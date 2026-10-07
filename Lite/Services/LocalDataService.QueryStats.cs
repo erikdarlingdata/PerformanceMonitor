@@ -716,6 +716,47 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// #5449: the rows the per-procedure history CHART plots: the history rows plus a zero row at each collector run that
+    /// stored nothing for this procedure between its first and last stored row (see <see cref="ProcedureHistoryIdleRuns"/>).
+    /// The collector keeps no row for a procedure that did no work in a cycle, where an older store kept one with deltas 0, so
+    /// without these the chart draws a line across the quiet minutes. Only SUCCESS runs count: a failed run says nothing about
+    /// the procedure. The grid keeps listing the stored rows.
+    /// </summary>
+    public async Task<List<ProcedureStatsHistoryRow>> GetProcedureStatsHistoryChartRowsAsync(int serverId, IReadOnlyList<ProcedureStatsHistoryRow> history)
+    {
+        if (history.Count == 0)
+        {
+            return new List<ProcedureStatsHistoryRow>();
+        }
+
+        var ordered = history.OrderBy(r => r.CollectionTime).ToList();
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT collection_time
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = 'procedure_stats'
+AND   status = 'SUCCESS'
+AND   collection_time >= $2
+AND   collection_time <= $3
+ORDER BY collection_time";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = ordered[0].CollectionTime });
+        command.Parameters.Add(new DuckDBParameter { Value = ordered[^1].CollectionTime });
+
+        var runs = new List<DateTime>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            runs.Add(reader.GetDateTime(0));
+        }
+
+        var idle = ProcedureHistoryIdleRuns.IdleRunTimes(ordered.Select(r => r.CollectionTime).ToList(), runs);
+        return ProcedureHistoryIdleRuns.ChartRows(ordered, idle);
+    }
+
+    /// <summary>
     /// Looks up a cached query plan from DuckDB by server_id and query_hash.
     /// Returns the most recently collected plan XML, or null if not found.
     /// </summary>

@@ -119,6 +119,71 @@ public sealed class ProcedureStatsIdleRowsLiveTests
         Assert.Equal(store.WorkStart, floor);
     }
 
+    [Fact]
+    public async Task ProcedureHistoryChart_AQuietRunPlotsZero_OnBothStores()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateAsync(ct);
+        await using var viewer = new ViewerDataService(store.ConnectionString);
+
+        var (oldGrid, oldChart) = await ReadHistoryAsync(viewer, store, OldServer, "idle-rows-old", ct);
+        var (newGrid, newChart) = await ReadHistoryAsync(viewer, store, NewServer, "idle-rows-new", ct);
+
+        /* The runs span six hours, the procedure's rows minutes 1 to 20: a 0 is plotted only between them. */
+        Assert.Equal(20, oldChart.Count);
+        Assert.Equal(oldChart.Select(r => r.CollectionTime), newChart.Select(r => r.CollectionTime));
+        Assert.Equal(oldChart.Select(r => r.DeltaExecutions), newChart.Select(r => r.DeltaExecutions));
+        Assert.Equal(oldChart.Select(r => r.AvgCpuMs), newChart.Select(r => r.AvgCpuMs));
+        Assert.Equal(0, newChart.Single(r => r.CollectionTime == store.WorkStart.AddMinutes(3)).DeltaExecutions);
+        Assert.Equal(10, newChart.Single(r => r.CollectionTime == store.WorkStart.AddMinutes(15)).DeltaExecutions);
+        /* The grid still lists only the minutes with work. */
+        Assert.Equal(4, newGrid.Count);
+        Assert.Equal(20, oldGrid.Count);
+    }
+
+    [Fact]
+    public async Task ProcedureHistoryChart_AFailedRunIsNotAQuietPoint()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateAsync(ct);
+        await using (var fail = store.DataSource.CreateCommand("UPDATE collect.collection_log SET status = 'ERROR' WHERE server_id = $1 AND collection_time = $2"))
+        {
+            fail.Parameters.AddWithValue(NewServer);
+            fail.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddMinutes(3), DateTimeKind.Unspecified));
+            await fail.ExecuteNonQueryAsync(ct);
+        }
+        await using var viewer = new ViewerDataService(store.ConnectionString);
+
+        var (_, chart) = await ReadHistoryAsync(viewer, store, NewServer, "idle-rows-new", ct);
+
+        Assert.Equal(19, chart.Count);
+        Assert.DoesNotContain(chart, r => r.CollectionTime == store.WorkStart.AddMinutes(3));
+    }
+
+    [Fact]
+    public void IdleRunTimes_ARunOwnsTheRowsUpToTheNextRun_WhetherStampedBeforeOrAtTheRows()
+    {
+        var t = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Unspecified);
+        var runs = Enumerable.Range(0, 8).Select(m => t.AddMinutes(m)).ToList();
+        /* Rows land two seconds after their run's stamp (minutes 1 and 6) or on it (minute 4). */
+        var rows = new List<DateTime> { t.AddMinutes(1).AddSeconds(2), t.AddMinutes(4), t.AddMinutes(6).AddSeconds(2) };
+
+        var idle = ViewerProcedureHistoryIdleRuns.IdleRunTimes(rows, runs);
+
+        /* Minutes 2, 3 and 5 own no row. Minute 1 owns the first row, 4 and 6 their rows; 0 and 7 lie outside the first and last row. */
+        Assert.Equal(new[] { 2, 3, 5 }, idle.Select(i => (int)(i - t).TotalMinutes).ToArray());
+        Assert.Empty(ViewerProcedureHistoryIdleRuns.IdleRunTimes(new List<DateTime>(), runs));
+    }
+
+    private static async Task<(List<ViewerProcedureStatsHistoryRow> Grid, List<ViewerProcedureStatsHistoryRow> Chart)> ReadHistoryAsync(
+        ViewerDataService viewer, SeededStore store, int serverId, string serverName, CancellationToken ct)
+    {
+        _ = serverName;
+        var grid = await viewer.GetProcedureStatsHistoryAsync(serverId, "AppDb", "dbo", "usp_Work", store.WorkStart.AddMinutes(-5), store.WorkStart.AddHours(1), ct);
+        var chart = await viewer.GetProcedureStatsHistoryChartRowsAsync(serverId, grid, ct);
+        return (grid, chart);
+    }
+
     private static async Task<List<(DateTime Bucket, double ElapsedMsPerSecond, double ExecutionsPerSecond)>> ReadTrendAsync(
         SeededStore store, int serverId, CancellationToken ct, int bucketMinutes = 10)
     {
@@ -165,6 +230,8 @@ public sealed class ProcedureStatsIdleRowsLiveTests
         }
 
         public NpgsqlDataSource DataSource { get; }
+
+        public string ConnectionString => _scratch.ConnectionString;
 
         /// <summary>A 10-minute boundary, 6 hours ago: minute 0 of the seeded twenty collections.</summary>
         public DateTime WorkStart { get; }

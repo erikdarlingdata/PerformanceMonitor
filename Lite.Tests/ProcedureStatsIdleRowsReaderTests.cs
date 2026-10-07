@@ -172,6 +172,67 @@ public sealed class ProcedureStatsIdleRowsReaderTests : IClassFixture<SharedDuck
         Assert.Equal(new[] { 1, 2, 4, 5 }, points.Select(p => (int)(p.CollectionTime - t0).TotalMinutes).ToArray());
     }
 
+    [Fact]
+    public async Task ProcedureHistoryChart_AQuietRunPlotsZero_OnBothStores()
+    {
+        var t0 = await SeedTwentyMinutesAsync();
+        /* The runs reach past the procedure's first and last row: a 0 there would be invented (it was not cached yet, or had left). */
+        await SeedRunsAsync(OldServer, "procedure_stats", t0.AddMinutes(-5), t0.AddMinutes(30));
+        await SeedRunsAsync(NewServer, "procedure_stats", t0.AddMinutes(-5), t0.AddMinutes(30));
+
+        var oldChart = await ChartRowsAsync(OldServer, t0);
+        var newChart = await ChartRowsAsync(NewServer, t0);
+
+        Assert.Equal(20, oldChart.Count);
+        Assert.Equal(oldChart.Select(r => r.CollectionTime), newChart.Select(r => r.CollectionTime));
+        foreach (var metric in new Func<ProcedureStatsHistoryRow, double>[] { r => r.DeltaExecutions, r => r.DeltaCpuMs, r => r.AvgCpuMs, r => r.DeltaLogicalReads })
+        {
+            Assert.Equal(oldChart.Select(metric), newChart.Select(metric));
+        }
+        Assert.Equal(0, newChart.Single(r => r.CollectionTime == t0.AddMinutes(3)).DeltaExecutions);
+        Assert.Equal(10, newChart.Single(r => r.CollectionTime == t0.AddMinutes(15)).DeltaExecutions);
+        /* The grid still lists only the minutes with work. */
+        var grid = await _dataService.GetProcedureStatsHistoryAsync(NewServer, "AppDb", "dbo", "usp_Work", 1, t0, t0.AddMinutes(25));
+        Assert.Equal(4, grid.Count);
+    }
+
+    [Fact]
+    public async Task ProcedureHistoryChart_AFailedRunIsNotAQuietPoint_AndAnotherProceduresRowDoesNotFillTheMinute()
+    {
+        var t0 = TenMinuteFloor(DateTime.UtcNow.AddMinutes(-40));
+        await SeedAsync(NewServer, t0.AddMinutes(1), "usp_Work", executions: 10, elapsedUs: 600_000, interval: 60);
+        await SeedAsync(NewServer, t0.AddMinutes(5), "usp_Work", executions: 10, elapsedUs: 600_000, interval: 240);
+        /* Another procedure worked at minute 2: the run at minute 2 stored a row, but not for usp_Work, so it is still a 0 for usp_Work. */
+        await SeedAsync(NewServer, t0.AddMinutes(2), "usp_Other", executions: 3, elapsedUs: 100_000, interval: 60);
+        await SeedRunsAsync(NewServer, "procedure_stats", t0.AddMinutes(1), t0.AddMinutes(5));
+        await SetRunStatusAsync(NewServer, t0.AddMinutes(3), "ERROR");
+
+        var chart = await ChartRowsAsync(NewServer, t0);
+
+        Assert.Equal(new[] { 1, 2, 4, 5 }, chart.Select(r => (int)(r.CollectionTime - t0).TotalMinutes).ToArray());
+    }
+
+    [Fact]
+    public void IdleRunTimes_ARunOwnsTheRowsUpToTheNextRun_WhetherStampedBeforeOrAtTheRows()
+    {
+        var t = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Unspecified);
+        var runs = Enumerable.Range(0, 8).Select(m => t.AddMinutes(m)).ToList();
+        /* Rows land two seconds after their run's stamp (minutes 1 and 6) or on it (minute 4). */
+        var rows = new List<DateTime> { t.AddMinutes(1).AddSeconds(2), t.AddMinutes(4), t.AddMinutes(6).AddSeconds(2) };
+
+        var idle = ProcedureHistoryIdleRuns.IdleRunTimes(rows, runs);
+
+        /* Minutes 2, 3 and 5 own no row. Minute 1 owns the first row, 4 and 6 their rows; 0 and 7 lie outside the first and last row. */
+        Assert.Equal(new[] { 2, 3, 5 }, idle.Select(i => (int)(i - t).TotalMinutes).ToArray());
+        Assert.Empty(ProcedureHistoryIdleRuns.IdleRunTimes(new List<DateTime>(), runs));
+    }
+
+    private async Task<List<ProcedureStatsHistoryRow>> ChartRowsAsync(int serverId, DateTime t0)
+    {
+        var history = await _dataService.GetProcedureStatsHistoryAsync(serverId, "AppDb", "dbo", "usp_Work", 1, t0, t0.AddMinutes(40));
+        return await _dataService.GetProcedureStatsHistoryChartRowsAsync(serverId, history);
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)
