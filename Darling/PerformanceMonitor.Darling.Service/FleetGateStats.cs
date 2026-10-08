@@ -84,6 +84,26 @@ internal sealed class FleetGateStats
         }
     }
 
+    /// <summary>
+    /// #4938: records slots that were skipped and never ran, with no slot that ran beside them. A collector with a run time
+    /// that the pass could not hand off inside its hour loses that day's run, and <see cref="RecordSlot"/> would count a run
+    /// that did not happen. Pass <see cref="DarlingWorker.StepRunTimeCollector"/>'s count: 1 for a day lost while the
+    /// sweep loop was running, 0 after a sleep, a pause or a stopped service, which records nothing.
+    /// </summary>
+    public void RecordSkippedSlots(long skipped)
+    {
+        if (skipped <= 0)
+        {
+            return;
+        }
+
+        lock (_lock)
+        {
+            ref var bucket = ref BucketFor(_utcNow());
+            bucket.Skipped += skipped;
+        }
+    }
+
     /// <summary>Records how long one collection body waited for a fleet gate slot.</summary>
     public void RecordQueueWait(TimeSpan wait)
     {
@@ -319,5 +339,93 @@ internal sealed class SkipCreditFloor
     {
         var floor = Floor;
         return CollectorCadence.SkippedSlots(due < floor ? floor : due, nowUtc, interval);
+    }
+}
+
+/// <summary>
+/// What a collector slot's watermark remembers while the memory launch guard holds collection off (#5479): the due stamp
+/// the count was made against, the interval it was counted at, how many lost slots were already counted for it, and the
+/// earliest slot the count may reach back to. An interval change mid-hold restarts the mark at the change (the due stamp
+/// keeps its place, so without that the new, shorter interval would count every slot of the hold so far at once). Written
+/// only by the sweep loop thread.
+/// </summary>
+internal readonly record struct HeldSlotMark(DateTime Due, long Counted, TimeSpan Interval = default, DateTime Floor = default);
+
+/// <summary>
+/// #5479: the skipped-slot count while the launch guard holds collection off. A held pass launches no body, so no body
+/// records a slot, and the hour's count read "0 ran, 0 skipped" and cleared "Collection Falling Behind" an hour into an
+/// outage; when the guard released, the first bodies stepped over every slot at once (101,774 of 101,881).
+///
+/// <para>A held slot is a skipped slot, so each slot that comes due is counted once, within a pass of its due time. The
+/// due stamp does not move during a hold, so the total lost since the stamp is a pure function of the clock
+/// (<see cref="Lost"/>) and a <see cref="HeldSlotMark"/> keeps what was already counted, so no slot is counted twice
+/// (<see cref="Newly"/>). For a collector on the interval grid a slot is lost once the NEXT slot has come due, which is
+/// exactly the count <see cref="CollectorCadence.SkippedSlots"/> gives when a run finally steps over it: the held count
+/// is that number spread over the hold. The slot at the stamp itself is the one the first run after the hold serves, so
+/// it is counted as a run then and never as skipped here. A collector with a run time has no next slot to wait for: its
+/// day is lost once the grace after its stamp has passed.</para>
+///
+/// <para>When the guard releases, the loop calls <see cref="SkipCreditFloor.Resume"/>, so the first bodies count none of
+/// what this counted.</para>
+/// </summary>
+internal static class HeldSlots
+{
+    /// <summary>
+    /// How many slots of one collector are lost by <paramref name="nowUtc"/>, for a due stamp that has not moved since
+    /// <paramref name="due"/>: the slots at <c>due + k * interval</c> that are not before <paramref name="floor"/> (a slot
+    /// that came due while the loop was not running is not the guard's doing) and whose <paramref name="serveWindow"/> has
+    /// passed. Pass the interval as the window for a collector on the grid, the run-time grace for one with a run time.
+    /// </summary>
+    public static long Lost(DateTime due, DateTime nowUtc, DateTime floor, TimeSpan interval, TimeSpan serveWindow)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(interval, TimeSpan.Zero);
+
+        var first = due;
+        if (due < floor)
+        {
+            first = due + TimeSpan.FromTicks(interval.Ticks * (long)Math.Ceiling((floor - due).Ticks / (double)interval.Ticks));
+        }
+
+        var lostAt = first + serveWindow;
+        if (nowUtc < lostAt)
+        {
+            return 0;
+        }
+
+        return (long)Math.Floor((nowUtc - lostAt).Ticks / (double)interval.Ticks) + 1;
+    }
+
+    /// <summary>
+    /// The slots to add to the skipped count on this pass: the lost total less what the mark already holds. The mark is
+    /// moved to the new total, also when the total fell (the floor was raised by a sleep or a pause), so a slot is never
+    /// counted twice and the count starts again from the raised floor. A mark made for another due stamp is dropped: the
+    /// stamp moved because a body ran, and that body counted its own slots. A mark made for another interval is restarted at
+    /// <paramref name="nowUtc"/>: the slots before the change were counted (or not) at the old interval, and counting them
+    /// again at the new one would invent them (60 minutes to 1 minute during a 2 hour hold made 119 slots at once).
+    /// </summary>
+    public static long Newly(
+        DateTime due, DateTime nowUtc, DateTime floor, TimeSpan interval, TimeSpan serveWindow, ref HeldSlotMark mark)
+    {
+        long counted;
+        DateTime markFloor;
+        if (mark.Due != due)
+        {
+            counted = 0;
+            markFloor = DateTime.MinValue;
+        }
+        else if (mark.Interval != interval)
+        {
+            counted = 0;
+            markFloor = nowUtc;
+        }
+        else
+        {
+            counted = mark.Counted;
+            markFloor = mark.Floor;
+        }
+
+        var total = Lost(due, nowUtc, floor > markFloor ? floor : markFloor, interval, serveWindow);
+        mark = new HeldSlotMark(due, total, interval, markFloor);
+        return Math.Max(0, total - counted);
     }
 }

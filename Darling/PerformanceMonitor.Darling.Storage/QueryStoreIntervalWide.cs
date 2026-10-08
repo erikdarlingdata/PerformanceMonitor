@@ -409,9 +409,13 @@ FROM batch_rows AS b;";
        by offset, before touching this. */
     /* The clamp (ClampedStart) is the read's lower bound AT and ABOVE raw's chunk floor. Below that floor the
        table is the only record left, and ResolveReadAsync extends the bound down to
-       ExactBelowFloorStart = max(window start, filled_since, table floor + one day) and no further: those are the
+       ExactBelowFloorStart = max(window start, filled_since, table floor + PurgeEdgeMargin (26 h)) and no further: those are the
        three bounds under which the table provably holds what raw held before its purge.
-       There is no per-server probe on this table: its only secondary index leads with first_execution_time. */
+       There is no per-server probe on this table: of its two secondary btrees, idx_query_store_interval_wide_first_exec
+       leads with first_execution_time, and the wide btree on (server_id, first_execution_time) (#4952,
+       QueryStoreBackgroundIndexes.WideServerFirstExec) leads with server_id but is built in the background by the
+       service, not by a migration, so a store can lack it. The per-server reads' bound on first_execution_time is
+       served by that wide btree where it exists. */
 
     /// <summary>
     /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
@@ -437,38 +441,21 @@ LEFT JOIN collect.query_store_interval_wide_coverage AS c
   ON c.server_id = $1;";
 
     /// <summary>
-    /// The floors, from TimescaleDB's catalog (metadata, never a scan), exactly as
-    /// <see cref="QueryStoreIntervalLatest.ChunkFloorsSql"/>: raw's oldest chunk, and this table's when
-    /// TimescaleDB's catalog carries it as a hypertable. It does not today — this table is engine-plain, per its
-    /// migration's own comment — so the <c>table_is_hypertable</c> arm is defensive, matching V143's.
+    /// Raw's floor, from TimescaleDB's catalog (metadata, never a scan), exactly as
+    /// <see cref="QueryStoreIntervalLatest.RawChunkFloorSql"/>: raw's oldest chunk (NULL when raw is not a
+    /// hypertable). This table's floor is never read from the catalog (#5541): the table is engine-plain, per its
+    /// migration's own comment, and retention purges it with a sliced DELETE that leaves emptied chunks listed, so a
+    /// catalog floor would sit far below the real one and move the rule toward the table.
     /// </summary>
-    public const string ChunkFloorsSql = @"
+    public const string RawChunkFloorSql = @"
 SELECT
-    (
-        SELECT
-            MIN(ch.range_start) AT TIME ZONE 'UTC'
-        FROM timescaledb_information.chunks AS ch
-        WHERE ch.hypertable_schema = 'collect'
-        AND   ch.hypertable_name = 'query_store_stats'
-    ) AS raw_floor,
-    EXISTS
-    (
-        SELECT
-            1
-        FROM timescaledb_information.hypertables AS h
-        WHERE h.hypertable_schema = 'collect'
-        AND   h.hypertable_name = 'query_store_interval_wide'
-    ) AS table_is_hypertable,
-    (
-        SELECT
-            MIN(ch.range_start) AT TIME ZONE 'UTC'
-        FROM timescaledb_information.chunks AS ch
-        WHERE ch.hypertable_schema = 'collect'
-        AND   ch.hypertable_name = 'query_store_interval_wide'
-    ) AS table_floor;";
+    MIN(ch.range_start) AT TIME ZONE 'UTC' AS raw_floor
+FROM timescaledb_information.chunks AS ch
+WHERE ch.hypertable_schema = 'collect'
+AND   ch.hypertable_name = 'query_store_stats';";
 
-    /// <summary>The table's floor for one server where the table is a plain heap (today, always): its oldest
-    /// interval.</summary>
+    /// <summary>The table's floor <c>H</c> for one server: its oldest interval. Always this read (#5541): the purge
+    /// deletes oldest first on <c>first_execution_time</c>, so every deleted row is below the remaining minimum.</summary>
     public const string PlainTableFloorSql = @"
 SELECT
     MIN(t.first_execution_time)
@@ -483,9 +470,16 @@ WHERE t.server_id = $1;";
     /// their own identity — keeps only its LATEST snapshot in the table; every caller that places these rows at
     /// <c>collection_time</c> (both duration-trend arm 2's) needs every one of them, not the running maximum. A
     /// field store carries zero such rows once raw retention (days) has aged the post-upgrade window out, so
-    /// this scan is a bounded, indexed (<c>server_id</c>, <c>collection_time</c>) read on the common path and
-    /// costs nothing extra there; it is what lets clause 6 answer TRUE only on the rare upgraded-recently store
-    /// this table cannot yet serve correctly. Bounded to the SAME range the table read would use
+    /// the answer is "none" on the common path, and it is what lets clause 6 answer TRUE only on the rare
+    /// upgraded-recently store this table cannot yet serve correctly. <b>The cost (#4952):</b> with only the
+    /// (<c>server_id</c>, <c>collection_time</c>) index this EXISTS finds nothing, so it would have to fetch every
+    /// heap tuple the server's window touches to say no. The partial index
+    /// <see cref="PgTableTuning.LegacyRowIndexName"/> (built on the start path) holds only the rows with no interval
+    /// start, so for the uncompressed chunks the "no" is an index read of that near-empty tree; compressed
+    /// chunks are still read by the columnar scan on their server_id segment index, which this index does not
+    /// reach. It stays an exact read, not a cached answer, because the collector can still store a NULL start
+    /// on a catalog join miss.
+    /// Bounded to the SAME range the table read would use
     /// (<see cref="ClampedStart"/> through <paramref name="windowEnd"/> in <see cref="ReadsTableAsync"/>), not
     /// the caller's raw windowStart, so a legacy row outside the served range cannot force a needless refusal.
     /// </summary>
@@ -513,10 +507,10 @@ SELECT EXISTS
     public static readonly TimeSpan GridWideMinWindow = TimeSpan.FromHours(12);
 
     /// <summary>
-    /// How far below the window start clause 3 still allows the table (V143's clause 3 restated: "B is the
-    /// window minus a day, and an interval spans at most a day"). One Query Store runtime-stats interval can
-    /// span up to a day, so an interval that STARTED up to a day before the window can still have executions
-    /// inside it. Restated here (rather than referencing <c>PgFactCollector.QueryPerf.PlanRegressionSkewMarginDays</c>)
+    /// How long one Query Store runtime-stats interval can span (V143's clause 3 restated: "B is the window minus
+    /// a day, and an interval spans at most a day"), so an interval that STARTED up to a day before the window can
+    /// still have executions inside it. Clause 3 of <see cref="UseTable"/> no longer uses it alone (#5541): it is
+    /// one term of <see cref="PurgeEdgeMargin"/>. Restated here (rather than referencing <c>PgFactCollector.QueryPerf.PlanRegressionSkewMarginDays</c>)
     /// because the viewer does not reference the service assembly (#1661 / #2530).
     /// </summary>
     public static readonly TimeSpan IntervalSpanMargin = TimeSpan.FromDays(1);
@@ -534,12 +528,15 @@ SELECT EXISTS
     /// <summary>
     /// <see cref="PurgeEdgeMargin"/> as a Postgres interval literal (rounded UP to whole minutes, so the SQL form
     /// can never be shorter than the margin), for the <c>first_execution_time &gt;= &lt;window start&gt; -
-    /// PurgeEdgeMarginSql</c> floor the per-server reads of this table carry (#4605). Among the table's indexes are the
-    /// unique key, which leads with <c>server_id</c> and holds <c>first_execution_time</c> as a key column, and
-    /// <c>idx_query_store_interval_wide_first_exec</c>. A read that filters only by <c>collection_time</c> (or
-    /// <c>interval_start_time_utc</c>) is served by neither, so a per-server read walked all of the server's rows;
-    /// the floor filters the unique key's entries before the heap. The Custom Views route, for all servers or some,
-    /// does not carry the floor (see <c>ComposeCompiler.BuildFactRelation</c>).
+    /// PurgeEdgeMarginSql</c> floor the per-server reads of this table carry (#4605). Among the table's btrees are the
+    /// unique key, which leads with <c>server_id</c> and holds <c>first_execution_time</c> as a key column,
+    /// <c>idx_query_store_interval_wide_first_exec</c>, and, where the service has built it, the wide btree on
+    /// <c>(server_id, first_execution_time)</c> (#4952), which the service builds in the background rather than a
+    /// migration. A read that filters only by <c>collection_time</c> (or <c>interval_start_time_utc</c>) is served by
+    /// none of them, so a per-server read walked all of the server's rows; the floor filters the unique key's entries
+    /// before the heap and, where the wide btree exists, is the lower end of the range that btree scans (the upper end is
+    /// <see cref="FirstExecUpperSlackSql"/>, #5523). The Custom Views route, for all
+    /// servers or some, does not carry the floor (see <c>ComposeCompiler.BuildFactRelation</c>).
     /// <para><b>Why no row is lost.</b> The collector keeps only intervals with <c>end_time &gt; @cutoff_time</c>,
     /// and the cutoff is never more than <see cref="WatermarkPolicy.MaxCatchup"/> before the row's
     /// <c>collection_time</c> (<c>WatermarkPolicy.ClampCatchup</c>: <c>C - MaxCatchup</c> with no watermark).
@@ -553,6 +550,65 @@ SELECT EXISTS
     /// </summary>
     public static readonly string PurgeEdgeMarginSql =
         $"interval '{(long)Math.Ceiling(PurgeEdgeMargin.TotalMinutes)} minutes'";
+
+    /// <summary>
+    /// How far past a read's window end a row's <c>first_execution_time</c> may sit, for the upper bound the
+    /// per-server reads placed by <c>collection_time</c> carry (#5523). A row is read by its <c>collection_time</c>,
+    /// which the service stamps from its own clock, and <c>first_execution_time</c> is the first execution inside the
+    /// interval by the MONITORED server's clock. So a row collected at or before the window end can hold a
+    /// <c>first_execution_time</c> past it by two things: the monitored clock running AHEAD of the service's, and the
+    /// length of the collection cycle (the cycle stamps <c>collection_time</c> once, at its start, and a later database
+    /// of the cycle is read minutes after that stamp, up to the collector's per-database budget each). Twelve hours
+    /// covers a server whose clock is set to local time in almost any zone, and a long cycle. The trade: a row from a
+    /// server whose clock runs more than this ahead of the service can drop from a closed window. A clock running
+    /// BEHIND is not what this bound is about (<c>WatermarkPolicy.ClampCatchup</c> only raises a watermark that is too
+    /// old, so it is a clock behind that the collector cannot tolerate). The slack only sets where the index range
+    /// ends, so it costs a few more hours of the server's rows read and turns a range that ran to now into a bounded
+    /// one. <see cref="QueryStoreTopDaily.SkewSlack"/> is one hour, because the daily summary is documented as
+    /// approximate; these reads were exact, so theirs is no shorter.
+    /// </summary>
+    public static readonly TimeSpan FirstExecUpperSlack = TimeSpan.FromHours(12);
+
+    /// <summary>
+    /// <see cref="FirstExecUpperSlack"/> as a Postgres interval literal (rounded UP to whole minutes), for the
+    /// <c>first_execution_time &lt;= &lt;window end&gt; + FirstExecUpperSlackSql</c> bound (#5523). With the floor
+    /// (<see cref="PurgeEdgeMarginSql"/>) it makes the <c>first_execution_time</c> range, the range
+    /// <c>ix_query_store_interval_wide_server_first_exec</c> (<c>(server_id, first_execution_time)</c>, #4952) scans,
+    /// finite at both ends: the floor alone ran from the window start to NOW, so a read of a window that ended days
+    /// ago, or the partial first or last day of a long one, walked every row of the server newer than the window.
+    /// </summary>
+    public static readonly string FirstExecUpperSlackSql =
+        $"interval '{(long)Math.Ceiling(FirstExecUpperSlack.TotalMinutes)} minutes'";
+
+    /// <summary>
+    /// The slack either side of a window placed by <c>interval_start_time_utc</c> (#5523, the duration trend's arm 1).
+    /// Both columns are the monitored server's own clock, so unlike <see cref="FirstExecUpperSlack"/> against
+    /// <c>collection_time</c> no cross-clock skew or collection cycle is involved, and an hour is enough. The floor
+    /// <c>first_execution_time &gt;= &lt;window start&gt; - </c> this slack holds because Microsoft documents
+    /// <c>sys.query_store_runtime_stats.first_execution_time</c> as: "First execution time for the query plan within the
+    /// aggregation interval. This is the end time of the query execution." The value is an end time inside the
+    /// interval, so it is never before the interval's start.
+    /// </summary>
+    public static readonly TimeSpan IntervalStartSlack = TimeSpan.FromHours(1);
+
+    /// <summary><see cref="IntervalStartSlack"/> as a Postgres interval literal (whole minutes, rounded up), the
+    /// <c>first_execution_time &gt;= &lt;window start&gt; - IntervalStartSlackSql</c> floor of a read placed by
+    /// <c>interval_start_time_utc</c> (#5523).</summary>
+    public static readonly string IntervalStartSlackSql =
+        $"interval '{(long)Math.Ceiling(IntervalStartSlack.TotalMinutes)} minutes'";
+
+    /// <summary>
+    /// How far a row's <c>first_execution_time</c> may sit from its own <c>interval_start_time_utc</c> and still
+    /// be read by a window placed on that column (#5523): <see cref="IntervalSpanMargin"/> after it (an interval spans
+    /// at most a day and <c>first_execution_time</c> lies inside it) and <see cref="IntervalStartSlack"/> as slack.
+    /// </summary>
+    public static readonly TimeSpan IntervalStartFirstExecMargin = IntervalSpanMargin + IntervalStartSlack;
+
+    /// <summary><see cref="IntervalStartFirstExecMargin"/> as a Postgres interval literal (whole minutes, rounded up),
+    /// the <c>first_execution_time &lt;= &lt;window end&gt; + IntervalStartFirstExecMarginSql</c> bound of a read placed
+    /// by <c>interval_start_time_utc</c> (#5523).</summary>
+    public static readonly string IntervalStartFirstExecMarginSql =
+        $"interval '{(long)Math.Ceiling(IntervalStartFirstExecMargin.TotalMinutes)} minutes'";
 
     /// <summary>True when the server's effective <c>query_store</c> cadence (null: the default) is at most
     /// <see cref="MaxBelowFloorCadence"/> and the largest gap between successive collections near the purge edge is
@@ -609,9 +665,16 @@ FROM (
     /// <item>Coverage exists (<paramref name="filledSince"/> is not null) and there is no pending batch.</item>
     /// <item><c>filledSince &lt;= max(R, S)</c> (<paramref name="rawFloor"/>, <paramref name="windowStart"/>):
     /// the table holds every snapshot raw's own read would, and may hold more (the ruled window extension).</item>
-    /// <item><c>R &gt;= H</c> or <c>S - 1 day &gt;= H</c> (<paramref name="tableFloor"/>,
-    /// <see cref="IntervalSpanMargin"/>): raw holds no history the table has dropped, or every interval the
-    /// window needs starts inside the table. A NULL <paramref name="tableFloor"/> means the table holds nothing
+    /// <item><c>R &gt;= H + <see cref="PurgeEdgeMargin"/></c> or <c>S - <see cref="PurgeEdgeMargin"/> &gt;= H</c>
+    /// (<paramref name="tableFloor"/>): raw holds no snapshot of an interval the table has dropped, or every
+    /// interval the raw read can count for the window starts inside the table. This read counts a snapshot by
+    /// <c>collection_time</c> alone (no <c>last_execution_time</c> filter, unlike the Latest rule), so a snapshot
+    /// collected at or after <c>S</c> can belong to an interval that began down to <c>S - PurgeEdgeMargin</c>, which
+    /// is why the second arm uses the whole margin and not one interval length (#5541). The margin is there because the two purge on different
+    /// columns (#5541): raw drops a snapshot by <c>collection_time</c>, the table drops an interval by
+    /// <c>first_execution_time</c>, and a snapshot lands in raw up to <see cref="PurgeEdgeMargin"/> after its interval
+    /// began. With <c>R</c> only at or above <c>H</c>, raw can still hold a snapshot of an interval that began below
+    /// <c>H</c> and that the table dropped. A NULL <paramref name="tableFloor"/> means the table holds nothing
     /// for the server, and clause 2 already refuses that case.</item>
     /// <item>A literal <paramref name="literalWindowEnd"/> (a custom range, MCP <c>as_of</c>) must be at or
     /// after <paramref name="appliedThrough"/>. NULL means an open end (a preset), which skips this clause
@@ -648,8 +711,8 @@ FROM (
 
         if (tableFloor is DateTime h)
         {
-            var skewFloor = windowStart - IntervalSpanMargin;
-            if (!((rawFloor is DateTime floor && floor >= h) || skewFloor >= h))
+            var edgeFloor = windowStart - PurgeEdgeMargin;
+            if (!((rawFloor is DateTime floor && floor >= h + PurgeEdgeMargin) || edgeFloor >= h))
             {
                 return false;
             }
@@ -684,12 +747,15 @@ FROM (
     /// <param name="BelowFloorStart">Non-null only when the read reaches below raw's floor.</param>
     /// <param name="StartBound">Which bound set <see cref="ReadStart"/>; a surface names it when the read is
     /// truncated.</param>
+    /// <param name="DecisionFailed">True only when the source decision itself faulted and the plan is the
+    /// raw fallback; a legitimate "the gate says raw" leaves it false, so a caller can tell the two apart.</param>
     public readonly record struct WideReadPlan(
         bool UseTable,
         DateTime ClampedStart,
         DateTime ReadStart,
         DateTime? BelowFloorStart,
-        WideStartBound StartBound = WideStartBound.Window)
+        WideStartBound StartBound = WideStartBound.Window,
+        bool DecisionFailed = false)
     {
         /// <summary>Where the table's proven-complete history starts for this read: <see cref="ReadStart"/>
         /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the
@@ -719,14 +785,20 @@ FROM (
     /// <summary>#4689: the note a table-served Query Store read carries when the interval table started it later than
     /// the window. The MCP top-queries table route (one server) and Compose's panel (the servers in scope) both
     /// take their text from here. <paramref name="settingServer"/> names the server whose history set the common
-    /// start of a many-server read; when null the reason says "these servers".</summary>
-    public static string HistoryNote(DateTime effectiveStart, WideStartBound bound, bool manyServers, string? settingServer = null)
+    /// start of a many-server read; when null the reason says "these servers".
+    ///
+    /// <para>#4966: <paramref name="effectiveStart"/> is the start as its caller already prints it, in the same text
+    /// as its <c>effective_start</c> field (<c>McpHelpers.FormatEffectiveStart</c>: UTC, with the Z), and the note
+    /// names it as given. The page finds the instant in the sentence by the field's exact text to show it in the
+    /// browser's zone, so a note that spelled the instant on its own (a plain "o" of the store's naive floor has no
+    /// Z) was drawn in bare UTC above a grid of local times.</para></summary>
+    public static string HistoryNote(string effectiveStart, WideStartBound bound, bool manyServers, string? settingServer = null)
     {
         var scope = manyServers ? "the servers in scope" : "this server";
         var reason = bound switch
         {
             WideStartBound.FilledSince =>
-                $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart:o}.",
+                $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart}.",
             WideStartBound.TablePurgeEdge =>
                 "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
             WideStartBound.RawFloorSlowCadence =>
@@ -736,7 +808,7 @@ FROM (
             _ =>
                 "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
         };
-        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
+        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
             + reason;
     }
 
@@ -909,7 +981,7 @@ FROM (
     /// <list type="bullet">
     /// <item><paramref name="filledSince"/>: the coverage claim starts there and is never backdated, and a gap
     /// check restarts it above a hole (<see cref="ResetCoverageSql"/>).</item>
-    /// <item><paramref name="tableFloor"/> + <see cref="IntervalSpanMargin"/>: the 9-day purge deletes row by
+    /// <item><paramref name="tableFloor"/> + <see cref="PurgeEdgeMargin"/>: the 9-day purge deletes row by
     /// row on <c>first_execution_time</c>, so a row whose interval began before the table floor is gone even when
     /// its <c>collection_time</c> is inside the window.</item>
     /// <item><paramref name="windowStart"/>: never read before the window asked for.</item>
@@ -965,6 +1037,25 @@ FROM (
     }
 
     /// <summary>
+    /// The inputs <see cref="ResolveReadAsync"/> reads that do not depend on the server: the raw floor of
+    /// <see cref="RawChunkFloorSql"/>, which takes no parameter and reads TimescaleDB's catalog for the whole store.
+    /// (<see cref="ReadSourceInputsSql"/>'s coverage and pending columns, <see cref="PlainTableFloorSql"/>,
+    /// <see cref="HasLegacyRowSql"/> and the cadence probe all filter on the server, so they stay per server.)
+    /// A caller that resolves many servers for one window passes one <see cref="StoreWideInputsCache"/> to each call.
+    /// </summary>
+    public sealed record StoreWideInputs(DateTime? RawFloor);
+
+    /// <summary>
+    /// A per-check holder for <see cref="StoreWideInputs"/>. <see cref="ResolveReadAsync"/> fills it the first
+    /// time a server reaches the floors step and reuses it for every later server, so the floors are read at
+    /// most once per check and not at all when every server refuses before that step.
+    /// </summary>
+    public sealed class StoreWideInputsCache
+    {
+        internal StoreWideInputs? Value;
+    }
+
+    /// <summary>
     /// <see cref="UseTable"/> plus the store round trips it needs, the clamp (<see cref="ClampedStart"/>), and the
     /// lower bound the table read may bind (<see cref="WideReadPlan.ReadStart"/>), which reaches below raw's chunk
     /// floor down to <see cref="ExactBelowFloorStart"/> — all computed from the SAME <c>rawFloor</c> this decision
@@ -979,7 +1070,8 @@ FROM (
         TimeSpan minWindow,
         int commandTimeoutSeconds,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        StoreWideInputsCache? storeWide = null)
     {
         /* The probes bind these as timestamp-without-time-zone, which Npgsql refuses for Kind=Utc; a caller that
            resolves its window from DateTime.UtcNow (the MCP tool) would otherwise fail every decision and read raw. */
@@ -1009,7 +1101,7 @@ FROM (
             }
 
             /* Review D4R H1: clauses 4 and 5 need no table floor at all, so check them before the two
-               remaining round trips (ChunkFloorsSql's metadata read and, worse, PlainTableFloorSql's
+               remaining round trips (RawChunkFloorSql's metadata read and, worse, PlainTableFloorSql's
                unindexed server-wide scan). A short window or a literal end before appliedThrough can only
                ever land on "raw" (UseTable's own tail), so failing here saves both queries. */
             if (windowEnd - windowStart < minWindow || (literalWindowEnd is DateTime e && e < appliedThrough))
@@ -1018,20 +1110,22 @@ FROM (
             }
 
             DateTime? rawFloor = null;
-            DateTime? tableFloor = null;
-            var tableIsHypertable = false;
-            if (hasTimescale)
+            if (hasTimescale && storeWide?.Value is StoreWideInputs cached)
             {
-                await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
-                await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
-                await reader.ReadAsync(cancellationToken);
-                rawFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
-                tableIsHypertable = reader.GetBoolean(1);
-                tableFloor = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+                rawFloor = cached.RawFloor;
+            }
+            else if (hasTimescale)
+            {
+                await using var floors = new NpgsqlCommand(RawChunkFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                rawFloor = await floors.ExecuteScalarAsync(cancellationToken) as DateTime?;
+                if (storeWide is not null)
+                {
+                    storeWide.Value = new StoreWideInputs(rawFloor);
+                }
             }
 
             /* Clause 2 (filledSince <= max(rawFloor, windowStart)) needs only rawFloor, already in hand from
-               ChunkFloorsSql's metadata read (or never set, on a non-Timescale store) — never the table floor.
+               RawChunkFloorSql's metadata read (or never set, on a non-Timescale store) — never the table floor.
                An upgraded store whose claim doesn't cover the window yet fails here, before PlainTableFloorSql's
                scan, instead of after it. */
             if (filledSince > ClampedStart(rawFloor, windowStart))
@@ -1039,9 +1133,9 @@ FROM (
                 return new WideReadPlan(false, windowStart, windowStart, null);
             }
 
-            if (!tableIsHypertable)
+            DateTime? tableFloor;
+            await using (var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds })
             {
-                await using var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
                 plain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                 tableFloor = await plain.ExecuteScalarAsync(cancellationToken) as DateTime?;
             }
@@ -1095,7 +1189,7 @@ FROM (
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(ex, "Query Store wide-table source decision failed for server {ServerId}; reading raw", serverId);
-            return new WideReadPlan(false, windowStart, windowStart, null);
+            return new WideReadPlan(false, windowStart, windowStart, null, DecisionFailed: true);
         }
     }
 

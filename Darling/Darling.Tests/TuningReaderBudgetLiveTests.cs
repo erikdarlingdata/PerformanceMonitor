@@ -103,6 +103,7 @@ public sealed class TuningReaderBudgetLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteRowsAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         var bodySucceeded = false;
         try
@@ -122,7 +123,7 @@ public sealed class TuningReaderBudgetLiveTests
                     $"{indexName} should be gone after PgTableTuning.ApplyAsync — #4247 dropped it.");
             }
 
-            var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+            var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
             var currentStart = end.AddHours(-1);
             var baselineStart = currentStart.AddHours(-1);
             var collectionTime = currentStart.AddMinutes(10);
@@ -306,7 +307,8 @@ VALUES (1, $1, $2, $3, $4, $5, $6, 'Regular', $7, $8, $9, 10, 1000, 500)", conne
         await using var cleanup = new NpgsqlCommand(
             $"DELETE FROM query_stats WHERE server_id = {ServerId}; " +
             $"DELETE FROM procedure_stats WHERE server_id = {ServerId}; " +
-            $"DELETE FROM query_store_stats WHERE server_id = {ServerId};", connection);
+            $"DELETE FROM query_store_stats WHERE server_id = {ServerId}; " +
+            $"DELETE FROM servers WHERE server_id = {ServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

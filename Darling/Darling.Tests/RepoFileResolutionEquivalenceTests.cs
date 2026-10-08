@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// <see cref="EveryAdoptingPin_IsASiblingOfTheSharedReader"/> asserts that, and a pin moved into a
 /// subdirectory reds there rather than silently resolving from a different starting point.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class RepoFileResolutionEquivalenceTests
 {
     /// <summary>A call site that really exists, paired with the resolver that used to serve it.</summary>

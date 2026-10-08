@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// <c>cpu_utilization_stats</c> and <c>blocked_process_baseline</c> supplies, with a <c>server_properties</c> row
 /// carrying the zone id, lands the EST and EDT rows in one bucket and looks the analysis time up in it.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class LocalClockBucketKeyTests
 {
     /* US Eastern, 2026: spring-forward Sunday 2026-03-08 07:00Z (−05:00 → −04:00), fall-back Sunday 2026-11-01 06:00Z. */
@@ -404,6 +405,7 @@ public sealed class LocalClockBucketKeyTests
 /// shared store is established before it runs and the residue check runs after it (#1862, #1873).
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class LocalClockBucketKeyLiveTests
 {
     private const string EasternWindowsId = "Eastern Standard Time";

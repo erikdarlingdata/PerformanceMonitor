@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -198,10 +198,12 @@ public sealed class TimescaleContinuousAggregateTests
         /* Thirteen hourly refreshes since #3653 (A6): the six registered hourly rollups — the three Query
            Store views and the three interval-honest successors that REPLACED the legacy trio on the phase grid
            — and the seven baseline aggregates. Twelve of them light; the heaviest is answered by identity. */
-        Assert.Equal(6, TimescaleSupport.HourlyAggregates.Length);
+        /* #5329 appended the two io hourlies: eight registered hourly rollups, fifteen hourly refreshes, fourteen
+           of them light. */
+        Assert.Equal(8, TimescaleSupport.HourlyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
-        Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(12, TimescaleSupport.LightHourlyRefreshCount);
+        Assert.Equal(15, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(14, TimescaleSupport.LightHourlyRefreshCount);
 
         var phases = TimescaleSupport.HourlyRefreshPhaseOrder
             .Select(TimescaleSupport.RefreshPhaseMinutesFor)
@@ -466,9 +468,11 @@ public sealed class TimescaleContinuousAggregateTests
            collect.query_stats feeds THREE hourly policies since #3653 (A6): the two interval-honest
            rollups (query-grain and per-database) and the query_stats baseline — the widest contention group
            on the grid after the legacy trio left the phase grid at LC, every one on its own minute. */
-        Assert.Equal(3, sourceOf.Count(kv => string.Equals(kv.Value, "query_stats", StringComparison.Ordinal)));
+        /* Four since #5329: query_stats_io_hourly joins the two interval-honest rollups and the baseline. */
+        Assert.Equal(4, sourceOf.Count(kv => string.Equals(kv.Value, "query_stats", StringComparison.Ordinal)));
         /* procedure_stats has ONE consumer since A6: only ProcedureStatsIntervalHourlyView (the legacy left the grid). */
-        Assert.Equal(1, sourceOf.Count(kv => string.Equals(kv.Value, "procedure_stats", StringComparison.Ordinal)));
+        /* Two since #5329: procedure_stats_io_hourly sits beside it. */
+        Assert.Equal(2, sourceOf.Count(kv => string.Equals(kv.Value, "procedure_stats", StringComparison.Ordinal)));
         Assert.Equal(2, sourceOf.Count(kv => string.Equals(kv.Value, "query_store_stats", StringComparison.Ordinal)));
 
         var views = new HashSet<string>(definitions.Select(a => a.View), StringComparer.Ordinal);
@@ -1326,24 +1330,46 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
-    /// PIN (#4300): when the stitched slot's fallback fires (no successor bucket above the legacy's last),
-    /// the probe's upper bound must be <c>now() - HourlyRefreshStartOffset</c>, not a bare <c>now()</c>.
-    /// A bare <c>now()</c> lets a healthy, upgrading store with an EMPTY successor read every hour back
-    /// to the legacy's freeze as unprobed and therefore Short, RE-HOLDING the raw purge for rows the
-    /// successor's own first refresh will reach within <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>
-    /// anyway. RED on dev: the fallback ends at a bare <c>time_bucket(INTERVAL '1 hour', now()::timestamp))</c>
-    /// with no offset subtraction.
+    /// PIN (#4300, #4981): when the stitched slot's fallback fires (no successor bucket above the legacy's
+    /// last), the probe's upper bound must be the service clock minus
+    /// <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>, not a bare <c>now()</c>. A bare <c>now()</c>
+    /// lets a healthy, upgrading store with an EMPTY successor read every hour back to the legacy's freeze as
+    /// unprobed and therefore Short, RE-HOLDING the raw purge for rows the successor's own first refresh will
+    /// reach within the offset anyway. And the clock is BOUND (<c>$1</c>), never <c>now()</c> in the text:
+    /// <c>now()::timestamp</c> renders in the store session's time zone against buckets that are naive UTC.
+    /// RED at <c>9441f6b6c</c>: the fallback ends at
+    /// <c>time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '1 day')</c>, so the statement carries a
+    /// session clock and no placeholder.
     /// </summary>
     [Fact]
-    public void RetentionArmSafetySql_StitchedSlot_FallbackUpperBoundUsesHourlyRefreshStartOffset()
+    public void RetentionArmSafetySql_StitchedSlot_FallbackUpperBoundIsTheBoundHorizon_NotTheSessionClock()
     {
         var sql = TimescaleSupport.RetentionArmSafetySql(
             "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsIntervalHourlyView });
 
+        Assert.Equal("$1", TimescaleSupport.RetentionArmSafetyHorizonPlaceholder);
         Assert.Contains(
-            $"time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '{TimescaleSupport.HourlyRefreshStartOffset}')",
+            $"time_bucket(INTERVAL '1 hour', {TimescaleSupport.RetentionArmSafetyHorizonPlaceholder})) - INTERVAL '1 hour'",
             sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("time_bucket(INTERVAL '1 hour', now()::timestamp))", sql, StringComparison.Ordinal);
+
+        /* No session clock anywhere in the statement, in any spelling. */
+        Assert.DoesNotContain("now()", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("localtimestamp", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("current_timestamp", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("clock_timestamp", sql, StringComparison.OrdinalIgnoreCase);
+
+        /* What is bound: the UTC clock minus the same offset the SQL used to subtract, as a naive timestamp, so
+           Npgsql sends timestamp and not timestamptz. */
+        var utcNow = new DateTime(2026, 10, 3, 6, 30, 0, DateTimeKind.Utc);
+        var horizon = TimescaleSupport.RetentionArmSafetyHorizon(utcNow);
+        Assert.Equal(utcNow - TimescaleSupport.HourlyRefreshStartSpan, horizon);
+        Assert.Equal(DateTimeKind.Unspecified, horizon.Kind);
+
+        /* A statement with no stitched slot never names the placeholder. */
+        var plainSql = TimescaleSupport.RetentionArmSafetySql(
+            "query_store_stats", "collection_time",
+            new[] { TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsIntervalHourlyView });
+        Assert.DoesNotContain(TimescaleSupport.RetentionArmSafetyHorizonPlaceholder, plainSql, StringComparison.Ordinal);
     }
 
     /// <summary>

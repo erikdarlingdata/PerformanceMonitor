@@ -126,6 +126,20 @@ public class UtilizationEfficiencyRow
     /// </summary>
     public bool HasCpuSample => ProvisioningStatus.Length > 0;
 
+    /// <summary>The Avg CPU figure: a dash when the window held no CPU sample (<see cref="HasCpuSample"/> false), never the 0.00% that
+    /// came from nothing.</summary>
+    public string AvgCpuText => HasCpuSample ? $"{AvgCpuPct:N2}%" : "-";
+
+    /// <summary>The P95 CPU figure: a dash when the window held no CPU sample, never a 0.00%.</summary>
+    public string P95CpuText => HasCpuSample ? $"{P95CpuPct:N2}%" : "-";
+
+    /// <summary>The Max CPU figure: a dash when the window held no CPU sample, never a 0%.</summary>
+    public string MaxCpuText => HasCpuSample ? $"{MaxCpuPct}%" : "-";
+
+    /// <summary>False when the window held no CPU sample: the server is stale or its CPU collector is off, and its latest database
+    /// sizes may be days old, so the Allocated vs Used chart is hidden rather than shown as current.</summary>
+    public bool ShowsDatabaseSizeChart => HasCpuSample;
+
     // FinOps cost — proportional to server monthly budget
     public decimal MonthlyCost { get; set; }
     public decimal AnnualCost => MonthlyCost * 12m;
@@ -133,7 +147,13 @@ public class UtilizationEfficiencyRow
     // Health score (Increment 6)
     public decimal FreeSpacePct { get; set; }
     public int HealthScore { get; set; }
-    public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+
+    /// <summary>The badge color: the score's own, or gray when the window held no CPU sample and there is no score to color.</summary>
+    public string HealthScoreColor => HasCpuSample ? FinOpsHealthCalculator.ScoreColor(HealthScore) : FinOpsHealthCalculator.NoScoreColor;
+
+    /// <summary>The badge text: "Health: 87", or "Health: -" when the window held no CPU sample (<see cref="HasCpuSample"/> false). Memory and
+    /// storage alone can read a perfect 100 beside a "No Data" card, so with no CPU sample there is no score, not a partial one.</summary>
+    public string HealthScoreText => HasCpuSample ? $"Health: {HealthScore}" : "Health: -";
 
     /// <summary>
     /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
@@ -142,13 +162,8 @@ public class UtilizationEfficiencyRow
     /// on every edition. A window with no CPU sample (<see cref="HasCpuSample"/> false) leaves the CPU term out: its p95 is a 0
     /// that came from nothing, and scoring that 0 would hand the server a full 100.
     /// </summary>
-    public int ComputeHealthScore()
-    {
-        var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
-        int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
-        return FinOpsHealthCalculator.Overall(
-            cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
-    }
+    public int ComputeHealthScore() =>
+        FinOpsHealthCalculator.Score(HasCpuSample, P95CpuPct, PhysicalMemoryMb, BufferPoolMb, FreeSpacePct);
 }
 
 public class DatabaseResourceUsageRow
@@ -405,8 +420,14 @@ public class ServerPropertyRow
     }
 
     // Health score (Increment 6)
-    public int HealthScore { get; set; }
-    public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
+    /// not a score built from memory and storage alone. It is the Utilization tab's score for the same server
+    /// (<see cref="FinOpsHealthCalculator.Score"/>), read by <see cref="LocalDataService.GetServerMetricsAsync"/>.</summary>
+    public int? HealthScore { get; set; }
+    public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
+
+    /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
+    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
 }
 
 public class StorageGrowthRow
@@ -420,6 +441,12 @@ public class StorageGrowthRow
     public decimal? Growth30dMb { get; set; }
     public decimal? DailyGrowthRateMb { get; set; }
     public decimal? GrowthPct30d { get; set; }
+
+    /// <summary>The tooltip on a blank 7-day baseline cell (shown as n/a): no sample within a day of 7 days ago. Null when there is one.</summary>
+    public string? Size7dAgoNote => Size7dAgoMb == null ? "No sample from 7 days ago" : null;
+
+    /// <summary>The tooltip on a blank 30-day baseline cell (shown as n/a): no sample within a day of 30 days ago. Null when there is one.</summary>
+    public string? Size30dAgoNote => Size30dAgoMb == null ? "No sample from 30 days ago" : null;
 
     /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
     /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
@@ -479,6 +506,16 @@ public class ExpensiveQueryRow
 
 public static class FinOpsHealthCalculator
 {
+    /// <summary>The badge color of a health score that does not exist (no CPU sample in the window).</summary>
+    public const string NoScoreColor = "#7F8C8D";
+
+    /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
+    public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
+    /// <summary>The tooltip on the dash shown in place of a health score on the Server Inventory. That score is null for two reasons: the last 24 hours hold no
+    /// CPU sample, or no memory sample has been collected (memory_stats off in the schedule, or not yet run on a new server). The row does not say which,
+    /// so the note names both. The Utilization view keeps <see cref="NoScoreNote"/>: it has no row at all without a memory sample.</summary>
+    public const string NoInventoryScoreNote = "No health score: the last 24 hours hold no CPU sample, or no memory sample has been collected.";
+
     public static int CpuScore(decimal p95Pct)
     {
         if (p95Pct <= 70) return (int)(100 - p95Pct * 50 / 70);
@@ -513,6 +550,23 @@ public static class FinOpsHealthCalculator
 
         /* integer weights, so no floating-point error can truncate 100 to 99 */
         return (memory * 30 + storage * 30) / 60;
+    }
+
+    /// <summary>Free space as a percent of allocated; 100 when nothing is allocated (no snapshot, or an empty one).</summary>
+    public static decimal FreeSpacePct(decimal allocatedMb, decimal freeMb) =>
+        allocatedMb > 0 ? freeMb / allocatedMb * 100m : 100m;
+
+    /// <summary>
+    /// THE health score, the one rule every surface uses: the FinOps Utilization badge and the Server Inventory grid's Health column. CPU is
+    /// the 24-hour p95, memory is the buffer pool's share of physical memory, storage is the free share of the newest database-size snapshot
+    /// (<see cref="FreeSpacePct"/>). A window with no CPU sample (<paramref name="hasCpuSample"/> false) leaves the CPU term out: its p95 is a 0
+    /// that came from nothing, and scoring that 0 would hand the server a full 100.
+    /// </summary>
+    public static int Score(bool hasCpuSample, decimal p95CpuPct, long physicalMemoryMb, long bufferPoolMb, decimal freeSpacePct)
+    {
+        var bpRatio = physicalMemoryMb > 0 ? (decimal)bufferPoolMb / physicalMemoryMb : 0m;
+        int? cpuScore = hasCpuSample ? CpuScore(p95CpuPct) : null;
+        return Overall(cpuScore, MemoryScore(bpRatio), StorageScore(freeSpacePct));
     }
 
     public static string ScoreColor(int score) => score switch
@@ -607,7 +661,6 @@ public class RecommendationRow
     public string Finding { get; set; } = "";
     public string Detail { get; set; } = "";
     public decimal? EstMonthlySavings { get; set; }
-    public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
     public int SeveritySort => Severity switch
     {
         "High" => 1,

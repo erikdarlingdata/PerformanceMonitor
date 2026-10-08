@@ -470,13 +470,17 @@ public sealed class ViewerFinOpsRecommendationsTests
         var body = RightSizingRulesSource();
 
         Assert.Matches(
-            new Regex(@"util\s*==\s*null\s*\|\|\s*!\s*util\s*\.\s*HasCpuSample\s*\|\|\s*util\s*\.\s*P95CpuPct\s*>=\s*30"),
+            new Regex(@"CpuRightSizingTargetCores\s*\(\s*util\s*\)\s*is\s*not\s*int\s*targetCores"),
             CpuRightSizingBuilderSource());
+        /* The no-sample guard lives in the target helper both CPU rows share (one rule, #5492). */
         Assert.Matches(
-            new Regex(@"BuildCpuRightSizingRecommendation\s*\(\s*util\s*,\s*monthlyCost\s*\)"),
+            new Regex(@"util\s*==\s*null\s*\|\|\s*!\s*FinOpsUtilizationFigures\s*\.\s*HasCpuSample\s*\(\s*util\s*\)\s*\|\|\s*util\s*\.\s*P95CpuPct\s*>=\s*30"),
+            RecommendationsMethodSource("int? CpuRightSizingTargetCores(", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs"));
+        Assert.Matches(
+            new Regex(@"FinOpsRecommendationFigures\s*\.\s*CpuRightSizing\s*\(\s*util\s*,\s*monthlyCost\s*\)"),
             body);
         Assert.Matches(
-            new Regex(@"vmUtil\s*!=\s*null\s*&&\s*vmUtil\s*\.\s*HasCpuSample\s*&&"),
+            new Regex(@"vmUtil\s*!=\s*null\s*&&\s*FinOpsUtilizationFigures\s*\.\s*HasCpuSample\s*\(\s*vmUtil\s*\)\s*&&"),
             body);
     }
 
@@ -485,23 +489,26 @@ public sealed class ViewerFinOpsRecommendationsTests
     {
         var body = RightSizingRulesSource();
         const string notAzureSqlDatabase =
-            @"await\s+GetRecommendationEngineEditionAsync\(\s*serverId\s*,\s*cancellationToken\s*\)\s*!=\s*CollectorEngineCapability\s*\.\s*AzureSqlDatabaseEngineEdition";
+            @"await\s+GetEngineEditionAsync\(\s*dataSource\s*,\s*serverId\s*,\s*commandTimeoutSeconds\s*,\s*cancellationToken\s*\)\s*!=\s*CollectorEngineCapability\s*\.\s*AzureSqlDatabaseEngineEdition";
 
         Assert.Matches(new Regex(@"util\s*\.\s*PhysicalMemoryMb\s*>\s*8192\s*&&\s*" + notAzureSqlDatabase), body);
-        Assert.Matches(new Regex(@"vmUtil\s*\.\s*HasCpuSample\s*&&\s*" + notAzureSqlDatabase), body);
+        Assert.Matches(new Regex(@"FinOpsUtilizationFigures\s*\.\s*HasCpuSample\s*\(\s*vmUtil\s*\)\s*&&\s*" + notAzureSqlDatabase), body);
         Assert.Equal(5, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
     }
 
     private static string RightSizingRulesSource() =>
-        RecommendationsMethodSource("Task<List<RecommendationRow>> GetRecommendationsAsync(");
+        RecommendationsMethodSource("Task<List<FinOpsRecommendation>> GetRecommendationsAsync(", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsRecommendationsReader.cs");
 
     private static string CpuRightSizingBuilderSource() =>
-        RecommendationsMethodSource("RecommendationRow? BuildCpuRightSizingRecommendation(");
+        RecommendationsMethodSource("FinOpsRecommendation? CpuRightSizing(", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
 
-    private static string RecommendationsMethodSource(string signatureText)
+    private static string RecommendationsMethodSource(string signatureText) =>
+        RecommendationsMethodSource(signatureText, "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs");
+
+    private static string RecommendationsMethodSource(string signatureText, params string[] projectPath)
     {
         var source = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs"));
+            RepoFile.ReadRepoFile(["Darling", .. projectPath]));
         var signature = source.IndexOf(signatureText, StringComparison.Ordinal);
         Assert.True(signature >= 0, $"{signatureText} is gone, so this pin would read nothing.");
         return CSharpSourceWalker.BraceBalanced(source, source.IndexOf('{', signature));

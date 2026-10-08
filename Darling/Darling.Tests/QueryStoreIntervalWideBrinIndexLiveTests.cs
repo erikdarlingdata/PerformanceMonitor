@@ -45,13 +45,13 @@ public sealed class QueryStoreIntervalWideBrinIndexLiveTests
         return connection;
     }
 
-    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    internal static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         return await command.ExecuteScalarAsync(ct);
     }
 
-    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    internal static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 300 };
         await command.ExecuteNonQueryAsync(ct);
@@ -79,29 +79,31 @@ ORDER BY g;"), ct);
         "collection_time = collection_time + interval '1 minute', last_execution_time = last_execution_time + interval '1 minute', "
         + "execution_count = execution_count + 1, avg_duration_us = avg_duration_us + 1";
 
-    private static async Task<(long Updated, long Hot)> UpdateAndReadHotAsync(
-        NpgsqlConnection connection, string setList, string where, CancellationToken ct)
+    internal static async Task<(long Updated, long Hot)> UpdateAndReadHotAsync(
+        NpgsqlConnection connection, string setList, string where, CancellationToken ct, string? table = null)
     {
+        table ??= Table;
         /* The pg_stat_xact_* counters are the session's still-pending counts, so an earlier measurement on this
            connection is still in them after its rollback: take the delta around the update. */
         await using var transaction = await connection.BeginTransactionAsync(ct);
-        var (updatedBefore, hotBefore) = await ReadXactCountersAsync(connection, transaction, ct);
-        await using (var update = new NpgsqlCommand($"UPDATE {Table} SET {setList} WHERE {where}", connection, transaction) { CommandTimeout = 300 })
+        var (updatedBefore, hotBefore) = await ReadXactCountersAsync(connection, transaction, table, ct);
+        await using (var update = new NpgsqlCommand($"UPDATE {table} SET {setList} WHERE {where}", connection, transaction) { CommandTimeout = 300 })
         {
             await update.ExecuteNonQueryAsync(ct);
         }
 
-        var (updatedAfter, hotAfter) = await ReadXactCountersAsync(connection, transaction, ct);
+        var (updatedAfter, hotAfter) = await ReadXactCountersAsync(connection, transaction, table, ct);
         await transaction.RollbackAsync(ct);
         return (updatedAfter - updatedBefore, hotAfter - hotBefore);
     }
 
     private static async Task<(long Updated, long Hot)> ReadXactCountersAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken ct)
+        NpgsqlConnection connection, NpgsqlTransaction transaction, string table, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
-            "SELECT COALESCE(SUM(n_tup_upd), 0)::bigint, COALESCE(SUM(n_tup_hot_upd), 0)::bigint FROM pg_stat_xact_all_tables WHERE schemaname = 'collect' AND relname = 'query_store_interval_wide'",
+            "SELECT COALESCE(SUM(n_tup_upd), 0)::bigint, COALESCE(SUM(n_tup_hot_upd), 0)::bigint FROM pg_stat_xact_all_tables WHERE schemaname = 'collect' AND relname = @relname",
             connection, transaction);
+        command.Parameters.AddWithValue("relname", table[(table.IndexOf('.', StringComparison.Ordinal) + 1)..]);
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
         return (reader.GetInt64(0), reader.GetInt64(1));
@@ -165,9 +167,11 @@ ORDER BY g;"), ct);
     }
 
     /// <summary>The column names the product's upsert sets in <c>DO UPDATE SET</c>, parsed from its own SQL.</summary>
-    private static HashSet<string> UpsertSetColumns()
+    internal static HashSet<string> UpsertSetColumns() => UpsertSetColumns(QueryStoreIntervalWide.UpsertSql);
+
+    /// <summary>The same parse for another writer's upsert (the latest table's, #5507).</summary>
+    internal static HashSet<string> UpsertSetColumns(string sql)
     {
-        var sql = QueryStoreIntervalWide.UpsertSql;
         var start = sql.IndexOf("DO UPDATE SET", StringComparison.Ordinal);
         Assert.True(start >= 0, "the upsert has no DO UPDATE SET; the parse below would read nothing");
         var end = sql.IndexOf("WHERE (EXCLUDED.collection_time", start, StringComparison.Ordinal);
@@ -230,7 +234,16 @@ WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
-        await EnsureAsync(connection, ct);
+
+        /* Every background index the service builds, not the BRIN alone: the census reads the catalog after the product's
+           own list has been ensured, so the next member of QueryStoreBackgroundIndexes.All is scanned without an edit here. */
+        await QueryStoreBackgroundIndexesLiveTests.EnsureAllAsync(connection, ct);
+        foreach (var spec in QueryStoreBackgroundIndexes.All)
+        {
+            Assert.True(
+                (bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{spec.IndexName}'::regclass", ct))!,
+                $"{spec.IndexName} must be built and valid before the census reads the catalog");
+        }
 
         /* Data-independent: the catalog, not a seeded update. The scan must see the identity index and the
            first_execution_time index, or it reads nothing. */

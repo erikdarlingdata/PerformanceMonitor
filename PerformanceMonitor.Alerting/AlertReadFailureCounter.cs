@@ -835,6 +835,11 @@ public sealed class AlertReadFailureCounter
     /// digest-routed alert-history rows, Darling-only like the other two documents. Counted on the rollup's
     /// reasoning: its swallowed failure skips the day's tick without consuming the interval, and a fault
     /// folded into "no singles today" would make an unreadable store read as a quiet one.</para>
+    ///
+    /// <para>#5450 added the daily collection-history audit's rollup read, Darling-only: a source whose bucket
+    /// read fails or times out is left unread and retried until the next day's slot, so a nonzero count naming
+    /// it says a source could not be asked, and a fault folded into "no thin hours" would read an unreadable
+    /// history as a complete one.</para>
     /// </summary>
     public const string FleetScopedReads =
         "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
@@ -846,7 +851,7 @@ public sealed class AlertReadFailureCounter
         + "health reads behind compression-job health, store-job cadence and retention holds, and the two "
         + "informational store self-alerts #3826 added — the plan dimension's TOAST slack read and the "
         + "store checkpointer pressure read behind the WAL levers, and the store settings self-alert's "
-        + "managed-conf verdicts read (#4215)";
+        + "managed-conf verdicts read (#4215), and the daily collection-history audit's rollup read (#5450)";
 
     /// <summary>
     /// The window these figures cover, and the window they do NOT.

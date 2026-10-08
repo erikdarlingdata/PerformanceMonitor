@@ -115,7 +115,7 @@ public sealed class PlanCorrectionFrameLiveTests
             /* ── arm A: already UTC. The stored value equals collection_time and must come back equal to
                   it. An offset applied here ADDS four hours, because the offset is negative. ── */
             var recommendations = await DarlingPlanCorrectionReader.GetPlanCorrectionsAsync(
-                postgres, ServerId, collectionTime.AddHours(-1), collectionTime.AddHours(1), cap: 50, ct);
+                postgres, ServerId, collectionTime.AddHours(-1), collectionTime.AddHours(1), cap: 50, cancellationToken: ct);
 
             var recommendation = Assert.Single(recommendations);
             Assert.Equal(collectionTime, recommendation.CollectionTime);

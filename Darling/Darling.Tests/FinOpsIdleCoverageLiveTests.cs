@@ -1,0 +1,246 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// The idle-database coverage rule read through <c>HasIdleCoverageAtAsync(now)</c> against a real store: the oldest query-stats
+/// sample at or before now minus 7 days AND a sample on each of the 7 complete UTC days before today (today is not required).
+/// Every scenario gets its own server and asks at several times of day, because the rule's day boundaries move with the clock.
+/// </summary>
+/* #1776 own-store: the scenarios share one scratch database, and each server's rows are its own, so nothing here shares rows with another test. */
+public sealed class FinOpsIdleCoverageLiveTests
+{
+    private const int TimeoutSeconds = 30;
+    private static readonly DateTime Day = new(2026, 10, 7, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /* 00:30, 06:00, 12:00, 18:00 and 23:30: either side of a day's start, middle and end. */
+    private static readonly double[] HoursOfDay = { 0.5, 6, 12, 18, 23.5 };
+
+    private static string? Cs => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    internal static async Task<(int Id, string Name)> RegisterAsync(NpgsqlConnection c, string name, CancellationToken ct)
+    {
+        var id = ServerIdHelper.GetDeterministicHashCode(name);
+        await DarlingMcpTestData.RegisterServerAsync(c, id, name, ct);
+        return (id, name);
+    }
+
+    /// <summary>One zero-execution sample every half day from <paramref name="days"/> back up to <paramref name="now"/>, skipping those <paramref name="skip"/> accepts.</summary>
+    internal static async Task SeedHalfDaysAsync(
+        NpgsqlConnection c, int id, string name, DateTime now, double days, Func<DateTime, bool> skip, CancellationToken ct)
+    {
+        var steps = (int)Math.Round(days * 2);
+        for (var k = 0; k <= steps; k++)
+        {
+            var at = now.AddHours(-12.0 * k);
+            if (skip(at)) continue;
+            await FinOpsIdleCoverageSeed.InsertAsync(c, ct, id, name, at, "h" + k);
+        }
+    }
+
+    [Fact]
+    public async Task SixAndAHalfDaysOfHistory_GivesNoCoverage_AtAnyTimeOfDay()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live idle-coverage test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Cs!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        foreach (var hour in HoursOfDay)
+        {
+            var now = Day.AddHours(hour);
+            /* 6.5 days sampled every half day: every complete day D-6 .. D-1 holds samples, but nothing is old enough to
+               claim 7 days were watched, however many UTC dates 6.5 days touch (it touches 8 at some hours). */
+            var (shortId, shortName) = await RegisterAsync(c, $"darling-idle-cov-short-{hour}", ct);
+            await SeedHalfDaysAsync(c, shortId, shortName, now, 6.5, _ => false, ct);
+            Assert.False(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, shortId, now, TimeoutSeconds, ct), $"6.5 days at hour {hour}");
+
+            /* Control: 7.5 days sampled the same way is covered at the same moment, so the scenario above is not passing for
+               some unrelated reason. */
+            var (longId, longName) = await RegisterAsync(c, $"darling-idle-cov-long-{hour}", ct);
+            await SeedHalfDaysAsync(c, longId, longName, now, 7.5, _ => false, ct);
+            Assert.True(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, longId, now, TimeoutSeconds, ct), $"7.5 days at hour {hour}");
+        }
+    }
+
+    [Fact]
+    public async Task SevenAndAHalfDaysWithDMinus3Missing_GivesNoCoverage_AtAnyTimeOfDay()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live idle-coverage test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Cs!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        foreach (var hour in HoursOfDay)
+        {
+            var now = Day.AddHours(hour);
+            var dMinus3 = now.Date.AddDays(-3);
+            /* 7.5 days of history, long enough for the oldest-sample test, but no sample at all on D-3: the gap is
+               inside the window, so nothing was watching that day and every database would read as idle by default. */
+            var (gapId, gapName) = await RegisterAsync(c, $"darling-idle-cov-gap-{hour}", ct);
+            await SeedHalfDaysAsync(c, gapId, gapName, now, 7.5, at => at.Date == dMinus3, ct);
+            Assert.False(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, gapId, now, TimeoutSeconds, ct), $"D-3 missing at hour {hour}");
+        }
+    }
+
+    [Fact]
+    public async Task FullCoverage_JustAfterMidnightUtc_WithNoSampleYetToday_IsCovered()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live idle-coverage test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Cs!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* An old sample and a noon sample on each of D-7 .. D-1; nothing yet today. Five minutes after 00:00 UTC the
+           rule still holds (today is not required), and it keeps holding through the day with no new sample. */
+        var seeded = Day.AddMinutes(5);
+        var (id, name) = await RegisterAsync(c, "darling-idle-cov-midnight", ct);
+        await FinOpsIdleCoverageSeed.SeedAsync(c, ct, id, name, seeded);
+
+        var asked = new List<string>();
+        foreach (var at in new[] { seeded, Day.AddHours(6), Day.AddHours(23.5) })
+        {
+            if (!await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, id, at, TimeoutSeconds, ct))
+                asked.Add(at.ToString("HH:mm"));
+        }
+        Assert.True(asked.Count == 0, "not covered at " + string.Join(", ", asked));
+
+        /* The same data asked a day later: the window slid one day on, and D-1 (yesterday, which holds no sample) breaks
+           it, so coverage ends there rather than lasting forever. */
+        Assert.False(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, id, Day.AddDays(1).AddMinutes(5), TimeoutSeconds, ct));
+    }
+
+    /// <summary>The 7-day raw count the rule used before the per-day probes (#5492): the distinct UTC dates in [$2, $3) holding a sample.</summary>
+    private const string OldDistinctDayCountSql = @"
+SELECT COUNT(DISTINCT CAST(collection_time AS DATE))
+FROM v_query_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <  $3";
+
+    private static async Task<(long Old, long Probed)> CountDaysBothWaysAsync(NpgsqlDataSource dataSource, int id, DateTime now, CancellationToken ct)
+    {
+        var start = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now), DateTimeKind.Unspecified);
+        var end = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now), DateTimeKind.Unspecified);
+
+        static async Task<long> RunAsync(NpgsqlDataSource ds, string sql, int serverId, DateTime from, DateTime to, int column, CancellationToken token)
+        {
+            await using var command = ds.CreateCommand(sql);
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = from });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = to });
+            await using var reader = await command.ExecuteReaderAsync(token);
+            Assert.True(await reader.ReadAsync(token));
+            return Convert.ToInt64(reader.GetValue(column), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return (await RunAsync(dataSource, OldDistinctDayCountSql, id, start, end, 0, ct),
+                await RunAsync(dataSource, DarlingFinOpsOptimizationReader.IdleCoverageSql, id, start, end, 1, ct));
+    }
+
+    [Fact]
+    public async Task PerDayProbes_CountTheSameDaysAsTheOldDistinctCount_InTheThreeScenarios()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live idle-coverage test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Cs!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        foreach (var hour in HoursOfDay)
+        {
+            var now = Day.AddHours(hour);
+
+            /* Six and a half days of history: D-6 .. D-1 hold samples, and D-7 does only at the hours when 6.5 days back still reaches it. */
+            var (shortId, shortName) = await RegisterAsync(c, $"darling-idle-cnt-short-{hour}", ct);
+            await SeedHalfDaysAsync(c, shortId, shortName, now, 6.5, _ => false, ct);
+            var (oldShort, probedShort) = await CountDaysBothWaysAsync(dataSource, shortId, now, ct);
+            Assert.Equal(oldShort, probedShort);
+            Assert.InRange(probedShort, 6L, 7L);
+
+            /* Seven and a half days with D-3 missing: six of the seven days, the gap not counted. */
+            var dMinus3 = now.Date.AddDays(-3);
+            var (gapId, gapName) = await RegisterAsync(c, $"darling-idle-cnt-gap-{hour}", ct);
+            await SeedHalfDaysAsync(c, gapId, gapName, now, 7.5, at => at.Date == dMinus3, ct);
+            var (oldGap, probedGap) = await CountDaysBothWaysAsync(dataSource, gapId, now, ct);
+            Assert.Equal(oldGap, probedGap);
+            Assert.Equal(6L, probedGap);
+
+            /* Seven and a half days, no gap: all seven complete days, and today (which holds samples at some hours) is not one of them. */
+            var (fullId, fullName) = await RegisterAsync(c, $"darling-idle-cnt-full-{hour}", ct);
+            await SeedHalfDaysAsync(c, fullId, fullName, now, 7.5, _ => false, ct);
+            var (oldFull, probedFull) = await CountDaysBothWaysAsync(dataSource, fullId, now, ct);
+            Assert.Equal(oldFull, probedFull);
+            Assert.Equal(7L, probedFull);
+        }
+    }
+
+    /// <summary>
+    /// Round-2 L5 (#5492): the day edges. D-3 holds no half-day sample here; a sample exactly at D-3 00:00:00.000000 is the
+    /// start of that day (half-open day, so it covers it); D-4 23:59:59.999999 and D-2 00:00:00.000000 belong to the
+    /// neighbouring days and leave D-3 uncovered. The per-day probes count the same days as the old distinct-date count in both.
+    /// </summary>
+    [Fact]
+    public async Task ASampleOnTheExactDayEdge_CoversOnlyItsOwnDay()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live idle-coverage test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Cs!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        foreach (var hour in HoursOfDay)
+        {
+            var now = Day.AddHours(hour);
+            var dMinus3 = now.Date.AddDays(-3);
+
+            var (midId, midName) = await RegisterAsync(c, $"darling-idle-edge-mid-{hour}", ct);
+            await SeedHalfDaysAsync(c, midId, midName, now, 7.5, at => at.Date == dMinus3, ct);
+            await FinOpsIdleCoverageSeed.InsertAsync(c, ct, midId, midName, dMinus3, "mid");
+            Assert.True(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, midId, now, TimeoutSeconds, ct), $"00:00:00.000000 of D-3 at hour {hour}");
+            var (oldMid, probedMid) = await CountDaysBothWaysAsync(dataSource, midId, now, ct);
+            Assert.Equal(oldMid, probedMid);
+            Assert.Equal(7L, probedMid);
+
+            var (edgeId, edgeName) = await RegisterAsync(c, $"darling-idle-edge-near-{hour}", ct);
+            await SeedHalfDaysAsync(c, edgeId, edgeName, now, 7.5, at => at.Date == dMinus3, ct);
+            await FinOpsIdleCoverageSeed.InsertAsync(c, ct, edgeId, edgeName, dMinus3.AddTicks(-10), "prevEnd");
+            await FinOpsIdleCoverageSeed.InsertAsync(c, ct, edgeId, edgeName, dMinus3.AddDays(1), "nextStart");
+            Assert.False(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, edgeId, now, TimeoutSeconds, ct), $"neighbouring edges at hour {hour}");
+            var (oldEdge, probedEdge) = await CountDaysBothWaysAsync(dataSource, edgeId, now, ct);
+            Assert.Equal(oldEdge, probedEdge);
+            Assert.Equal(6L, probedEdge);
+        }
+    }
+}

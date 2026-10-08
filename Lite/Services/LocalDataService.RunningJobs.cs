@@ -205,6 +205,13 @@ public class RunningJobRow
     /// honours.</summary>
     public string StartTimeLocal => ServerTimeHelper.FormatServerClock(StartTime);
 
+    /// <summary>#4966: when the snapshot this row belongs to was collected, to the second, in the display zone. The Running Jobs
+    /// grid draws only the newest snapshot, so this is what tells a stale grid from a fresh one. <c>collection_time</c> is the
+    /// collector's own UTC stamp, so it is worded from the instant (<see cref="ServerTimeHelper.FormatServerTime(DateTime, string)"/>,
+    /// like the Automatic Tuning grid's Collected column), unlike <see cref="StartTimeLocal"/>, which is the server's wall clock.
+    /// The column sorts by <see cref="CollectionTime"/>.</summary>
+    public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
+
     public string CurrentDurationFormatted => FormatDuration(CurrentDurationSeconds);
     public string AvgDurationFormatted => FormatDuration(AvgDurationSeconds);
     public string P95DurationFormatted => FormatDuration(P95DurationSeconds);

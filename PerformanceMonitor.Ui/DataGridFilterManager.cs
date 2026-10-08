@@ -54,6 +54,9 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
     {
         _unfilteredData = newData;
 
+        /* An empty grid says so (Lite click-through F15) instead of showing a bare header row. */
+        EmptyState.Show(_dataGrid, newData.Count == 0);
+
         if (!HasActiveFilters())
         {
             SetItemsSourcePreservingSort(newData);
@@ -177,7 +180,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
                         FontFamily = new FontFamily("Segoe MDL2 Assets"),
                         Foreground = hasActive
                             ? new SolidColorBrush(Color.FromRgb(0xFF, 0xD7, 0x00))
-                            : (Brush)Application.Current.FindResource("ForegroundDimBrush")
+                            : (Application.Current?.TryFindResource("ForegroundDimBrush") as Brush ?? Brushes.Gray) /* no Application in a headless test: a plain grey */
                     };
                     filterButton.Content = textBlock;
 

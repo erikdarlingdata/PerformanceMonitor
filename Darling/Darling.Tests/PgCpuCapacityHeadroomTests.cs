@@ -46,6 +46,8 @@ namespace Darling.Tests;
 /// runtime exception and a passing unit test otherwise); a null PI <c>Value</c> becomes NULL and never 0;
 /// and the four metric queries cannot be conflated into four CPU readings.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class PgCpuCapacityHeadroomTests
 {
     internal const int RungVersion = 115;

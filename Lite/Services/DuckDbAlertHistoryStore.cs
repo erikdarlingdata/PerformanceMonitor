@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 
@@ -100,8 +101,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = record.NotificationType });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = record.SendError ?? (object)DBNull.Value });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = record.Muted });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = record.DetailText ?? (object)DBNull.Value });
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = record.ContextJson ?? (object)DBNull.Value });
+            /* #4348/#5320 Layer 0b: the alert text and its context are judged where they are written, because the
+               source rows an alert was built from may predate the collection-time filter. Clean text is the same
+               instance, so the stored row is unchanged. */
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DerivedStoreScrub.Text(record.DetailText) ?? (object)DBNull.Value });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DerivedStoreScrub.Json(record.ContextJson) ?? (object)DBNull.Value });
 
             await command.ExecuteNonQueryAsync();
 

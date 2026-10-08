@@ -39,6 +39,17 @@ public class FinOpsFleetReadParityTests : IDisposable
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); } catch { }
     }
 
+    /// <summary>One query_stats sample per UTC day for the last <paramref name="days"/> days (today first), on a database no size snapshot lists, so the idle-coverage rule is met without making any listed database active.</summary>
+    private static void SeedQueryStatsCoverage(DuckDBConnection conn, int serverId, string serverName, DateTime now, ref long nextId, int days = 7)
+    {
+        /* A full-coverage seed (7 or more days) starts yesterday and reaches 8 days back: the oldest sample must be at least 7 days old and each complete day before today must hold one. A short seed (the gap case) starts now. */
+        var start = days >= 7 ? 1 : 0;
+        for (var d = start; d < start + (days >= 7 ? days + 1 : days); d++)
+            Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+                          delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
+                         VALUES ($1,$2,$3,$4,'DbElsewhere','0xE',1,10,20,1)", nextId--, now.AddDays(-d), serverId, serverName);
+    }
+
     private static void Exec(DuckDBConnection conn, string sql, params object[] vals)
     {
         using var cmd = conn.CreateCommand();
@@ -55,7 +66,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task TopResourceConsumers_KeepsEachGridsOwnFilter()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int serverId = 1;
@@ -112,7 +123,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task ServerMetrics_FleetStatement_CoversEveryServer_AndFlagsIdleDatabases()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int busyServerId = 10;
@@ -140,6 +151,7 @@ public class FinOpsFleetReadParityTests : IDisposable
             Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
                           delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
                          VALUES ($1,$2,$3,$4,'DbActive','0xA',10,1000,2000,100)", nextId--, now.AddDays(-1), busyServerId, "BUSY");
+            SeedQueryStatsCoverage(conn, busyServerId, "BUSY", now, ref nextId);
         }
 
         var svc = new LocalDataService(initializer);
@@ -161,6 +173,64 @@ public class FinOpsFleetReadParityTests : IDisposable
     }
 
     /// <summary>
+    /// The fleet "Idle DBs" count follows the recommendation row's rule: a database is idle for 7 days only when query stats hold a
+    /// sample on each of the 7 complete UTC days before today AND the oldest sample is at least 7 days old. A store that was closed for
+    /// days (samples only today and yesterday) reads NULL (a dash), not a count of every database; so does one whose samples reach every
+    /// date but start only 6 days and a few minutes back; a covered server with nothing idle reads 0, not NULL, even with no sample yet
+    /// today.
+    /// </summary>
+    [Fact]
+    public async Task ServerMetrics_IdleDbCount_NeedsSevenDaysOfQueryStatsCoverage()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const int gapServerId = 50;
+        const int busyServerId = 60;
+        const int youngServerId = 70;
+        var now = DateTime.UtcNow;
+        long nextId = -1;
+
+        using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+            foreach (var (serverId, name) in new[] { (gapServerId, "GAP"), (busyServerId, "BUSYALL"), (youngServerId, "YOUNG") })
+            {
+                SeedServerProperties(conn, serverId, name, nextId--, now);
+                Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+                              file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+                             VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',20480,8000)", nextId--, now, serverId, name);
+            }
+
+            // GAP: samples today and yesterday only (the app was closed before that), DbOne never ran in them.
+            SeedQueryStatsCoverage(conn, gapServerId, "GAP", now, ref nextId, days: 2);
+
+            // BUSYALL: the oldest sample is 8 days old and each of the 7 complete days before today holds one (none yet today), and DbOne
+            // is the database that ran, so nothing is idle.
+            for (var d = 1; d <= 8; d++)
+                Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+                              delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
+                             VALUES ($1,$2,$3,$4,'DbOne','0xB',5,10,20,1)", nextId--, now.AddDays(-d), busyServerId, "BUSYALL");
+
+            // YOUNG: a sample on each of the 7 dates from 7 days back to yesterday, but the first is at 23:59:30 of the 7th day back, so the
+            // oldest sample is not yet 7 days old (6 days and a few minutes at most times of day). Seven dates are covered; the history is not.
+            Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+                          delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
+                         VALUES ($1,$2,$3,$4,'DbOne','0xY',5,10,20,1)", nextId--, now.Date.AddDays(-7).AddHours(23).AddMinutes(59).AddSeconds(30), youngServerId, "YOUNG");
+            for (var d = 1; d <= 6; d++)
+                Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+                              delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
+                             VALUES ($1,$2,$3,$4,'DbOne','0xY',5,10,20,1)", nextId--, now.Date.AddDays(-d).AddHours(12), youngServerId, "YOUNG");
+        }
+
+        var metrics = await new LocalDataService(initializer).GetServerMetricsAsync();
+
+        Assert.Null(metrics[gapServerId].IdleDbCount);
+        Assert.Equal(0, metrics[busyServerId].IdleDbCount);
+        Assert.Null(metrics[youngServerId].IdleDbCount);
+    }
+
+    /// <summary>
     /// The overlay must not depend on the <c>servers</c> table: Lite never inserts into it, so a read driven
     /// from it returned an empty dictionary on every real store and the Server Inventory never got its
     /// collected CPU, storage and idle-database figures. With CPU, size and <c>server_properties</c> rows and
@@ -171,7 +241,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task ServerMetrics_AreReadWithNoServersRow_FromCollectedServerProperties()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int liveServerId = 30;
@@ -191,6 +261,7 @@ public class FinOpsFleetReadParityTests : IDisposable
                 Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
                               file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
                              VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',20480,8000)", nextId--, now, serverId, name);
+                SeedQueryStatsCoverage(conn, serverId, name, now, ref nextId);
             }
 
             using var count = conn.CreateCommand();
@@ -218,7 +289,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task ServerMetrics_ServerWithNoCpuSampleInTheWindow_GetsNoVerdict_ALowCpuServerStillGetsOverProvisioned()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int quietServerId = 50;
@@ -269,7 +340,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task UtilizationEfficiency_ServerWithNoCpuSampleInTheWindow_GetsNoVerdict_ALowCpuServerStillGetsOverProvisioned()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int quietServerId = 70;
@@ -306,6 +377,61 @@ public class FinOpsFleetReadParityTests : IDisposable
         Assert.NotNull(noCpu);
         Assert.Equal(0L, noCpu.CpuSamples);
         Assert.Equal("", noCpu.ProvisioningStatus);
+    }
+
+    /// <summary>
+    /// One server, one health score: the Server Inventory's Health column (the fleet read) and the Utilization tab's badge score the same server
+    /// from the same inputs. The inventory used to score the 24-hour average CPU against a fixed memory and storage term, so servers with
+    /// different buffer pools and free space all read the same number beside a Utilization score that differed.
+    /// </summary>
+    [Fact]
+    public async Task ServerMetrics_HealthScore_EqualsTheUtilizationScore_PerServer()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var now = DateTime.UtcNow;
+        long nextId = -1;
+        // (id, name, cpu samples, physical MB, buffer pool MB, total MB, used MB)
+        var servers = new (int Id, string Name, int[] Cpu, int PhysMb, int BpMb, int TotalMb, int UsedMb)[]
+        {
+            (101, "HEALTHY", [10, 12, 14], 65536, 40000, 100000, 40000),
+            (102, "STRAINED", [60, 85, 95], 16384, 15800, 100000, 97000),
+        };
+
+        using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+            foreach (var sv in servers)
+            {
+                SeedServerProperties(conn, sv.Id, sv.Name, nextId--, now);
+                foreach (var cpu in sv.Cpu)
+                    Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                                 VALUES ($1,$2,$3,$4,$2,$5,1)", nextId--, now.AddHours(-1), sv.Id, sv.Name, cpu);
+                Exec(conn, @"INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name,
+                              total_physical_memory_mb, available_physical_memory_mb, target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+                             VALUES ($1,$2,$3,$4,$5,1000,$5,$5,$6)", nextId--, now, sv.Id, sv.Name, sv.PhysMb, sv.BpMb);
+                Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+                              file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+                             VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',$5,$6)", nextId--, now, sv.Id, sv.Name, sv.TotalMb, sv.UsedMb);
+            }
+        }
+
+        var svc = new LocalDataService(initializer);
+        var fleet = await svc.GetServerMetricsAsync();
+        var inventoryScores = new System.Collections.Generic.List<int?>();
+
+        foreach (var sv in servers)
+        {
+            var util = (await svc.GetUtilizationEfficiencyAsync(sv.Id))!;
+            var sizes = await svc.GetDatabaseSizeLatestAsync(sv.Id);
+            util.FreeSpacePct = FinOpsHealthCalculator.FreeSpacePct(DatabaseSizeRow.AllocatedTotalMb(sizes), DatabaseSizeRow.FreeTotalMb(sizes));
+
+            Assert.Equal(util.ComputeHealthScore(), fleet[sv.Id].HealthScore);
+            inventoryScores.Add(fleet[sv.Id].HealthScore);
+        }
+
+        Assert.NotEqual(inventoryScores[0], inventoryScores[1]);
     }
 
     /// <summary>One collected <c>server_properties</c> row, which is what makes a server known to the fleet read.

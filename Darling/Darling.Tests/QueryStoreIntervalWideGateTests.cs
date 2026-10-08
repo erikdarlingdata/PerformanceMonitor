@@ -55,18 +55,52 @@ public sealed class QueryStoreIntervalWideGateTests
         Assert.False(Rule(filledSince: WindowEnd));
 
     [Fact]
-    public void Clause3_TableFloorShortOfTheOneDayMargin_ReadsRaw() =>
-        // table floor only reaches 23h before window start — short of the full one-day margin clause 3 needs —
-        // and raw has no floor (a plain store): the table cannot answer for the earliest part of the window.
+    public void Clause3_TableFloorShortOfThePurgeEdgeMargin_ReadsRaw()
+    {
+        /* #5541: the raw read counts a snapshot by collection_time alone, so a snapshot collected at or after the window
+           start can belong to an interval that began down to S - PurgeEdgeMargin (a 1440-minute interval collected up to
+           an hour plus the catch-up cap after it ended). A table floor between S - 26 h and S - 24 h used to pass the
+           old S - 1 day arm and then miss that interval. Raw has no floor here (a plain store), so only 3b can pass. */
+        Assert.False(Rule(tableFloor: WindowStart.AddHours(-24)));
+        Assert.False(Rule(tableFloor: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin + TimeSpan.FromMinutes(1)));
         Assert.False(Rule(tableFloor: WindowStart.AddHours(-23)));
+    }
 
     [Fact]
-    public void Clause3_TableFloorAtOrBeyondTheOneDayMargin_ReadsTheTable() =>
-        Assert.True(Rule(tableFloor: WindowStart.AddDays(-1)));
+    public void Clause3_ReviewFailingInput_AOneDayIntervalCollectedJustAfterTheWindowStart_ReadsRaw()
+    {
+        /* The round-1 review's pure form: default retention (raw keeps 30 days, so R is far below H and 3a fails),
+           H = S - 24 h, a 12 h minimum window. It returned true before the fix. */
+        var s = WindowStart;
+        Assert.False(QueryStoreIntervalWide.UseTable(
+            s.AddDays(-1), false, s.AddDays(-10), s, s.AddDays(1), null, s.AddDays(1), s.AddHours(-24), TimeSpan.FromHours(12)));
+    }
 
     [Fact]
-    public void Clause3_RawFloorAtOrAboveTableFloor_ReadsTheTable_EvenOutsideTheMargin() =>
-        Assert.True(Rule(rawFloor: WindowStart.AddDays(-3), tableFloor: WindowStart.AddDays(-3)));
+    public void Clause3_TableFloorAtOrBeyondThePurgeEdgeMargin_ReadsTheTable()
+    {
+        Assert.True(Rule(tableFloor: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin));
+        Assert.True(Rule(tableFloor: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin - TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void Clause3_RawFloorAtOrAboveTableFloorPlusMargin_ReadsTheTable_EvenOutsideTheMargin()
+    {
+        /* The table floor sits 12h under the window start, short of the purge-edge margin, so only 3a can pass. */
+        var h = WindowStart.AddHours(-12);
+        Assert.True(Rule(rawFloor: h + QueryStoreIntervalWide.PurgeEdgeMargin, tableFloor: h));
+        Assert.True(Rule(rawFloor: h + QueryStoreIntervalWide.PurgeEdgeMargin + TimeSpan.FromMinutes(1), tableFloor: h));
+    }
+
+    [Fact]
+    public void Clause3_RawFloorWithinTheMarginOfTheTableFloor_ReadsRaw()
+    {
+        /* #5541: raw drops a snapshot by collection_time, the table drops an interval by first_execution_time, so
+           raw at or just above the table floor can still hold a snapshot of an interval the table dropped. */
+        var h = WindowStart.AddHours(-12);
+        Assert.False(Rule(rawFloor: h, tableFloor: h));
+        Assert.False(Rule(rawFloor: h + QueryStoreIntervalWide.PurgeEdgeMargin - TimeSpan.FromMinutes(1), tableFloor: h));
+    }
 
     [Fact]
     public void Clause4_OpenEnd_SkipsTheAppliedThroughComparison() =>

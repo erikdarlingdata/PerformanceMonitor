@@ -1235,6 +1235,20 @@ public static class FactRemediation
             : "(no snapshot time)";
 
     /// <summary>
+    /// Whether the action is a standing CONFIG fix: a database-config, RCSI, percent-autogrowth file or
+    /// server-config target list is non-empty. Force-plan, clear-plan and missing-index actions are not config
+    /// fixes, so those findings stay incidents. The viewer card and the MCP <c>is_config_fix</c> field share this.
+    /// </summary>
+    public static bool IsConfigFix(RemediationAction? action)
+    {
+        if (action is null) return false;
+        return (action.DbConfigTargets?.Count ?? 0) > 0
+            || (action.RcsiTargets?.Count ?? 0) > 0
+            || (action.FileGrowthTargets?.Count ?? 0) > 0
+            || (action.ServerConfigTargets?.Count ?? 0) > 0;
+    }
+
+    /// <summary>
     /// The machine-first remediation projection (#2138) — see <see cref="StructuredRemediation"/> for
     /// why it exists and why it is built at read time rather than persisted. Null when the action is
     /// null or carries no force-plan targets (other verbs can gain shapes when a consumer needs them).

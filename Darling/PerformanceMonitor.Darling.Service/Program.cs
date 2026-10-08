@@ -9,9 +9,11 @@
 using System;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -55,7 +57,15 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
         return 1;
     }
 
-    Console.Error.Write("Password: ");
+    /* #5413: Windows PowerShell 5.1 turns every line a native command writes to a captured or redirected error
+       stream into an error record, so under $ErrorActionPreference = 'Stop' a successful scripted run stopped the
+       script. The prompt goes to stderr so stdout stays exactly the blob (`... > blob.txt`), but only a person at a
+       keyboard needs it; a pipe or a file feeding stdin does not. */
+    if (!Console.IsInputRedirected)
+    {
+        Console.Error.Write("Password: ");
+    }
+
     var plaintext = Console.ReadLine();
     if (string.IsNullOrEmpty(plaintext))
     {
@@ -67,7 +77,13 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
     }
 
     Console.WriteLine(DarlingSecrets.Protect(plaintext));
-    Console.Error.WriteLine("Paste the line above into the server's \"encryptedPassword\" in darling.json.");
+
+    /* The paste hint is for a person reading the console; a script that captured stdout is not reading it. */
+    if (!Console.IsOutputRedirected)
+    {
+        Console.Error.WriteLine("Paste the line above into the server's \"encryptedPassword\" in darling.json.");
+    }
+
     return 0;
 }
 
@@ -88,6 +104,13 @@ if (args.Length > 0 && DarlingCliCommands.IsCheckSettingsVerb(args[0]))
     var wantsJson = rest.Any(a => string.Equals(a, "--json", StringComparison.OrdinalIgnoreCase));
     var configPath = rest.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal));
     return await DarlingCliCommands.CheckSettingsAsync(configPath, wantsJson, Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: write one aliased diagnostics file for a bug report (#5097). Every argument after the verb is its own
+   (path, --hours, --server, --log-dir, --config, --alias-map, --force). Exit code: see DarlingCliCommands.DiagnosticsBundleExitCode. */
+if (args.Length > 0 && DarlingCliCommands.IsDiagnosticsBundleVerb(args[0]))
+{
+    return await DarlingCliCommands.DiagnosticsBundleAsync(args.Skip(1).ToArray(), Console.Out, Console.Error, CancellationToken.None);
 }
 
 /* CLI verb: print a paste-ready remote-viewer connection string + the server TLS cert for the opt-in store
@@ -303,6 +326,34 @@ if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || Dar
         enable: DarlingCliCommands.IsEnableCollectorVerb(args[0]), args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --reset-password-key [--config <path>] (#5366) - mark the service's current password key replaced, so the next
+   start makes a new one, and print how many saved passwords must be entered again. Store only: it never touches a key
+   file. Same platform posture as the verbs around it (Windows only for a MANAGED store credential, which the verb checks). */
+if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
+{
+    return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: --self-check-password-key <vector-path> (#5366) - hidden: not in the usage text. Runs the real password key file,
+   file identity and sealed-value code in a fresh temporary directory and exits non-zero on any failure. The Linux build job
+   runs it inside the built image, because the test project runs on Windows. It reads no configuration and opens no store. */
+if (args.Length > 0 && DarlingCliCommands.IsSelfCheckPasswordKeyVerb(args[0]))
+{
+    return DarlingPasswordKeySelfCheck.Run(args[1..], Console.Out, Console.Error);
+}
+
+/* CLI verb: --set-collector-run-at <collector> <HH:MM|none|default> [--server <name>] [--config <path>] (#4938) — set,
+   stop or clear the time of day a collector that runs once a day starts, fleet-wide or for one server, and print the
+   rows read back from the store. A heavy daily collector otherwise starts whenever the service happened to start, which
+   is often a busy hour; the time is on the monitored server's own clock. Same shape and the same platform posture as
+   --enable-collector directly above: the verb owns no SQL (it executes the command plane's own plan), NO Windows guard
+   here because Windows is needed only for a MANAGED store credential (DPAPI), which the verb checks itself, and the
+   trailing arguments are parsed STRICTLY inside the verb (never guess — #1581's posture). */
+if (args.Length > 0 && DarlingCliCommands.IsSetCollectorRunAtVerb(args[0]))
+{
+    return await DarlingCliCommands.SetCollectorRunAtAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: --drop-xe-sessions <server-name> [--dry-run] [--config <path>] | --print-sql (#4732) — drop the Extended
    Events sessions (the deadlock and blocked-process ring buffers, and the opt-in long-query completions one)
    Darling created on a server this service still monitors (run just before the server is removed; after removal,
@@ -451,6 +502,11 @@ builder.Services.AddSingleton<WebRuntimeState>();
    log line ever reported its expiry). */
 builder.Services.AddSingleton<WebTlsCertificateState>();
 
+/* #5288: the MCP listener's twin of the seam above, a SEPARATE singleton so each listener publishes and
+   clears only its own certificate: a web restart can never clear or resolve an MCP alert, and a certificate
+   both listeners serve is published to both and alerts (and resolves) twice, independently. */
+builder.Services.AddSingleton<McpTlsCertificateState>();
+
 /* #2298: the worker-published monitored-server registry the MCP host's plan-fetch resolver reads,
    replacing its own mcp-role re-read of rows whose encrypted_password column that role is
    deliberately denied. */
@@ -478,6 +534,13 @@ builder.Services.AddSingleton<BaselineCache>();
    loop and RunComposedPanelAsync -- a singleton for the same reason CollectorCostAccumulator is: the worker's
    flush and the web host's recording are separate hosted services in the one process. */
 builder.Services.AddSingleton<ReadLatencyAccumulator>();
+
+/* #5097: the slow-read record's queue. The three recorders offer to it; the worker runs its one writer once the store
+   is migrated. */
+builder.Services.AddSingleton<SlowReadLog>();
+
+/* #5097: the per-statement timing listener for reads; samples only inside a ReadScope that asked for capture. */
+ReadStatementCapture.Register();
 
 builder.Services.AddHostedService<DarlingWorker>();
 
@@ -522,6 +585,11 @@ if (OperatingSystem.IsWindows())
             SingleInstanceGuard.ServiceMutexName);
     }
 }
+
+/* #5320 N1: the statement filter's judge takes 250-900 ms to build. Build it in the background now, so the
+   first MCP tool call, plan analysis or alert after start does not wait for it. Placed after the single-instance
+   guard so a refused second instance does not pay for it. */
+_ = Task.Run(SensitiveStatements.WarmUp);
 
 try
 {

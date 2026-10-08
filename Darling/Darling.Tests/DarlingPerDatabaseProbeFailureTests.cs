@@ -192,7 +192,12 @@ public sealed class DarlingPerDatabaseProbeFailureTests
            cannot quietly become the third case without someone reading this. */
         Assert.True(BlockedProcessReportCollector.Instance.EmitsProbeFailures);
         Assert.True(BlockedProcessReportCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
-        Assert.False(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
+
+        /* #5498: database_size_stats now runs per database on Azure too. Its Azure text emits no trailing set, and
+           the contract reads an absent set as zero failures, so declaring the flag there changes nothing. */
+        Assert.True(DatabaseSizeStatsCollector.Instance.EmitsProbeFailures);
+        Assert.True(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
+        Assert.False(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo()));
     }
 
     /* ── helpers ── */

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -100,13 +100,15 @@ public sealed class TimescaleAggregateCompressionTests
            7 (into FrozenRollupAggregates, off the band entirely); LC then removed the deferral that had held
            the three interval-honest successor dailies out of AggregateCompressionTargets, so the list is now
            every member of all three source lists, with nothing subtracted — 6 + 7 + 7. */
-        Assert.Equal(6, TimescaleSupport.HourlyAggregates.Length);
+        /* #5329 appended the two io hourlies, so the hourly list is 8 and the band is 8 + 7 + 7 = 22 of the 23
+           hours available. */
+        Assert.Equal(8, TimescaleSupport.HourlyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.DailyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
         Assert.Equal(
             TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length,
             targets.Count);
-        Assert.Equal(20, targets.Count);
+        Assert.Equal(22, targets.Count);
 
         Assert.Equal(targets.Count, targets.Select(t => t.View).Distinct(StringComparer.Ordinal).Count());
 
@@ -199,7 +201,9 @@ public sealed class TimescaleAggregateCompressionTests
            tiers (the L1 dedup layer and the interval-grain daily) and the seven baselines: 5 + 2 + 7. Was 17
            before LC (8 + 2 + 7, with the legacy trio still counted); three fewer now. Zero here is a filter
            that matched nothing. */
-        Assert.Equal(17 - 3, checkedTiers);
+        /* #5329: the two io hourlies are leaves with a retention policy and a compression target, so two
+           more: 14 + 2 = 16. */
+        Assert.Equal(17 - 3 + 2, checkedTiers);
     }
 
     /// <summary>
@@ -236,7 +240,9 @@ public sealed class TimescaleAggregateCompressionTests
            sits past the ceiling inside that window, and a ceiling that grew to meet it fails here — 304 s of
            margin. */
         var secondsPastHeaviest = (minute - TimescaleSupport.HeaviestRefreshStartMinute) * 60;
-        Assert.Equal(1200, secondsPastHeaviest);
+        /* #5329: (35 - 17) * 60 = 1,080 s past the heaviest start (1,200 s at :15 before the two io hourlies),
+           184 s over the 896 s ceiling (was 304 s). */
+        Assert.Equal(1080, secondsPastHeaviest);
         Assert.True(
             secondsPastHeaviest > TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
             $"the daily band's minute is {secondsPastHeaviest}s past the heaviest refresh's start against a "
@@ -604,7 +610,8 @@ public sealed class TimescaleAggregateCompressionTests
                registry's, not a literal chosen to match; this pin catches the day either side of that trade
                moves without the other. */
             Assert.Contains($"{TimescaleSupport.AggregateCompressionTargets.Count}/{TimescaleSupport.AggregateCompressionTargets.Count} materializations chunked at {TimescaleSupport.MaterializationChunkInterval}", firstLog.Joined, StringComparison.Ordinal);
-            Assert.Equal(20, TimescaleSupport.AggregateCompressionTargets.Count);
+            /* Twenty-two since #5329 appended the two io hourlies to the twenty of LC. */
+            Assert.Equal(22, TimescaleSupport.AggregateCompressionTargets.Count);
             Assert.Contains($"{wideBefore} changed this start", firstLog.Joined, StringComparison.Ordinal);
 
             /* A settled store issues no set_chunk_time_interval at all: the direct call returns zero changes and

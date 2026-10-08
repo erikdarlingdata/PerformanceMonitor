@@ -29,6 +29,7 @@
 
 import { el, mount, apiGetFleet, readToolWithinKeptHistory } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
+import { orderServers } from "./server-order.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
 import { buildCreateAlertAction } from "./alert-seed.js";
@@ -113,7 +114,7 @@ export async function renderEditor(main, id) {
 export async function loadFleetOptions() {
   const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
-  return [...(res.data.cards || [])]
+  return orderServers(res.data.cards || [])
     .map((c) => ({
       value: c.server_name || c.display_name,
       label: c.display_name,
@@ -121,8 +122,7 @@ export async function loadFleetOptions() {
       isAzureSqlDb: c.is_azure_sql_db === true,
       isAzureMi: c.is_azure_mi === true,
     }))
-    .filter((o) => o.value)
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .filter((o) => o.value);
 }
 
 /* Fleet TAG options for the alert-rule scope picker (#3350): the /api/fleet tag forest flattened depth-first
@@ -2291,7 +2291,8 @@ function topLevelScalarKeys(sample) {
 
 function rowKeys(sample, rowsKey) {
   const first = firstRow(sample, rowsKey);
-  return first ? Object.keys(first) : [];
+  /* Scalar-valued keys only: a nested value (processes[], graph) would render as [object Object]. */
+  return first ? Object.keys(first).filter((k) => first[k] === null || typeof first[k] !== "object") : [];
 }
 
 function rowNumericKeys(sample, rowsKey) {

@@ -84,13 +84,12 @@ process.on("unhandledRejection", (e) => rejections.push(String(e && e.stack ? e.
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "perfmon-grid-"));
 let modules;
 try {
-  fs.mkdirSync(path.join(scratch, "pages"));
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; every stand-in below is
+     written AFTER the copy, so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
-  fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
-  fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
-  fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
-  fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts-real.js"));
+  fs.copyFileSync(path.join(scratch, "charts.js"), path.join(scratch, "charts-real.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { renderLineChart as drawLineChart } from "./charts-real.js";\n' +
@@ -104,7 +103,8 @@ try {
       "  drawing = false;\n" +
       "  chartCalls.push({ series: (opts.series || []).map((s) => ({ key: s.key, label: s.label })), unit: opts.unit == null ? null : opts.unit, axis, node });\n" +
       "  return node;\n" +
-      "}\n"
+      "}\n" +
+      "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n"
   );
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   modules = {
@@ -277,7 +277,7 @@ const charts = modules.charts.chartCalls.map((chart) => ({
 
 console.log(JSON.stringify({
   headers: table ? all(table, "th").map((th) => th.textContent) : [],
-  numericHeaders: table ? all(table, "th").map((th) => th.className === "num") : [],
+  numericHeaders: table ? all(table, "th").map((th) => String(th.className).split(" ").includes("num")) : [],
   rows: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length) : [],
   charts,
   errors: all(root, "div").filter((n) => n.className === "strip error").map((n) => n.textContent),

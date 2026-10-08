@@ -104,14 +104,16 @@ public sealed class CommandPlaneCommandTimeoutTests
         ("DarlingWorker.cs", "RunExecuteActualPlanAsync", nameof(ServiceCommandDeadlines.ActualPlanResolveSeconds)),
         ("QueryStoreBackfill.cs", "GetCandidateDatabasesAsync", nameof(ServiceCommandDeadlines.QueryStoreBackfillReadSeconds)),
         ("QueryStoreBackfill.cs", "GetStoredFloorAsync", nameof(ServiceCommandDeadlines.QueryStoreBackfillReadSeconds)),
+        ("QueryStoreBackfill.cs", "DropGoneDatabasesAsync", nameof(ServiceCommandDeadlines.QueryStoreBackfillReadSeconds)),
         ("StoreConfigProvider.cs", "ReadConfigVersionAsync", nameof(ServiceCommandDeadlines.ConfigReloadBeaconSeconds)),
     };
 
     /// <summary>This group's command sites, counted so a member that stops creating commands fails loudly.
     /// #4197 bumped this from 9 to 10: <c>GetStoredFloorAsync</c> now builds TWO commands (an EXISTS pre-check
     /// and a MIN fallback) under the one <c>QueryStoreBackfillReadSeconds</c> regime, where every other member
-    /// in <see cref="s_sites"/> still builds exactly one.</summary>
-    private const int ExpectedSiteCount = 10;
+    /// in <see cref="s_sites"/> still builds exactly one. #5483 bumped it from 10 to 12: <c>DropGoneDatabasesAsync</c>
+    /// builds TWO (the newest-snapshot read and the per-database newer-row probe), both on the same regime.</summary>
+    private const int ExpectedSiteCount = 12;
 
     /// <summary>
     /// All FIVE construction shapes this sweep now knows about. The bare method group is absent from this

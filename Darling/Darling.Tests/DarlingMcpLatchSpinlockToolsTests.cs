@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -100,27 +101,44 @@ public sealed class DarlingMcpLatchSpinlockToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void SpinlockStatsTopNSql_TopByCollisions_PerSecondFromLag()
+    public void SpinlockStatsTopNSql_TopByCollisions_PerSecondFromTheNewestRowsInterval()
     {
         var sql = DarlingLatchSpinlockReader.SpinlockStatsTopNSql;
         Assert.Contains("FROM v_spinlock_stats", sql, StringComparison.Ordinal);
         Assert.Contains("delta_collisions", sql, StringComparison.Ordinal);
         Assert.Contains("delta_spins", sql, StringComparison.Ordinal);
         Assert.Contains("delta_backoffs", sql, StringComparison.Ordinal);
-        Assert.Contains("LAG(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (spinlock_name)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY a.total_delta_collisions DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        /* #5495: the read's shape. A hash aggregate over the window, then the newest row of ONLY the top-N
+           names by index lookup. The old shape window-sorted every row of the window (a per-name LAG, then a
+           DISTINCT ON sort of a materialised 1.2M-row CTE: 3-5 s at 7 days) to find one interval per name.
+           No window function may come back over the scanned window, and the aggregate must run before the
+           per-name lookups so they cost top-N probes, not window-N probes. */
+        Assert.DoesNotContain("OVER (", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DISTINCT ON", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("s.collection_time = a.latest_collection_time", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("LIMIT $4", StringComparison.Ordinal) < sql.IndexOf("CROSS JOIN LATERAL", StringComparison.Ordinal),
+            "the top-N cut must come before the per-name lookups of the newest row");
+        /* A NULL spinlock name never reached the old read's output (its join on the name dropped it before the LIMIT), so it
+           is excluded ahead of the top-N cut, and the per-name lookups compare with plain equality. */
+        Assert.Contains("AND   spinlock_name IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("IS NOT DISTINCT FROM", sql, StringComparison.Ordinal);
+        /* The previous-row lookup for a pre-V127 row stays inside the window, as the old per-name LAG did. */
+        Assert.Contains("p.collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("p.collection_time < a.latest_collection_time", sql, StringComparison.Ordinal);
         /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
            pre-V127 rows; no ELSE 0 on the rate, so an unknowable interval reads NULL and never 0.00. */
-        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN l.sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(l.sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
         Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
         /* #3653 A16: the spinlock query carries the latch query's own latest_interval_seconds line, so a null
            collisions_per_second has interval_seconds beside it on the wire — the same why-key on both tools. */
         Assert.Contains("END AS latest_interval_seconds", sql, StringComparison.Ordinal);
-        Assert.Contains("l.latest_interval_seconds", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -268,6 +286,61 @@ public sealed class DarlingMcpLatchSpinlockToolsLivePostgresTests
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    /* #4966: the window-floor cases of get_latch_stats and get_spinlock_stats (WindowNoticeAggregateCases). */
+    private static readonly WindowNoticeAggregateCases s_latchWindow = new(
+        "get_latch_stats", "latch_stats",
+        (ds, name, hours, end, top) => DarlingMcpLatchSpinlockTools.GetLatchStats(ds, name, hours, top, WebDataStartNote.FormatWindowEnd(end)),
+        (c, name, at, i) => DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO latch_stats (collection_id, collection_time, server_id, server_name, latch_class, waiting_requests_count, wait_time_ms, max_wait_time_ms, delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms, sample_interval_seconds)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::integer)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerIdHelper.GetDeterministicHashCode(name), name, "WINDOW_LATCH_" + i, 1000L, 20000L, 50L, 100L, 4000L - i, 5L, 60),
+        null);
+
+    private static readonly WindowNoticeAggregateCases s_spinlockWindow = new(
+        "get_spinlock_stats", "spinlock_stats",
+        (ds, name, hours, end, top) => DarlingMcpLatchSpinlockTools.GetSpinlockStats(ds, name, hours, top, WebDataStartNote.FormatWindowEnd(end)),
+        (c, name, at, i) => DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO spinlock_stats (collection_id, collection_time, server_id, server_name, spinlock_name, collisions, spins, spins_per_collision, sleep_time, backoffs, delta_collisions, delta_spins, delta_sleep_time, delta_backoffs, sample_interval_seconds)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::integer)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerIdHelper.GetDeterministicHashCode(name), name, "WINDOW_SPIN_" + i, 900000L, 5000000L, 5.5d, 100L, 200L, 40000L - i, 200000L, 3L, 7L, 60),
+        null);
+
+    [Fact]
+    public Task GetLatchStats_CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart_AgainstDevPostgres() => s_latchWindow.CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated_AgainstDevPostgres() => s_latchWindow.ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_AQuietStart_IsCovered_AgainstDevPostgres() => s_latchWindow.AQuietStart_IsCovered(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_TheNoRowsAnswer_StaysBare_AgainstDevPostgres() => s_latchWindow.TheNoRowsAnswer_StaysBare(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() => s_latchWindow.AShortWindow_WithRows_StartsNoProbe(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() => s_latchWindow.AFailedProbe_CostsTheNotice_NeverTheRows(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart_AgainstDevPostgres() => s_spinlockWindow.CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated_AgainstDevPostgres() => s_spinlockWindow.ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_AQuietStart_IsCovered_AgainstDevPostgres() => s_spinlockWindow.AQuietStart_IsCovered(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_TheNoRowsAnswer_StaysBare_AgainstDevPostgres() => s_spinlockWindow.TheNoRowsAnswer_StaysBare(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() => s_spinlockWindow.AShortWindow_WithRows_StartsNoProbe(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() => s_spinlockWindow.AFailedProbe_CostsTheNotice_NeverTheRows(ConnectionString);
+
     [Fact]
     public async Task LatchSpinlockTools_ReadPlantedRows_AgainstDevPostgres()
     {
@@ -308,17 +381,26 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::integer)",
                     CollectionIdGenerator.Next(), t, ServerId, ServerName, latchClass, 1000L, 20000L, 50L, requests, delta, 5L, interval);
             }
 
-            foreach (var (t, spinlockName, collisions, spins, interval) in new (DateTime, string, long, long, int?)[]
+            foreach (var (t, spinlockName, collisions, spins, interval) in new (DateTime, string?, long, long, int?)[]
             {
+                /* #5495: a row with no spinlock name (the column is nullable) has the biggest total here and still never reaches
+                   the page: the earlier read's join on the name dropped it before the LIMIT, and the new read keeps that. */
+                (newer, null, 999999L, 1L, 60),
                 (older, "LOCK_HASH", 40000L, 200000L, null),
                 (newer, "LOCK_HASH", 60000L, 300000L, 60),
                 (newer, "SOS_CACHESTORE", 0L, 0L, 0),
+                /* #5495: a pre-V127 pair (NULL interval) takes its interval from the previous row of the same name
+                   in the window, 120 s here; a pre-V127 name with ONE row in the window has no previous row, so
+                   its interval and rates are null. */
+                (older, "LOCK_PREV", 10000L, 50000L, null),
+                (newer, "LOCK_PREV", 12400L, 62000L, null),
+                (newer, "LOCK_SOLO", 500L, 900L, null),
             })
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     @"INSERT INTO spinlock_stats (collection_id, collection_time, server_id, server_name, spinlock_name, collisions, spins, spins_per_collision, sleep_time, backoffs, delta_collisions, delta_spins, delta_sleep_time, delta_backoffs, sample_interval_seconds)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::integer)",
-                    CollectionIdGenerator.Next(), t, ServerId, ServerName, spinlockName, 900000L, 5000000L, 5.5d, 100L, 200L, collisions, spins, 3L, 7L, interval);
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, (object?)spinlockName ?? DBNull.Value, 900000L, 5000000L, 5.5d, 100L, 200L, collisions, spins, 3L, 7L, interval);
             }
 
             var latch = await DarlingMcpLatchSpinlockTools.GetLatchStats(postgres, ServerName);
@@ -363,13 +445,25 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::integer)",
             Assert.Contains("Lock manager hash table access.", spin, StringComparison.Ordinal);
             var spinlocks = System.Text.Json.JsonDocument.Parse(spin).RootElement.GetProperty("spinlocks").EnumerateArray()
                 .ToDictionary(s => s.GetProperty("spinlock_name").GetString()!);
-            Assert.Equal(2, spinlocks.Count);
+            Assert.Equal(4, spinlocks.Count);
 
             var storedSpin = spinlocks["LOCK_HASH"];
             Assert.Equal(100000, storedSpin.GetProperty("total_delta_collisions").GetInt64());
             Assert.Equal(60, storedSpin.GetProperty("interval_seconds").GetDouble());
             Assert.Equal(1000.0, storedSpin.GetProperty("collisions_per_second").GetDouble());
             Assert.Equal(5000.0, storedSpin.GetProperty("spins_per_second").GetDouble());
+
+            var laggedSpin = spinlocks["LOCK_PREV"];
+            Assert.Equal(22400, laggedSpin.GetProperty("total_delta_collisions").GetInt64());
+            Assert.Equal(120, laggedSpin.GetProperty("interval_seconds").GetDouble());
+            Assert.Equal(103.33, laggedSpin.GetProperty("collisions_per_second").GetDouble(), 2);
+            Assert.Equal(516.67, laggedSpin.GetProperty("spins_per_second").GetDouble(), 2);
+            var soloSpin = spinlocks["LOCK_SOLO"];
+            Assert.Equal(500, soloSpin.GetProperty("total_delta_collisions").GetInt64());
+            foreach (var key in new[] { "interval_seconds", "collisions_per_second", "spins_per_second" })
+            {
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, soloSpin.GetProperty(key).ValueKind);
+            }
 
             var markerSpin = spinlocks["SOS_CACHESTORE"];
             foreach (var key in new[] { "interval_seconds", "collisions_per_second", "spins_per_second" })

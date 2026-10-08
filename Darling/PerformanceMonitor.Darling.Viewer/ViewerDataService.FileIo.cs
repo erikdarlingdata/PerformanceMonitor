@@ -73,7 +73,7 @@ public sealed partial class ViewerDataService
     /// <para>#4234 review (item 3): <c>first_collection_time</c> (<c>MIN(collection_time)</c>, every row in
     /// <c>rated</c> — rated or not) and <c>collection_count</c> (<c>COUNT(*)</c> over that same population) ride
     /// along so the caller can tell a true singleton bucket from one the bucketing actually merged, exactly like
-    /// <c>WaitTrendsSql</c>. $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes.
+    /// <c>WaitTrendsSql</c>. $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes, $5 the saved database filter (#5312, a text[], NULL = every database), inside <c>top_files</c>: the busiest files are those of the CHOSEN databases.
     /// </para>
     /// </summary>
     public const string FileIoLatencyTrendSql = $$"""
@@ -84,6 +84,7 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   (delta_reads > 0 OR delta_writes > 0)
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, file_name
             ORDER BY SUM(delta_reads + delta_writes) DESC
             LIMIT 10
@@ -146,7 +147,7 @@ public sealed partial class ViewerDataService
     /// <para>#4234 review (item 3): <c>first_collection_time</c> / <c>collection_count</c> ride along exactly
     /// like <c>WaitTrendsSql</c>'s, counted over every physical row (rated or not) so a bucket is never mistaken
     /// for a true singleton just because its one physical collection happened to be unrated.</para>
-    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes, $5 the saved database filter (#5312, a text[], NULL = every database), inside <c>top_files</c>: the busiest files are those of the CHOSEN databases.
     /// </summary>
     public const string FileIoThroughputTrendSql = $$"""
         WITH top_files AS (
@@ -156,6 +157,7 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   (delta_read_bytes > 0 OR delta_write_bytes > 0)
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, file_name
             ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC
             LIMIT 10
@@ -216,7 +218,7 @@ public sealed partial class ViewerDataService
     /// <c>bucket_start</c> grid line — see <see cref="FileIoLatencyPoint"/>.</para>
     /// </summary>
     public async Task<List<FileIoLatencyPoint>> GetFileIoLatencyTrendAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var items = new List<FileIoLatencyPoint>();
 
@@ -235,6 +237,7 @@ public sealed partial class ViewerDataService
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime,
             double AvgRead, double AvgWrite, double AvgQueuedRead, double AvgQueuedWrite)>();
@@ -282,7 +285,7 @@ public sealed partial class ViewerDataService
     /// which this read shares verbatim.</para>
     /// </summary>
     public async Task<List<FileIoThroughputPoint>> GetFileIoThroughputTrendAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var items = new List<FileIoThroughputPoint>();
 
@@ -301,6 +304,7 @@ public sealed partial class ViewerDataService
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var rows = new List<(string FileLabel, DateTime BucketStart, DateTime FirstCollectionTime, double Read, double Write)>();
         var everyBucketSingleton = true;

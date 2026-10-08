@@ -70,15 +70,18 @@ will not override it. When the two disagree the service says so, once per start,
   lifetime are all Windows-only. (There is a Linux path — see
   [Run on Linux](../Darling/README.md#run-on-linux-docker-compose-or-systemd-1804) — but it is not this
   procedure, and the WPF viewer is Windows either way.)
-- **Two .NET 10 runtimes**, from <https://dotnet.microsoft.com/download/dotnet/10.0>:
-  - **ASP.NET Core Runtime 10.0** — the service needs it whether or not you ever enable MCP or the web
-    dashboard, because the host framework is referenced unconditionally.
+- **.NET 10 runtimes**, from <https://dotnet.microsoft.com/download/dotnet/10.0>:
+  - **.NET Runtime 10.0 and ASP.NET Core Runtime 10.0** — the service needs both. The **ASP.NET Core
+    Hosting Bundle 10.0** installs the two together; the standalone ASP.NET Core Runtime installer does
+    **not** include the base .NET Runtime, so with that installer alone you also need the .NET Runtime
+    10.0. The service needs ASP.NET Core whether or not you ever enable MCP or the web dashboard, because
+    the host framework is referenced unconditionally.
   - **.NET Desktop Runtime 10.0** — the WPF viewer.
 
-  A stock Windows Server image has neither. `install-darling.ps1` now checks: it **refuses** the install if
-  the ASP.NET Core Runtime is missing, and **warns** if the .NET Desktop Runtime is. The asymmetry is
-  deliberate — without ASP.NET Core the service cannot start at all, whereas without the Desktop Runtime the
-  service runs fine and only the viewer will not open. Install both first anyway and skip the round trip.
+  A stock Windows Server image has none of them. `install-darling.ps1` now checks: it **refuses** the install
+  if the .NET Runtime or the ASP.NET Core Runtime is missing, and **warns** if the .NET Desktop Runtime is.
+  The asymmetry is deliberate — without those two the service cannot start at all, whereas without the Desktop Runtime the
+  service runs fine and only the viewer will not open. Install them all first anyway and skip the round trip.
 - **A monitored SQL Server** (2016 SP2–2025 with 2017 at CU3 or later, Azure SQL MI, AWS RDS, or Azure SQL DB) and a login on it with
   `VIEW SERVER STATE` and the rest of the [monitoring grants](../Darling/README.md#permissions-on-monitored-servers).
 - **Nothing else.** In the shipped default (`postgres.managed = true`) the service runs its own bundled
@@ -159,18 +162,21 @@ cd "C:\Program Files\PerformanceMonitorDarling"
 It prints `Password: ` and waits. Type the password, press Enter, and it prints one line of base64 (it starts
 `AQAAA`) — paste that into `"encryptedPassword"`.
 
-> **`--encrypt-password` writes its prompt and its confirmation to stderr; only the blob goes to stdout.**
-> That is deliberate (`… --encrypt-password > blob.txt` captures exactly the blob and nothing else) but it is
-> fatal under `$ErrorActionPreference = 'Stop'`: PowerShell treats the stderr write as a terminating error,
-> and then echoes the offending source line — which, if you piped the password in, leaks it into your
-> scrollback. In a script, do this instead:
+> **`--encrypt-password` is quiet when a script drives it.** The `Password: ` prompt goes to stderr only when
+> stdin is a console, and the "Paste the line above" hint goes to stderr only when stdout is a console. With the
+> password piped in and the output captured, a successful run writes nothing to stderr and one line of base64 to
+> stdout, so it works under `$ErrorActionPreference = 'Stop'` with no workaround:
 >
 > ```powershell
-> $ErrorActionPreference = 'Continue'
+> $ErrorActionPreference = 'Stop'
 > $blob = Read-Host -Prompt 'password' |
->     & "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --encrypt-password 2>$null |
->     Select-String -Pattern '^AQAAA' | ForEach-Object { $_.Line }
+>     & "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --encrypt-password
 > ```
+>
+> A failure still writes its error line to stderr and exits 1, and the guidance for a console that gave it no
+> input goes to stdout. (Older builds wrote the prompt and the hint to stderr unconditionally, which stopped a
+> `'Stop'` script and echoed the piped-in password in the error text; on one of those, wrap the call with
+> `$ErrorActionPreference = 'Continue'` and add `2>$null`.)
 
 The blob is DPAPI at **LocalMachine** scope with a fixed entropy string, so it decrypts **only on the machine
 that produced it**. Run `--encrypt-password` on the service host, and re-run it if you ever move `darling.json`
@@ -642,8 +648,8 @@ running 0.4 executions a second used to report zero and read as idle.
 
 **Desktop things a web imitation would be worse than.** No graphical plan viewer, no interactive query
 heatmap **plot** (the underlying read ships as a bucketed table on the Queries tab — same answer, no canvas),
-no block-chain reconstruction and no interactive deadlock graph — the Blocking tab hands you the captured
-blocked-process-report and deadlock-graph XML verbatim instead of pretending. No period-compare grids. The
+no block-chain reconstruction — the Blocking tab hands you the captured blocked-process-report XML
+(and the deadlock-graph XML, beside a drawn graph you can click) verbatim instead of pretending. No period-compare grids. The
 per-query drill-down above charts the same history the viewer's window does, but it is not that **window**:
 no stored-plan download or cached-plan fetch from it, and none of the desktop grids' own affordances —
 per-column filter popups, CSV export, Copy Repro Script, and right-click drill-down into a ±30-minute
@@ -831,9 +837,11 @@ Two gates apply, in this order: the **bearer token**, checked constant-time with
 then the **in-app CIDR check** on the remote address (loopback always allowed). A remote client with a bad or
 missing token gets **401**; one from outside `allowFrom` is refused before any response.
 
-**There is no TLS on MCP** — a self-signed certificate breaks real MCP clients, so the bearer token travels in
-clear on the segment. The MITM control is a TLS-terminating reverse proxy in front of the port. **Never expose
-this to the internet.**
+**TLS on MCP is opt-in, and without it the bearer token travels in clear on the segment.** Point
+`mcp.network.tls` at a PKCS#12 bundle or a PEM pair (`Darling/README.md` has the shape) and the LAN listener
+serves HTTPS only, or put a TLS-terminating reverse proxy in front of the port. Set `mcp.network.hostName` when
+clients connect by a DNS name. A missing, unreadable or expired certificate keeps MCP loopback-only rather than
+falling back to cleartext. **Never expose this to the internet.**
 
 ### 4.4 When it says enabled and still will not connect
 
@@ -870,7 +878,7 @@ If the block itself is bad the service *is* loud, and it fails closed to loopbac
 ```
 MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set — refusing to expose; binding loopback-only. Set mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token.
 MCP network token could not be decrypted (...) — refusing to expose; binding loopback-only.
-MCP network exposure requested but mcp.network.allowFrom '...' is not a valid CIDR or its address family does not match mcp.network.listen — refusing to expose; binding loopback-only.
+MCP network exposure requested but mcp.network.allowFrom '...' is not a valid CIDR list or an entry's address family does not match mcp.network.listen — refusing to expose; binding loopback-only. Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked (192.168.1.5/24 means 192.168.1.0/24).
 mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container) only and is ignored ...
 ```
 
@@ -886,9 +894,9 @@ Every one of these has cost somebody real time.
    documentation. Edit it as text. ([Part 0](#darlingjson-is-jsonc-not-json))
 2. **First start takes about two minutes** and looks like a hang. It is unpacking PostgreSQL and running
    `initdb`. Do not kill it. ([1.7](#17-wait-about-two-minutes))
-3. **`--encrypt-password` prompts on stderr**, which is a terminating error under
+3. **Older builds of `--encrypt-password` prompt on stderr**, which is a terminating error under
    `$ErrorActionPreference = 'Stop'` — and PowerShell then echoes the source line, leaking a piped-in password.
-   ([1.4](#14-write-darlingjson))
+   Current builds stay quiet when stdin or stdout is redirected. ([1.4](#14-write-darlingjson))
 4. **Every DPAPI blob is LocalMachine-scoped** — SQL passwords, the MCP token, the web token. They decrypt only
    on the machine that encrypted them. Copying `darling.json` to another box gives you an undecryptable file,
    not a portable config.
@@ -938,9 +946,9 @@ Every one of these has cost somebody real time.
 
 These are known, current, and not bugs:
 
-- **No TLS on the MCP endpoint**, and none on the web endpoint unless you configure `web.network.tls`. The
-  bearer token travels in clear on the segment in both cases otherwise; the named control is a
-  TLS-terminating reverse proxy. Both are trusted-LAN opt-ins.
+- **TLS is opt-in on the MCP and the web endpoint** (`mcp.network.tls`, `web.network.tls`). Without it the
+  token travels in clear on the segment; the other control is a TLS-terminating reverse proxy. Both are
+  trusted-LAN opt-ins.
 - **No client-side secret store for the viewer.** A remote seat's `darling.json` holds the store role password
   in cleartext; ACL it. Fine for the read-only `viewer` role, worth thinking about for `admin`.
 - **The web dashboard has no plan analysis and no live-server actions** — that is the WPF viewer's job — and

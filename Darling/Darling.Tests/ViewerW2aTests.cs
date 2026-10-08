@@ -346,7 +346,7 @@ public sealed class ViewerServerSummaryDisplayTests
     public void LastCollectionDisplay_TreatsStoredValueAsUtc_ShownLocal()
     {
         var storedUtc = new DateTime(2026, 7, 3, 3, 30, 45, DateTimeKind.Unspecified);
-        var expected = DateTime.SpecifyKind(storedUtc, DateTimeKind.Utc).ToLocalTime().ToString("HH:mm:ss");
+        var expected = DateTime.SpecifyKind(storedUtc, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         Assert.Equal(expected, new ServerSummaryItem { LastCollectionTime = storedUtc }.LastCollectionDisplay);
     }
 
@@ -365,6 +365,32 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal("2", new ServerSummaryItem { DeadlockCount = 2 }.DeadlockDisplay);
         Assert.True(new ServerSummaryItem { DeadlockCount = 1 }.HasAlerts);
         Assert.False(new ServerSummaryItem().HasAlerts);
+    }
+
+    [Fact]
+    public void OfflineCard_DeadlockDetailAndHasAlerts_ReadAsNoCurrentData()
+    {
+        /* Round-1 L7: the values read "--" while the detail line and the alert flag still carried the old counts. */
+        var online = new ServerSummaryItem
+        {
+            IsOnline = true,
+            BlockingCount = 2,
+            DeadlockCount = 3,
+            LastDeadlockMinutesAgo = 10,
+        };
+        Assert.NotEqual("", online.DeadlockDetail);
+        Assert.True(online.HasAlerts);
+
+        var offline = new ServerSummaryItem
+        {
+            IsOnline = false,
+            BlockingCount = 2,
+            DeadlockCount = 3,
+            LastDeadlockMinutesAgo = 10,
+        };
+        Assert.Equal("--", offline.DeadlockDisplay);
+        Assert.Equal("", offline.DeadlockDetail);
+        Assert.False(offline.HasAlerts);
     }
 
     [Fact]

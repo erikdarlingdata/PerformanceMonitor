@@ -467,6 +467,69 @@ public sealed class ViewerSchemaVersionGateTests
         Assert.True(calls > 0, "the tab no longer reads the schema version; retire this pin with the read");
     }
 
+    /// <summary>
+    /// A build that reads the run-time column V160 added refuses a store without it at connect (#4938). The Collector Schedules
+    /// read and save name that column, so a store below V160 would answer them with a raw "column does not exist" error. It never
+    /// gets that far: the connect gate in <c>MainWindow</c> reads the probed version, and a store below the build's version
+    /// stops the load with a message that says to update or restart the service, before any tab or editor loads. That is why
+    /// the viewer's schedule read has no older-store fallback of its own, the way the CLI's read-back has one (the CLI works
+    /// against a store older than its binary and the viewer does not). This pins the three parts: the probe carries the column,
+    /// the map puts a store without it below the required version, and the gate stops on a store below it. Relaxing the gate to
+    /// open an older store fails this, and the read then needs the fallback.
+    ///
+    /// <para>The probe is the one thing that can fail open: a probe that throws returns no version and the gate does not block
+    /// (a healthy store is never refused for a probe hiccup). That path is not covered here, and a store below V160 on it
+    /// meets the write executors' skew translation.</para>
+    /// </summary>
+    [Fact]
+    public void ABuildThatReadsTheRunTimeColumn_RefusesAStoreWithoutIt_AtConnect()
+    {
+        /* The schedule read and save never name the run time (the schedule Save deletes and re-inserts a scope's rows, so a column
+           there would be cleared), and the run-time read and write name the table the V160 rung created. */
+        Assert.DoesNotContain("run_at_minute", ViewerDataService.CollectorSchedulesSelectSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("run_at_minute", ViewerDataService.CollectorScheduleFleetUpsertSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("run_at_minute", ViewerDataService.CollectorScheduleServerUpsertSql, StringComparison.Ordinal);
+        Assert.Contains("FROM config.config_collector_run_times", ViewerDataService.CollectorRunTimesSelectSql, StringComparison.Ordinal);
+        Assert.Contains("INTO config.config_collector_run_times", ViewerDataService.CollectorRunTimeServerUpsertSql, StringComparison.Ordinal);
+
+        /* The probe carries the table as a sentinel. */
+        Assert.Contains(
+            "to_regclass('config.config_collector_run_times') IS NOT NULL",
+            ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
+
+        /* The map: every sentinel up to and including this one present is V160, and this one absent is V159, which is below
+           the version the build requires. Built from the signature, so a later migration's sentinel (which comes after this
+           one) is false in both and the answer does not move. */
+        var map = typeof(ViewerDataService).GetMethod(
+            nameof(ViewerDataService.MapProbedSchemaVersion),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var parameters = map.GetParameters();
+        var runAt = Array.FindIndex(parameters, p => p.Name == "hasCollectorRunAt");
+        Assert.True(runAt >= 0, "the probe map has no run-time sentinel, so a store without the column maps one rung high");
+
+        var atV160 = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= runAt)).ToArray();
+        Assert.Equal(160, (int)map.Invoke(null, atV160)!);
+
+        var atV159 = (object[])atV160.Clone();
+        atV159[runAt] = false;
+        var mapped = (int)map.Invoke(null, atV159)!;
+        Assert.Equal(159, mapped);
+        Assert.True(mapped < ViewerDataService.RequiredStoreSchemaVersion, "a store without the run-time column must read below the required version");
+
+        /* The gate: a probed version below the required one shows the failure and returns, and it does so before the first tab
+           loads from the store. */
+        var main = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs"));
+        var gate = System.Text.RegularExpressions.Regex.Match(
+            main,
+            @"version < ViewerDataService\.RequiredStoreSchemaVersion\)\s*\{.*?ShowConnectionFailure\(.*?\);\s*return;\s*\}",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+        Assert.True(gate.Success, "MainWindow no longer refuses a store below the required version at connect");
+
+        var firstTabLoad = main.IndexOf("AlertsHistoryContent.Initialize(", StringComparison.Ordinal);
+        Assert.True(firstTabLoad > gate.Index, "the version gate must come before the first tab loads from the store");
+    }
+
     private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
 
     [Fact]

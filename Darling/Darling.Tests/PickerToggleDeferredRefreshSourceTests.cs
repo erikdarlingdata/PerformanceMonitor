@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// is still walking the visual tree, and WPF throws "Cannot modify the Visual children for this node
 /// because a tree walk is in progress". The handlers must only ask a coalescer for a deferred refresh.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class PickerToggleDeferredRefreshSourceTests
 {
     private const string Viewer = "Darling/PerformanceMonitor.Darling.Viewer";

@@ -119,6 +119,22 @@ public sealed class CurrentWaitsTrendToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal("AppDb", blocked[0].GetProperty("database_name").GetString());
     }
 
+    /// <summary>#5244 L3: a blank database_name is "no filter" and is echoed as null, the way Darling's twin echoes it; a name is echoed as sent.</summary>
+    [Theory]
+    [InlineData("   ", null)]
+    [InlineData("", null)]
+    [InlineData("AppDb", "AppDb")]
+    public async Task DatabaseName_IsEchoedNormalized_BlankIsNull(string sent, string? echoed)
+    {
+        var service = new LocalDataService(_duckDb);
+        await SeedWaitAsync(DateTime.UtcNow.AddMinutes(-10), "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
+
+        var root = JsonDocument.Parse(await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 4, sent)).RootElement;
+
+        var echo = root.GetProperty("database_name");
+        Assert.Equal(echoed, echo.ValueKind == JsonValueKind.Null ? null : echo.GetString());
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)

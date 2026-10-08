@@ -28,12 +28,25 @@ namespace PerformanceMonitor.Darling.Service;
 /// window binds $1/$2 and the bucket ceiling, but retention-tier routing and the partial-window notice
 /// measure AGE from now — an absolute (zoomed/historical) window can end long before now.
 /// <see cref="Servers"/> is the resolved <c>$server</c> scope (Erik's Decision 1 fleet axis): null/empty =
-/// the WHOLE FLEET (no server predicate); one or many server names = a bound <c>server_name = ANY($n)</c>
-/// filter, never interpolated (the compile-run endpoint resolves the $server variable to this). Group-by-server
+/// the WHOLE FLEET (no server predicate); one or many server names = a bound name list ($n) that the read turns into
+/// <c>server_id = ANY(ARRAY(SELECT ... FROM collect.servers WHERE server_name = ANY($n)))</c> (#5525), never interpolated (the compile-run endpoint resolves the $server variable to this). Group-by-server
 /// and a per-panel server filter are separate and flow through the normal dimension path.</summary>
 /// <see cref="Coverage"/> is the #1759 companion to <see cref="Rollups"/>: existence is not enough, because a
 /// rollup created over pre-existing history serves only what it materialized, so the router also needs each
 /// tier's measured floor to avoid answering an old window with silence.
+/// <see cref="HourlyEdges"/> is an optional count-guard verdict for the hourly-raw-edges route: the compiler takes
+/// that route only when the verdict equals <see cref="ComposeSourceRouter.HourlyRawEdgesCandidate"/> for this run;
+/// null (the default) leaves every compile on its existing route.
+/// <see cref="ModuleMapThrough"/> is the module map's watermark (naive UTC, <see cref="DateTimeKind.Unspecified"/>): the
+/// largest procedure_stats <c>collection_time</c> the last map refresh read. The runner supplies it only for a panel that
+/// joins modules and takes the hourly-raw-edges route; with it, that route resolves names from the map plus a recent
+/// overlay of procedure_stats instead of ranking the whole window. Null (the default, and every other route) keeps the
+/// window-wide ranking CTE.
+/// <see cref="UnregisteredServers"/> (#5525) is the part of <see cref="Servers"/> that names no <c>collect.servers</c> row, found by
+/// the runner (<see cref="ComposeServerScope.FindUnregisteredAsync"/>) before it compiles. The compiler scopes a read by
+/// <c>server_id</c>, resolved from the registry by name; a name with no registry row resolves to no id, so those names alone are
+/// also matched on the row's stored <c>server_name</c>, exactly as the old scope matched them. Null or empty (the default, and
+/// every run whose names are all registered) adds nothing to the SQL or to the parameters.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
@@ -43,7 +56,10 @@ public sealed record ComposeRunContext(
     DateTime NowUtc,
     RollupCoverage Coverage,
     bool QueryStoreWideEligible = false,
-    DateTime? QueryStoreWideStart = null)
+    DateTime? QueryStoreWideStart = null,
+    ComposeHourlyEdgesVerdict? HourlyEdges = null,
+    DateTime? ModuleMapThrough = null,
+    IReadOnlyList<string>? UnregisteredServers = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -64,7 +80,7 @@ public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> 
 /// <c>collect.&lt;table&gt;</c> — the composed query can NEVER name a <c>config</c> table or an
 /// off-catalog column, and never relies on search_path.</item>
 /// <item>Every VALUE is a bound parameter: <c>$1</c>/<c>$2</c> the naive-UTC window, then (when the run is
-/// scoped to specific servers) a bound <c>server_name = ANY($n)</c>, then filter values as <c>= ANY($n)</c>
+/// scoped to specific servers) a bound server-name list ($n, resolved to <c>server_id</c> in the SQL, #5525), then filter values as <c>= ANY($n)</c>
 /// (with the array bound), <c>LIKE $n</c>, threshold <c>$n</c>, and <c>LIMIT $n</c> for topN.</item>
 /// <item>Aggregation is archetype-gated (SUM on the delta of a cumulative, on the column of a delta; AVG/
 /// MIN/MAX on the gauge/per-event column; <c>percentile_cont</c> only on per-event); a ratio is
@@ -115,12 +131,15 @@ public static class ComposeCompiler
     /// <para>Its rows are CUMULATIVE per-Query-Store-interval snapshots and the collector re-fetches the OPEN
     /// interval every cycle, so <c>qs_executions</c> (SUM) and the weighted <c>qs_avg_*</c> ratios would count
     /// one interval's work once per collection. The dedup keeps the LATEST snapshot per interval — the same
-    /// ROW_NUMBER convention the analysis collectors and both apps' Query Store readers use.</para>
+    /// ROW_NUMBER convention the analysis collectors and both apps' Query Store readers use. When the panel
+    /// filters on a dimension of this table, the dedupe ranks only the partitions that hold a matching row
+    /// (<see cref="QueryStorePartitionRestriction"/>); the filter itself stays outside, so a mid-window rename
+    /// cannot change which snapshot survives.</para>
     ///
     /// <para><c>server_id</c> is in the partition because a composed panel spans the fleet, not one server —
     /// and <c>server_name</c> is there too, which is NOT redundant: Postgres can push a qual through a
     /// subquery containing a window function only when the qual's columns appear in EVERY window's
-    /// PARTITION BY, and the panel's server scope is expressed as <c>server_name = ANY(...)</c> in the outer
+    /// PARTITION BY, and the panel's server scope is expressed as <c>server_id = ANY(...)</c> in the outer
     /// WHERE. Without it a fleet store would rank every server's rows before narrowing to the panel's. It is
     /// 1:1 with <c>server_id</c>, so it only ever makes the partition finer, never over-collapses. The
     /// grouped/filtered dimensions (<c>database_name</c>) push down for the same reason.</para>
@@ -172,8 +191,36 @@ public static class ComposeCompiler
     /// them; both are functionally dependent on <c>query_id</c>, so they add no groups.</para>
     /// </summary>
     private static string BuildFactRelation(
-        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null)
+        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
+        IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
+        string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum)
     {
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges)
+        {
+            /* Three arms with one SELECT list: the rollup for the whole-hour middle, the raw restart rows the rollup
+               excludes (literal `sample_interval_seconds = 0`, so the planner can use the partial index), and raw for the
+               edges outside the middle. The window, scope, filters and module join stay outside, on the caller's alias. */
+            var groups = ComposeHybridColumns.GroupColumns[sourceTable];
+            var mid = ComposeRoute.HybridMidAlias;
+            var suffix = aggregate switch
+            {
+                ComposeAggregate.Max => "max",
+                ComposeAggregate.Min => "min",
+                _ => "sum",
+            };
+            var midCols = string.Join(", ", groups.Select(c => $"{mid}.{c}"))
+                + $", {mid}.bucket AS collection_time, "
+                + string.Join(", ", ComposeHybridColumns.Measures.Select(kv => $"{mid}.{kv.Value}_{suffix} AS {kv.Key}"))
+                + ", 1 AS sample_interval_seconds";
+            var rawCols = string.Join(", ", groups) + ", collection_time, "
+                + string.Join(", ", ComposeHybridColumns.Measures.Keys) + ", sample_interval_seconds";
+            return $"(SELECT {midCols} FROM {PgSchemaGenerator.CollectSchema}.{route.CaggRelation} AS {mid} WHERE {mid}.bucket >= {edgeStartParam} AND {mid}.bucket < {edgeEndParam} "
+                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE collection_time >= {edgeStartParam} AND collection_time < {edgeEndParam} AND sample_interval_seconds = 0 "
+                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE collection_time >= {startParam} AND collection_time <= {endParam} AND (collection_time < {edgeStartParam} OR collection_time >= {edgeEndParam}))";
+        }
+
         if (route.IsCagg)
         {
             /* #3653 A6: CaggFromClause is the FROM-clause item (decision 2) — either
@@ -210,10 +257,83 @@ public static class ComposeCompiler
                 + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
         }
 
-        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
-            + $"query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
+        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
+            + $"server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role "
+            + $"ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
             + $"FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} "
-            + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}) AS qs_ranked WHERE qs_rn = 1)";
+            + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
+            + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe)
+            + ") AS qs_ranked WHERE qs_rn = 1)";
+    }
+
+    /* The partition key the restriction joins on. The dedupe's PARTITION BY text above spells the same list as a literal (the tie-break
+       source guard reads it there); a test pins the two equal. */
+    internal static readonly string[] s_queryStorePartitionKey =
+    {
+        "server_id", "server_name", "database_name", "query_id", "plan_id", "runtime_stats_interval_id", "first_execution_time", "execution_type_desc", "replica_role",
+    };
+
+    /// <summary>
+    /// The raw dedupe's input restriction when the panel carries dimension filters (#4605): only the partitions
+    /// holding at least one in-window row that matches those filters are ranked. Every kept partition keeps ALL
+    /// of its window rows, so <c>qs_rn = 1</c> picks the same survivor as the unrestricted dedupe, and the outer
+    /// filter still decides which survivors count. A partition with no matching row cannot yield a matching
+    /// survivor. Moving the predicate itself inside the dedupe would NOT be exact: a module renamed mid-window
+    /// leaves one partition with rows under two names, and the filter would change which row survives.
+    ///
+    /// <para>The restriction is a hashable NULL-safe semi-join: <c>EXISTS</c> over a <c>DISTINCT</c> key subquery,
+    /// joined on <c>coalesce(col, sentinel)</c> equality for every key column (the hash keys) plus an
+    /// <c>IS NOT DISTINCT FROM</c> residual. <c>PARTITION BY</c> groups NULLs together and a plain <c>IN</c> does
+    /// not match them, but <c>IS NOT DISTINCT FROM</c> alone cannot be hashed. <c>replica_role</c> is NULL on every
+    /// standalone server, so on such a store the NULL-safe comparison covers every row and must stay hashable (a
+    /// first shape, <c>IN … OR (null AND correlated EXISTS)</c>, timed out there). The residual keeps the result
+    /// exact even when a real value equals a sentinel (<c>''</c>, <c>-1</c>, <c>-infinity</c>).</para>
+    ///
+    /// <para>Only filters on the fact's own columns reach here; a module-joined dimension is not a column of this
+    /// table. The restriction is added only when at least one filter is on a NON-partition column
+    /// (<c>module_name</c>, <c>query_hash</c>): a filter on <c>server_name</c> or <c>database_name</c> is a
+    /// partition column and Postgres already pushes it through the window subquery, so restricting on it would add
+    /// a second scan, a DISTINCT and a semi-join for no change in the ranked rows. With no such filter the text is
+    /// empty and the dedupe is unchanged. When it is added, the inner WHERE still carries every pushable filter.</para>
+    /// </summary>
+    private static string QueryStorePartitionRestriction(
+        string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql, bool restrictDedupe)
+    {
+        if (!restrictDedupe || dimensionFilters is not { Count: > 0 })
+        {
+            return string.Empty;
+        }
+
+        var table = $"{PgSchemaGenerator.CollectSchema}.{QueryStoreTable}";
+        var window = $"{FactAlias}.{timeColumn} >= {startParam} AND {FactAlias}.{timeColumn} <= {endParam}"
+            + (serverScopeSql is null ? string.Empty : " AND " + serverScopeSql)
+            + string.Concat(dimensionFilters.Select(c => " AND " + c));
+        var keys = s_queryStorePartitionKey;
+        string Sentinel(string c) => c switch
+        {
+            "server_id" => throw new InvalidOperationException("server_id is never NULL and is compared directly; it has no sentinel."),
+            "query_id" or "plan_id" or "runtime_stats_interval_id" => "-1",
+            "first_execution_time" => "'-infinity'::timestamp",
+            _ => "''",
+        };
+        var hashKey = string.Concat(keys.Select(c => c == "server_id"
+            ? $" AND k.server_id = {QueryStoreTable}.server_id"
+            : $" AND coalesce(k.{c}, {Sentinel(c)}) = coalesce({QueryStoreTable}.{c}, {Sentinel(c)})"));
+        var residual = string.Concat(keys.Where(c => c != "server_id").Select(c => $" AND k.{c} IS NOT DISTINCT FROM {QueryStoreTable}.{c}"));
+        return $" AND EXISTS (SELECT 1 FROM (SELECT DISTINCT {string.Join(", ", keys.Select(c => FactAlias + "." + c))}"
+            + $" FROM {table} AS {FactAlias} WHERE {window}) AS k WHERE true{hashKey}{residual})";
+    }
+
+    /// <summary>True when two normalized server scopes are the same set under ordinal comparison (the case rule of
+    /// SQL <c>= ANY</c>); both null is the fleet matching the fleet.</summary>
+    private static bool SameServerScope(IReadOnlyList<string>? proved, IReadOnlyList<string>? run)
+    {
+        if (proved is null || run is null)
+        {
+            return proved is null && run is null;
+        }
+
+        return new HashSet<string>(proved, StringComparer.Ordinal).SetEquals(run);
     }
 
     /// <summary>
@@ -247,6 +367,19 @@ public static class ComposeCompiler
             route = ComposeRoute.Raw;
         }
 
+        /* A count-guard verdict that equals the router's candidate for this run swaps a raw route to the
+           hourly-raw-edges route. IsCagg stays false, so everything but the FROM item stays on its raw path. */
+        if (context.HourlyEdges is { } verdict
+            && route.Tier == ComposeSourceTier.Raw
+            && ComposeSourceRouter.HourlyRawEdgesCandidate(plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage) is { } candidate
+            && string.Equals(verdict.SourceTable, candidate.SourceTable, StringComparison.Ordinal)
+            && verdict.HourStartUtc == candidate.HourStartUtc
+            && verdict.HourEndUtc == candidate.HourEndUtc
+            && SameServerScope(ComposeSourceRouter.NormalizeServerScope(verdict.Servers), ComposeSourceRouter.NormalizeServerScope(context.Servers)))
+        {
+            route = new ComposeRoute(ComposeSourceTier.HourlyRawEdges, candidate.SuccessorView, null, null, candidate.HourStartUtc, candidate.HourEndUtc);
+        }
+
         /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
            a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
         var effectiveBucket = plan.TimeBucket;
@@ -276,12 +409,36 @@ public static class ComposeCompiler
 
         var p = new ParamList();
         /* $1 start, $2 end — the naive-UTC window prelude. The server scope is OPTIONAL/multi: null/empty
-           $server => the whole fleet (no predicate); one/many servers => a bound server_name = ANY($n), never
+           $server => the whole fleet (no predicate); one/many servers => a bound name list resolved to server_id in the SQL (ServerScope, #5525), never
            interpolated (the compile-run endpoint resolves the $server variable to this). */
         var startParam = p.AddTimestamp(context.StartUtc);
         var endParam = p.AddTimestamp(context.EndUtc);
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
+        string FactScope() => ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam);
+
+        /* The hourly-raw-edges route binds its two edge instants here and no other route binds anything, so every
+           other compile keeps its parameters. wideStartParam below is Query Store only and the hybrid route never
+           serves Query Store, so the two binds never co-occur. */
+        string? edgeStartParam = null, edgeEndParam = null;
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges)
+        {
+            edgeStartParam = p.AddTimestamp(route.EdgeStartUtc!.Value);
+            edgeEndParam = p.AddTimestamp(route.EdgeEndUtc!.Value);
+        }
+
+        /* The recent-overlay floor of the hourly-raw-edges module join: the later of the window start and the map's
+           watermark less the refresh slack. Bound only when the module join is emitted below from the map, so no other
+           compile gains a parameter. A watermark later than the run's now (written ahead of the clock by an older
+           build) counts as no watermark, so that compile ranks the whole window as before. */
+        string? moduleOverlayFloorParam = null;
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges && plan.UsesModuleJoin
+            && context.ModuleMapThrough is DateTime moduleMapThrough && moduleMapThrough <= context.NowUtc)
+        {
+            var overlayFloor = moduleMapThrough - DarlingModuleMap.WatermarkSlack;
+            moduleOverlayFloorParam = p.AddTimestamp(overlayFloor > context.StartUtc ? overlayFloor : context.StartUtc);
+        }
 
         /* #4689: below raw's floor the interval table is exact only from the runner's common start
            (ComposeRunContext.QueryStoreWideStart, the latest per-server read start), so an eligible Query Store
@@ -298,9 +455,18 @@ public static class ComposeCompiler
            reuses the same clause TEXT in both its rank CTE and its series query, which reuses the same $n
            placeholders rather than double-binding each value. */
         var filterClauses = new List<string>(plan.Filters.Count);
+        var pushableFilterClauses = new List<string>();
+        var restrictDedupe = false;
         foreach (var filter in plan.Filters)
         {
-            filterClauses.Add(BuildFilterClause(filter, context, p));
+            var clause = BuildFilterClause(filter, context, p);
+            filterClauses.Add(clause);
+            if (!filter.Dimension.ViaModuleJoin
+                && string.Equals(filter.Dimension.SourceTable, QueryStoreTable, StringComparison.Ordinal))
+            {
+                pushableFilterClauses.Add(clause);
+                restrictDedupe |= !s_queryStorePartitionKey.Contains(filter.Dimension.Column, StringComparer.Ordinal);
+            }
         }
 
         var timeColumn = route.IsCagg ? ComposeRoute.CaggTimeColumn : s_timeColumnByTable[plan.Measure.SourceTable];
@@ -312,7 +478,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
@@ -353,7 +519,7 @@ public static class ComposeCompiler
             sql.Append(indent).Append("  AND ").Append(FactAlias).Append('.').Append(timeColumn).Append(endOperator).Append(endParam).Append('\n');
             if (hasServerScope)
             {
-                sql.Append(indent).Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");
+                sql.Append(indent).Append("  AND ").Append(FactScope()).Append('\n');
             }
 
             foreach (var clause in filterClauses)
@@ -366,25 +532,55 @@ public static class ComposeCompiler
            retained module_map instead (procedure_stats raw is dropped at 4d, so the CTE can't cover old windows). */
         if (plan.UsesModuleJoin && !route.IsCagg)
         {
-            /* Window-bounded AND scoped to the same server set — partitioned by (server_name, sql_handle) so a
-               handle reused across servers attributes per server, not globally. */
-            sql.Append("WITH ").Append(ModuleAlias).Append(" AS (\n");
+            /* The hourly-raw-edges route with a map watermark ranks only the recent overlay [floor, end] and takes every
+               older handle from collect.module_map. Without a watermark (or on any other route) the CTE ranks the whole
+               window, exactly as before.
+
+               Each (server_name, sql_handle) appears once in m: the overlay keeps rn = 1 per pair, the map's primary key
+               is that pair, and the NOT EXISTS drops a map row the overlay already carries, so the outer LEFT JOIN and
+               the group references are unchanged. A map row with last_seen before the window start is skipped, so a handle
+               with no procedure_stats row in the window still reads '(ad hoc)'. The map is forward-only, so a handle
+               renamed before the floor reads its newest name from the map and one renamed after it reads the overlay's.
+               A rename inside the last minute (the gap between the window end and now) can show the newer name, and so can a handle whose only procedure_stats row is in that
+               minute (it can show a name where the raw route shows (ad hoc)). */
+            var fromMap = moduleOverlayFloorParam is not null;
+            sql.Append("WITH ").Append(fromMap ? "m_recent" : ModuleAlias).Append(" AS (\n");
             sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name\n");
             sql.Append("    FROM (\n");
             sql.Append("        SELECT server_name, sql_handle, object_name, schema_name, database_name,\n");
             sql.Append("               ROW_NUMBER() OVER (PARTITION BY server_name, sql_handle ORDER BY collection_time DESC) AS rn\n");
             sql.Append("        FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".procedure_stats\n");
-            sql.Append("        WHERE collection_time >= ").Append(startParam).Append('\n');
+            sql.Append("        WHERE collection_time >= ").Append(fromMap ? moduleOverlayFloorParam : startParam).Append('\n');
             sql.Append("          AND collection_time <= ").Append(endParam).Append('\n');
             if (hasServerScope)
             {
-                sql.Append("          AND server_name = ANY(").Append(serverScopeParam).Append(")\n");
+                sql.Append("          AND ").Append(ServerScope(string.Empty, serverScopeParam!, unregisteredParam)).Append('\n');
             }
 
             sql.Append("          AND sql_handle IS NOT NULL\n");
             sql.Append("          AND sql_handle <> ''\n");
             sql.Append("    ) ranked_modules\n");
             sql.Append("    WHERE rn = 1\n");
+            if (fromMap)
+            {
+                sql.Append("),\n");
+                sql.Append(ModuleAlias).Append(" AS (\n");
+                sql.Append("    SELECT server_name, sql_handle, object_name, schema_name, database_name FROM m_recent\n");
+                sql.Append("    UNION ALL\n");
+                sql.Append("    SELECT mm.server_name, mm.sql_handle, mm.object_name, mm.schema_name, mm.database_name\n");
+                sql.Append("    FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS mm\n");
+                sql.Append("    WHERE mm.last_seen >= ").Append(startParam).Append('\n');
+                if (hasServerScope)
+                {
+                    /* module_map is a small table keyed (server_name, sql_handle) with no server_id column, so it stays scoped by the
+                       scoped names (#5525). The fact rows are scoped by id, so a renamed server's pre-rename handles resolve through
+                       m_recent when the overlay covers them and read '(ad hoc)' when only this map would. */
+                    sql.Append("      AND mm.server_name = ANY(").Append(serverScopeParam).Append(")\n");
+                }
+
+                sql.Append("      AND NOT EXISTS (SELECT 1 FROM m_recent AS r WHERE r.server_name = mm.server_name AND r.sql_handle = mm.sql_handle)\n");
+            }
+
             sql.Append(")\n");
         }
 
@@ -568,13 +764,36 @@ public static class ComposeCompiler
         new Dictionary<string, ServerClock>(StringComparer.Ordinal);
 
     /// <summary>
+    /// The server scope predicate every fact read shares (#5525): <c>&lt;prefix&gt;server_id = ANY(ARRAY(SELECT reg.server_id FROM
+    /// collect.servers AS reg WHERE reg.server_name = ANY($names))))</c>. Every collector hypertable and every rollup compresses
+    /// segmented by <c>server_id</c>, which also leads the time index, and <c>server_name</c> is neither, so the old
+    /// <c>server_name = ANY($n)</c> read every compressed chunk in full and discarded most of it. The uncorrelated sub-select
+    /// is an InitPlan: Postgres evaluates it once, pushes the id list into each compressed chunk's segment filter (and through
+    /// the Query Store dedupe window, whose PARTITION BY carries <c>server_id</c>), and keeps this compiler free of a connection
+    /// and the parameter list unchanged. The text is <see cref="ServerScopeSql.Predicate"/>, shared with the hourly-edges count guard.
+    ///
+    /// <para><b>Semantics.</b> A scoped name means the server or servers the registry (<c>collect.servers</c>) holds under that name
+    /// NOW, with all of their rows. The registry holds one current <c>server_name</c> per <c>server_id</c> (a re-connect rewrites it),
+    /// and its only key is <c>server_id</c>, so a name can be held by two rows. Fact rows keep the name they were written under, so:
+    /// a renamed server's whole history is in the scope of its current name, where the old filter matched only the rows written under
+    /// that exact spelling; a name that a NEW server took over after a rename means the new server, and the old server's rows stored
+    /// under that name are no longer in that name's scope (they are in the scope of the old server's current name); a name held by
+    /// two registry rows means both servers, with every row of each, under every name it was written under. A scoped name with NO
+    /// registry row resolves to no id (the runner finds those, <see cref="ComposeRunContext.UnregisteredServers"/>), so those
+    /// names alone also match on the row's stored <c>server_name</c> through <paramref name="unregisteredParam"/>.</para>
+    /// </summary>
+    internal static string ServerScope(string prefix, string namesParam, string? unregisteredParam) =>
+        ServerScopeSql.Predicate(prefix, namesParam, unregisteredParam);
+
+    /// <summary>
     /// The read that runs before a panel's <see cref="AnnotationClockFrame.ServerLocal"/> annotation query
     /// (#4821): each server's newest <c>server_properties</c> row that has an offset, with the
     /// <c>time_zone_id</c> from that SAME row, the row <c>DarlingServerClockReader</c> reads for one server.
     ///
     /// <para><c>server_properties</c> is indexed <c>(server_id, collection_time)</c> and NOT on
     /// <c>server_name</c>, so the <c>DISTINCT ON</c> sort has no index to ride. When the panel names its
-    /// servers, the same list the annotation query filters on bounds it, so the sort covers the requested
+    /// servers, the same list the annotation query filters on bounds it (by <c>server_id</c> since #5525, see
+    /// <see cref="ServerScope"/>; a renamed server then also yields its old-name rows), so the sort covers the requested
     /// servers instead of the whole fleet's retained history. A fleet-wide panel names none and reads every
     /// server, as the old in-query join did.</para>
     /// </summary>
@@ -592,7 +811,9 @@ public static class ComposeCompiler
         sql.Append("WHERE utc_offset_minutes IS NOT NULL\n");
         if (context.Servers is { Count: > 0 })
         {
-            sql.Append("AND   server_name = ANY(").Append(p.AddTextArray(context.Servers)).Append(")\n");
+            var scopeParam = p.AddTextArray(context.Servers);
+            var unregisteredParam = context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
+            sql.Append("AND   ").Append(ServerScope(string.Empty, scopeParam, unregisteredParam)).Append('\n');
         }
 
         sql.Append("ORDER BY server_name, collection_time DESC");
@@ -751,7 +972,7 @@ public static class ComposeCompiler
 
     /// <summary>Compiles one annotation source into its bounded, catalog-only, schema-qualified event query:
     /// <c>SELECT &lt;ts&gt; AS ts, f.&lt;labelCol&gt; AS label FROM collect.&lt;table&gt; AS f WHERE
-    /// &lt;ts&gt; BETWEEN $1 AND $2 [AND f.server_name = ANY($3)] ORDER BY ts LIMIT
+    /// &lt;ts&gt; BETWEEN $1 AND $2 [AND f.server_id = ANY(ARRAY(SELECT ... WHERE server_name = ANY($3)))] ORDER BY ts LIMIT
     /// &lt;MaxAnnotationEvents&gt;</c>. Every identifier is a catalog constant; every value is bound.
     ///
     /// <para><c>&lt;ts&gt;</c> is the bare <c>f.&lt;timeCol&gt;</c> for a UTC source and the de-skewed
@@ -772,6 +993,7 @@ public static class ComposeCompiler
         var endParam = p.AddTimestamp(context.EndUtc);
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
         var serverLocal = source.Frame == AnnotationClockFrame.ServerLocal;
 
         var ts = serverLocal
@@ -793,7 +1015,7 @@ public static class ComposeCompiler
         sql.Append("  AND ").Append(ts).Append(" <= ").Append(endParam).Append('\n');
         if (hasServerScope)
         {
-            sql.Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");
+            sql.Append("  AND ").Append(ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam)).Append('\n');
         }
 
         sql.Append("ORDER BY ts\n");

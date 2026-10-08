@@ -278,6 +278,7 @@
                         <Style TargetType="ListBoxItem">
                             <Setter Property="Padding" Value="0"/>
                             <Setter Property="Margin" Value="0,1"/>
+                            <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName, Mode=OneTime}"/>
                             <Setter Property="Background" Value="Transparent"/>
                             <Setter Property="BorderThickness" Value="0"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -402,6 +403,10 @@
                                     </TextBlock.Style>
                                 </TextBlock>
                             </Grid>
+                            <!-- #5352: says so when the search above matched no card, instead of leaving a blank
+                                 grid. The sentence is ServerOverviewFilter.NoMatchText, shared with the viewer. -->
+                            <TextBlock x:Name="OverviewNoMatchText" VerticalAlignment="Center" Margin="12,0,0,0"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}" Visibility="Collapsed"/>
                         </StackPanel>
                         <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
                             <ItemsControl x:Name="OverviewItemsControl">
@@ -412,12 +417,13 @@
                                 </ItemsControl.ItemsPanel>
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
-                                        <Border Background="{DynamicResource BackgroundLightBrush}"
+                                        <controls:OverviewCardBorder Background="{DynamicResource BackgroundLightBrush}"
                                                 BorderBrush="{Binding CardBorderBrush}"
                                                 BorderThickness="2" CornerRadius="6"
                                                 Margin="6"
                                                 Width="260" MinHeight="160"
                                                 Cursor="Hand"
+                                                AutomationProperties.Name="{Binding DisplayName}"
                                                 MouseLeftButtonDown="OverviewCard_MouseLeftButtonDown">
                                             <Grid>
                                                 <StackPanel Margin="16">
@@ -536,7 +542,7 @@
                                                     </StackPanel>
                                                 </Border>
                                             </Grid>
-                                        </Border>
+                                        </controls:OverviewCardBorder>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>

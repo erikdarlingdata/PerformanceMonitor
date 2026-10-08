@@ -17,6 +17,7 @@ namespace PerformanceMonitorLite.Tests;
 /// body template cannot be broken out of by alert data, and that a malformed config degrades to a clear
 /// error instead of an exception in the alert loop.
 /// </summary>
+[Trait("Reads", "Darling")]
 public class GenericWebhookTests
 {
     private static readonly AlertBranding Branding = new("Performance Monitor Lite", null);

@@ -248,7 +248,7 @@ internal static class DarlingFirewallCheck
                     "so remote clients will be blocked. The service account cannot create it by design. Run " +
                     "PerformanceMonitor.Darling.Service.exe --configure-firewall from an ELEVATED PowerShell (it " +
                     "reconciles every Darling rule from darling.json), or run just this one:\n{Command}",
-                    ruleName, port, remedy ?? "(no command — allowFrom is missing or not a valid CIDR; run --configure-network)");
+                    ruleName, port, remedy ?? "(no command — allowFrom is missing or not a valid CIDR list; run --configure-network)");
                 break;
 
             case FirewallRuleVerdict.LoopbackStaleRule:

@@ -32,8 +32,8 @@ public sealed partial class PgTargetDrillDownCollector
 
     /// <summary>
     /// The statements that wrote the most temp blocks in the window, for a <c>PG_TEMP_SPILL</c> root (lane 6 of
-    /// #3542): <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the row cap, <c>$5</c> the
-    /// text cap. <c>temp_blks_written</c> is a lifetime counter on <c>pg_statement_stats</c>, so it is
+    /// #3542): <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the row cap. The text comes back whole and the reader judges it, then cuts it to
+    /// <see cref="StatementTextCap"/> (#5320). <c>temp_blks_written</c> is a lifetime counter on <c>pg_statement_stats</c>, so it is
     /// differenced the way <see cref="PgTargetBadActorDetailSql"/> differences the block counters —
     /// <c>GREATEST(x − LAG(x), 0)</c> over the full series identity — and summed per <c>queryid</c>; the calls
     /// and time beside it are the stored deltas, so the reader can see whether the spill is one heavy report or
@@ -70,7 +70,7 @@ SELECT
     CAST(COALESCE(SUM(s.delta_calls), 0) AS bigint)              AS calls,
     CAST(COALESCE(SUM(s.delta_total_exec_time_ms), 0) AS bigint) AS total_exec_ms,
     COUNT(DISTINCT s.database_id)                                AS database_count,
-    LEFT(MAX(t.query_text), $5)                                  AS query_text,
+    MAX(t.query_text)                                            AS query_text,
     hashtext(MAX(t.query_text))                                  AS text_hash
 FROM stmt_series AS s
 LEFT JOIN pg_statement_text AS t
@@ -84,8 +84,8 @@ LIMIT $4";
     /// <summary>
     /// One statement's window, for a <c>PG_BAD_ACTOR_&lt;queryid&gt;</c> root or leaf: the deltas the fact was
     /// graded on, the block figures the fact does not carry, the per-database breakdown, and the normalised
-    /// text with its hash. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> queryid,
-    /// <c>$5</c> the text cap.
+    /// text with its hash. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> queryid. The text comes back whole and the reader judges it, then cuts it to
+    /// <see cref="StatementTextCap"/> (#5320).
     ///
     /// <para>The same differencing as the collector's read and <c>DarlingPgStatementReader.PgTopQueriesSql</c>:
     /// stored deltas for calls / time / rows, <c>GREATEST(x − LAG(x), 0)</c> over the full series identity
@@ -149,7 +149,7 @@ SELECT
     (SELECT array_agg(pd.database_id ORDER BY pd.total_exec_ms DESC) FROM per_database AS pd)   AS database_ids,
     (SELECT array_agg(pd.calls ORDER BY pd.total_exec_ms DESC) FROM per_database AS pd)         AS database_calls,
     (SELECT array_agg(pd.total_exec_ms ORDER BY pd.total_exec_ms DESC) FROM per_database AS pd) AS database_total_exec_ms,
-    LEFT(MAX(t.query_text), $5)                                  AS query_text,
+    MAX(t.query_text)                                            AS query_text,
     hashtext(MAX(t.query_text))                                  AS text_hash,
     MAX(t.first_seen)                                            AS text_first_seen
 FROM stmt_series AS s
@@ -222,7 +222,6 @@ HAVING COUNT(*) > 0";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         cmd.Parameters.AddWithValue(TempSpillStatementCap);
-        cmd.Parameters.AddWithValue(StatementTextCap);
 
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
@@ -244,7 +243,7 @@ HAVING COUNT(*) > 0";
                 temp_blks_written_per_call = calls > 0 ? Math.Round((double)tempBlksWritten / calls, 2) : (double?)null,
                 database_count = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
                 /* Null when no text has been captured for this queryid yet — never "". */
-                query_text = reader.IsDBNull(6) ? null : reader.GetString(6),
+                query_text = reader.IsDBNull(6) ? null : AnalysisStatementText.Preview(reader.GetString(6), StatementTextCap),
                 text_hash = reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)),
             });
         }
@@ -259,7 +258,6 @@ HAVING COUNT(*) > 0";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         cmd.Parameters.AddWithValue(queryId);
-        cmd.Parameters.AddWithValue(StatementTextCap);
 
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken))
@@ -298,7 +296,7 @@ HAVING COUNT(*) > 0";
                 total_exec_ms = i < databaseTotals.Length ? databaseTotals[i] : 0L,
             }).ToList(),
             /* Null when no text has been captured for this queryid yet — never "". */
-            query_text = reader.IsDBNull(15) ? null : reader.GetString(15),
+            query_text = reader.IsDBNull(15) ? null : AnalysisStatementText.Preview(reader.GetString(15), StatementTextCap),
             text_hash = reader.IsDBNull(16) ? (int?)null : Convert.ToInt32(reader.GetValue(16)),
             text_first_seen = reader.IsDBNull(17) ? null : reader.GetDateTime(17).ToString("o", CultureInfo.InvariantCulture),
             queryid_note = "queryid is stable within a PostgreSQL major and re-keyed by a major upgrade or a compute_query_id change; text_hash is the hash of the normalised text and is how the same statement is recognised across that re-key.",

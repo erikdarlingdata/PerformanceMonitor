@@ -139,22 +139,29 @@ LIMIT 1";
 
     /// <summary>
     /// Gets the latest database size stats (file sizes, volume space).
+    /// <para>#5244: <paramref name="databaseNames"/> (null or empty = every database) limits the ROWS of the newest snapshot. The
+    /// snapshot itself is the server's newest whatever the filter, so a filtered and an unfiltered call carry the same
+    /// <c>collection_time</c>. Darling's <c>GetLatestDatabaseSizesAsync</c> is the twin.</para>
     /// </summary>
-    public async Task<List<DatabaseSizeStatsRow>> GetLatestDatabaseSizeStatsAsync(int serverId)
+    public async Task<List<DatabaseSizeStatsRow>> GetLatestDatabaseSizeStatsAsync(
+        int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        command.CommandText = $@"
 SELECT database_name, file_name, file_type_desc, physical_name,
        total_size_mb, used_size_mb, auto_growth_mb, max_size_mb,
        volume_mount_point, volume_total_mb, volume_free_mb,
        collection_time, file_id
 FROM v_database_size_stats
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1){dbClause}
 ORDER BY database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<DatabaseSizeStatsRow>();
         using var reader = await command.ExecuteReaderAsync();

@@ -44,6 +44,7 @@ public sealed class DarlingWebAssetsTests
     [InlineData("js/util.js")]
     [InlineData("js/panels.js")]
     [InlineData("js/charts.js")]
+    [InlineData("js/grid-tools.js")]
     [InlineData("js/views-api.js")]
     [InlineData("js/derive.js")]
     [InlineData("js/editor.js")]

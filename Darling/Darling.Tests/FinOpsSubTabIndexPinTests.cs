@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// so a runtime check would need the app. The two files are parsed the same way the #1949 grid pins parse
 /// theirs.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FinOpsSubTabIndexPinTests
 {
     /// <summary>Constant name suffix stripped to give the header it must correspond to.</summary>

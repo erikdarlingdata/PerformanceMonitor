@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /// call sites — over comment/string-stripped source, so a re-introduced <c>ex.Message</c> fails here rather
 /// than in a support ticket that pastes a ping response into a chat.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class FailureNoteRedactionTests
 {
     // ── the formatter ────────────────────────────────────────────────────────────────────

@@ -42,6 +42,7 @@ namespace Darling.Tests;
 /// <c>deadlock_coverage</c> established one level up: numbers, a denominator, a named cause, and a sentence
 /// that names both windows and disclaims the one it did not measure.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class CollectionOutputBesideCostTests
 {
     /* The measured pg_deadlocks counts, so every row below is the shape this issue was filed on rather
@@ -432,7 +433,9 @@ public sealed class CollectionOutputBesideCostTests
             "public static async Task<List<CollectorHealth>> GetCollectionHealthAsync");
         var lite = OrdinalMap(
             Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs"),
-            "public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync");
+            /* #5371 moved the positional reads out of the public GetCollectionHealthAsync (now the memo,
+               cancellation and phase-timing wrapper) into ReadCollectionHealthAsync, which maps the row. */
+            "private async Task<List<CollectorHealthRow>> ReadCollectionHealthAsync");
 
         /* The precondition. 31 columns since #4748's one (latest_run_note, the newest run's note the band
            reads) - 30 at #3885's, 16 at #2460, plus #2472's four fan-out

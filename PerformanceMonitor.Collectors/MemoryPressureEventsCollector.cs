@@ -51,9 +51,9 @@ DECLARE
        CollectorTimestampFrameTests pins both directions. */
     @now datetime2(7) = SYSUTCDATETIME();
 
-SELECT @ms_ticks = dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi;
+SELECT /* PerformanceMonitorLite */ @ms_ticks = dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     /* MILLISECOND, not SECOND-truncated -- see CpuUtilizationCollector's identical fix (#2749) for the
        full explanation: dividing by 1000 before DATEADD(SECOND, ...) discards the sub-second remainder,
        which differs on every poll, so re-reading the same ring-buffer entry on a later cycle recomputes a

@@ -19,12 +19,16 @@ public partial class LocalDataService
 {
     /// <summary>
     /// Gets the latest file I/O stats snapshot with computed latency.
+    /// <para>#5244: <paramref name="databaseNames"/> (null or empty = every database) limits the ROWS of the newest capture. The
+    /// capture is the server's newest whatever the filter, so a filtered and an unfiltered call carry the same
+    /// <c>collection_time</c>. Darling's <c>GetLatestFileIoStatsAsync</c> is the twin.</para>
     /// </summary>
-    public async Task<List<FileIoRow>> GetLatestFileIoStatsAsync(int serverId)
+    public async Task<List<FileIoRow>> GetLatestFileIoStatsAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        command.CommandText = $@"
 SELECT
     database_name,
     file_name,
@@ -41,10 +45,12 @@ SELECT
     collection_time
 FROM v_file_io_stats
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1){dbClause}
 ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<FileIoRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -75,13 +81,20 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
     /// The bucketed statement text (#4234), pulled out of <see cref="GetFileIoLatencyTrendAsync"/> so its shape
     /// is checkable without a live DuckDB.
     /// </summary>
-    internal static readonly string FileIoLatencyTrendSql = $@"
+    internal static readonly string FileIoLatencyTrendSql = FileIoLatencyTrendSqlFor("");
+
+    /// <summary>
+    /// #5312: the latency statement with the saved database filter's <see cref="BuildDbInClause"/> predicate in the
+    /// top-files ranking, so the top ten are ranked among the chosen databases only (the later join to the ranking
+    /// narrows every other CTE). <paramref name="dbClause"/> "" is the statement as it always read.
+    /// </summary>
+    internal static string FileIoLatencyTrendSqlFor(string dbClause) => $@"
 WITH top_files AS (
     SELECT database_name, file_name
     FROM v_file_io_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   collection_time <= $3{dbClause}
     AND   (delta_reads > 0 OR delta_writes > 0)
     GROUP BY database_name, file_name
     ORDER BY SUM(delta_reads + delta_writes) DESC
@@ -137,7 +150,7 @@ ORDER BY database_name, file_name, 3";
     /// <c>first_collection_time</c> instead of the <c>time_bucket</c> grid line; a single merged bucket
     /// anywhere (any file) keeps <c>bucket_start</c> throughout.</para>
     /// </summary>
-    public async Task<List<FileIoTrendPoint>> GetFileIoLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    public async Task<List<FileIoTrendPoint>> GetFileIoLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var _q = TimeQuery("GetFileIoLatencyTrendAsync", "v_file_io_stats top-10 files, bucketed");
         using var connection = await OpenConnectionAsync();
@@ -148,12 +161,15 @@ ORDER BY database_name, file_name, 3";
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
-        command.CommandText = FileIoLatencyTrendSql;
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        command.CommandText = FileIoLatencyTrendSqlFor(dbClause);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime, double ReadLatency, double WriteLatency, double QueuedReadLatency, double QueuedWriteLatency)>();
         var everyBucketSingleton = true;
@@ -221,13 +237,17 @@ LIMIT 1";
     /// The bucketed statement text (#4234), pulled out of <see cref="GetFileIoThroughputTrendAsync"/> so its
     /// shape is checkable without a live DuckDB.
     /// </summary>
-    internal static readonly string FileIoThroughputTrendSql = $@"
+    internal static readonly string FileIoThroughputTrendSql = FileIoThroughputTrendSqlFor("");
+
+    /// <summary>#5312: the throughput statement with the saved database filter in the top-files ranking, as
+    /// <see cref="FileIoLatencyTrendSqlFor"/> does for latency.</summary>
+    internal static string FileIoThroughputTrendSqlFor(string dbClause) => $@"
 WITH top_files AS (
     SELECT database_name, file_name
     FROM v_file_io_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   collection_time <= $3{dbClause}
     AND   (delta_read_bytes > 0 OR delta_write_bytes > 0)
     GROUP BY database_name, file_name
     ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC
@@ -288,7 +308,7 @@ ORDER BY file_label, 2";
     /// per-collection read always dropped that collection. Singleton stamping follows
     /// <see cref="WaitTrendsSql"/>'s rule.</para>
     /// </summary>
-    public async Task<List<FileIoThroughputPoint>> GetFileIoThroughputTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    public async Task<List<FileIoThroughputPoint>> GetFileIoThroughputTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var _q = TimeQuery("GetFileIoThroughputTrendAsync", "v_file_io_stats top-10 files by bytes, bucketed");
         using var connection = await OpenConnectionAsync();
@@ -299,12 +319,15 @@ ORDER BY file_label, 2";
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
-        command.CommandText = FileIoThroughputTrendSql;
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        command.CommandText = FileIoThroughputTrendSqlFor(dbClause);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var rows = new List<(string FileLabel, DateTime BucketStart, DateTime FirstCollectionTime, double ReadMbPerSec, double WriteMbPerSec)>();
         var everyBucketSingleton = true;

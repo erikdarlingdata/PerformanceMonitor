@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// discipline <see cref="SharedBaselineCacheTests"/> uses for the same three call sites, so a construction
 /// call named only inside a doc comment is not mistaken for a real site.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PlanSync4602AnalysisServiceConfigCensusTests
 {
     /// <summary>Matches <c>new DarlingAnalysisService(</c> and captures everything up to the matching close

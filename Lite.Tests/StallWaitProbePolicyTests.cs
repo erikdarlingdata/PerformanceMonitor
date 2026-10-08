@@ -603,6 +603,10 @@ public class StallWaitProbePolicyTests
         Assert.Contains("sys.dm_os_waiting_tasks", sql, StringComparison.Ordinal);
         Assert.Contains("sys.dm_os_schedulers", sql, StringComparison.Ordinal);
 
+        /* And the session catalog, which classifies each waiting task as user or background and finds this
+           service's own session. */
+        Assert.Contains("sys.dm_exec_sessions", sql, StringComparison.Ordinal);
+
         /* NOT the expensive shredders. A probe against an instance that has gone 50x slow at producing rows
            must not ask it for plan XML or SQL text. */
         Assert.DoesNotContain("dm_exec_query_plan", sql, StringComparison.Ordinal);
@@ -627,11 +631,10 @@ public class StallWaitProbePolicyTests
             sql,
             StringComparison.Ordinal);
 
-        /* And the ignored-wait list is deliberately absent — see the QueryText comment. SOS_SCHEDULER_YIELD
-           is the leading candidate for a producer-side slowdown, and a trend surface's benign list is
-           exactly where it would be dropped. */
+        /* The idle exclusion is a list of literals rendered from IgnoredWaitDefaults.All, never a copy of it
+           and never a name of the set in the text. */
         Assert.DoesNotContain("IgnoredWait", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("wait_type NOT IN", sql, StringComparison.Ordinal);
+        Assert.Contains("wt.is_idle = 0", sql, StringComparison.Ordinal);
 
         /* CONTRIBUTING.md's function rule: COUNT_BIG, never COUNT. Asserted here because nothing in the
            repo enforces it — this query shipped two bare COUNTs through every guard and was caught by eye
@@ -660,7 +663,7 @@ public class StallWaitProbePolicyTests
         var idle = await StallWaitProbePolicy.ReadAsync(
             new FakeSampleReader(new object?[][]
             {
-                [null, null, null, null, 0L, 0, 8, 0L, 0L, 0L, 0],
+                [null, null, null, null, 0L, 0, 8, 0L, 0L, 0L, 0, 0L, 0, 0L, null, null, null, 0L, 0],
             }),
             CancellationToken.None);
 
@@ -668,12 +671,15 @@ public class StallWaitProbePolicyTests
         Assert.Equal(0, idle!.WaitingTaskCount);
         Assert.Null(idle.TopWaitType);
         Assert.Equal(8, idle.SchedulerCount);
+        Assert.Equal(
+            "excluded from ranking: background 0 tasks/0 types; idle 0 tasks/0 types; ours: not visible",
+            idle.WaitSummary);
 
         /* The same shape with zero schedulers is not an instance, and must not be credited as a sample. */
         var notAnInstance = await StallWaitProbePolicy.ReadAsync(
             new FakeSampleReader(new object?[][]
             {
-                [null, null, null, null, 0L, 0, 0, 0L, 0L, 0L, 0],
+                [null, null, null, null, 0L, 0, 0, 0L, 0L, 0L, 0, 0L, 0, 0L, null, null, null, 0L, 0],
             }),
             CancellationToken.None);
 
@@ -694,8 +700,8 @@ public class StallWaitProbePolicyTests
         var sample = await StallWaitProbePolicy.ReadAsync(
             new FakeSampleReader(new object?[][]
             {
-                ["SOS_SCHEDULER_YIELD", 412L, 9_931L, 61L, 631L, 14, 8, 97L, 3L, 12L, 21],
-                ["ASYNC_NETWORK_IO", 3L, 8_812L, 4_401L, 631L, 14, 8, 97L, 3L, 12L, 21],
+                ["SOS_SCHEDULER_YIELD", 412L, 9_931L, 61L, 631L, 14, 8, 97L, 3L, 12L, 21, 0L, 0, 0L, null, null, null, 0L, 0],
+                ["ASYNC_NETWORK_IO", 3L, 8_812L, 4_401L, 631L, 14, 8, 97L, 3L, 12L, 21, 0L, 0, 0L, null, null, null, 0L, 0],
             }),
             CancellationToken.None);
 
@@ -716,13 +722,13 @@ public class StallWaitProbePolicyTests
 
         /* The breadth column carries both types; nothing parses it, and the discriminators are their own
            columns beside it. */
-        Assert.Equal("SOS_SCHEDULER_YIELD:412x/9931ms; ASYNC_NETWORK_IO:3x/8812ms", sample.WaitSummary);
+        Assert.Equal("SOS_SCHEDULER_YIELD:412x/9931ms; ASYNC_NETWORK_IO:3x/8812ms; excluded from ranking: background 0 tasks/0 types; idle 0 tasks/0 types; ours: not visible", sample.WaitSummary);
     }
 
     /// <summary>
-    /// A few wait names come back from the DMV with a trailing space (SQP_STATS_REPORTING is one), and this
-    /// sample applies no ignore filter, so a background waiter can be the top wait. The space must not land in
-    /// the stored top wait type or in the summary line.
+    /// A few wait names come back from the DMV with a trailing space, and a user-task wait can carry it too
+    /// (the fixture uses a name that is NOT on the idle list, so it is one the real query can rank). The space must not land in the stored top wait type or in the summary
+    /// line.
     /// </summary>
     [Fact]
     public async Task ReadAsync_TrimsTheTrailingSpaceAWaitNameCarries()
@@ -730,14 +736,275 @@ public class StallWaitProbePolicyTests
         var sample = await StallWaitProbePolicy.ReadAsync(
             new FakeSampleReader(new object?[][]
             {
-                ["SQP_STATS_REPORTING ", 1L, 240_000L, 240_000L, 631L, 14, 8, 97L, 3L, 12L, 21],
-                ["SOS_SCHEDULER_YIELD", 412L, 9_931L, 61L, 631L, 14, 8, 97L, 3L, 12L, 21],
+                ["LCK_M_S ", 1L, 240_000L, 240_000L, 631L, 14, 8, 97L, 3L, 12L, 21, 0L, 0, 0L, null, null, null, 0L, 0],
+                ["SOS_SCHEDULER_YIELD", 412L, 9_931L, 61L, 631L, 14, 8, 97L, 3L, 12L, 21, 0L, 0, 0L, null, null, null, 0L, 0],
             }),
             CancellationToken.None);
 
         Assert.NotNull(sample);
-        Assert.Equal("SQP_STATS_REPORTING", sample!.TopWaitType);
-        Assert.Equal("SQP_STATS_REPORTING:1x/240000ms; SOS_SCHEDULER_YIELD:412x/9931ms", sample.WaitSummary);
+        Assert.Equal("LCK_M_S", sample!.TopWaitType);
+        Assert.Equal("LCK_M_S:1x/240000ms; SOS_SCHEDULER_YIELD:412x/9931ms; excluded from ranking: background 0 tasks/0 types; idle 0 tasks/0 types; ours: not visible", sample.WaitSummary);
+    }
+
+    /// <summary>
+    /// The ranking excludes exactly the shared idle list and nothing else (#5267): the rendered list is the
+    /// set at load, in ordinal order, as <c>N'…'</c> literals, and the waits this probe exists to find are
+    /// not in it.
+    /// </summary>
+    [Fact]
+    public void TheQuery_ExcludesExactlyTheSharedIdleList_FromTheRanking()
+    {
+        var sql = StallWaitProbePolicy.QueryText;
+
+        /* Rendered ONCE: the list lives in the leading derived set as is_idle, and the totals and the ranking
+           both read that flag. Every N'...' literal before the SELECT is therefore the list, once. */
+        var list = sql.Substring(0, sql.IndexOf("SELECT /* PerformanceMonitorDarling", StringComparison.Ordinal));
+        var literals = System.Text.RegularExpressions.Regex.Matches(list, "N'([^']*)'")
+            .Select(m => m.Groups[1].Value)
+            .ToList();
+
+        Assert.Equal(IgnoredWaitDefaults.All.OrderBy(n => n, StringComparer.Ordinal).ToList(), literals);
+        Assert.All(literals, n => Assert.Matches("^[A-Z0-9_]+$", n));
+
+        /* The starvation, lock, latch and IO waits are the point of the probe and must still rank. */
+        foreach (var name in new[] { "SOS_SCHEDULER_YIELD", "THREADPOOL", "ASYNC_NETWORK_IO", "PAGEIOLATCH_SH", "LCK_M_X", "RESOURCE_SEMAPHORE" })
+        {
+            Assert.DoesNotContain("N'" + name + "'", sql, StringComparison.Ordinal);
+        }
+
+        /* Wait type only: no session or batch text is read to decide idleness. */
+        Assert.DoesNotContain("sql_text", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The idle counts use the same list as the ranking exclusion, in the totals; a name that is not a plain
+    /// wait name is refused rather than rendered into the text.
+    /// </summary>
+    [Fact]
+    public void TheQuery_CountsTheIdleWaitsInTheTotals_AndRefusesAnUnsafeName()
+    {
+        var sql = StallWaitProbePolicy.QueryText;
+        var crossJoin = sql.IndexOf("CROSS JOIN", StringComparison.Ordinal);
+        var firstApply = sql.IndexOf("OUTER APPLY", StringComparison.Ordinal);
+        var totals = sql.Substring(crossJoin, firstApply - crossJoin);
+
+        Assert.Contains("idle_waiting_tasks", totals, StringComparison.Ordinal);
+        Assert.Contains("idle_wait_types", totals, StringComparison.Ordinal);
+        Assert.Contains("N'SP_SERVER_DIAGNOSTICS_SLEEP'", sql, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, "N'SP_SERVER_DIAGNOSTICS_SLEEP'"));
+
+        /* A task counted as background is not counted again as idle. */
+        Assert.Contains("ISNULL(wt.is_user_process, 1) <> 0 AND wt.is_idle = 1", totals, StringComparison.Ordinal);
+
+        Assert.Throws<InvalidOperationException>(() => StallWaitProbePolicy.BuildQueryText(new[] { "OK_WAIT", "BAD'; DROP" }));
+        Assert.Throws<InvalidOperationException>(() => StallWaitProbePolicy.BuildQueryText(Array.Empty<string>()));
+
+        /* A null entry is the documented refusal too, not an ArgumentNullException from the sort or the regex. */
+        Assert.Throws<InvalidOperationException>(() => StallWaitProbePolicy.BuildQueryText(new string?[] { "OK_WAIT", null }!));
+        Assert.DoesNotContain("<<", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The ranking drops background tasks and the totals do not. The ISNULL form is asserted literally: a bare
+    /// <c>es.is_user_process = 1</c> would drop every session the DMV cannot show (Azure SQL Database).
+    /// </summary>
+    [Fact]
+    public void TheRanking_DropsBackgroundTasks_ButTheTotalsDoNot()
+    {
+        var sql = StallWaitProbePolicy.QueryText;
+
+        var firstApply = sql.IndexOf("OUTER APPLY", StringComparison.Ordinal);
+        var crossJoin = sql.IndexOf("CROSS JOIN", StringComparison.Ordinal);
+        Assert.True(crossJoin > 0 && firstApply > crossJoin);
+
+        var totals = sql.Substring(crossJoin, firstApply - crossJoin);
+        var ranking = sql.Substring(firstApply, sql.IndexOf("OUTER APPLY", firstApply + 1, StringComparison.Ordinal) - firstApply);
+
+        /* Both read the one derived set, which keeps a session the DMV cannot show (a LEFT JOIN), and the
+           ranking keeps its fail-safe. */
+        var waiting = sql.Substring(0, crossJoin);
+        Assert.Contains("LEFT JOIN sys.dm_exec_sessions AS es", waiting, StringComparison.Ordinal);
+        Assert.Contains("FROM waiting AS wt", totals, StringComparison.Ordinal);
+        Assert.Contains("FROM waiting AS wt", ranking, StringComparison.Ordinal);
+        Assert.Contains("TOP (5)", ranking, StringComparison.Ordinal);
+        Assert.Contains("ISNULL(wt.is_user_process, 1) = 1", ranking, StringComparison.Ordinal);
+        Assert.Contains("wt.is_idle = 0", ranking, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("is_user_process, 1) = 1", totals, StringComparison.Ordinal);
+        Assert.Contains("background_waiting_tasks", totals, StringComparison.Ordinal);
+
+        /* Sessionless tasks are dropped by an explicit predicate, once, in the derived set both read. */
+        Assert.Contains("owt.session_id IS NOT NULL", waiting, StringComparison.Ordinal);
+        Assert.Contains("owt.wait_type IS NOT NULL", waiting, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// This service's own session is found by application name and client host, never by session id, and the
+    /// query binds no parameters.
+    /// </summary>
+    [Fact]
+    public void TheQuery_FindsOurOwnSession_ByProgramAndHost_NotBySessionId()
+    {
+        var sql = StallWaitProbePolicy.QueryText;
+
+        Assert.Contains("es.program_name = APP_NAME()", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PROGRAM_NAME", sql, StringComparison.Ordinal);
+        Assert.Contains("es.host_name = HOST_NAME()", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT_BIG(DISTINCT es.session_id)", sql, StringComparison.Ordinal);
+        Assert.Contains("sys.dm_exec_requests", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("target_session_id", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("@session_id", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The planted rowset: 631 waiting tasks, 600 of them background, two ranked user waits, and one session of
+    /// ours waiting on ASYNC_NETWORK_IO. The unfiltered total is preserved, the top wait is the user wait, and
+    /// the summary ends with the exclusion tail.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_ReadsTheExclusionCountsAndOurSessionWait_FromThePlantedRowset()
+    {
+        var sample = await StallWaitProbePolicy.ReadAsync(
+            new FakeSampleReader(new object?[][]
+            {
+                ["SOS_SCHEDULER_YIELD", 25L, 9_931L, 61L, 631L, 14, 8, 97L, 3L, 12L, 21, 600L, 9, 1L, "ASYNC_NETWORK_IO", 41_000L, "ASYNC_NETWORK_IO", 0L, 0],
+                ["ASYNC_NETWORK_IO", 3L, 8_812L, 4_401L, 631L, 14, 8, 97L, 3L, 12L, 21, 600L, 9, 1L, "ASYNC_NETWORK_IO", 41_000L, "ASYNC_NETWORK_IO", 0L, 0],
+            }),
+            CancellationToken.None);
+
+        Assert.NotNull(sample);
+        Assert.Equal(631, sample!.WaitingTaskCount);
+        Assert.Equal("SOS_SCHEDULER_YIELD", sample.TopWaitType);
+        Assert.Equal(600, sample.BackgroundWaitingTasks);
+        Assert.Equal(9, sample.BackgroundWaitTypes);
+        Assert.Equal(1, sample.CollectorSessions);
+        Assert.Equal("ASYNC_NETWORK_IO", sample.CollectorWaitType);
+        Assert.Equal(41_000, sample.CollectorWaitMs);
+        Assert.Equal("ASYNC_NETWORK_IO", sample.CollectorLastWaitType);
+        Assert.EndsWith(
+            "excluded from ranking: background 600 tasks/9 types; idle 0 tasks/0 types; ours: ASYNC_NETWORK_IO 41000ms (last ASYNC_NETWORK_IO)",
+            sample.WaitSummary,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>No visible session of ours says so, rather than reading as a zero-millisecond wait.</summary>
+    [Fact]
+    public async Task ReadAsync_OurSessionNotVisible_SaysSo()
+    {
+        var sample = await StallWaitProbePolicy.ReadAsync(
+            new FakeSampleReader(new object?[][]
+            {
+                ["SOS_SCHEDULER_YIELD", 25L, 9_931L, 61L, 631L, 14, 8, 97L, 3L, 12L, 21, 600L, 9, 0L, null, null, null, 0L, 0],
+            }),
+            CancellationToken.None);
+
+        Assert.NotNull(sample);
+        Assert.EndsWith("; ours: not visible", sample!.WaitSummary, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Several matching sessions are labelled as such, and a running request (no current wait) reads as
+    /// running.
+    /// </summary>
+    [Fact]
+    public void RenderWaitSummary_LabelsSeveralSessions_AndARunningRequest()
+    {
+        var waits = new[] { new StallWaitRow("SOS_SCHEDULER_YIELD", 25, 9_931, 61) };
+
+        var summary = StallWaitProbePolicy.RenderWaitSummary(waits, 600, 9, 2, null, 0, "PAGEIOLATCH_SH");
+
+        Assert.EndsWith(
+            "ours (oldest of 2): running (last PAGEIOLATCH_SH)",
+            summary,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>Only background sessions wait: nothing ranks, and the summary is just the tail.</summary>
+    [Fact]
+    public async Task ReadAsync_WithOnlyBackgroundWaits_KeepsTheTailAsTheWholeSummary()
+    {
+        var sample = await StallWaitProbePolicy.ReadAsync(
+            new FakeSampleReader(new object?[][]
+            {
+                [null, null, null, null, 600L, 9, 8, 97L, 3L, 12L, 21, 600L, 9, 1L, "ASYNC_NETWORK_IO", 41_000L, "ASYNC_NETWORK_IO", 0L, 0],
+            }),
+            CancellationToken.None);
+
+        Assert.NotNull(sample);
+        Assert.Null(sample!.TopWaitType);
+        Assert.Equal(
+            "excluded from ranking: background 600 tasks/9 types; idle 0 tasks/0 types; ours: ASYNC_NETWORK_IO 41000ms (last ASYNC_NETWORK_IO)",
+            sample.WaitSummary);
+    }
+
+    /// <summary>The worst-case tail (maximum counts, 60-character names, 40 long entries) stays inside the cap.</summary>
+    [Fact]
+    public void RenderWaitSummary_TheWorstCaseTail_FitsTheCap()
+    {
+        var name = new string('W', 60);
+        var many = Enumerable.Range(0, 40).Select(_ => new StallWaitRow(name, long.MaxValue, long.MaxValue, 1)).ToArray();
+
+        var summary = StallWaitProbePolicy.RenderWaitSummary(many, long.MaxValue, int.MaxValue, long.MaxValue, name, long.MaxValue, name, long.MaxValue, int.MaxValue);
+        var alone = StallWaitProbePolicy.RenderWaitSummary(
+            Array.Empty<StallWaitRow>(), long.MaxValue, int.MaxValue, long.MaxValue, name, long.MaxValue, name, long.MaxValue, int.MaxValue);
+
+        Assert.True(summary.Length <= 512);
+        Assert.True(alone.Length <= 512);
+        Assert.StartsWith("excluded from ranking:", alone, StringComparison.Ordinal);
+    }
+
+    /// <summary>The idle counts ride in the tail, between the background counts and our own session (#5267).</summary>
+    [Fact]
+    public void RenderWaitSummary_CarriesTheIdleCounts_InTheTail()
+    {
+        var waits = new[] { new StallWaitRow("LCK_M_S", 1, 4_200, 4_200) };
+
+        var summary = StallWaitProbePolicy.RenderWaitSummary(waits, 58, 7, 1, "ASYNC_NETWORK_IO", 10, "ASYNC_NETWORK_IO", 3, 2);
+
+        Assert.Equal(
+            "LCK_M_S:1x/4200ms; excluded from ranking: background 58 tasks/7 types; idle 3 tasks/2 types; ours: ASYNC_NETWORK_IO 10ms (last ASYNC_NETWORK_IO)",
+            summary);
+    }
+
+    /// <summary>
+    /// Only idle and background waits exist: nothing ranks (a null top wait, zero top totals), the tail is the
+    /// whole summary and carries both counts, and the waiting-task total still counts every task.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_WithOnlyIdleAndBackgroundWaits_HasNoTopWait_AndCountsTheIdleOnes()
+    {
+        var sample = await StallWaitProbePolicy.ReadAsync(
+            new FakeSampleReader(new object?[][]
+            {
+                [null, null, null, null, 61L, 8, 8, 0L, 0L, 0L, 0, 58L, 6, 0L, null, null, null, 3L, 2],
+            }),
+            CancellationToken.None);
+
+        Assert.NotNull(sample);
+        Assert.Null(sample!.TopWaitType);
+        Assert.Equal(0, sample.TopWaitTotalMs);
+        Assert.Equal(0, sample.TopWaitMaxMs);
+        Assert.Equal(61, sample.WaitingTaskCount);
+        Assert.Equal(
+            "excluded from ranking: background 58 tasks/6 types; idle 3 tasks/2 types; ours: not visible",
+            sample.WaitSummary);
+    }
+
+    /// <summary>The tail is reserved first, so 40 long entries cannot push it off the 512-character cap.</summary>
+    [Fact]
+    public void RenderWaitSummary_KeepsTheTailWholeUnderTheCap()
+    {
+        var many = Enumerable.Range(0, 40)
+            .Select(i => new StallWaitRow($"WAIT_TYPE_NUMBER_{i:D2}", 1_234, 5_678_901, 4_321))
+            .ToArray();
+        const string tail = "excluded from ranking: background 600 tasks/9 types; idle 12 tasks/3 types; ours: ASYNC_NETWORK_IO 41000ms (last ASYNC_NETWORK_IO)";
+
+        var summary = StallWaitProbePolicy.RenderWaitSummary(many, 600, 9, 1, "ASYNC_NETWORK_IO", 41_000, "ASYNC_NETWORK_IO", 12, 3);
+
+        Assert.True(summary.Length <= StallWaitProbePolicy.WaitSummaryMaxLength);
+        Assert.EndsWith(tail, summary, StringComparison.Ordinal);
+        Assert.Contains("WAIT_TYPE_NUMBER_00:1234x/5678901ms; ", summary, StringComparison.Ordinal);
+        Assert.DoesNotContain(";;", summary, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -753,7 +1020,8 @@ public class StallWaitProbePolicyTests
         var summary = StallWaitProbePolicy.RenderWaitSummary(many);
 
         Assert.True(summary.Length <= StallWaitProbePolicy.WaitSummaryMaxLength);
-        Assert.EndsWith("ms", summary, StringComparison.Ordinal);
+        Assert.EndsWith("ours: not visible", summary, StringComparison.Ordinal);
+        Assert.Contains("ms; excluded from ranking:", summary, StringComparison.Ordinal);
         Assert.DoesNotContain(";;", summary, StringComparison.Ordinal);
         Assert.False(summary.EndsWith("; ", StringComparison.Ordinal));
     }
@@ -818,7 +1086,7 @@ public class StallWaitProbePolicyTests
 
         public override string GetString(int ordinal) => (string)_rows[_index][ordinal]!;
 
-        public override int FieldCount => 11;
+        public override int FieldCount => 19;
 
         public override bool HasRows => _rows.Count > 0;
 

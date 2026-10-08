@@ -438,6 +438,53 @@ public sealed class ManagedConfFileTests
         Assert.Contains(diffs, d => d.Key == "checkpoint_timeout");
     }
 
+    /// <summary>v18 is one of the builders <see cref="ManagedConfFile.RenderBody"/> calls: the rendered body
+    /// carries exactly one preload line, <c>timescaledb,pg_stat_statements,auto_explain</c> (v18's list wins
+    /// over v13's), and every <c>auto_explain.*</c> setting, once.</summary>
+    [Fact]
+    public void RenderBody_CarriesAutoExplain_OnePreloadLine_AndEverySetting()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        Assert.Equal(1, CountOccurrences(body, "shared_preload_libraries = '"));
+        Assert.Contains("shared_preload_libraries = 'timescaledb,pg_stat_statements,auto_explain'", body, StringComparison.Ordinal);
+        foreach (var setting in new[]
+        {
+            "auto_explain.log_min_duration = '10s'",
+            "auto_explain.log_analyze = 'off'",
+            "auto_explain.log_format = 'json'",
+            "auto_explain.log_nested_statements = 'off'",
+            "auto_explain.log_verbose = 'on'",
+            "auto_explain.log_settings = 'on'",
+            "auto_explain.log_parameter_max_length = '0'",
+        })
+        {
+            Assert.Equal(1, CountOccurrences(body, setting));
+        }
+    }
+
+    /// <summary>An operator library already in force survives the v18 merge, and auto_explain is last.</summary>
+    [Fact]
+    public void RenderBody_V18Merge_KeepsAnOperatorLibrary_AndAppendsAutoExplainLast()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs(effectivePreloadList: "timescaledb,pg_prewarm"));
+
+        Assert.Contains("shared_preload_libraries = 'timescaledb,pg_prewarm,pg_stat_statements,auto_explain'", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>A render over a list that already holds auto_explain is byte-identical to a second render
+    /// over the list that render produced: the merge is idempotent across starts.</summary>
+    [Fact]
+    public void RenderBody_V18Merge_IsIdempotentAcrossStarts()
+    {
+        var first = ManagedConfFile.RenderBody(SampleInputs(effectivePreloadList: "timescaledb"));
+        var preload = Assert.Single(ManagedConfFile.DiffBodyKeys(string.Empty, first), d => d.Key == "shared_preload_libraries");
+
+        var second = ManagedConfFile.RenderBody(SampleInputs(effectivePreloadList: preload.RenderedValue));
+
+        Assert.Equal(first, second);
+    }
+
     /// <summary>Pin: <see cref="ManagedConfFile.RenderBody"/> always renders <c>listen_addresses</c> as
     /// exactly loopback (<c>DarlingManagedPostgres.BuildConfAppend</c>'s v1 line) — never the network
     /// address an exposed store's command line adds. Every verification path that reads this rendered text
@@ -594,6 +641,11 @@ public sealed class ManagedConfFileTests
         if (marker == DarlingManagedPostgres.ConfMarkerV17)
         {
             return DarlingManagedPostgres.BuildLogLinePrefixConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV18)
+        {
+            return DarlingManagedPostgres.BuildSlowPlanConfAppend(inputs.EffectivePreloadList);
         }
 
         throw new InvalidOperationException(

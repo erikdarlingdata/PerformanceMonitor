@@ -46,11 +46,15 @@ public sealed class ViewerQueriesSqlTests
            what resolves the payload dimension. Note "FROM v_query_stats" does not contain
            "FROM query_stats", so these two assertions really are about two different relations. */
         var rankedRead = sql.IndexOf("FROM query_stats", StringComparison.Ordinal);
-        var lateral = sql.IndexOf("LEFT JOIN LATERAL", StringComparison.Ordinal);
-        var textRead = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        var lookupAt = sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal);
+        var dimRead = sql.IndexOf("query_text_dim", StringComparison.Ordinal);
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
-        Assert.True(textRead > lateral && lateral > rankedRead,
-            "the base-table aggregate comes first; the resolving view is read by the latest-text LATERAL");
+        /* #5309: the text is ONE lookup for every ranked group; it resolves the dimension itself (what
+           v_query_stats' COALESCE does) for the newest row of each group only. */
+        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
+        Assert.True(dimRead > lookupAt && lookupAt > rankedRead,
+            "the base-table aggregate comes first; the dimension is read by the one latest-text lookup");
 
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
@@ -61,6 +65,7 @@ public sealed class ViewerQueriesSqlTests
            another caller's rows (NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows). */
         Assert.Contains("GROUP BY database_name, query_hash, host_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("host_object_name IS NOT DISTINCT FROM r.host_object_name", sql, StringComparison.Ordinal);
+        Assert.Contains("q.host_object_name IS NOT DISTINCT FROM rk.host_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0", sql, StringComparison.Ordinal);
     }
 
@@ -69,7 +74,9 @@ public sealed class ViewerQueriesSqlTests
     {
         var sql = ViewerDataService.TopQueriesSql;
         Assert.Contains("ORDER BY SUM(delta_elapsed_time) DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal); /* over-fetch so the WAITFOR trim can't shrink below top */
+        /* #5313: the over-fetch is the candidate limit $6 (top + 5 first, TopFill refills while the page is short). */
+        Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY r.total_elapsed_us DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
@@ -79,15 +86,16 @@ public sealed class ViewerQueriesSqlTests
     public void TopQueriesSql_FetchesTheLatestNonNullQueryText_ViaLateralJoin_WithPlanPresenceFlag()
     {
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
-        Assert.Contains("query_text IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
+        Assert.Contains("q.query_text IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("q.collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("DISTINCT ON (q.database_name, q.query_hash, q.host_object_name)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
         /* The LATERAL still fetches only query_text (never the multi-KB plan), and it reads v_query_stats so
            the #1767 payload dimension is resolved — the base table's inline query_text is NULL on every row
            written since. The plan is surfaced by a cheap group-level presence flag that gates the grid's
            Query Plan column; the plan XML itself is read on demand (GetQueryStatsPlanXmlAsync). */
-        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("JOIN query_text_dim AS d ON d.digest = l.query_text_digest", sql, StringComparison.Ordinal);
 
         /* The flag now has a digest arm: since #1767 the plan lives in query_plan_dim and the fact row
            carries only the key, so a bare `query_plan_xml IS NOT NULL` would report "no plan captured" for
@@ -127,7 +135,9 @@ public sealed class ViewerQueriesSqlTests
         /* #1319: $5 is now the global database filter (database_name = ANY($5)), NOT Lite's utc-offset
            staleness param — the viewer still drops Lite's INTERVAL staleness filter. */
         Assert.Contains("database_name = ANY($5)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$6", sql, StringComparison.Ordinal);
+        /* #5313: $6 is the candidate limit now (top + 5 first, refilled), still not an offset or staleness parameter. */
+        Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -186,9 +196,10 @@ public sealed class ViewerQueriesSqlTests
            reason: Regular, Aborted and Exception executions of one plan are separate runtime-stats rows. */
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(execution_type_desc)", sql, StringComparison.Ordinal);
-        /* Rank by total duration = executions * avg duration, over-fetch 5, cap at top (Lite's shape). */
+        /* Rank by total duration = executions * avg duration, candidate limit (top + 5 on the first round, #5313), cap at top (Lite's shape). */
         Assert.Contains("ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY r.total_executions * r.avg_duration_ms DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
@@ -260,10 +271,10 @@ public sealed class ViewerQueriesSqlTests
     // ── Comparisons ──
 
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsComparisonSql), "query_stats", "GROUP BY th.database_name, th.query_hash")]
-    [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql), "query_store_stats", "GROUP BY th.database_name, th.query_hash")]
-    [InlineData(nameof(ViewerDataService.ProcedureStatsComparisonSql), "procedure_stats", "GROUP BY tp.database_name, tp.schema_name, tp.object_name")]
-    public void ComparisonSql_UnionsTop100_FullOuterJoins_NullSafe(string sqlName, string table, string finalGroupBy)
+    [InlineData(nameof(ViewerDataService.QueryStatsComparisonSql), "query_stats", "th", "database_name,query_hash")]
+    [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql), "query_store_stats", "th", "database_name,query_hash")]
+    [InlineData(nameof(ViewerDataService.ProcedureStatsComparisonSql), "procedure_stats", "tp", "database_name,schema_name,object_name")]
+    public void ComparisonSql_UnionsTop100_FullOuterJoins_NullSafe(string sqlName, string table, string topAlias, string keyColumns)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
@@ -271,11 +282,34 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("LIMIT 100", sql, StringComparison.Ordinal);
         Assert.Contains("UNION ALL", sql, StringComparison.Ordinal);
         Assert.Contains("FULL OUTER JOIN baseline_period b", sql, StringComparison.Ordinal);
-        /* The CTE INNER JOINs keep Lite's null-safe IS NOT DISTINCT FROM (legal in a PG inner join)... */
-        Assert.Contains("IS NOT DISTINCT FROM", sql, StringComparison.Ordinal);
-        /* ...but the FULL JOIN must be COALESCE-equality — PG can't FULL-JOIN on IS NOT DISTINCT FROM. */
-        Assert.Contains("COALESCE(c.database_name, '') = COALESCE(b.database_name, '')", sql, StringComparison.Ordinal);
-        Assert.Contains(finalGroupBy, sql, StringComparison.Ordinal);
+        /* #5420: the period joins are null-safe the hashable way, a COALESCE equality plus an IS NULL pair, because
+           IS NOT DISTINCT FROM ran as a nested loop over every window row (ViewerTextLookupWindowBoundLiveTests pins the plan)... */
+        foreach (var key in keyColumns.Split(','))
+        {
+            /* both halves of EVERY key column, in both periods' text join: a dropped IS NULL pair makes a NULL key and an empty
+               one meet, and the COALESCE half alone cannot tell them apart. */
+            Assert.Equal(2, CountOf(sql, $"COALESCE(w.{key}, '') = COALESCE({topAlias}.{key}, '')"));
+            Assert.Equal(2, CountOf(sql, $"(w.{key} IS NULL) = ({topAlias}.{key} IS NULL)"));
+        }
+        /* ...and the FULL JOIN must be COALESCE-equality plus the IS NULL pair, on EVERY key column — PG can't FULL-JOIN on
+           IS NOT DISTINCT FROM, and a COALESCE alone would merge a NULL-key group with its empty-key twin and fan a row out (#5420).
+           Both halves are one-side equalities, so the join stays hashable. Counted once each, so a dropped half fails. */
+        foreach (var key in keyColumns.Split(','))
+        {
+            Assert.Equal(1, CountOf(sql, $"COALESCE(c.{key}, '') = COALESCE(b.{key}, '')"));
+            Assert.Equal(1, CountOf(sql, $"(c.{key} IS NULL) = (b.{key} IS NULL)"));
+        }
+    }
+
+    private static int CountOf(string text, string part)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(part, StringComparison.Ordinal); at >= 0; at = text.IndexOf(part, at + part.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     [Fact]

@@ -166,7 +166,7 @@ public sealed class AzureSqlDatabaseHardwareTests
 
         Process proc;
         try { proc = Process.Start(psi)!; }
-        catch (Win32Exception) { return; } // Node is not installed; the source pins above still hold the change in place.
+        catch (Win32Exception) { Assert.Skip("Node is not installed, so the shipped page script cannot be run."); throw; } // The source pins above still hold the change in place.
 
         using (proc)
         {
@@ -235,18 +235,21 @@ public sealed class AzureSqlDatabaseHardwareTests
     {
         var tab = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Loaders.cs");
         var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml");
-        var read = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Utilization.cs");
+        var read = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsUtilizationReader.cs");
+        var figures = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsUtilizationFigures.cs");
 
-        Assert.Contains("ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition)", tab, StringComparison.Ordinal);
+        Assert.Contains("ServerHardwareScope.HardwareIsTheHosts(d.EngineEdition)", figures, StringComparison.Ordinal);
+        Assert.Contains("FinOpsUtilizationFigures.Explanation(", tab, StringComparison.Ordinal);
         Assert.Contains("FinOpsPhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);", tab, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"FinOpsPhysicalMemoryCaption\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("ServerHardwareScope.OverProvisionedExplanation(", tab, StringComparison.Ordinal);
-        Assert.Contains("ServerHardwareScope.RightSizedExplanation(", tab, StringComparison.Ordinal);
+        Assert.Contains("ServerHardwareScope.OverProvisionedExplanation(", figures, StringComparison.Ordinal);
+        Assert.Contains("ServerHardwareScope.RightSizedExplanation(", figures, StringComparison.Ordinal);
         Assert.DoesNotContain("of physical RAM", tab, StringComparison.Ordinal);
+        Assert.DoesNotContain("of physical RAM", figures, StringComparison.Ordinal);
         /* The CPU count is resolved through the edition (AzureSqlDatabaseHostMathTests pins the CASE): off edition 5 it is still
            COALESCE(vcore_count, cpu_count), and the edition still rides along for the card. */
         Assert.Contains("ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition", read, StringComparison.Ordinal);
-        Assert.Contains("EngineEdition = reader.IsDBNull(16)", read, StringComparison.Ordinal);
+        Assert.Contains("EngineEdition: reader.IsDBNull(16)", read, StringComparison.Ordinal);
     }
 
     [Fact]

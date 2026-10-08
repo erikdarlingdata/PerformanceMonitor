@@ -39,7 +39,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
             return;
         }
 
-        const string role = "pm_test_pgreadbinaryfile_role";
+        var role = "pm_test_pgreadbinaryfile_" + Guid.NewGuid().ToString("N")[..8]; // #4981: unique to the run, roles are cluster-wide
 
         await using var adminConnection = new NpgsqlConnection(connectionStringRoot);
         await adminConnection.OpenAsync();
@@ -123,7 +123,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         await using var adminConnection = new NpgsqlConnection(connectionStringRoot);
         await adminConnection.OpenAsync();
 
-        await DropScratchDatabaseAsync(adminConnection, database);
+        await DropScratchDatabaseAsync(connectionStringRoot, adminConnection, database);
 
         await using (var create = adminConnection.CreateCommand())
         {
@@ -164,14 +164,16 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         {
             await LiveStoreCleanup.RunAsync(connectionStringRoot, bodySucceeded, async (cleanup, _) =>
             {
-                await DropScratchDatabaseAsync(cleanup, database);
+                await DropScratchDatabaseAsync(connectionStringRoot, cleanup, database);
             });
         }
     }
 
     /* WITH (FORCE), because the probe's own connection may not have finished closing on the server. */
-    private static async Task DropScratchDatabaseAsync(NpgsqlConnection adminConnection, string database)
+    private static async Task DropScratchDatabaseAsync(string connectionStringRoot, NpgsqlConnection adminConnection, string database)
     {
+        /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+        await ScratchPostgres.QuiesceTimescaleJobsAsync(connectionStringRoot, database);
         await using var drop = adminConnection.CreateCommand();
         drop.CommandTimeout = 60;
         drop.CommandText = $"DROP DATABASE IF EXISTS {database} WITH (FORCE)";
@@ -234,7 +236,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         {
             await LiveStoreCleanup.RunAsync(connectionStringRoot!, bodySucceeded, async (cleanup, _) =>
             {
-                await DropScratchDatabaseAsync(cleanup, database);
+                await DropScratchDatabaseAsync(connectionStringRoot!, cleanup, database);
             });
         }
     }

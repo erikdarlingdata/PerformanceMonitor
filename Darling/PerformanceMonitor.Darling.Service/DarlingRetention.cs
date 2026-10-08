@@ -185,7 +185,7 @@ public static class DarlingRetention
     /// different windows. The table keeps 9 days and deletes row by row on <c>first_execution_time</c>. A Query
     /// Store interval can span a day, so 8 days is exactly the edge for an interval that starts just past the
     /// horizon and closes inside a 7-day window; 9 days gives a day of margin. Reads use the table below raw's
-    /// chunk floor, down to L = max(window start, filled_since, table floor + 1 day), where the table floor is
+    /// chunk floor, down to L = max(window start, filled_since, table floor + 26 h (the purge-edge margin)), where the table floor is
     /// the oldest <c>first_execution_time</c> the purge has left. Like <see cref="QueryStoreIntervalLatestRetentionDays"/>
     /// this is a named constant, not a knob, and in no collector schedule.
     /// </summary>
@@ -803,8 +803,8 @@ public static class DarlingRetention
                (QueryStoreIntervalWideRetentionDays) on first_execution_time — a shorter horizon than V143's 15
                days. Same batched-DELETE shape, same pending-replay horizon reasoning, failure-isolated like every
                sibling. The purge deletes row by row on first_execution_time, so the table floor the read gate
-               checks (MIN(first_execution_time)) advances as it runs, and reads below raw's floor stop one day
-               above it (L = max(window start, filled_since, table floor + 1 day)). */
+               checks (MIN(first_execution_time)) advances as it runs, and reads below raw's floor stop 26 h
+               above it (L = max(window start, filled_since, table floor + 26 h, the purge-edge margin)). */
             var intervalWideDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalWide.TableName,
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.TableName, "first_execution_time"),
@@ -909,6 +909,60 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
+               guard compares with the hourly rollup, in place of counting raw. NOT in CollectorCatalog.All (the
+               collector runner's COPY transaction writes it, not a collector definition), so the loop above skips
+               it, and the raw-relation skip in that loop is for raw tables only; nothing else prunes it.
+               The horizon is the SUCCESSOR HOURLY ROLLUP's (TimescaleSupport.HourlyRetentionSpan, the same
+               constant the successor's own retention policy and the read router derive from), NOT raw's four days
+               and NOT a collector's retention: the guard compares the ledger with the rollup, which keeps ninety
+               days, so a ledger pruned at raw's horizon would be missing hours the rollup still holds and the guard
+               would fail every window past four days. A store without TimescaleDB has no rollup and no guard, and
+               the same constant just bounds the table there.
+               A plain table, so a plain DELETE: about one row per server per hour (servers x 24 x retention days),
+               and the primary key leads with bucket, so the predicate is an index range scan. One execution IS the
+               whole purge, so it dispatches single-shot, like the fleet-sweep children below.
+               Failure-isolated like every sibling: a failed statement is warned + counted, the sweep goes on. */
+            var hourLedgerDeleted = await PurgeOneAsync(
+                postgres, QueryStatsHourLedger.LedgerTable,
+                QueryStatsHourLedger.PruneSql,
+                utcNow - TimescaleSupport.HourlyRetentionSpan, logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (hourLedgerDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += hourLedgerDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* collect.pg_io_stats_hourly (#5495, V170): the hourly rollup of pg_io_stats. NOT in CollectorCatalog.All (the hourly
+               tick's builder writes it), so the loop above skips it. It keeps exactly the raw collector's retention (the same
+               resolved days, so a per-collector override moves both): a rollup hour whose raw rows are gone makes the read's count guard
+               differ and sends that read to raw, which holds nothing there either. A plain table, one row per combination per hour,
+               and the unique index leads with server_id then hour_start; a plain DELETE is one execution. */
+            var pgIoHourlyDays = EffectivePurgeRetentionDays(
+                "pg_io_stats",
+                retentionDaysFor?.Invoke("pg_io_stats")
+                    ?? (CollectorScheduleDefaults.All.TryGetValue("pg_io_stats", out var pgIoSchedule) ? pgIoSchedule.RetentionDays : DataRetentionBaseDays));
+            var pgIoHourlyDeleted = await PurgeOneAsync(
+                postgres, PgIoStatsHourly.Table,
+                PgIoStatsHourlyBuilder.PruneSql,
+                utcNow.AddDays(-pgIoHourlyDays), logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (pgIoHourlyDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += pgIoHourlyDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
             /* collect.oversized_plan_backlog (#3392) purges on last_seen_at at
                OversizedPlanBacklogRetentionDays. NOT in CollectorCatalog.All (it is written by the collector
                runner's post-write hook and by the backlog sweep, not by a collector definition), so the loop

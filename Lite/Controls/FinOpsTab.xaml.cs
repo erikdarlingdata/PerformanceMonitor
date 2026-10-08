@@ -44,6 +44,13 @@ public partial class FinOpsTab : UserControl
        for a server switch that never happened. Darling's FinOps tab carries the same flag. */
     private bool _populatingServers;
 
+    /* When the last whole per-server load began (UTC). The tab loads once at start-up, before the first collection has run; showing it
+       later re-runs that load, the same one a server reselect runs, unless this is recent (FinOpsShowReloadPolicy). */
+    private DateTime? _lastPerServerLoadUtc;
+
+    /* True until the tab's first show after start-up has run its reload: that one never skips on the age of the start-up load. */
+    private bool _firstShowPending = true;
+
     private DataGridFilterManager<DatabaseResourceUsageRow>? _dbResourcesFilterMgr;
     private DataGridFilterManager<StorageGrowthRow>? _storageGrowthFilterMgr;
     private DataGridFilterManager<DatabaseSizeRow>? _dbSizesFilterMgr;
@@ -146,6 +153,23 @@ public partial class FinOpsTab : UserControl
             ServerSelector.SelectedIndex = 0;
     }
 
+    /// <summary>
+    /// #5312: the selected server's saved per-server database filter (the one the server tab's database picker persists in
+    /// <see cref="ServerConnection.ViewFilterDatabases"/>) as a reader argument: null (= every database, the unfiltered
+    /// statement) when nothing is chosen. Read from the manager's current entry, because the instance in the selector can be
+    /// older than a filter change made on the server tab. Call on the UI thread, before the read goes to the pool.
+    /// </summary>
+    private IReadOnlyList<string>? SelectedDatabaseFilter()
+    {
+        var shown = ServerSelector.SelectedItem as ServerConnection;
+        var current = shown == null ? null : _serverManager?.GetServerById(shown.Id) ?? shown;
+        return DatabaseFilterOf(current);
+    }
+
+    /// <summary>The filter of <paramref name="server"/> as a reader argument: null when it has none.</summary>
+    internal static IReadOnlyList<string>? DatabaseFilterOf(ServerConnection? server) =>
+        server == null || server.ViewFilterDatabases.Count == 0 ? null : server.ViewFilterDatabases.ToList();
+
     private int GetSelectedServerId()
     {
         if (ServerSelector.SelectedItem is ServerConnection server)
@@ -186,7 +210,7 @@ public partial class FinOpsTab : UserControl
         {
             var connStr = GetSelectedConnectionString();
             if (!string.IsNullOrEmpty(connStr))
-                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash);
+                plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash));
         }
         return plan;
     }
@@ -240,6 +264,7 @@ public partial class FinOpsTab : UserControl
         using var _profiler = Helpers.MethodProfiler.StartTiming("FinOps-PerServerData");
         var serverId = GetSelectedServerId();
         if (serverId == 0 || _dataService == null) return;
+        _lastPerServerLoadUtc = DateTime.UtcNow;
 
         // Re-read monthly cost from server manager in case user edited the server config
         if (ServerSelector.SelectedItem is Models.ServerConnection selectedServer && _serverManager != null)
@@ -311,11 +336,14 @@ public partial class FinOpsTab : UserControl
                 data.MonthlyCost = _currentServerMonthlyCost;
 
                 // Compute free space % for health score from database sizes
+                /* #5312: deliberately NOT filtered. This read feeds the server's free-space health score, which is a
+                   server-wide figure, so the saved database filter must not move it. The Database Sizes grid and the
+                   size chart below take the filter. */
                 dbSizes = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
                 var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
                 var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
-                data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
+                data.FreeSpacePct = FinOpsHealthCalculator.FreeSpacePct(totalStorageMb, totalFreeMb);
             }
 
             UpdateUtilizationSummary(data);
@@ -339,7 +367,8 @@ public partial class FinOpsTab : UserControl
                 topAvg = byAvg;
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
-                dbSizeSummary = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId));
+                var sizeChartFilter = SelectedDatabaseFilter();
+                dbSizeSummary = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId, 10, sizeChartFilter));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
                 provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId));
@@ -349,6 +378,9 @@ public partial class FinOpsTab : UserControl
             TopTotalGrid.ItemsSource = topTotal;
             TopAvgGrid.ItemsSource = topAvg;
             DbSizeChart.ItemsSource = dbSizeSummary;
+            /* A server with no CPU sample in the window is stale or not collecting: its latest sizes can be days old, so the chart is
+               hidden rather than shown as if they were current. */
+            DbSizeChartGroup.Visibility = data is { ShowsDatabaseSizeChart: true } ? Visibility.Visible : Visibility.Collapsed;
             /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
             var chartCaption = dbSizeSummary is null ? null : DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
             DbSizeChartCaption.Text = chartCaption ?? "";
@@ -407,9 +439,10 @@ public partial class FinOpsTab : UserControl
         }
 
         /* CPU text + bars */
-        AvgCpuText.Text = $"{data.AvgCpuPct:N2}%";
-        P95CpuText.Text = $"{data.P95CpuPct:N2}%";
-        MaxCpuText.Text = $"{data.MaxCpuPct}%";
+        /* A window with no CPU sample shows dashes and empty bars: the 0s the read returns came from nothing. */
+        AvgCpuText.Text = data.AvgCpuText;
+        P95CpuText.Text = data.P95CpuText;
+        MaxCpuText.Text = data.MaxCpuText;
         CpuSamplesText.Text = data.CpuSamples.ToString("N0");
         /* On an Azure SQL Database the count is its vCores, named as vCores, and n/a where its service objective names none: the
            scheduler count it can see is never shown as the CPU it is given. */
@@ -418,9 +451,9 @@ public partial class FinOpsTab : UserControl
         /* The in-use count is n/a where it was not collected (NULL on an Azure SQL Database), never 0; the maximum shows as stored. */
         WorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);
 
-        SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, (double)data.AvgCpuPct);
-        SetBar(P95CpuBar, P95CpuFilled, P95CpuEmpty, (double)data.P95CpuPct);
-        SetBar(MaxCpuBar, MaxCpuFilled, MaxCpuEmpty, data.MaxCpuPct);
+        SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, data.HasCpuSample ? (double)data.AvgCpuPct : 0);
+        SetBar(P95CpuBar, P95CpuFilled, P95CpuEmpty, data.HasCpuSample ? (double)data.P95CpuPct : 0);
+        SetBar(MaxCpuBar, MaxCpuFilled, MaxCpuEmpty, data.HasCpuSample ? data.MaxCpuPct : 0);
 
         /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
         var stolenPct = data.TotalMemoryMb > 0
@@ -481,9 +514,10 @@ public partial class FinOpsTab : UserControl
         /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
            Database is the database's own. */
         data.HealthScore = data.ComputeHealthScore();
-        /* A window with no CPU sample has no CPU term (ComputeHealthScore leaves it out), and the tooltip says so. */
-        HealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;
-        HealthScoreText.Text = $"Health: {data.HealthScore}";
+        /* A window with no CPU sample has no score: the memory and storage terms alone would read a full 100 next to "No Data".
+           It shows a dash on a gray badge, and the tooltip says why. */
+        HealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;
+        HealthScoreText.Text = data.HealthScoreText;
         HealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         HealthScoreBorder.Visibility = Visibility.Visible;
     }
@@ -575,12 +609,41 @@ public partial class FinOpsTab : UserControl
     private void ReloadUnfinishedSizeGridsOnShow()
     {
         if (!IsVisible || _dataService == null) return;
-        /* A show while a flagged load is still in flight starts a second load that supersedes the first: one
-           extra local read, and the generation check keeps only the newest paint. */
         var serverId = GetSelectedServerId();
         if (serverId == 0) return;
+
+        /* The first show: the start-up load ran before any collection, against a store that may be days old, so every grid on this
+           tab (and the recommendations built from them) can still be that empty window. Re-run the same whole load a server
+           reselect runs, for the server already selected; the per-grid generations drop any paint it supersedes. Filters stay: no
+           server switch happened. It covers both size grids, so the flagged reloads below are for a recent load. */
+        var firstShow = _firstShowPending;
+        _firstShowPending = false;
+        if (FinOpsShowReloadPolicy.ShouldReloadOnShow(_lastPerServerLoadUtc, DateTime.UtcNow, firstShow))
+        {
+            _ = LoadPerServerDataAsync();
+            return;
+        }
+
+        /* A show while a flagged load is still in flight starts a second load that supersedes the first: one
+           extra local read, and the generation check keeps only the newest paint. */
         if (_dbSizesNeedReload) _ = LoadDatabaseSizesAsync(serverId);
         if (_storageGrowthNeedReload) _ = LoadStorageGrowthAsync(serverId);
+    }
+
+    /// <summary>
+    /// The Overview refresh saw that a collection for <paramref name="serverId"/> finished at <paramref name="lastCollectionUtc"/>.
+    /// A tab that is visible on that server reloads (see <see cref="FinOpsShowReloadPolicy.ShouldReloadAfterCollection"/>): the load it
+    /// holds may have read the window before the collection, and nothing else re-runs it while the tab stays shown.
+    /// </summary>
+    public void NoteCollection(int serverId, DateTime? lastCollectionUtc)
+    {
+        if (!IsVisible || _dataService == null || lastCollectionUtc is not DateTime collected) return;
+        if (serverId == 0 || GetSelectedServerId() != serverId) return;
+
+        if (FinOpsShowReloadPolicy.ShouldReloadAfterCollection(_lastPerServerLoadUtc, collected, DateTime.UtcNow))
+        {
+            _ = LoadPerServerDataAsync();
+        }
     }
 
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)
@@ -591,7 +654,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
+            var sizesFilter = SelectedDatabaseFilter();
+            var data = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId, sizesFilter));
             if (_loads.Superseded(nameof(LoadDatabaseSizesAsync), gen)) return;
 
             // Compute proportional cost shares
@@ -661,7 +725,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetPvsStatsLatestAsync(serverId));
+            var pvsFilter = SelectedDatabaseFilter();
+            var data = await Task.Run(() => _dataService.GetPvsStatsLatestAsync(serverId, pvsFilter));
             if (_loads.Superseded(nameof(LoadPvsStatsAsync), gen)) return;
 
             _pvsStatsFilterMgr!.UpdateData(data);
@@ -681,7 +746,7 @@ public partial class FinOpsTab : UserControl
             var openTab = _openTabClock.Invoke(serverId);
             var dataService = _dataService;
             var (trend, collected) = await Task.Run(async () =>
-                (await dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7)),
+                (await dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7), pvsFilter),
                  await dataService.GetServerClockAsync(serverId)));
             if (_loads.Superseded(nameof(LoadPvsStatsAsync), gen)) return;
 
@@ -773,16 +838,8 @@ public partial class FinOpsTab : UserControl
                 async () => await Task.Run(() => _dataService!.GetServerMetricsAsync()));
             if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
 
-            // Compute health scores for each server
-            foreach (var item in data)
-            {
-                /* A server with no CPU sample in the window has a null average: its CPU term is left out, because scoring it
-                   as 0% CPU would hand it a full 100 made from nothing. */
-                int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;
-                var memScore = 80; // Default — we don't have buffer pool ratio in inventory
-                var storScore = FinOpsHealthCalculator.StorageScore(50); // Default — no file-level free space in inventory
-                item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
-            }
+            /* The Health column comes with the collected overlay (FinOpsServerInventory.ApplyCollectedMetrics): the same score the Utilization
+               tab shows for the server, from its p95 CPU, buffer pool and free space. A server with no CPU sample has none (a dash). */
 
             _serverInventoryCache = data;
             _serverInventoryCacheTime = DateTime.Now;
@@ -805,7 +862,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId));
+            var storageGrowthFilter = SelectedDatabaseFilter();   // #5312: UI thread, before the read goes to the pool
+            var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId, storageGrowthFilter));
             if (_loads.Superseded(nameof(LoadStorageGrowthAsync), gen)) return;
             _storageGrowthFilterMgr!.UpdateData(data);
             _storageGrowthNeedReload = data.Count == 0;
@@ -844,9 +902,16 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetIdleDatabasesAsync(serverId));
+            // The same 7-day coverage rule the recommendation row uses: a database is idle only when each of the last 7 UTC days was
+            // watched, else the grid says why it is empty instead of "No idle databases detected".
+            var (covered, data) = await Task.Run(async () =>
+            {
+                var hasCoverage = await _dataService.HasQueryStatsCoverageAsync(serverId);
+                return (hasCoverage, hasCoverage ? await _dataService.GetIdleDatabasesAsync(serverId) : new List<IdleDatabaseRow>());
+            });
             if (_loads.Superseded(nameof(LoadIdleDatabasesAsync), gen)) return;
             _idleDbsFilterMgr!.UpdateData(data);
+            IdleDatabasesNoDataMessage.Text = LocalDataService.IdleDatabasesEmptyText(covered);
             IdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
         }

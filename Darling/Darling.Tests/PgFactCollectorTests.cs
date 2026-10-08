@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /* Live-fixture tests share one Postgres store; the collection serializes them so
    cross-test row churn (inserts/purges/deletes) cannot race another class's assertions. */
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class PgFactCollectorTests
 {
     /// <summary>Distinctive fake ids — a real server_id is a storage-name hash, never these.</summary>
@@ -111,10 +112,14 @@ public sealed class PgFactCollectorTests
     {
         /* 32 collect methods (31 fact readers plus the #3538 coverage witness), one query each, plus
            the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery, plus
-           PLAN_REGRESSION's #3953 table twin: the plan-regression method runs one of two reads per server,
-           and Lite has no store for the second (its DuckDB keeps no latest-snapshot interval table). */
-        Assert.Equal(LiteCollectMethodSurface.Length + 2, PgFactCollector.AllSql.Count);
+           PLAN_REGRESSION's #3953 table twin and #5448 daily-totals twin: the plan-regression method runs one of
+           three reads per server, and Lite has no store for the second or the third (its DuckDB keeps no
+           latest-snapshot interval table), plus #5516's DatabaseSizeNewestSql: the database-size method runs
+           it first and DatabaseSizeSql only when a file has dropped out of the newest snapshot. */
+        Assert.Equal(LiteCollectMethodSurface.Length + 4, PgFactCollector.AllSql.Count);
+        Assert.Contains(PgFactCollector.DatabaseSizeNewestSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);
+        Assert.Contains(PgFactCollector.PlanRegressionDailySql, PgFactCollector.AllSql);
         Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.CoverageSql, PgFactCollector.AllSql);
     }
@@ -243,17 +248,20 @@ public sealed class PgFactCollectorTests
     [Fact]
     public void AllSql_AnyValue_OnlyInThePlanRegressionQuery()
     {
-        /* any_value() is standard SQL:2023, in Postgres since 16 (product minimum PG is 17).
+        /* any_value() is standard SQL:2023, in Postgres since 16 (product minimum PG is 16).
            It is deliberate in the plan-regression aggregation and nowhere else. */
         Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionSql, StringComparison.Ordinal);
         Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionTableSql, StringComparison.Ordinal);
+        Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionDailySql, StringComparison.Ordinal);
         foreach (var sql in PgFactCollector.AllSql)
         {
             if (sql.Contains("any_value", StringComparison.OrdinalIgnoreCase))
             {
-                /* The two PLAN_REGRESSION reads (#3953: raw, and its interval-table twin), and nothing else. */
+                /* The three PLAN_REGRESSION reads (#3953: raw, and its interval-table twin; #5448: the daily-totals twin),
+                   and nothing else. */
                 Assert.True(
-                    sql == PgFactCollector.PlanRegressionSql || sql == PgFactCollector.PlanRegressionTableSql,
+                    sql == PgFactCollector.PlanRegressionSql || sql == PgFactCollector.PlanRegressionTableSql
+                        || sql == PgFactCollector.PlanRegressionDailySql,
                     "any_value() outside the PLAN_REGRESSION reads:\n" + sql);
             }
         }
@@ -302,7 +310,9 @@ public sealed class PgFactCollectorTests
                    the drill-down guard. */
                 Assert.True(
                     views.Contains(target) || tables.Contains(target) || ctes.Contains(target)
-                        || target == QueryStoreIntervalLatest.TableName,
+                        || target == QueryStoreIntervalLatest.TableName
+                        /* #5448: the daily-totals twin reads the per-day table beside it. */
+                        || target == "plan_regression_daily",
                     $"FROM/JOIN target '{target}' resolves to no V4 view, collector table, or CTE in:\n{sql}");
             }
         }
@@ -481,7 +491,7 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
     /// #3527: delta_cntr_value spans one COLLECTION INTERVAL, not one second — read raw, the
     /// PERFMON_*_SEC facts overstate by the cadence (60x at 60s, 300x at 5min). The query must
     /// select the row's measured sample_interval_seconds (#2234) for the division and filter
-    /// interval &lt;= 0 rows (no delta was knowable: first sighting, reset, gap) so rn = 1 lands on
+    /// interval &lt;= 0 rows (no delta was knowable: first sighting, reset, gap) so the newest row per counter (LIMIT 1) lands on
     /// the newest row a rate can honestly be derived from.
     /// </summary>
     [Fact]

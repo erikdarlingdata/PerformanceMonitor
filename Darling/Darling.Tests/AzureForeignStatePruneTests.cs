@@ -138,7 +138,10 @@ public sealed class AzureForeignStatePruneTests
             k => k.Prefix == QueryStoreOpenIntervalState.WatermarkKeyPrefix);
 
         /* Nothing may sit outside both lists — a server-scoped key added to PrunableKeys by reflex would be
-           deleted every cycle. */
-        Assert.Empty(QueryStorePerDatabaseState.NotKeyedByDatabase);
+           deleted every cycle. The one member is the drop record of the long-query session older versions shared
+           between installs (#4961): its server-scope key is the bare prefix, which a prune that rebuilds keys as
+           prefix + database name would delete every cycle. A new member is a decision, so the list is pinned
+           whole rather than checked for containment. */
+        Assert.Equal(new[] { LegacyLongQuerySession.StateKeyPrefix }, QueryStorePerDatabaseState.NotKeyedByDatabase);
     }
 }

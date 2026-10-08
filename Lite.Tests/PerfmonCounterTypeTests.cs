@@ -35,6 +35,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <c>PerformanceMonitor.Collectors</c> is kept free of both), so the gauge set is spelled twice and
 /// <see cref="TheCollectorsGaugeSet_IsTheVocabularysGaugeSet"/> is what holds the two spellings equal.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class PerfmonCounterTypeTests
 {
     /* ---- the vocabulary ------------------------------------------------------------------------------ */
@@ -87,8 +88,9 @@ public sealed class PerfmonCounterTypeTests
         Assert.Equal("other", PerfmonCounterTypes.Word(424242));
     }
 
-    /// <summary>The write half and the read half of one rule, held equal across the assembly boundary that
-    /// forbids one declaration: a type added to either side without the other fails here, not in a chart.</summary>
+    /// <summary>The write half and the read half of one rule, declared once: the gauge set lives in the
+    /// vocabulary (<c>PerfmonCounterTypes.GaugeTypes</c>) and the collector's <c>GaugeCounterTypes</c> and
+    /// <c>IsGauge</c> read it, so a type added there reaches the collector in the same edit.</summary>
     [Fact]
     public void TheCollectorsGaugeSet_IsTheVocabularysGaugeSet()
     {
@@ -104,11 +106,13 @@ public sealed class PerfmonCounterTypeTests
             Assert.False(PerfmonStatsCollector.IsGauge(type));
         }
 
-        /* The two assemblies really are unrelated — the reason the set is spelled twice. */
+        /* The collectors assembly reads the vocabulary from Common, and Common does not reference the collectors
+           back: one direction only, so the set is declared once and there is no cycle. */
         var collectors = typeof(PerfmonStatsCollector).Assembly;
         var common = typeof(PerfmonCounterTypes).Assembly;
-        Assert.DoesNotContain(collectors.GetReferencedAssemblies(), a => a.Name == common.GetName().Name);
+        Assert.Contains(collectors.GetReferencedAssemblies(), a => a.Name == common.GetName().Name);
         Assert.DoesNotContain(common.GetReferencedAssemblies(), a => a.Name == collectors.GetName().Name);
+        Assert.Same(PerfmonCounterTypes.GaugeTypes, PerfmonStatsCollector.GaugeCounterTypes);
     }
 
     /* ---- the Lite rung ------------------------------------------------------------------------------- */
@@ -208,6 +212,7 @@ public sealed class PerfmonCounterTypeTests
 /// the rung (NULL type), and a counter whose instances disagree on type — each read back with the type the
 /// chart classifies by, the delta as null where none was stored, and the kind word the MCP publishes.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly DuckDbInitializer _duckDb;
@@ -441,7 +446,7 @@ public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixt
         Directory.CreateDirectory(dbDir);
         var dbPath = Path.Combine(dbDir, "lite-v61.duckdb");
 
-        var initializer = new DuckDbInitializer(dbPath);
+        using var initializer = new DuckDbInitializer(dbPath);
         await initializer.InitializeAsync();
 
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
@@ -478,7 +483,7 @@ public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixt
             await ExecAsync(conn, "INSERT INTO schema_version (version) VALUES (61)");
         }
 
-        var upgraded = new DuckDbInitializer(dbPath);
+        using var upgraded = new DuckDbInitializer(dbPath);
         await upgraded.InitializeAsync();
 
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))

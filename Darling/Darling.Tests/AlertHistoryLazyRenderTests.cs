@@ -66,10 +66,17 @@ public sealed class AlertHistoryLazyRenderTests
         Assert.Contains("if (built || !node.open) return;", detailCell, StringComparison.Ordinal);
         Assert.Contains("mount(placeholder, detailBody(a));", detailCell, StringComparison.Ordinal);
 
+        /* #5241: an Analysis row's advice is fetched here, in the toggle handler, once per opened row - never by the
+           list read, and never for a row nobody opened. */
+        Assert.Contains("if (isAnalysisAlert(a)) {", detailCell, StringComparison.Ordinal);
+        Assert.Contains("await alertAdvice(a)", detailCell, StringComparison.Ordinal);
+        Assert.Contains("mount(placeholder, detailBody(a, items));", detailCell, StringComparison.Ordinal);
+        Assert.DoesNotContain("include_details", js, StringComparison.Ordinal);
+
         /* The control: detailBody is where that work actually happens, so the absence above is real and not a
            matcher for text that was never going to appear anywhere in this file. Same field/error shape as the
            pre-#4194 eager version - only when it runs has changed. */
-        var detailBody = ExtractFunction(js, "function detailBody(a) {");
+        var detailBody = ExtractFunction(js, "function detailBody(a, details) {");
         Assert.Contains("parseDetailFields(", detailBody, StringComparison.Ordinal);
         Assert.Contains("fieldRow", detailBody, StringComparison.Ordinal);
         Assert.Contains("detail-fields", detailBody, StringComparison.Ordinal);
@@ -117,7 +124,10 @@ public sealed class AlertHistoryLazyRenderTests
            must not call it - the previous table stays exactly as it is until the new page is ready. */
         var js = AlertsJs;
         var loadingStripUses = Regex.Matches(js, Regex.Escape("loadingStrip(")).Count;
-        Assert.Equal(1, loadingStripUses);
+        /* The first mount in renderAlerts, and (#5241) the one in an opened Analysis row's own expansion while its advice
+           loads; neither is on the poll path. */
+        Assert.Equal(2, loadingStripUses);
+        Assert.Contains("mount(placeholder, [loadingStrip()]);", ExtractFunction(js, "function detailCell(a) {"), StringComparison.Ordinal);
 
         var refreshAlerts = ExtractFunction(js, "async function refreshAlerts(state) {");
         Assert.DoesNotContain("loadingStrip", refreshAlerts, StringComparison.Ordinal);

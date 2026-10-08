@@ -134,7 +134,9 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Generic "Show Active Queries at This Time" drill-down for resource charts that have no
     /// more specific target (memory clerks/grants/pressure, tempdb size + file I/O, file I/O
-    /// latency + throughput, current waits, perfmon).
+    /// latency + throughput, current waits, perfmon). The "Showing since" banner is refreshed for the drill
+    /// window too (#4953), over the same UTC pair the grid read takes: left alone it keeps describing the last
+    /// range read, so it can claim a cut the drill window does not have or miss one it does.
     /// </summary>
     private async void OnActiveQueriesDrillDown(DateTime time)
     {
@@ -146,6 +148,10 @@ public partial class ServerTab : UserControl
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LiveSnapshotIndicator.Text = DrillDownIndicatorText(fromDate, toDate, GetPickerZone());
         _ = LoadActiveQueriesSlicerAsync();
+        /* fromDate/toDate are the naive-UTC pair GetDrillWindow built (#4766). The grid read above took them as they
+           are (GetTimeRange's custom-range branch) and the banner probe compares against the same UTC collection_time,
+           so they go through unconverted, as the slicer handler's e.StartUtc/e.EndUtc do (#4279). */
+        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, fromDate, toDate);
     }
 
     private async void OnBlockingDrillDown(DateTime time)
@@ -155,8 +161,11 @@ public partial class ServerTab : UserControl
 
         MainTabControl.SelectedIndex = 8; // Blocking
         BlockingSubTabControl.SelectedIndex = 2; // Blocked Process Reports
-        var bpr = await System.Threading.Tasks.Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, fromDate, toDate));
-        _blockedProcessFilterMgr!.UpdateData(bpr);
+        var bprRead = await System.Threading.Tasks.Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, 0, fromDate, toDate));
+        _blockedProcessFilterMgr!.UpdateData(bprRead.Rows);
+        /* The drill window is the naive-UTC pair GetDrillWindow built (#4766), which the grid read above took as it is: the
+           banner follows it, so it stops describing the last range read (#4966). */
+        await RefreshCappedGridBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, fromDate, toDate, bprRead.Rows, LocalDataService.BlockedProcessReportGridCap, BlockedProcessRowTimeUtc, bprRead.CappedSourceStartUtc);
     }
 
     private async void OnDeadlockDrillDown(DateTime time)
@@ -168,6 +177,8 @@ public partial class ServerTab : UserControl
         BlockingSubTabControl.SelectedIndex = 3; // Deadlocks
         var dlr = await System.Threading.Tasks.Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, fromDate, toDate));
         _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(dlr));
+        /* Same as OnBlockingDrillDown (#4966): the banner follows the drill window's UTC pair. */
+        await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, fromDate, toDate, dlr, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
     }
 
     private async void OnHeatmapDrillDown(DateTime bucketTimeUtc)
@@ -187,6 +198,9 @@ public partial class ServerTab : UserControl
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LiveSnapshotIndicator.Text = DrillDownIndicatorText(fromDate, toDate, GetPickerZone());
         _ = LoadActiveQueriesSlicerAsync();
+        /* The heatmap drill's window is the same naive-UTC pair the grid read took (see OnActiveQueriesDrillDown):
+           the banner follows it, so it stops describing the last range read (#4953). */
+        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, fromDate, toDate);
     }
 
     /// <summary>
@@ -199,7 +213,7 @@ public partial class ServerTab : UserControl
         _customRange.Set(fromUtc, toUtc);
 
         // Switch to Custom without triggering a refresh
-        _isRefreshing = true;
+        _suppressRangeRefresh = true;
         try
         {
             TimeRangeCombo.SelectedIndex = 5; // Custom
@@ -217,7 +231,7 @@ public partial class ServerTab : UserControl
         }
         finally
         {
-            _isRefreshing = false;
+            _suppressRangeRefresh = false;
         }
     }
 }

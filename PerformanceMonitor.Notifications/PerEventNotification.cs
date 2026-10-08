@@ -91,8 +91,10 @@ public static class PerEventNotification
         return messages;
     }
 
-    /* A fresh context for the incidents ONE message carries: the source's severity override, plus the
-       forensic attachment (deadlock_graph.xml / blocked_process_report.xml) belonging to those incidents so
+    /* A fresh context for the incidents ONE message carries: the source's severity override, the
+       per-replica identity (#5368 — describes the firing, not one incident, and the PagerDuty key is
+       derived from the context the sender is handed), plus the forensic attachment
+       (deadlock_graph.xml / blocked_process_report.xml) belonging to those incidents so
        per-event email keeps the file #1146 put there.
 
        #3330: the attachment comes from the incidents, not from the source. Copying the source's put the
@@ -106,7 +108,8 @@ public static class PerEventNotification
         {
             SeverityOverride = source.SeverityOverride,
             AttachmentXml = attachment?.Xml,
-            AttachmentFileName = attachment?.FileName
+            AttachmentFileName = attachment?.FileName,
+            AgReplicaIdentity = source.AgReplicaIdentity
         };
     }
 

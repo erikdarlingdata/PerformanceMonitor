@@ -43,6 +43,11 @@ public partial class SettingsWindow : Window
         MuteRuleService? muteRuleService = null)
     {
         InitializeComponent();
+        /* The window asks for 750 DIPs of height; on a work area shorter than that (a small laptop screen with the taskbar up)
+           the bottom of the form, and the Save button under it, sat off-screen. Cap it to the monitor's work area the way the
+           Add Server dialog does, once there is an HWND to ask which monitor, and again when the window is dragged to another. */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        LocationChanged += (_, _) => WindowWorkArea.Clamp(this);
         _scheduleManager = scheduleManager;
         _serverManager = serverManager;
         _backgroundService = backgroundService;
@@ -67,12 +72,18 @@ public partial class SettingsWindow : Window
     private void LoadServerScheduleSummary()
     {
         var servers = _serverManager.GetAllServers();
-        var rows = servers.Select(s => new ServerScheduleRow
+        var rows = servers.Select(s =>
         {
-            ServerId = s.Id,
-            ServerName = s.DisplayName,
-            Preset = _scheduleManager.GetActivePresetForServer(s.Id),
-            Status = _scheduleManager.HasServerOverride(s.Id) ? "Customized" : "Default"
+            /* One read per row, so Preset, Status and the tooltip all describe the same schedule list. */
+            var summary = _scheduleManager.GetServerScheduleSummary(s.Id);
+            return new ServerScheduleRow
+            {
+                ServerId = s.Id,
+                ServerName = s.DisplayName,
+                Preset = summary.Preset,
+                Status = summary.Status,
+                PresetDetail = summary.PresetDetail
+            };
         }).ToList();
 
         ServerScheduleGrid.ItemsSource = rows;
@@ -149,6 +160,7 @@ public partial class SettingsWindow : Window
         public string ServerName { get; set; } = "";
         public string Preset { get; set; } = "";
         public string Status { get; set; } = "";
+        public string PresetDetail { get; set; } = "";
     }
 
     private void UpdateCollectionStatus()
@@ -641,7 +653,6 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsChecked = App.AlertDeadlockEnabled;
         AlertDeadlockThresholdBox.Text = App.AlertDeadlockThreshold.ToString();
         AlertPoisonWaitCheckBox.IsChecked = App.AlertPoisonWaitEnabled;
-        AlertPoisonWaitThresholdBox.Text = App.AlertPoisonWaitThresholdMs.ToString();
         AlertLongRunningQueryCheckBox.IsChecked = App.AlertLongRunningQueryEnabled;
         AlertLongRunningQueryThresholdBox.Text = App.AlertLongRunningQueryThresholdMinutes.ToString();
         AlertLongRunningQueryMaxResultsBox.Text = App.AlertLongRunningQueryMaxResults.ToString();
@@ -731,8 +742,6 @@ public partial class SettingsWindow : Window
         if (int.TryParse(AlertDeadlockThresholdBox.Text, out var deadlock) && deadlock > 0)
             App.AlertDeadlockThreshold = deadlock;
         App.AlertPoisonWaitEnabled = AlertPoisonWaitCheckBox.IsChecked == true;
-        if (int.TryParse(AlertPoisonWaitThresholdBox.Text, out var poisonWait) && poisonWait > 0)
-            App.AlertPoisonWaitThresholdMs = poisonWait;
         App.AlertLongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             App.AlertLongRunningQueryThresholdMinutes = lrq;
@@ -915,7 +924,6 @@ public partial class SettingsWindow : Window
         AlertBlockingThresholdBox.Text = "1";
         AlertBlockingWaitSecondsBox.Text = "0";
         AlertDeadlockThresholdBox.Text = "1";
-        AlertPoisonWaitThresholdBox.Text = "500";
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertLongRunningQueryMaxResultsBox.Text = "5";
         AlertTempDbSpaceThresholdBox.Text = "80";
@@ -1015,10 +1023,6 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
-        /* #3539 A4: the poison-wait ms box is retired (nothing reads it) and stays disabled regardless of the
-           master switch — the XAML sets IsEnabled="False", and this loop must not re-enable it on load or
-           on toggle, or the operator is back to tuning a number the engine ignores. */
-        AlertPoisonWaitThresholdBox.IsEnabled = false;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;
@@ -1217,6 +1221,7 @@ public partial class SettingsWindow : Window
         PagerDutyWebhookEnabledCheckBox.IsChecked = App.PagerDutyWebhookEnabled;
         PagerDutyRoutingKeyBox.Text = App.PagerDutyRoutingKey;
         PagerDutyEuRegionCheckBox.IsChecked = App.PagerDutyUseEuRegion;
+        PagerDutyAutoResolveCheckBox.IsChecked = App.PagerDutyAutoResolve;
         PagerDutyProxyAddressBox.Text = App.PagerDutyProxyAddress;
         UpdateTeamsControlStates();
         UpdateSlackControlStates();
@@ -1263,6 +1268,7 @@ public partial class SettingsWindow : Window
         App.PagerDutyWebhookEnabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
         App.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
         App.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
+        App.PagerDutyAutoResolve = PagerDutyAutoResolveCheckBox.IsChecked == true;
         App.PagerDutyProxyAddress = PagerDutyProxyAddressBox.Text?.Trim() ?? "";
 
         /* Save webhook URLs to Credential Manager instead of settings.json. The generic channel's headers
@@ -1289,6 +1295,7 @@ public partial class SettingsWindow : Window
         root["pagerduty_webhook_enabled"] = App.PagerDutyWebhookEnabled;
         root["pagerduty_use_eu_region"] = App.PagerDutyUseEuRegion;
         root["pagerduty_proxy_address"] = App.PagerDutyProxyAddress;
+        root["pagerduty_auto_resolve"] = App.PagerDutyAutoResolve;
 
         /* Remove legacy plaintext webhook URLs from settings.json */
         if (root is JsonObject obj)
@@ -1365,6 +1372,7 @@ public partial class SettingsWindow : Window
         bool enabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
         PagerDutyRoutingKeyBox.IsEnabled = enabled;
         PagerDutyEuRegionCheckBox.IsEnabled = enabled;
+        PagerDutyAutoResolveCheckBox.IsEnabled = enabled;
         PagerDutyProxyAddressBox.IsEnabled = enabled;
         TestPagerDutyButton.IsEnabled = enabled;
     }
