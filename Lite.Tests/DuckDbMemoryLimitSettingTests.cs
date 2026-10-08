@@ -216,6 +216,72 @@ public class DuckDbMemoryLimitSettingTests : IDisposable
         Assert.Equal(await ReportedMemoryLimitAsync($"{settingGb}GB"), await CurrentLimitAsync(connection));
     }
 
+    [Theory]
+    [InlineData(1, 32, 4)]
+    [InlineData(2, 32, 8)]
+    [InlineData(2, 4, 4)]
+    [InlineData(2, 2, 2)]
+    [InlineData(4, 32, 8)]
+    [InlineData(64, 32, 8)]
+    [InlineData(1, 1, 1)]
+    public void ThreadsFor_IsMinOfCapCoresAndMemoryOver256Mb(int memoryGb, int cores, int expected)
+    {
+        Assert.Equal(expected, DuckDbInitializer.ThreadsFor(memoryGb, cores));
+        Assert.True(DuckDbInitializer.MainConnectionMemoryPerThreadMb >= 125, "DuckDB's documented minimum is 125 MB per thread");
+    }
+
+    [Fact]
+    public async Task Threads_FollowTheSetting_AndSurviveTheTrimCycleAndTheCopyRaise()
+    {
+        DuckDbInitializer.ConfiguredMemoryLimitGb = 1;
+        var expected = DuckDbInitializer.ThreadsFor(1, Environment.ProcessorCount);
+        using var initializer = new DuckDbInitializer(_dbPath);
+        Assert.Contains($"threads={expected};", initializer.ConnectionString);
+        await initializer.InitializeAsync();
+
+        using var connection = initializer.CreateConnection();
+        await connection.OpenAsync();
+        Assert.Equal(expected, await CurrentThreadsAsync(connection));
+
+        /* The COPY raise moves memory_limit to 4 GB; threads stay at the resting setting's count. */
+        await ArchiveService.WithRaisedCopyMemoryLimit(connection, async () =>
+            Assert.Equal(expected, await CurrentThreadsAsync(connection)));
+        Assert.Equal(expected, await CurrentThreadsAsync(connection));
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 1;
+        try
+        {
+            initializer.RunMemoryTrimCycle();
+            using var after = initializer.CreateConnection();
+            await after.OpenAsync();
+            Assert.Equal(expected, await CurrentThreadsAsync(after));
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+    }
+
+    private static async Task<int> CurrentThreadsAsync(DuckDBConnection connection)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT current_setting('threads')";
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task PreserveInsertionOrder_StaysOnForTheMainConnection()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+        using var connection = initializer.CreateConnection();
+        await connection.OpenAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT current_setting('preserve_insertion_order')";
+        Assert.True(Convert.ToBoolean(await cmd.ExecuteScalarAsync()));
+    }
+
     [Fact]
     public async Task TrimCycle_RestoresTheSetting()
     {

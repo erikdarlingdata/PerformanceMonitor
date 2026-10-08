@@ -849,7 +849,7 @@ public partial class DuckDbInitializer : IDisposable
     ///   complaint — uncapped, buffer pool grows toward 80% of system RAM).
     ///   ArchiveService raises this temporarily for parquet COPY operations,
     ///   which need more headroom due to a DuckDB pre-reservation behavior.
-    /// - threads=<see cref="MainConnectionThreads"/> (min(8, processors), #5381): bounds the per-thread buffers of a wide read.
+    /// - threads=<see cref="MainConnectionThreads"/> (min(8, processors, memory limit / 256 MB), #5381, #5457): bounds the per-thread buffers of a wide read.
     /// - parquet_metadata_cache is deliberately left at DuckDB's default, off (#5377). Measured on DuckDB
     ///   1.5.5, turning it on cut the bind of a 518-file union_by_name read from about 140 ms to about 45 ms,
     ///   and a file replaced at the same path (compaction's swap, the Query Store repair) still read its new
@@ -882,11 +882,30 @@ public partial class DuckDbInitializer : IDisposable
     internal static int ConfiguredMemoryLimitGb { get; set; } = Services.DuckDbMemoryLimitSetting.DefaultGb;
 
     /// <summary>
-    /// The main connection's <c>threads</c> (#5381): min(8, logical processors), at least 1. Unset, DuckDB used
+    /// The main connection's <c>threads</c> (#5381, #5457): derived from the memory setting by
+    /// <see cref="ThreadsFor"/>, min(8, logical processors, memory limit / 256 MB), at least 1. Unset, DuckDB used
     /// every core, and on a 32-core machine five reads that pass at 8 threads ran out of memory at 1 GB because
-    /// each thread holds its own buffers. Measured at 2 GB: 8 threads, all reads pass, worst peak 1,100 MB.
+    /// each thread holds its own buffers. It follows <see cref="ConfiguredMemoryLimitGb"/> (the resting limit),
+    /// so it is fixed for the life of the process: the trim cycle (which only moves memory_limit to 64 MB and
+    /// back) and the COPY raise (memory_limit up to the larger of 4 GB and the setting, then back) never touch it.
     /// </summary>
-    internal static readonly int MainConnectionThreads = Math.Max(1, Math.Min(8, Environment.ProcessorCount));
+    internal static int MainConnectionThreads =>
+        ThreadsFor(ConfiguredMemoryLimitGb, Environment.ProcessorCount);
+
+    /// <summary>The most threads the main connection uses, whatever the memory setting or core count.</summary>
+    internal const int MainConnectionThreadCap = 8;
+
+    /// <summary>
+    /// Memory each DuckDB thread gets at the limit (256 MB, double DuckDB's documented 125 MB per-thread minimum),
+    /// so the 2 GB default is exactly the 8-thread cap and the 1 GB minimum runs 4 threads. Measured on the
+    /// Lite store (Job History over 20 weeks and the top-queries read over 90 days, 32 cores, 1 GB and 4 GB):
+    /// 4 and 8 threads took the same time, while 16 and 32 threads were slower and peaked 20-70% higher in
+    /// memory, so a raised memory setting does not raise the thread count past the cap.
+    /// </summary>
+    internal const int MainConnectionMemoryPerThreadMb = 256;
+
+    internal static int ThreadsFor(int memoryGb, int cores) =>
+        Math.Max(1, Math.Min(Math.Min(MainConnectionThreadCap, cores), memoryGb * 1024 / MainConnectionMemoryPerThreadMb));
 
     /// <summary>
     /// Ensures the database exists and all tables are created, then opens the sentinel (#4262).
