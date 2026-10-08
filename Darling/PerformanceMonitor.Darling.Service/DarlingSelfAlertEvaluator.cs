@@ -169,6 +169,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// online.</summary>
     private readonly FailedSendRetryTracker _connectionRetries = new();
 
+    /// <summary>#5489: the same for a "Collection Stopped" alert no channel delivered.</summary>
+    private readonly FailedSendRetryTracker _collectionStoppedRetries = new();
+
     /// <summary>The same for the availability group alerts (#4795), keyed by metric and AG grain: a disconnect
     /// that reached no channel is due again with re-fire off or on; a failover and a data-movement-suspended
     /// edge, whose "already reported" markers are put back, are due again after the same delay. Held in a tracker
@@ -1621,8 +1624,9 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// Edge-applies the collection-stopped decision (mirrors the Dashboard's
-    /// <c>_activeCollectionStoppedAlert</c>/<c>_lastCollectionStoppedAlert</c>): fire once on entry, re-fire
-    /// only after the alert cooldown while it persists, and write ONE "Collection Resumed" history row on
+    /// <c>_activeCollectionStoppedAlert</c>/<c>_lastCollectionStoppedAlert</c>): a state alert (#5489). It fires
+    /// once on entry, repeats only when <c>connection_refire_minutes</c> is above 0 (every that many minutes) or
+    /// to send again an alert no channel took (#4795), and writes ONE "Collection Resumed" history row on
     /// recovery. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
     /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started
@@ -1644,13 +1648,35 @@ internal sealed class DarlingSelfAlertEvaluator
 
         if (stopped)
         {
+            /* #5489: a state alert, decided by the same shared policy "Server Unreachable" uses. A server never
+               seen stopped counts as running, so the first stopped sweep (also the first one after a restart,
+               which loses this in-memory state) is the entry and sends ONE alert. While the outage stands it
+               repeats only when connection_refire_minutes > 0 and that interval passed, or to send again an
+               alert that reached no channel (#4795). It no longer repeats every cooldown. */
+            var wasStopped = _activeCollectionStopped.TryGetValue(key, out var standing) && standing;
             _activeCollectionStopped[key] = true;
-            if (CooldownElapsed(_lastCollectionStoppedAlert, key, now))
+            var refire = _connectionRefireMinutes();
+            var decision = ConnectionAlertPolicy.Decide(
+                previousOnline: !wasStopped,
+                online: false,
+                alertWhenAlreadyDownAtFirstSight: false,
+                refireInterval: refire > 0 ? TimeSpan.FromMinutes(refire) : null,
+                /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading. */
+                lastDownAlertUtc: LastFiredStamp.TryGet(_lastCollectionStoppedAlert, key, now, out var lastStopped)
+                    ? lastStopped : null,
+                nowUtc: now,
+                retryDueUtc: _collectionStoppedRetries.DueUtc(key, now));
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastCollectionStoppedAlert[key] = now;
+                var repeatNote = decision == ConnectionAlertDecision.Lost
+                    ? string.Empty
+                    : refire > 0
+                        ? $"Still stopped (re-alerting every {refire} min). "
+                        : "Still stopped (the previous alert reached no channel, so it is sent again). ";
                 var delivery = await FireAsync(
                     key, serverName, "Collection Stopped", reason, "collecting",
-                    detail: reason + " A headless service has no dashboard to watch, so this is the primary " +
+                    detail: repeatNote + reason + " A headless service has no dashboard to watch, so this is the primary " +
                         "signal that a server's data has gone stale. Check the service log and the server's " +
                         "reachability, credentials, and collector permissions.",
                     severity: AlertSeverityLevel.Critical,
@@ -1659,11 +1685,23 @@ internal sealed class DarlingSelfAlertEvaluator
                        with different units (a run count, or minutes). See AlertMetricClassifier.IsStateOnly. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
-                AfterSelfFire("Collection Stopped", _lastCollectionStoppedAlert, key, now, SharedCooldown, delivery);
+                /* #4795: the server was forgotten while this was sending; Forget cleared the stamp and the
+                   retry, so writing the answer now would hand them to the next registration. */
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                /* #4795: every channel failed -> due again after the failed-send back-off (a minute, doubling,
+                   never more than the shared cooldown), with re-fire off too. Any other answer clears it. */
+                NoteRetrySend(_collectionStoppedRetries, key, "Collection Stopped", delivery);
             }
         }
         else if (_activeCollectionStopped.TryRemove(key, out var was) && was)
         {
+            /* #5489: the outage is over; the next one is a new entry with its own alert. */
+            _lastCollectionStoppedAlert.TryRemove(key, out _);
+            _collectionStoppedRetries.Clear(key);
             await RecordResolutionAsync(new AlertResolution(
                 key, serverName, "Collection Stopped",
                 "Collection Resumed", $"{serverName}: Data collection is running again"), cancellationToken);
@@ -7887,6 +7925,7 @@ WHERE c.is_enabled";
            state dropped above. Left behind, a re-add that is still down would pass its silent first pass and then
            be paged on the second, as "the previous alert reached no channel", for an outage the removed server had. */
         _connectionRetries.Clear(key);
+        _collectionStoppedRetries.Clear(key);
 
         /* #4795: and so does its re-fire clock, the stamp of the last down alert delivered. Left behind, a re-add
            that is still down would find a down alert on record for an outage the removed server had, and the clock
