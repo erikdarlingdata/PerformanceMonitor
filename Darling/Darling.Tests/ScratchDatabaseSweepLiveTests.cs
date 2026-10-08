@@ -128,12 +128,17 @@ public sealed class ScratchDatabaseSweepLiveTests
 
     /// <summary>
     /// #5549: an abandoned database with TimescaleDB jobs is quiesced before the sweep drops it. A custom job that
-    /// sleeps 8 seconds is running in the database when the sweep starts. A plain <c>DROP DATABASE</c> does not wait for
-    /// that worker: TimescaleDB ends it, which is the kill the quiesce exists to avoid, and the drop returns at once.
-    /// The quiesce unschedules the jobs and waits for the running worker to leave (its cap is 10 seconds), so the sweep
-    /// takes seconds. Measured on a rig: about 5 seconds with the quiesce, 0.1 to 0.3 seconds with the quiesce taken out
-    /// of the sweep, where the test fails on the elapsed time. The 2-second floor sits well between the two.
-    /// </summary>
+    /// sleeps 8 seconds is running in the database when the sweep starts. The quiesce unschedules the jobs and waits for
+    /// the running worker to leave (its cap is 10 seconds). TimescaleDB's scheduler ends an unscheduled job's running
+    /// worker itself, a few seconds after the stop (faster on some machines), so a correct sweep can finish well before
+    /// the job's 8 seconds are up. Without the quiesce, a plain <c>DROP DATABASE</c> does not wait for the worker:
+    /// TimescaleDB ends it as part of the drop, which is the kill the quiesce exists to avoid, and the drop returns in a
+    /// fraction of a second (0.1 to 0.3 seconds on a rig). The two differ in ORDER, not in elapsed time (a clock floor
+    /// failed a correct 1.6 second sweep on CI): with the quiesce the worker is gone before the sweep's
+    /// <c>DROP DATABASE</c> starts, without it the drop runs while the worker is alive. So a monitor session polls
+    /// <c>pg_stat_activity</c> during the sweep and the test fails if any one look sees both at once. It also fails, rather
+    /// than passing silently, if the monitor never saw the worker alive after the sweep began.
+    ///</summary>
     [Fact]
     public async Task TheSweep_QuiescesAnAbandonedDatabasesTimescaleJobs_BeforeDroppingIt()
     {
@@ -207,17 +212,38 @@ public sealed class ScratchDatabaseSweepLiveTests
                 workerAge = (double)(await age.ExecuteScalarAsync(ct))!;
             }
 
-            Assert.True(workerAge < 5, $"the job worker is already {workerAge:F1} s into its 8 s sleep, too little left to tell a quiesced drop from a plain one.");
+            Assert.True(workerAge < 5, $"the job worker is already {workerAge:F1} s into its 8 s sleep, too little left of it for the sweep to find the worker still alive.");
+
+            var workerPid = await WorkerPidAsync(admin, name, ct);
+
+            /* Watch the order, not the clock: a monitor session polls pg_stat_activity (about every 20 ms) for the whole
+               sweep. Each look is one statement, so it sees the worker and the sweeper's DROP DATABASE together or not
+               at all. A correct sweep never has both alive at one look: the worker is gone before the DROP starts. */
+            var watch = new SweepWatch();
+            using var watchStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            await using var monitor = new NpgsqlConnection(unpooledAdmin);
+            await monitor.OpenAsync(ct);
+            var watcher = WatchAsync(monitor, workerPid, name, watch, watchStop.Token);
 
             var log = new List<string>();
-            var clock = Stopwatch.StartNew();
-            var dropped = await ScratchDatabaseSweep.SweepAsync(
-                baseConnectionString!, now, ScratchDatabaseSweep.AbandonedAfter, log.Add, ct);
-            clock.Stop();
+            IReadOnlyList<string> dropped;
+            try
+            {
+                watch.SweepStarted = true;
+                dropped = await ScratchDatabaseSweep.SweepAsync(
+                    baseConnectionString!, now, ScratchDatabaseSweep.AbandonedAfter, log.Add, ct);
+            }
+            finally
+            {
+                await watchStop.CancelAsync();
+                await watcher;
+            }
 
             Assert.Contains(name, dropped);
-            Assert.True(clock.Elapsed >= TimeSpan.FromSeconds(2),
-                $"the sweep took {clock.Elapsed.TotalSeconds:F1} s with a job worker running in the database: it dropped the database without waiting the worker out.");
+            Assert.True(watch.WorkerAliveAfterStart > 0,
+                $"the monitor never saw the job worker (pid {workerPid}) alive after the sweep started ({watch.Looks} looks), so this run proves nothing about the quiesce: the scheduler ended the worker before the sweep began.");
+            Assert.True(watch.Overlaps == 0,
+                $"the sweep dropped the database while the job worker (pid {workerPid}) was still alive, at {watch.Overlaps} of {watch.Looks} looks: it did not wait the worker out.");
             Assert.Contains(log, line => line.Contains(name, StringComparison.Ordinal) && line.StartsWith("Dropped", StringComparison.Ordinal));
             Assert.Empty(await ExistingAsync(baseConnectionString!, new[] { name }, ct));
             Assert.Equal(0L, await ScratchPostgres.JobWorkerCountAsync(admin, name, ct));
@@ -226,6 +252,70 @@ public sealed class ScratchDatabaseSweepLiveTests
         finally
         {
             await DropIfStillThereAsync(baseConnectionString!, name, bodySucceeded);
+        }
+    }
+
+    /// <summary>What the monitor session saw while the sweep ran. The test sets <see cref="SweepStarted"/>; only the watcher writes the counts.</summary>
+    private sealed class SweepWatch
+    {
+        public volatile bool SweepStarted;
+        public int Looks;
+        public int WorkerAliveAfterStart;
+        public int Overlaps;
+    }
+
+    private static async Task<int> WorkerPidAsync(NpgsqlConnection admin, string name, CancellationToken ct)
+    {
+        await using var pid = new NpgsqlCommand(
+            "SELECT min(pid) FROM pg_stat_activity WHERE datname = $1 AND backend_type LIKE 'User-Defined Action%'", admin);
+        pid.Parameters.AddWithValue(name);
+        return await pid.ExecuteScalarAsync(ct) is int found ? found : 0;
+    }
+
+    /// <summary>
+    /// Polls until <paramref name="stop"/> fires. One statement per look, so both facts come from one snapshot: the job
+    /// worker with this pid is alive, and another backend is running the sweep's <c>DROP DATABASE</c> for this name.
+    /// </summary>
+    private static async Task WatchAsync(NpgsqlConnection monitor, int workerPid, string name, SweepWatch watch, CancellationToken stop)
+    {
+        /* The pattern is written DROP%DATABASE% so the drop-site census (UnpooledDropConnectionCensusTests) does not take this look-up for a drop. */
+        const string Look = @"SELECT
+              EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND backend_type LIKE 'User-Defined Action%'),
+              EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND state = 'active'
+                      AND query LIKE 'DROP%DATABASE%' AND strpos(query, $2) > 0)";
+        try
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                var started = watch.SweepStarted;
+                await using (var look = new NpgsqlCommand(Look, monitor))
+                {
+                    look.Parameters.AddWithValue(workerPid);
+                    look.Parameters.AddWithValue(name);
+                    await using var reader = await look.ExecuteReaderAsync(stop);
+                    await reader.ReadAsync(stop);
+                    var workerAlive = reader.GetBoolean(0);
+                    var dropRunning = reader.GetBoolean(1);
+                    watch.Looks++;
+                    if (started && workerAlive)
+                    {
+                        watch.WorkerAliveAfterStart++;
+                    }
+
+                    if (workerAlive && dropRunning)
+                    {
+                        watch.Overlaps++;
+                    }
+                }
+
+                /* No pause between looks: without the quiesce, the stretch where the DROP is running and the worker is not yet
+                   gone lasts only the milliseconds TimescaleDB takes to end the worker, and a 20 ms pause missed it. */
+                await Task.Yield();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            /* The sweep returned; the last look was cut short. */
         }
     }
 
