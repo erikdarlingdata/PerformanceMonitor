@@ -107,7 +107,7 @@ public sealed class DarlingMcpPgWraparoundTools
                     ?? McpHelpers.Status(
                         "unavailable",
                         /* W6 (release walk): said in plain words, offline first. An offline server collects nothing, so an
-                           empty window is the likeliest reason; the store-internal "cannot classify" wording is gone. */
+                           empty window is the likeliest reason; the store-internal engine wording is gone. */
                         "No PostgreSQL freeze-headroom data for this server and window. If the server is offline, "
                         + "nothing is being collected from it. Otherwise this collector has not run on it yet, or the "
                         + "store has not yet learned that it is a PostgreSQL server. Check list_servers.");
