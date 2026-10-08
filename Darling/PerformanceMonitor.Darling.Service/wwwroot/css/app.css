@@ -549,6 +549,11 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 .chart { width: 100%; position: relative; }
 .chart svg { display: block; width: 100%; height: auto; max-height: 300px; }
+/* Line and scatter charts draw at the width of their box, one SVG unit per CSS pixel (#5586), so the SVG keeps the size its
+   inline style gives it (the .chart svg rule above is for the bar and pie charts). It is out of flow inside .chart-plot: a fixed-width SVG must not stop a narrowing
+   panel from shrinking, which would hide the narrowing from the width the chart watches. */
+.chart .chart-plot { position: relative; width: 100%; overflow: hidden; }
+.chart svg.plot-svg { position: absolute; left: 0; top: 0; max-height: none; }
 .chart .axis text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart .axis .axis-unit { fill: var(--dim); font-size: 10px; }
 .chart .grid-line { stroke: var(--border); stroke-width: 1; }
