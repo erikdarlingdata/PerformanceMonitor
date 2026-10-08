@@ -12,10 +12,14 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using Darling.Tests;
 using Lite.Tests.Helpers;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Controls;
+using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -96,11 +100,56 @@ public sealed class StatementScrubLiveReadTests
         Assert.False(live.HasLiveQueryPlan);
     }
 
+    /// <summary>
+    /// #5554: the live read judges every row, and the judge can spend seconds on a large plan, so the loop runs off the
+    /// calling (UI) thread. Driven from a dedicated thread that blocks until the read returns; a loop that ran inline would
+    /// read every row on that same thread.
+    /// </summary>
+    [Fact]
+    public void LiveSnapshotRows_AreReadAndJudged_OffTheCallingThread()
+    {
+        var plan = StatementScrubCanary.CanaryPlan();
+        using var reader = new FakeCollectorDataReader(
+            SnapshotRow(StatementScrubCanary.CanaryStatement, plan, plan),
+            SnapshotRow(StatementScrubCanary.PlainStatement, null, null))
+        {
+            GetStringThreads = new System.Collections.Concurrent.ConcurrentBag<int>()
+        };
+
+        var callerThread = -1;
+        List<QuerySnapshotRow>? rows = null;
+        var thread = new Thread(() =>
+        {
+            callerThread = Environment.CurrentManagedThreadId;
+            rows = ServerTab.ReadLiveSnapshotRowsAsync(reader, new DateTime(2026, 10, 8, 12, 0, 0)).GetAwaiter().GetResult();
+        });
+        thread.Start();
+        Assert.True(thread.Join(TimeSpan.FromSeconds(60)));
+
+        Assert.NotNull(rows);
+        Assert.Equal(2, rows!.Count);
+        Assert.Equal(Marker, rows[0].QueryText);
+        Assert.Equal(StatementScrubCanary.PlainStatement, rows[1].QueryText);
+        Assert.NotEmpty(reader.GetStringThreads);
+        Assert.DoesNotContain(callerThread, reader.GetStringThreads);
+    }
+
+    /// <summary>#5554: the re-run and fetch display sites filter off the UI thread; the result is the same as the sync filter.</summary>
+    [Fact]
+    public async Task FilterAsync_GivesTheSameAnswerAsFilter_AndPassesNullAndEmptyThrough()
+    {
+        var plan = StatementScrubCanary.CanaryPlan();
+        Assert.Equal(LivePlanDisplay.Filter(plan), await LivePlanDisplay.FilterAsync(plan));
+        Assert.DoesNotContain(StatementScrubCanary.SecretNeedles[0], await LivePlanDisplay.FilterAsync(plan) ?? "", StringComparison.Ordinal);
+        Assert.Null(await LivePlanDisplay.FilterAsync(null));
+        Assert.Equal(string.Empty, await LivePlanDisplay.FilterAsync(string.Empty));
+    }
+
     private static readonly Regex ActualPlanCall = new(
         @"ActualPlanExecutor\s*\.\s*ExecuteForActualPlanAsync\s*\(", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex WrappedActualPlanCall = new(
-        @"LivePlanDisplay\s*\.\s*Filter\s*\(\s*await\s+ActualPlanExecutor\s*\.\s*ExecuteForActualPlanAsync\s*\(",
+        @"await\s+LivePlanDisplay\s*\.\s*FilterAsync\s*\(\s*await\s+ActualPlanExecutor\s*\.\s*ExecuteForActualPlanAsync\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -155,24 +204,32 @@ public sealed class StatementScrubLiveReadTests
             "Lite/Windows/AddMultipleServersDialog.xaml.cs", /* SELECT @@VERSION */
             "Lite/Windows/AddServerDialog.xaml.cs",       /* SELECT @@VERSION */
             "Lite/Windows/ExcludedDatabasesDialog.xaml.cs", /* database names */
+            /* #5554: the rest of Lite, not just the windows and tabs. Each is judged, or reads no statement text: */
+            "Lite/Analysis/SqlPlanFetcher.cs",            /* drill-down plan fetch: judged in DrillDownCollector.Plans before analysis */
+            "Lite/Services/LocalDataService.FinOps.IndexAnalysis.cs",    /* index names and sizes, no statement text */
+            "Lite/Services/LocalDataService.FinOps.Recommendations.cs",  /* object and setting metadata, no statement text */
+            "Lite/Services/LocalDataService.FinOps.ServerProperties.cs", /* server properties, no statement text */
+            "Lite/Services/LocalDataService.QueryStats.cs",              /* the live plan fetches: every caller wraps them (LivePlanDisplay) */
+            "Lite/Services/LocalDataService.QueryStore.cs",              /* the Query Store live plan fetch: every caller wraps it */
+            "Lite/Services/RemoteCollectorService.cs",                   /* the scheduled collectors: judged at collection */
+            "Lite/Services/RemoteCollectorService.DefinitionRunner.cs",  /* the definition-driven collectors: judged at collection */
+            "Lite/Services/RemoteCollectorService.QueryStoreBackfill.cs", /* Query Store backfill: judged at collection */
+            "Lite/Services/ServerManager.cs",                            /* connection test, @@VERSION */
         };
 
         var actual = new List<string>();
-        foreach (var sub in new[] { "Controls", "Windows", "Helpers" })
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(RepoRoot(), "Lite"), "*.cs", SearchOption.AllDirectories))
         {
-            foreach (var file in Directory.EnumerateFiles(Path.Combine(RepoRoot(), "Lite", sub), "*.cs", SearchOption.AllDirectories))
+            var relative = Path.GetRelativePath(RepoRoot(), file).Replace('\\', '/');
+            if (relative.Contains("/obj/", StringComparison.Ordinal) || relative.Contains("/bin/", StringComparison.Ordinal))
             {
-                var relative = Path.GetRelativePath(RepoRoot(), file).Replace('\\', '/');
-                if (relative.Contains("/obj/", StringComparison.Ordinal) || relative.Contains("/bin/", StringComparison.Ordinal))
-                {
-                    continue;
-                }
+                continue;
+            }
 
-                var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file));
-                if (Regex.IsMatch(code, @"new\s+SqlConnection\s*\("))
-                {
-                    actual.Add(relative);
-                }
+            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file));
+            if (Regex.IsMatch(code, @"new\s+SqlConnection\s*\("))
+            {
+                actual.Add(relative);
             }
         }
 

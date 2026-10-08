@@ -19,9 +19,12 @@ namespace PerformanceMonitor.Ui;
 public static class DatabaseFilterSelection
 {
     /// <summary>
-    /// The names to store: the ticked names, or none when every listed database is ticked (or none is).
+    /// The names to store: the ticked names, or none when every COLLECTED database is ticked. The comparison is against
+    /// the collected names the read returned, not the list on screen: that list also holds the sticky names of a filter
+    /// for databases not collected yet, and when the read failed (<paramref name="collectedNames"/> is null or empty) the
+    /// list is nothing but those sticky names, so "every box ticked" would widen a narrow filter to All (#5554).
     /// </summary>
-    public static List<string> Stored(IReadOnlyList<(string Name, bool IsSelected)> items)
+    public static List<string> Stored(IReadOnlyList<(string Name, bool IsSelected)> items, IReadOnlyCollection<string>? collectedNames)
     {
         var ticked = new List<string>();
         foreach (var (name, isSelected) in items)
@@ -32,6 +35,20 @@ public static class DatabaseFilterSelection
             }
         }
 
-        return items.Count > 0 && ticked.Count == items.Count ? new List<string>() : ticked;
+        if (collectedNames == null || collectedNames.Count == 0)
+        {
+            return ticked;
+        }
+
+        var tickedSet = new HashSet<string>(ticked, System.StringComparer.OrdinalIgnoreCase);
+        foreach (var name in collectedNames)
+        {
+            if (!tickedSet.Contains(name))
+            {
+                return ticked;
+            }
+        }
+
+        return new List<string>();
     }
 }

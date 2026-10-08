@@ -55,7 +55,7 @@ public partial class ServerTab : UserControl
             if (string.IsNullOrEmpty(plan))
             {
                 var connStr = _credentialResolver.GetConnectionString(_server);
-                plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash));
+                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash));
                 source = "live server";
             }
 
@@ -110,7 +110,7 @@ public partial class ServerTab : UserControl
             if (string.IsNullOrEmpty(plan))
             {
                 var connStr = _credentialResolver.GetConnectionString(_server);
-                plan = LivePlanDisplay.Filter(await LocalDataService.FetchProcedurePlanOnDemandAsync(connStr, row.DatabaseName, row.SchemaName, row.ObjectName));
+                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(connStr, row.DatabaseName, row.SchemaName, row.ObjectName));
                 source = "live server";
             }
 
@@ -374,7 +374,7 @@ public partial class ServerTab : UserControl
                 try
                 {
                     var connStr = _credentialResolver.GetConnectionString(_server);
-                    planXml = LivePlanDisplay.Filter(await LocalDataService.FetchProcedurePlanOnDemandAsync(
+                    planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(
                         connStr, proc.DatabaseName, proc.SchemaName, proc.ObjectName));
                 }
                 catch { }
@@ -387,7 +387,7 @@ public partial class ServerTab : UserControl
                     try
                     {
                         var connStr = _credentialResolver.GetConnectionString(_server);
-                        planXml = LivePlanDisplay.Filter(await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId));
+                        planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId));
                     }
                     catch { }
                 }
@@ -404,7 +404,7 @@ public partial class ServerTab : UserControl
                 try
                 {
                     var procConnStr = _credentialResolver.GetConnectionString(_server);
-                    planXml = LivePlanDisplay.Filter(await LocalDataService.FetchProcedurePlanOnDemandAsync(procConnStr, procComp.DatabaseName, procComp.SchemaName, procComp.ObjectName));
+                    planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(procConnStr, procComp.DatabaseName, procComp.SchemaName, procComp.ObjectName));
                 }
                 catch { }
                 break;
@@ -469,7 +469,7 @@ public partial class ServerTab : UserControl
                     try
                     {
                         var connStr = _credentialResolver.GetConnectionString(_server);
-                        planXml = LivePlanDisplay.Filter(await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId));
+                        planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId));
                     }
                     catch { }
                 }
@@ -531,7 +531,7 @@ public partial class ServerTab : UserControl
             var connectionString = _credentialResolver.GetConnectionString(_server);
 
             /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
-            var actualPlanXml = LivePlanDisplay.Filter(await ActualPlanExecutor.ExecuteForActualPlanAsync(
+            var actualPlanXml = await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 connectionString,
                 databaseName ?? "",
                 queryText,
@@ -585,7 +585,7 @@ public partial class ServerTab : UserControl
         try
         {
             var connStr = _credentialResolver.GetConnectionString(_server);
-            return LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash));
+            return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash));
         }
         catch { return null; }
     }
@@ -631,7 +631,7 @@ public partial class ServerTab : UserControl
             var connStr = _credentialResolver.GetConnectionString(_server);
             foreach (var f in frames)
             {
-                planXml = LivePlanDisplay.Filter(await LocalDataService.FetchPlanBySqlHandleAsync(
+                planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchPlanBySqlHandleAsync(
                     connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd));
                 if (!string.IsNullOrEmpty(planXml)) break;
             }
@@ -723,7 +723,7 @@ public partial class ServerTab : UserControl
             var connStr = _credentialResolver.GetConnectionString(_server);
             foreach (var f in frames)
             {
-                planXml = LivePlanDisplay.Filter(await LocalDataService.FetchPlanBySqlHandleAsync(
+                planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchPlanBySqlHandleAsync(
                     connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd));
                 if (!string.IsNullOrEmpty(planXml)) break;
             }

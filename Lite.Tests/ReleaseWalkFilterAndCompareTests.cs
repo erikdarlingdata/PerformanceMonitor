@@ -44,7 +44,7 @@ public sealed class ReleaseWalkFilterAndCompareTests
     {
         var items = Enumerable.Range(1, 12).Select(i => ($"Db{i}", true)).ToList();
 
-        Assert.Empty(DatabaseFilterSelection.Stored(items));
+        Assert.Empty(DatabaseFilterSelection.Stored(items, items.Select(i => i.Item1).ToList()));
     }
 
     [Fact]
@@ -52,14 +52,46 @@ public sealed class ReleaseWalkFilterAndCompareTests
     {
         var items = new List<(string Name, bool IsSelected)> { ("A", true), ("B", false), ("C", true) };
 
-        Assert.Equal(new[] { "A", "C" }, DatabaseFilterSelection.Stored(items));
+        Assert.Equal(new[] { "A", "C" }, DatabaseFilterSelection.Stored(items, new[] { "A", "B", "C" }));
     }
 
     [Fact]
     public void DatabaseFilter_NoBoxTicked_AndNoDatabasesListed_AreAll()
     {
-        Assert.Empty(DatabaseFilterSelection.Stored(new List<(string, bool)> { ("A", false), ("B", false) }));
-        Assert.Empty(DatabaseFilterSelection.Stored(new List<(string, bool)>()));
+        Assert.Empty(DatabaseFilterSelection.Stored(new List<(string, bool)> { ("A", false), ("B", false) }, new[] { "A", "B" }));
+        Assert.Empty(DatabaseFilterSelection.Stored(new List<(string, bool)>(), new[] { "A", "B" }));
+        Assert.Empty(DatabaseFilterSelection.Stored(new List<(string, bool)>(), null));
+    }
+
+    /// <summary>
+    /// #5554: a sticky filter for two databases, the collected-name read failed (null) or came back empty: the list holds
+    /// only the sticky names, every one ticked, and that is not "every database ticked".
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DatabaseFilter_StickyNamesOnly_WhenTheCollectedReadFailed_StayTheFilter(bool emptyRead)
+    {
+        var items = new List<(string Name, bool IsSelected)> { ("Sales", true), ("Billing", true) };
+
+        var stored = DatabaseFilterSelection.Stored(items, emptyRead ? new List<string>() : null);
+
+        Assert.Equal(new[] { "Sales", "Billing" }, stored);
+    }
+
+    /// <summary>
+    /// #5554: every listed box is ticked, but one collected database is not on the list the user ticked (it was collected
+    /// after the list was built, or the sticky names are all that is ticked): not All. Ticking every collected name, with
+    /// a sticky name beside them, is All.
+    /// </summary>
+    [Fact]
+    public void DatabaseFilter_AllIsEveryCollectedNameTicked_NotEveryListedBox()
+    {
+        var onlySticky = new List<(string Name, bool IsSelected)> { ("Sales", true), ("Ghost", true) };
+        Assert.Equal(new[] { "Sales", "Ghost" }, DatabaseFilterSelection.Stored(onlySticky, new[] { "Sales", "Billing" }));
+
+        var withSticky = new List<(string Name, bool IsSelected)> { ("Billing", true), ("Ghost", true), ("Sales", true) };
+        Assert.Empty(DatabaseFilterSelection.Stored(withSticky, new[] { "sales", "BILLING" }));
     }
 
     [Theory]
@@ -71,6 +103,31 @@ public sealed class ReleaseWalkFilterAndCompareTests
 
         Assert.Contains("DatabaseFilterSelection.Stored(", source, StringComparison.Ordinal);
         Assert.DoesNotContain("if (item.IsSelected)", source, StringComparison.Ordinal);
+    }
+
+    // ---- #5554: a failed Running Jobs read is not "no jobs are running" -------------------------------------------
+
+    [Theory]
+    [InlineData("Lite/Controls/ServerTab.Refresh.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.RunningJobs.cs")]
+    public void RunningJobsLoad_DoesNotTurnAFailedReadIntoAnEmptyList(string path)
+    {
+        var source = RepoFile(path);
+
+        /* SafeQueryAsync answers a failed read with an empty list, and the empty grid then says "No SQL Agent jobs are
+           running." about a read that never answered. The load catches the failure itself and says the read failed. */
+        Assert.DoesNotContain("SafeQueryAsync(() => _dataService.GetRunningJobsAsync", source, StringComparison.Ordinal);
+        Assert.Contains("RunningJobsReadFailedText(ex)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunningJobsReadFailedText_NamesTheCause_AndNeverSaysNoJobsAreRunning()
+    {
+        var text = ServerTab.RunningJobsReadFailedText(new InvalidOperationException("msdb is offline"));
+
+        Assert.Contains("could not be read", text, StringComparison.Ordinal);
+        Assert.Contains("msdb is offline", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("No SQL Agent jobs are running", text, StringComparison.Ordinal);
     }
 
     // ---- V12d ---------------------------------------------------------------------------------------------------

@@ -63,7 +63,7 @@ public partial class QueryStatsHistoryWindow : Window
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
                 this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
             /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
-            async (db, qt, est, iso, ct) => LivePlanDisplay.Filter(await ActualPlanExecutor.ExecuteForActualPlanAsync(
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite")),
             "the monitored server");
@@ -197,7 +197,7 @@ public partial class QueryStatsHistoryWindow : Window
             // Fall back to live server if DuckDB didn't have it
             if (string.IsNullOrEmpty(plan) && !string.IsNullOrEmpty(_connectionString))
             {
-                plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
+                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
                 source = "live server";
             }
 
@@ -306,7 +306,7 @@ public partial class QueryStatsHistoryWindow : Window
         try { plan = await System.Threading.Tasks.Task.Run(() => _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash)); }
         catch { /* DuckDB lookup failed — fall through to the live server */ }
         if (string.IsNullOrEmpty(plan) && !string.IsNullOrEmpty(_connectionString))
-            plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
+            plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
         return plan;
     }
 

@@ -100,6 +100,7 @@ public partial class ViewerServerTab : UserControl
     private List<SelectableItem> _databaseFilterItems = new();
     private bool _isUpdatingDatabaseFilterSelection;
     private int _databaseFilterTotalCount;
+    private List<string>? _databaseFilterCollectedNames;
     private bool _databaseFilterDirty;
 
     /// <summary>The database filter as a reader argument: null (= All, unfiltered) when nothing is selected.</summary>

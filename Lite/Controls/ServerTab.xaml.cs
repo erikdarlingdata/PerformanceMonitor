@@ -569,16 +569,7 @@ public partial class ServerTab : UserControl
             command.CommandTimeout = 30;
 
             using var reader = await command.ExecuteReaderAsync();
-            var results = new List<QuerySnapshotRow>();
-            var snapshotTime = DateTime.UtcNow;
-            /* #4348: this read is the button's own, not the collector's, so the statement text and both plans are judged
-               here, one session (one shared budget) for the whole read. */
-            var scrub = new SensitiveStatements.Session();
-
-            while (await reader.ReadAsync())
-            {
-                results.Add(ReadLiveSnapshotRow(reader, snapshotTime, scrub));
-            }
+            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow);
 
             _querySnapshotsFilterMgr!.UpdateData(results);
             /* #4953: the grid now holds the live rows, not the range the "Showing since" banner described, so the banner
@@ -600,6 +591,24 @@ public partial class ServerTab : UserControl
             LiveSnapshotButton.IsEnabled = true;
         }
     }
+
+    /// <summary>
+    /// The whole live snapshot read, on a thread-pool thread (#5554). This read is the button's own, not the collector's,
+    /// so the statement text and both plans are judged here (#4348), one session (one shared budget) for the whole read;
+    /// the judge parses every plan and can spend up to the session budget, so the loop never runs on the dispatcher.
+    /// </summary>
+    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime)
+        => Task.Run(async () =>
+        {
+            var results = new List<QuerySnapshotRow>();
+            var scrub = new SensitiveStatements.Session();
+            while (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                results.Add(ReadLiveSnapshotRow(reader, snapshotTime, scrub));
+            }
+
+            return results;
+        });
 
     /// <summary>
     /// One row of the live snapshot query, read into the grid's row. The query is the scheduled collector's,

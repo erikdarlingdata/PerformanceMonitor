@@ -68,7 +68,7 @@ public partial class WaitDrillDownWindow : Window
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
                 this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
             /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
-            async (db, qt, est, iso, ct) => LivePlanDisplay.Filter(await ActualPlanExecutor.ExecuteForActualPlanAsync(
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite")),
             "the monitored server");
