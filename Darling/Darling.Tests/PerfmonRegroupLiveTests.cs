@@ -33,8 +33,9 @@ public sealed class PerfmonRegroupLiveTests
     private const long IdBase = -495_200_000_000L;
 
     /// <summary>"Now" for every day the tests seed, name and compare, captured ONCE: a run that crosses midnight UTC between a
-    /// seed and a lookup must not move the day a chunk is looked up by (the database's own clock decides only the reach, which
-    /// has days of slack on both sides of the seeded chunks).</summary>
+    /// seed and a lookup must not move the day a chunk is looked up by. The database's own clock decides the reach, which has
+    /// days of slack on both sides of the seeded chunks in every test but <c>TheReach_IsClampedToTheRetentionLessADay</c>; that
+    /// one reads the chunks in its reach from <c>now()</c> itself.</summary>
     private static readonly DateTime RunStartUtc = DateTime.UtcNow;
 
     private sealed record ChunkRow(string Name, bool IsCompressed, string SegmentBy, DateTime Start);
@@ -205,7 +206,7 @@ public sealed class PerfmonRegroupLiveTests
         Assert.True((await ReadChunksAsync(connection, ct)).Single(c => c.Name == chunk.Name).IsCompressed);
 
         var logger = new CapturingTestLogger();
-        Assert.True(await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct));
+        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.Regrouped, await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct));
         Assert.Equal(0, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
         var after = (await ReadChunksAsync(connection, ct)).Single(c => c.Name == chunk.Name);
         Assert.True(after.IsCompressed);
@@ -338,7 +339,7 @@ public sealed class PerfmonRegroupLiveTests
         await holder.ReleaseAsync(ct);
         var compressed = await compress;
 
-        Assert.True(compressed);
+        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.Regrouped, compressed);
         Assert.Equal(1, logger.Lines.Count(line => line.Contains("not changed this pass", StringComparison.Ordinal)));
         Assert.Equal(0, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
         var after = (await ReadChunksAsync(connection, ct)).Single(c => c.Name == chunk.Name);
@@ -368,7 +369,7 @@ public sealed class PerfmonRegroupLiveTests
         await ExecAsync(connection, $"SELECT decompress_chunk('{chunk.Name}')", ct);
         await using var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
         var logger = new CapturingTestLogger();
-        Assert.False(await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct));
+        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.LeftUncompressed, await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct));
         await holder.ReleaseAsync(ct);
 
         Assert.Equal(3, logger.Lines.Count(line => line.Contains("not changed this pass", StringComparison.Ordinal)));
@@ -469,16 +470,21 @@ public sealed class PerfmonRegroupLiveTests
             return clock.Elapsed;
         }
 
-        var baseline = TimeSpan.Zero;
+        /* The baseline is the MEDIAN of the warm reads (#5574, check round 2): the first read after the compress is cold (plan,
+           buffers) and is dropped, and one slow outlier must not lift the baseline, because the stall this test guards is a
+           lock wait of about 3 s on top of a warm read, and a baseline raised by 0.5 s lets it through. */
+        var warm = new List<TimeSpan>();
         using (var baselineConnection = new NpgsqlConnection(scratch.ConnectionString))
         {
             await baselineConnection.OpenAsync(ct);
+            await TimeReadAsync(baselineConnection, ct);
             for (var i = 0; i < 5; i++)
             {
-                var took = await TimeReadAsync(baselineConnection, ct);
-                baseline = took > baseline ? took : baseline;
+                warm.Add(await TimeReadAsync(baselineConnection, ct));
             }
         }
+
+        var baseline = warm.OrderBy(took => took).ElementAt(warm.Count / 2);
 
         var stop = false;
         var slowest = TimeSpan.Zero;
@@ -651,7 +657,8 @@ public sealed class PerfmonRegroupLiveTests
 
         Assert.Equal(4, first.Done);
         Assert.Equal(1, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
-        Assert.Single(logger.Lines, line => line.Contains("could not be decompressed within 2 s", StringComparison.Ordinal) && line.Contains(held.Name, StringComparison.Ordinal));
+        Assert.Single(logger.Lines, line => line.Contains("could not be decompressed within 2 s", StringComparison.Ordinal) && line.Contains("hit the statement cap after", StringComparison.Ordinal) && line.Contains(held.Name, StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("cancelled by the server", StringComparison.Ordinal));
         Assert.Equal(OldChunkSegmentBy, (await ReadChunksAsync(connection, ct)).Single(chunk => chunk.Name == held.Name).SegmentBy);
 
         var linesBefore = logger.Lines.Count;
@@ -660,6 +667,51 @@ public sealed class PerfmonRegroupLiveTests
         Assert.Equal(PerfmonRegroupRunEnd.AllSkipped, second.End);
         Assert.DoesNotContain(logger.Lines.Skip(linesBefore), line => line.Contains("(decompress)", StringComparison.Ordinal));
         Assert.Equal(OldChunkSegmentBy, (await ReadChunksAsync(connection, ct)).Single(chunk => chunk.Name == held.Name).SegmentBy);
+        TimescaleSupport.BusyStreaks.Reset();
+    }
+
+    /// <summary>
+    /// A decompress the SERVER cancels before the 30-minute cap (a short <c>statement_timeout</c> on the role, a cancel from
+    /// another session) is still not tried again until the restart, so a short server timeout does not cost a rewrite every hour,
+    /// but the log tells the truth about it (#5574, check round 2): "cancelled by the server" with the real elapsed time, not
+    /// "could not be decompressed within 1800 s". The session's <c>statement_timeout</c> is 2 s here, under the 3 s lock wait the
+    /// held chunk gives, so the server cancels first and the cap (the default 1800 s) is nowhere near.
+    /// </summary>
+    [Fact]
+    public async Task ADecompressTheServerCancelsBeforeTheCap_IsNotTriedAgain_AndTheLogSaysTheServerDidIt()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql(TimescaleSupport.PerfmonStatsTable), ct);
+        TimescaleSupport.BusyStreaks.Reset();
+
+        var held = ChunkOfDay(await ReadChunksAsync(connection, ct), 1);
+        var stub = new TimescaleSupport.PerfmonRegroupRead(
+            TimescaleSupport.PerfmonRegroupReadStatus.Candidates,
+            new[] { new TimescaleSupport.PerfmonRegroupCandidate(held.Name, OldChunkSegmentBy) }, null);
+        var drainConnection = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Options = "-c statement_timeout=2000" }.ConnectionString;
+        await using var holder = await HoldLockAsync(scratch.ConnectionString, held.Name, ct);
+        var logger = new CapturingTestLogger();
+        var drain = NewDrain(drainConnection, logger, TimeSpan.Zero, new List<TimeSpan>(), readCandidates: FixedRead(stub));
+        var first = await RunDetailedBoundedAsync(drain, 60, ct);
+        await holder.ReleaseAsync(ct);
+
+        Assert.Equal(0, first.Done);
+        Assert.Single(logger.Lines, line => line.Contains("cancelled by the server", StringComparison.Ordinal)
+            && line.Contains(held.Name, StringComparison.Ordinal) && line.Contains("before the 1800 s statement cap", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("could not be decompressed within", StringComparison.Ordinal) || line.Contains("hit the statement cap", StringComparison.Ordinal));
+        Assert.Equal(OldChunkSegmentBy, (await ReadChunksAsync(connection, ct)).Single(chunk => chunk.Name == held.Name).SegmentBy);
+
+        /* Not tried again while the process lives, though the stub keeps answering with it. */
+        var linesBefore = logger.Lines.Count;
+        var second = await RunDetailedBoundedAsync(drain, 60, ct);
+        Assert.Equal(0, second.Done);
+        Assert.Equal(PerfmonRegroupRunEnd.AllSkipped, second.End);
+        Assert.DoesNotContain(logger.Lines.Skip(linesBefore), line => line.Contains("(decompress)", StringComparison.Ordinal));
         TimescaleSupport.BusyStreaks.Reset();
     }
 
@@ -683,7 +735,7 @@ public sealed class PerfmonRegroupLiveTests
         await ExecAsync(connection, $"SELECT decompress_chunk('{chunk.Name}')", ct);
         await using var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
         var logger = new CapturingTestLogger();
-        Assert.False(await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct, statementTimeoutSeconds: 1));
+        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.LeftUncompressed, await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct, statementTimeoutSeconds: 1));
         await holder.ReleaseAsync(ct);
 
         Assert.Equal(1, logger.Lines.Count(line => line.Contains("(compress) could not be changed", StringComparison.Ordinal)));
@@ -768,8 +820,12 @@ public sealed class PerfmonRegroupLiveTests
         await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
         await ExecAsync(connection, TimescaleSupport.EnableCompressionSql(TimescaleSupport.PerfmonStatsTable), ct);
 
-        var gone = new TimescaleSupport.PerfmonRegroupCandidate("_timescaledb_internal._hyper_99999_99999_chunk", OldChunkSegmentBy);
-        var stub = new TimescaleSupport.PerfmonRegroupRead(TimescaleSupport.PerfmonRegroupReadStatus.Candidates, new[] { gone }, null);
+        /* THREE gone chunks (the failure limit is three in a row): a gone chunk that counted as a failure would end the run at the
+           third, and the run would end FailureLimit with a Warning instead of getting past all three (#5574, check round 2). */
+        var gone = Enumerable.Range(1, 3)
+            .Select(n => new TimescaleSupport.PerfmonRegroupCandidate($"_timescaledb_internal._hyper_99999_{n}_chunk", OldChunkSegmentBy))
+            .ToArray();
+        var stub = new TimescaleSupport.PerfmonRegroupRead(TimescaleSupport.PerfmonRegroupReadStatus.Candidates, gone, null);
         var logger = new CapturingTestLogger();
         var run = await RunDetailedBoundedAsync(NewDrain(scratch.ConnectionString, logger, TimeSpan.Zero, new List<TimeSpan>(), readCandidates: FixedRead(stub)), 30, ct);
 
@@ -777,6 +833,53 @@ public sealed class PerfmonRegroupLiveTests
         Assert.Equal(PerfmonRegroupRunEnd.AllSkipped, run.End);
         Assert.Equal(0, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
         Assert.DoesNotContain(logger.Lines, line => line.Contains("in a row could not be re-grouped", StringComparison.Ordinal));
+        foreach (var candidate in gone)
+        {
+            Assert.Contains(logger.Lines, line => line.StartsWith("Debug:", StringComparison.Ordinal)
+                && line.Contains(candidate.Chunk, StringComparison.Ordinal) && line.Contains("no longer exists", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// A chunk that is gone by the compress half is Gone too, not "left for the policy" (#5574, check round 2): no Warning, no
+    /// "stays uncompressed until the compression policy compresses it" line (there is nothing to compress). And a 42P01 on a chunk the
+    /// catalog still lists is a Failed chunk with a Warning, never Gone.
+    /// </summary>
+    [Fact]
+    public async Task ARelationErrorIsGoneOnlyWhenTheChunkCatalogAgrees_AtEitherHalf()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql(TimescaleSupport.PerfmonStatsTable), ct);
+        TimescaleSupport.BusyStreaks.Reset();
+
+        /* The compress half on a chunk that is not there. */
+        var goneLogger = new CapturingTestLogger();
+        var result = await TimescaleSupport.CompressRegroupedChunkAsync(
+            connection, goneLogger, "_timescaledb_internal._hyper_99999_9_chunk", 3, TimeSpan.Zero, ct);
+        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.Gone, result);
+        Assert.Equal(0, goneLogger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+        Assert.DoesNotContain(goneLogger.Lines, line => line.Contains("compression policy", StringComparison.Ordinal));
+        Assert.Single(goneLogger.Lines, line => line.StartsWith("Debug:", StringComparison.Ordinal) && line.Contains("no longer exists (compress half;", StringComparison.Ordinal));
+
+        /* The same relation error on a chunk the catalog still lists: Failed, with a Warning that says why. */
+        var listed = ChunkOfDay(await ReadChunksAsync(connection, ct), 2);
+        foreach (var half in new[] { "decompress", "compress" })
+        {
+            var listedLogger = new CapturingTestLogger();
+            var listedResult = await TimescaleSupport.ResolveMissingRelationAsync(connection, listedLogger, listed.Name, half, ct);
+            Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.Failed, listedResult);
+            Assert.Equal(1, listedLogger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Single(listedLogger.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal)
+                && line.Contains(half, StringComparison.Ordinal) && line.Contains("still lists the chunk", StringComparison.Ordinal));
+        }
+
+        var goneDirect = await TimescaleSupport.ResolveMissingRelationAsync(connection, null, "_timescaledb_internal._hyper_99999_9_chunk", "decompress", ct);
+        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.Gone, goneDirect);
     }
 
     /// <summary>
@@ -796,15 +899,29 @@ public sealed class PerfmonRegroupLiveTests
         await ExecAsync(connection,
             "INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES (NULL, 'perfmon_stats', 4)", ct);
 
-        var run = await RunDetailedBoundedAsync(NewDrain(scratch.ConnectionString, new CapturingTestLogger(), TimeSpan.Zero, new List<TimeSpan>()), 60, ct);
-
-        Assert.Equal(3, run.Done);
-        var after = await ReadChunksAsync(connection, ct);
-        foreach (var daysBack in new[] { 1, 2, 3 })
+        /* The expected chunks come from the DATABASE clock, read here (#5574, check round 2): the reach is "ends within 3 days of
+           now()", and the day-3 chunk drops out of it at midnight UTC, so a count of 3 fixed when the class loaded fails a run that
+           crosses midnight between the class start and this test. The chunks themselves are named by the seeded days. */
+        var expected = new List<string>();
+        using (var inReach = new NpgsqlCommand(
+            @"SELECT format('%I.%I', chunk_schema, chunk_name) FROM timescaledb_information.chunks
+              WHERE hypertable_schema = 'collect' AND hypertable_name = 'perfmon_stats' AND is_compressed
+              AND range_end > now() - make_interval(days => 3)", connection))
+        await using (var names = await inReach.ExecuteReaderAsync(ct))
         {
-            Assert.Equal(WantedChunkSegmentBy, after.Single(chunk => chunk.Name == ChunkOfDay(after, daysBack).Name).SegmentBy);
+            while (await names.ReadAsync(ct))
+            {
+                expected.Add(names.GetString(0));
+            }
         }
 
+        Assert.InRange(expected.Count, 2, 3);
+        var run = await RunDetailedBoundedAsync(NewDrain(scratch.ConnectionString, new CapturingTestLogger(), TimeSpan.Zero, new List<TimeSpan>()), 60, ct);
+
+        Assert.Equal(expected.Count, run.Done);
+        var after = await ReadChunksAsync(connection, ct);
+        Assert.All(after.Where(chunk => expected.Contains(chunk.Name)), chunk => Assert.Equal(WantedChunkSegmentBy, chunk.SegmentBy));
+        Assert.All(after.Where(chunk => !expected.Contains(chunk.Name) && chunk.IsCompressed), chunk => Assert.Equal(OldChunkSegmentBy, chunk.SegmentBy));
         Assert.Equal(OldChunkSegmentBy, ChunkOfDay(after, 4).SegmentBy);
         Assert.Equal(OldChunkSegmentBy, ChunkOfDay(after, 5).SegmentBy);
     }

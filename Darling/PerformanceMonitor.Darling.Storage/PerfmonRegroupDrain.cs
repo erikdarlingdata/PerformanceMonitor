@@ -64,8 +64,9 @@ internal readonly record struct PerfmonRegroupRunResult(int Done, PerfmonRegroup
 ///
 /// <para><b>What it remembers for the life of the process</b> (the drain object lives as long as the service): the chunks it
 /// re-grouped, so a chunk that still reads as a candidate afterwards (a TimescaleDB release that spells the setting
-/// differently) is skipped with one Warning instead of rewritten forever; the chunks whose decompress hit the statement cap
-/// (<see cref="TimescaleSupport.PerfmonRegroupStatementTimeoutSeconds"/>), which would hit it every hour; and that a failed
+/// differently) is skipped with one Warning instead of rewritten forever; the chunks whose decompress was cancelled, by the statement cap
+/// (<see cref="TimescaleSupport.PerfmonRegroupStatementTimeoutSeconds"/>) or by the server (a <c>statement_timeout</c> shorter
+/// than the cap, or a cancel), which would be cancelled again every hour (the log line says which and how long it ran); and that a failed
 /// catalog read has been reported once at Warning.</para>
 ///
 /// <para>Gated exactly as the first version was: <see cref="TimescaleSupport.PerfmonRegroupBlockedReason"/> is asked
@@ -264,14 +265,29 @@ public sealed class PerfmonRegroupDrain
                     break;
 
                 case TimescaleSupport.PerfmonRegroupChunkResult.TimedOut:
-                    /* The decompress ran into its statement cap. The same chunk would run into it at every hourly start,
-                       so it is left alone while this process lives. The statement's own Warning has said why. */
+                    /* The decompress was cancelled: by its own cap, or by the server (a statement_timeout on the role or database,
+                       or someone's cancel). Either way the same chunk would be cancelled at every hourly start, and a rewrite
+                       costs minutes, so it is left alone while this process lives. The statement's own Warning has said why;
+                       this line says which of the two it was and how long it really ran (#5574). */
                     skipped.Add(chunk);
                     _gaveUp.Add(chunk);
                     failuresInARow++;
-                    _logger?.LogInformation(
-                        "TimescaleDB: perfmon_stats chunk {Chunk} could not be decompressed within {Seconds} s, so it is not tried again until the service restarts (#5574)",
-                        chunk, _statementTimeoutSeconds);
+                    var ranSeconds = (int)outcome.Elapsed.TotalSeconds;
+                    /* A second of slack: the client's timer runs from the command's start, a timer can fire a few
+                       milliseconds early, and a server cancel inside the last second is the cap for every practical purpose. */
+                    if (outcome.Elapsed >= TimeSpan.FromSeconds(_statementTimeoutSeconds - 1))
+                    {
+                        _logger?.LogInformation(
+                            "TimescaleDB: perfmon_stats chunk {Chunk} could not be decompressed within {Seconds} s (it hit the statement cap after {Ran} s), so it is not tried again until the service restarts (#5574)",
+                            chunk, _statementTimeoutSeconds, ranSeconds);
+                    }
+                    else
+                    {
+                        _logger?.LogInformation(
+                            "TimescaleDB: perfmon_stats chunk {Chunk} was cancelled by the server (a statement_timeout or a cancel) after {Ran} s, before the {Seconds} s statement cap, so it is not tried again until the service restarts (#5574)",
+                            chunk, ranSeconds, _statementTimeoutSeconds);
+                    }
+
                     break;
 
                 default:
