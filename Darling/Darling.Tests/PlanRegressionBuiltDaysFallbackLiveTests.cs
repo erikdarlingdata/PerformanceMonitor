@@ -135,7 +135,22 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
     /// still finds the regression.
     /// </summary>
     [Fact]
-    public async Task ADayMarkedByALateRow_DropsOutOfTheBuiltDays_AndIsReadLive()
+    public Task ADayMarkedByALateRow_DropsOutOfTheBuiltDays_AndIsReadLive() => RunLateRowAsync(utcNow: null);
+
+    /// <summary>
+    /// The same assertions at a fixed clock, so the late-row test means the same all day. Before 04:00 UTC the window's start
+    /// (four hours back) is on the previous calendar day, so the window's first day is fifteen days before today; from 04:00
+    /// UTC it is fourteen. The cases straddle that edge (the last minute before 04:00, and 04:00 itself) and a mid-day one.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 30)]
+    [InlineData(3, 59)]
+    [InlineData(4, 0)]
+    [InlineData(12, 0)]
+    public Task ADayMarkedByALateRow_DropsOutOfTheBuiltDays_AndIsReadLive_AtAFixedClock(int hour, int minute) =>
+        RunLateRowAsync(new DateTime(2026, 10, 7, hour, minute, 0, DateTimeKind.Utc));
+
+    private static async Task RunLateRowAsync(DateTime? utcNow)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 late-row test.");
@@ -145,7 +160,7 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct, utcNow);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var windowFloor = PgFactCollector.PlanRegressionWindowFloor(periodStart.AddDays(-PgFactCollector.PlanRegressionWindowDays));
@@ -315,15 +330,21 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
     /// <summary>
     /// One query with two plans, the cheap one seen five days before the pass window and the costly one in it (a 10x CPU
     /// regression), plus an old steady query so the interval table's floor is below the read's bound, and a coverage claim
-    /// below the window so the fact reads the interval table. Then T-14 through T-3 are built for the server, so the fact
-    /// can read day totals.
+    /// below the window so the fact reads the interval table. Then the window's days are built for the server, so the fact
+    /// can read day totals. The window's first day is <c>(start - 14 days).Date</c> (<c>PgFactCollector.PlanRegressionWindowFloor</c>),
+    /// and <c>start</c> is four hours before <paramref name="utcNow"/>, so from 00:00 to 04:00 UTC it is still yesterday.
+    /// The built range is therefore counted from <c>start.Date</c>, not <c>utcNow.Date</c>: counted from today, the window's
+    /// first day was never built in those hours and the late-row test failed. <paramref name="utcNow"/> is a seam so the
+    /// class can be run at a fixed 00:30 and 12:00 UTC (null means the clock).
     /// </summary>
-    private static async Task<(DateTime Start, DateTime End)> SeedAndBuildAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task<(DateTime Start, DateTime End)> SeedAndBuildAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime? utcNow = null)
     {
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = DateTime.SpecifyKind(utcNow ?? DateTime.UtcNow, DateTimeKind.Unspecified);
         var end = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
         var start = end.AddHours(-4);
         var today = now.Date;
+        var windowDay = start.Date;
 
         await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
         await InsertIntervalAsync(connection, queryId: 1, planId: 11, "0xCHEAP", cpuUs: 20_000, execs: 100, firstExec: start.AddDays(-5).AddHours(-1), ct);
@@ -340,9 +361,9 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
             await coverage.ExecuteNonQueryAsync(ct);
         }
 
-        for (var d = -14; d <= -3; d++)
+        for (var d = -PgFactCollector.PlanRegressionWindowDays; d <= -3; d++)
         {
-            await PlanRegressionDaily.BuildDayAsync(connection, ServerId, DateOnly.FromDateTime(today.AddDays(d)), now, ct);
+            await PlanRegressionDaily.BuildDayAsync(connection, ServerId, DateOnly.FromDateTime(windowDay.AddDays(d)), now, ct);
         }
 
         return (start, end);
