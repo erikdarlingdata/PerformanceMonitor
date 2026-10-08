@@ -1822,8 +1822,17 @@ jobs:
       # _CSVLOG_SIBLING at the 5544 stderr+csvlog cluster, and DARLING_TEST_PG_LOG_TARGET/
       # _UTC_LOG_TARGET at the 5545 cluster (the two self-hosted log end-to-end tests). DARLING_TEST_PG
       # (5541) stays the store for the classes that read one target's log while writing to a separate store.
+      # #5587: run 37824250187 attempt 1 (shard 3) hit the JOB's 30-minute timeout inside this step. GitHub then
+      # cancelled the job and left every later step (the stop, both uploads) pending, kept no log for the job, and the
+      # per-test timing was never written (the runner writes it when a chunk ends). Shards 0 to 5 normally take 6 to
+      # 11 minutes in this step. A STEP-level timeout ends only this step: the step fails, the job goes on, and the
+      # `always()` steps below run, so the PostgreSQL log and the runner output are uploaded. It sits well under the
+      # job's 30 minutes (about 2 minutes of setup before it, a few after it); it is not a speed limit for the tests.
+      # `-longRunning 300` makes the runner print a test that has run for 5 minutes while the step is still alive, so a
+      # hang names its test (the slowest normal Darling test is 120 s, in the upgrade classes).
       - name: Run Darling PG tests
         if: steps.filter.outputs.darling == 'true'
+        timeout-minutes: 22
         shell: pwsh
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
@@ -1915,6 +1924,8 @@ jobs:
 
           # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
           $PSNativeCommandUseErrorActionPreference = $false
+          # The runner output of every chunk is kept beside the reports (the darling-runner-log-N artifact, #5587).
+          New-Item -ItemType Directory -Force -Path TestResults | Out-Null
           $failedChunks = 0
           $chunkNumber = 0
           foreach ($chunk in $chunks) {
@@ -1924,7 +1935,7 @@ jobs:
               Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
               # -xml: per-test durations for the darling-tests-timing artifact (#5459 change 4: the test map's
               # selection estimates need a per-class Darling time, and none was recorded before).
-              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @chunkArgs -trx TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx -xml TestResults/darling-timing-${{ matrix.shard }}-$chunkNumber.xml
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @chunkArgs -trx TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx -xml TestResults/darling-timing-${{ matrix.shard }}-$chunkNumber.xml -longRunning 300 | Tee-Object -FilePath TestResults/darling-runner-${{ matrix.shard }}.log -Append
               if ($LASTEXITCODE -ne 0) {
                   $failedChunks++
                   Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
@@ -1991,8 +2002,21 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # #5587: the runner output, kept when the shard fails, is cancelled or its test step times out. The job's own
+      # timeout leaves this step pending (see the note on the test step), which is why that step has a timeout of its own.
+      - name: Upload Darling runner output
+        if: always() && steps.filter.outputs.darling == 'true'
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-runner-log-${{ matrix.shard }}
+          path: TestResults/darling-runner-*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Upload PG log and test results on failure
-        if: failure() && steps.filter.outputs.darling == 'true'
+        if: (failure() || cancelled()) && steps.filter.outputs.darling == 'true'
         uses: actions/upload-artifact@v6
         with:
           # Per-shard: matrix legs sharing one artifact name collide and fail the upload.
@@ -2727,8 +2751,12 @@ jobs:
       # "run everything" are one argument-list apart — the loudest possible difference to get wrong
       # quietly. (Hundreds of classes across four shards make an empty one implausible under either cut,
       # so the arm is a guard, not an expectation.)
+      # #5587: the Darling PG job lost a shard to the JOB's timeout (its later steps stayed pending and no log was kept).
+      # This job has the same shape, so its test step gets a timeout of its own, under the job's 30 minutes, and the
+      # runner prints a test that has run for 5 minutes. The slowest Lite shard measured 14 minutes in this step.
       - name: Run Lite tests (shard)
         if: steps.scope.outputs.run == 'true'
+        timeout-minutes: 22
         shell: pwsh
         env:
           # The timing source the gate pinned for the WHOLE run (empty: none, so the hash cut). Read from
@@ -2880,6 +2908,7 @@ jobs:
 
           # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
           $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Force -Path TestResults | Out-Null
           $failedChunks = 0
           $chunkNumber = 0
           foreach ($chunk in $chunks) {
@@ -2888,7 +2917,7 @@ jobs:
               $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
               Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
               # -xml: per-test durations for the lite-tests-timing artifact (#5208).
-              dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs -xml TestResults/lite-timing-${{ matrix.shard }}-$chunkNumber.xml
+              dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs -xml TestResults/lite-timing-${{ matrix.shard }}-$chunkNumber.xml -longRunning 300 | Tee-Object -FilePath TestResults/lite-runner-${{ matrix.shard }}.log -Append
               if ($LASTEXITCODE -ne 0) {
                   $failedChunks++
                   Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
@@ -2912,6 +2941,18 @@ jobs:
           path: |
             TestResults/lite-timing-*.xml
             TestResults/lite-timing-*.xml.cpu.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # #5587: the runner output, uploaded whatever the test step did (see the note on the test step).
+      - name: Upload Lite runner output
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-runner-log-${{ matrix.shard }}
+          path: TestResults/lite-runner-*.log
           retention-days: 7
           if-no-files-found: ignore
 
