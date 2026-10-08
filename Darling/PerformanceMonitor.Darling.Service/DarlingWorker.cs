@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -11643,7 +11643,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// The hourly store-maintenance tick's eighth tenant (#5495): builds the hourly rollup of the differenced PostgreSQL I/O
     /// counters that long <c>get_pg_io_stats</c> windows read, one failure-isolated pass (see
     /// <see cref="PgIoStatsHourlyBuilder.RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>). The first pass after
-    /// the V170 upgrade is the fill, capped at <see cref="PgIoStatsHourlyBuilder.MaxBuildsPerTick"/> hours. Its own catch-all: nothing here can fail the tick.
+    /// the V170 upgrade is the fill, bounded by time (<see cref="PgIoStatsHourlyBuilder.TickBudget"/>). Its own catch-all: nothing here can fail the tick.
     /// </summary>
     private async Task BuildPgIoStatsHourlyAsync(CancellationToken stoppingToken)
     {

@@ -29,8 +29,8 @@ public sealed class AwsPerServerRoleRungTests
     internal const int RungVersion = 169;
     private const int PreviousVersion = 168;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe: the newest, so the last argument.</summary>
-    private const int ProbeOrdinal = 144;
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument: V170's sentinel (#5495) follows it.</summary>
+    internal const int ProbeOrdinal = 144;
 
     private const string RoleColumn = "aws_role_arn";
 

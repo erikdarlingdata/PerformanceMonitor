@@ -182,6 +182,9 @@ internal static class DarlingLatchSpinlockReader
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
+            /* The earlier read joined its newest-row CTE on spinlock_name = spinlock_name, which drops a NULL name before the
+               LIMIT; the column is nullable, so the name is excluded here, ahead of the top-N cut, to keep that behavior. */
+            AND   spinlock_name IS NOT NULL
             GROUP BY spinlock_name
         ),
         top_n AS
@@ -213,7 +216,7 @@ internal static class DarlingLatchSpinlockReader
             FROM v_spinlock_stats AS s
             WHERE s.server_id = $1
             AND   s.collection_time = a.latest_collection_time
-            AND   s.spinlock_name IS NOT DISTINCT FROM a.spinlock_name
+            AND   s.spinlock_name = a.spinlock_name
             LIMIT 1
         ) AS l
         CROSS JOIN LATERAL
@@ -229,7 +232,7 @@ internal static class DarlingLatchSpinlockReader
                                  WHERE p.server_id = $1
                                  AND   p.collection_time >= $2
                                  AND   p.collection_time < a.latest_collection_time
-                                 AND   p.spinlock_name IS NOT DISTINCT FROM a.spinlock_name
+                                 AND   p.spinlock_name = a.spinlock_name
                                  ORDER BY p.collection_time DESC
                                  LIMIT 1))))
                         ELSE NULLIF(l.sample_interval_seconds, 0)

@@ -123,6 +123,10 @@ public sealed class DarlingMcpLatchSpinlockToolsSurfaceAndSqlTests
         Assert.True(
             sql.IndexOf("LIMIT $4", StringComparison.Ordinal) < sql.IndexOf("CROSS JOIN LATERAL", StringComparison.Ordinal),
             "the top-N cut must come before the per-name lookups of the newest row");
+        /* A NULL spinlock name never reached the old read's output (its join on the name dropped it before the LIMIT), so it
+           is excluded ahead of the top-N cut, and the per-name lookups compare with plain equality. */
+        Assert.Contains("AND   spinlock_name IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("IS NOT DISTINCT FROM", sql, StringComparison.Ordinal);
         /* The previous-row lookup for a pre-V127 row stays inside the window, as the old per-name LAG did. */
         Assert.Contains("p.collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("p.collection_time < a.latest_collection_time", sql, StringComparison.Ordinal);

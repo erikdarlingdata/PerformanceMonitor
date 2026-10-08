@@ -68,26 +68,34 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats_hourly_state (server_id integer P
     /// <summary>
     /// Builds one (server, hour): $1 server_id, $2 the hour start (naive UTC timestamp); returns the rows inserted. The caller
     /// deletes the hour's rows first, in the same transaction. Seeds each combination's difference from the newest EARLIER rollup row
-    /// (its <c>l_*</c>), so hours must be built in order from <c>first_hour</c>.
+    /// (its <c>l_*</c>), so hours must be built in order from <c>first_hour</c>. The seed is one backward index probe per combination
+    /// of the hour being built (<c>ORDER BY hour_start DESC LIMIT 1</c> on the unique index), not a sort of every earlier rollup row of
+    /// the server: that sort made the first fill quadratic in the hours already built.
     /// </summary>
     public const string BuildHourSql = """
-        WITH seed AS (
-            SELECT DISTINCT ON (backend_type, object_type, context)
-                   backend_type, object_type, context, last_ct AS ct, true AS is_seed,
-                   l_reads AS reads, l_read_time_ms AS read_time_ms, l_hits AS hits, l_extends AS extends, l_extend_time_ms AS extend_time_ms,
-                   l_evictions AS evictions, l_reuses AS reuses, l_writes AS writes, l_write_time_ms AS write_time_ms,
-                   l_read_bytes AS read_bytes, l_write_bytes AS write_bytes, l_extend_bytes AS extend_bytes,
-                   NULL::timestamp AS stats_reset, NULL::bigint AS op_bytes
-            FROM collect.pg_io_stats_hourly
-            WHERE server_id = $1 AND hour_start < $2
-            ORDER BY backend_type, object_type, context, hour_start DESC
-        ),
-        hr AS (
+        WITH hr AS (
             SELECT backend_type, object_type, context, collection_time AS ct, false AS is_seed,
                    reads, read_time_ms, hits, extends, extend_time_ms, evictions, reuses, writes, write_time_ms,
                    read_bytes, write_bytes, extend_bytes, stats_reset, op_bytes
             FROM collect.pg_io_stats
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $2 + interval '1 hour'
+        ),
+        seed AS (
+            SELECT s.backend_type, s.object_type, s.context, s.last_ct AS ct, true AS is_seed,
+                   s.l_reads AS reads, s.l_read_time_ms AS read_time_ms, s.l_hits AS hits, s.l_extends AS extends, s.l_extend_time_ms AS extend_time_ms,
+                   s.l_evictions AS evictions, s.l_reuses AS reuses, s.l_writes AS writes, s.l_write_time_ms AS write_time_ms,
+                   s.l_read_bytes AS read_bytes, s.l_write_bytes AS write_bytes, s.l_extend_bytes AS extend_bytes,
+                   NULL::timestamp AS stats_reset, NULL::bigint AS op_bytes
+            FROM (SELECT DISTINCT backend_type, object_type, context FROM hr) AS cmb
+            CROSS JOIN LATERAL (
+                SELECT * FROM collect.pg_io_stats_hourly AS p
+                WHERE p.server_id = $1 AND p.hour_start < $2
+                AND   p.backend_type IS NOT DISTINCT FROM cmb.backend_type
+                AND   p.object_type  IS NOT DISTINCT FROM cmb.object_type
+                AND   p.context      IS NOT DISTINCT FROM cmb.context
+                ORDER BY p.hour_start DESC
+                LIMIT 1
+            ) AS s
         ),
         u AS (SELECT * FROM seed UNION ALL SELECT * FROM hr),
         d AS (
@@ -156,7 +164,18 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats_hourly_state (server_id integer P
     /// The count guard: $1 server_id, $2/$3 the window. Returns (h1, h2), the whole-hour span the rollup may serve, or no row.
     /// h1 is the window start rounded up, h2 the end rounded down and capped at the built watermark; the span must be 6 hours or more,
     /// h1 must be after the server's first built hour (earlier, the seed of the first rollup rows is unknown), and every hour's raw row
-    /// count must equal the rollup's <c>sum(row_count)</c>. A late row, an unbuilt hour or a purged hour all make a count differ.
+    /// count must equal the rollup's <c>sum(row_count)</c>, for the hours in [h1, h2) AND for the hour just before h1. A late row
+    /// older than the builder's rebuild span, an unbuilt hour or a purged hour all make a count differ.
+    ///
+    /// <para><b>The hour before h1.</b> The first rollup hour's boundary difference <c>b_*</c> was taken against the newest row
+    /// before it as of the build, and the stitch adds it only when that row is inside the window, so that row is in the window's head
+    /// edge and in the hour just before h1. A row that arrived there after the build is differenced by the raw head edge AND still
+    /// missing from the stale boundary difference, which is a double count; the count of that hour catches it.</para>
+    ///
+    /// <para><b>Bounds the planner can use.</b> The raw count is bounded on the bound parameters ($2 less the extra hour, and $3),
+    /// besides the exact hours: the exact bounds come out of a CTE column and cannot exclude a chunk of the hypertable, so without
+    /// the parameter bounds the count read every compressed chunk of the store at any window length. The rollup table is a plain
+    /// table whose unique index leads with (server_id, hour_start), so its range is already an index range.</para>
     /// </summary>
     public const string GuardSql = """
         WITH st AS (
@@ -175,13 +194,15 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats_hourly_state (server_id integer P
         l AS (
             SELECT date_trunc('hour', t.collection_time) AS hr, count(*) AS n
             FROM ok, pg_io_stats AS t
-            WHERE t.server_id = $1 AND t.collection_time >= ok.h1 AND t.collection_time < ok.h2
+            WHERE t.server_id = $1
+            AND   t.collection_time >= $2::timestamp - interval '1 hour' AND t.collection_time < $3::timestamp
+            AND   t.collection_time >= ok.h1 - interval '1 hour' AND t.collection_time < ok.h2
             GROUP BY 1
         ),
         c AS (
             SELECT r.hour_start AS hr, sum(r.row_count) AS n
             FROM ok, pg_io_stats_hourly AS r
-            WHERE r.server_id = $1 AND r.hour_start >= ok.h1 AND r.hour_start < ok.h2
+            WHERE r.server_id = $1 AND r.hour_start >= ok.h1 - interval '1 hour' AND r.hour_start < ok.h2
             GROUP BY 1
         )
         SELECT ok.h1, ok.h2

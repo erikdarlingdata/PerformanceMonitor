@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -174,31 +174,10 @@ public static class DarlingPgIoReader
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         try
         {
-            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
-            DateTime h1, h2;
-            await using (var guard = new NpgsqlCommand(PgIoStatsHourly.GuardSql, connection, transaction) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
+            if (await TryReadFromRollupAsync(connection, serverId, start, end, limit, cancellationToken) is { } fromRollup)
             {
-                guard.Parameters.AddWithValue(serverId);
-                guard.Parameters.AddWithValue(start);
-                guard.Parameters.AddWithValue(end);
-                await using var span = await guard.ExecuteReaderAsync(cancellationToken);
-                if (!await span.ReadAsync(cancellationToken))
-                {
-                    throw new InvalidOperationException("hourly rollup does not cover the window");
-                }
-
-                h1 = span.GetDateTime(0);
-                h2 = span.GetDateTime(1);
+                return fromRollup;
             }
-
-            await using var stitched = new NpgsqlCommand(PgIoStatsHourly.StitchedReadSql, connection, transaction) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
-            stitched.Parameters.AddWithValue(serverId);
-            stitched.Parameters.AddWithValue(start);
-            stitched.Parameters.AddWithValue(end);
-            stitched.Parameters.AddWithValue(limit);
-            stitched.Parameters.AddWithValue(DateTime.SpecifyKind(h1, DateTimeKind.Unspecified));
-            stitched.Parameters.AddWithValue(DateTime.SpecifyKind(h2, DateTimeKind.Unspecified));
-            return await ReadPageAsync(stitched, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -218,6 +197,42 @@ public static class DarlingPgIoReader
         return await ReadPageAsync(command, cancellationToken);
     }
 
+    /// <summary>
+    /// The rollup route of <see cref="GetPgIoPageAsync"/>: the count guard and the stitched read in one REPEATABLE READ
+    /// transaction. Returns null when the guard returns no span (a window under 6 hours, one the rollup does not cover, or a count
+    /// that differs): an ordinary outcome that costs no exception. A store below V170 (no tables) or any other fault throws, and
+    /// the caller reads raw.
+    /// </summary>
+    private static async Task<PgIoPage?> TryReadFromRollupAsync(
+        NpgsqlConnection connection, int serverId, DateTime start, DateTime end, int limit, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+        DateTime h1, h2;
+        await using (var guard = new NpgsqlCommand(PgIoStatsHourly.GuardSql, connection, transaction) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
+        {
+            guard.Parameters.AddWithValue(serverId);
+            guard.Parameters.AddWithValue(start);
+            guard.Parameters.AddWithValue(end);
+            await using var span = await guard.ExecuteReaderAsync(cancellationToken);
+            if (!await span.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            h1 = span.GetDateTime(0);
+            h2 = span.GetDateTime(1);
+        }
+
+        await using var stitched = new NpgsqlCommand(PgIoStatsHourly.StitchedReadSql, connection, transaction) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
+        stitched.Parameters.AddWithValue(serverId);
+        stitched.Parameters.AddWithValue(start);
+        stitched.Parameters.AddWithValue(end);
+        stitched.Parameters.AddWithValue(limit);
+        stitched.Parameters.AddWithValue(DateTime.SpecifyKind(h1, DateTimeKind.Unspecified));
+        stitched.Parameters.AddWithValue(DateTime.SpecifyKind(h2, DateTimeKind.Unspecified));
+        return await ReadPageAsync(stitched, cancellationToken);
+    }
+
     private static async Task<PgIoPage> ReadPageAsync(NpgsqlCommand command, CancellationToken cancellationToken)
     {
         var rows = new List<PgIoRow>();
@@ -225,7 +240,8 @@ public static class DarlingPgIoReader
         double windowTotalReadTimeMs = 0;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
-        {            /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
+        {
+            /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
             windowTotalReads = reader.IsDBNull(19) ? 0 : reader.GetInt64(19);
             windowTotalReadTimeMs = reader.IsDBNull(20) ? 0 : reader.GetDouble(20);
             rows.Add(new PgIoRow(

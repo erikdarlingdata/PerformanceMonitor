@@ -20,19 +20,24 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>
 /// The builder of <see cref="PgIoStatsHourly"/> (#5495): the hourly store-maintenance tick's eighth tenant. It follows
 /// V168's <see cref="PlanRegressionDaily"/> builder: one transaction per (server, hour) under a per-server advisory lock, a
-/// <c>statement_timeout</c> on the build, a per-tick cap on builds and on wall-clock time (the cap is what bounds the first fill after
-/// the upgrade), and a failed build that is logged and retried by the next tick while readers stay on raw.
+/// <c>statement_timeout</c> on the build, a per-tick bound on wall-clock time (<see cref="TickBudget"/>; that bound is what keeps the
+/// first fill after the upgrade from holding the tick), and a failed build that is logged and retried by the next tick while readers
+/// stay on raw.
 ///
 /// <para><b>Order and watermark.</b> Hours are built oldest first from <c>first_hour</c>, each seeded from the newest earlier
 /// rollup row, and <c>built_through</c> (exclusive) moves to the end of each hour in the same transaction as its rows. An hour is
 /// closed once <see cref="CloseMarginMinutes"/> have passed its end. The first fill starts at the first whole hour after the server's
 /// oldest raw row, no earlier than <see cref="FillDays"/> back. Every tick also rebuilds the last <see cref="RebuildHours"/> built
-/// hours, so a late row inside that span is picked up; a later one leaves that hour's raw and rollup counts different, which sends a read
-/// that spans it back to the raw statement (the count guard), until the hour ages out.</para>
+/// hours, so a late row inside that span is picked up. A later one leaves that hour's raw and rollup counts different, and the count
+/// guard sends a read back to the raw statement when the window spans that hour or starts in the hour after it (that hour's last row
+/// seeds the first rollup hour's boundary difference); a window that ends before the hour or starts after the next one does not need
+/// it. Until the hour ages out of retention the rollup row is never rebuilt, unlike V168's, which rebuilds on a late-row trigger.</para>
 ///
-/// <para><b>First fill cost.</b> One hour costs about 0.1 s on the rig (90 combinations, one-minute cadence, 5,400 raw rows), so a
-/// 30-day fill is about 72 hours x 10 = 720 builds, about 70 s per server; <see cref="MaxBuildsPerTick"/> caps one tick and the next
-/// tick continues from the watermark. Nothing runs in the migration: V170 only creates empty tables.</para>
+/// <para><b>First fill cost and its bound.</b> One hour costs 8 to 13 ms on the large store (90 combinations, one-minute cadence, about
+/// 5,400 raw rows), so a 31-day fill is 744 builds, about 6 to 10 s per server. Two bounds apply to a tick, both by time and neither by a
+/// count of builds: <see cref="TickBudget"/> (2 minutes: no new build starts after it, and the next tick continues from the watermark)
+/// and <see cref="MaxTickDuration"/> (10 minutes: the hard cap, which the budget can never exceed). A build that has started always
+/// finishes or times out (<see cref="BuildStatementTimeoutSeconds"/>). Nothing runs in the migration: V170 only creates empty tables.</para>
 /// </summary>
 public static class PgIoStatsHourlyBuilder
 {
@@ -45,11 +50,17 @@ public static class PgIoStatsHourlyBuilder
     /// <summary>The built hours before the watermark that every tick rebuilds, to catch late rows.</summary>
     public const int RebuildHours = 2;
 
-    /// <summary>The most hours one tick builds across all servers.</summary>
-    public const int MaxBuildsPerTick = 800;
+    /// <summary>
+    /// The time bound of one tick: no new build starts once a tick has run this long, whatever is left (the next tick continues from the
+    /// watermark). A fixed count of builds would have stretched the first fill over days on a large store, where a build takes
+    /// milliseconds; a time budget lets a fast store finish its fill in one tick and a slow one stop early.
+    /// </summary>
+    public static readonly TimeSpan TickBudget = TimeSpan.FromMinutes(2);
 
-    /// <summary>No new build starts once a tick has run this long.</summary>
+    /// <summary>The hard cap: no new build starts after this, even if <see cref="TickBudget"/> is raised past it.</summary>
     public static readonly TimeSpan MaxTickDuration = TimeSpan.FromMinutes(10);
+
+    private static readonly TimeSpan StartCutoff = TickBudget < MaxTickDuration ? TickBudget : MaxTickDuration;
 
     /// <summary>The server-side statement_timeout of each hour's build transaction.</summary>
     public const int BuildStatementTimeoutSeconds = 60;
@@ -80,9 +91,14 @@ VALUES ($1::integer, $2::timestamp, $3::timestamp)
 ON CONFLICT (server_id) DO UPDATE SET built_through = EXCLUDED.built_through;
 """;
 
-    /// <summary>Removes the rollup and state rows of servers that are not enabled.</summary>
+    /// <summary>
+    /// Removes the rollup and state rows of servers that are not enabled. Driven from the small state table (one row per server),
+    /// as V168's cleanup is driven from its built table: the rollup rows go by <c>server_id</c>, the leading column of the unique
+    /// index, instead of a scan of the whole rollup every hourly tick. The state row is written in the same transaction as a
+    /// server's first rollup row, so no rollup row exists without one.
+    /// </summary>
     public const string GcSql = """
-DELETE FROM collect.pg_io_stats_hourly WHERE server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled);
+DELETE FROM collect.pg_io_stats_hourly WHERE server_id IN (SELECT st.server_id FROM collect.pg_io_stats_hourly_state AS st WHERE st.server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled));
 DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled);
 """;
 
@@ -215,7 +231,7 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
 
             for (var hour = from; hour < ceiling; hour = hour.AddHours(1))
             {
-                if (built >= MaxBuildsPerTick || elapsed() >= MaxTickDuration)
+                if (elapsed() >= StartCutoff)
                 {
                     deferred++;
                     continue;

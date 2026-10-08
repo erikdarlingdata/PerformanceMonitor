@@ -66,6 +66,45 @@ public sealed class PgIoStatsHourlyTests
     }
 
     [Fact]
+    public void TheCountGuard_BoundsTheRawCountOnTheBoundParameters_NotOnlyOnAColumnOfACte()
+    {
+        /* #5495 big-store fix: the raw table is a hypertable, and chunk exclusion needs bounds it can evaluate from the
+           bound parameters. The hours the rollup may serve come from the ok CTE (a column of a CTE), which cannot exclude a
+           chunk, so the raw count carries $2/$3 bounds of its own next to the exact ones. */
+        var sql = PgIoStatsHourly.GuardSql.Replace("\r\n", "\n");
+        var raw = sql[sql.IndexOf("l AS (", StringComparison.Ordinal)..sql.IndexOf("c AS (", StringComparison.Ordinal)];
+        Assert.Contains("t.collection_time >= $2::timestamp - interval '1 hour'", raw, StringComparison.Ordinal);
+        Assert.Contains("t.collection_time < $3::timestamp", raw, StringComparison.Ordinal);
+        Assert.Contains("t.collection_time >= ok.h1 - interval '1 hour' AND t.collection_time < ok.h2", raw, StringComparison.Ordinal);
+
+        /* The rollup side is a plain table whose unique index leads with (server_id, hour_start): the range is already an index range. */
+        Assert.Contains("r.hour_start >= ok.h1 - interval '1 hour' AND r.hour_start < ok.h2", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheBuild_SeedsEachCombinationFromItsNewestEarlierRollupRowByIndex_NotBySortingEveryEarlierRow()
+    {
+        /* #5495: the seed was DISTINCT ON over every earlier rollup row of the server, which sorts all of them for each hour built
+           (quadratic over a first fill). It now probes once per combination of the hour being built. */
+        var sql = PgIoStatsHourly.BuildHourSql.Replace("\r\n", "\n");
+        var seed = sql[sql.IndexOf("seed AS (", StringComparison.Ordinal)..sql.IndexOf("u AS (", StringComparison.Ordinal)];
+        Assert.Contains("LATERAL", seed, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY p.hour_start DESC", seed, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", seed, StringComparison.Ordinal);
+        Assert.DoesNotContain("DISTINCT ON", seed, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheGc_IsDrivenFromTheSmallStateTable_NotAScanOfTheWholeRollup()
+    {
+        var gc = PgIoStatsHourlyBuilder.GcSql.Replace("\r\n", "\n");
+        var first = gc[..gc.IndexOf(';', StringComparison.Ordinal)];
+        Assert.Contains("DELETE FROM collect.pg_io_stats_hourly WHERE server_id IN (SELECT", first, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.pg_io_stats_hourly_state", first, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_io_stats_hourly WHERE server_id NOT IN", gc, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheReader_TriesTheRollupInOneSnapshot_AndFallsBackToTheRawStatement()
     {
         var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgIoReader.cs");
@@ -100,8 +139,10 @@ public sealed class PgIoStatsHourlyTests
         Assert.Contains("PgIoStatsHourlyBuilder.PruneSql", retention, StringComparison.Ordinal);
         Assert.Contains("\"pg_io_stats\"", retention, StringComparison.Ordinal);
 
-        /* The first fill is bounded. */
-        Assert.True(PgIoStatsHourlyBuilder.MaxBuildsPerTick > 0 && PgIoStatsHourlyBuilder.MaxBuildsPerTick <= 1000);
+        /* The first fill is bounded by time, not by a count of builds: no new build starts after the budget, and the hard cap stays. */
+        Assert.Null(typeof(PgIoStatsHourlyBuilder).GetField("MaxBuildsPerTick"));
+        Assert.Equal(TimeSpan.FromMinutes(2), PgIoStatsHourlyBuilder.TickBudget);
+        Assert.True(PgIoStatsHourlyBuilder.TickBudget < PgIoStatsHourlyBuilder.MaxTickDuration);
         Assert.True(PgIoStatsHourlyBuilder.MaxTickDuration <= TimeSpan.FromMinutes(10));
     }
 }
@@ -288,6 +329,38 @@ AND   NOT (c.bt = 'startup' AND t < '{Ts(Late)}')";
     }
 
     [Fact]
+    public async Task ALateRowInTheHourBeforeTheFirstRollupHour_FailsTheCountGuard_AndTheReadMatchesRaw()
+    {
+        await RunLiveAsync(async (scratch, connection, dataSource, ct) =>
+        {
+            /* The window starts mid-hour (02:30), so its first rollup hour is 03:00 and the 02:00 hour is a raw edge. The 03:00
+               rollup row's boundary difference was taken against the 02:55 row. */
+            var start = new DateTime(2026, 3, 19, 2, 30, 0, DateTimeKind.Unspecified);
+            Assert.Single(await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(start), Unspec(Now)));
+
+            /* A row dated 02:58 arrives long after the rebuild span has passed: a copy of the 02:55 row with the reads a little ahead. */
+            await ExecAsync(connection,
+                "INSERT INTO collect.pg_io_stats (collection_id, collection_time, server_id, server_name, backend_type, object_type, context, "
+                + "reads, read_time_ms, writes, write_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, stats_reset, read_bytes, write_bytes, extend_bytes) "
+                + "SELECT 999999998, collection_time + interval '3 minutes', server_id, server_name, backend_type, object_type, context, "
+                + "reads + 1, read_time_ms + 1, writes, write_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, stats_reset, read_bytes, write_bytes, extend_bytes "
+                + "FROM collect.pg_io_stats WHERE server_id = 1 AND backend_type = 'client backend' AND context = 'normal' AND collection_time = '2026-03-19 02:55:00'", ct);
+
+            /* The late row is in the hour before h1, not inside [h1, h2): the guard still refuses the window. */
+            Assert.Empty(await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(start), Unspec(Now)));
+
+            var raw = await RowsAsync(connection, DarlingPgIoReader.PgIoSql, 1, Unspec(start), Unspec(Now), 1000);
+            var viaReader = await DarlingPgIoReader.GetPgIoPageAsync(dataSource, 1, start, Now, 1000, ct);
+            Assert.NotEmpty(raw);
+            Assert.Equal(long.Parse(raw[0].Split('|')[19], CultureInfo.InvariantCulture), viaReader.WindowTotalReads);
+            Assert.Equal(raw.Count, viaReader.Rows.Count);
+
+            /* A window that starts after that hour does not need it, and is still served from the rollup. */
+            Assert.Single(await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(start.AddHours(3)), Unspec(Now)));
+        });
+    }
+
+    [Fact]
     public async Task AStoreBelowTheRung_HasNoRollupTables_AndTheReaderStillAnswersFromRaw()
     {
         await RunLiveAsync(async (scratch, connection, dataSource, ct) =>
@@ -299,7 +372,7 @@ AND   NOT (c.bt = 'startup' AND t < '{Ts(Late)}')";
     }
 
     [Fact]
-    public async Task TheTick_BuildsOnlyClosedHours_IsBoundedPerTick_AndIsIdempotent()
+    public async Task TheTick_BuildsOnlyClosedHours_IsBoundedByTheTimeBudget_AndIsIdempotent()
     {
         await RunLiveAsync(async (scratch, connection, dataSource, ct) =>
         {
@@ -310,6 +383,56 @@ AND   NOT (c.bt = 'startup' AND t < '{Ts(Late)}')";
             Assert.Equal(PgIoStatsHourlyBuilder.RebuildHours, again.Built);
             Assert.Equal(before, (await RowsAsync(connection, "SELECT count(*), sum(row_count) FROM collect.pg_io_stats_hourly"))[0]);
 
+            /* The bound is time: a clock that reads past the budget after five builds stops the tick there, and the next tick
+               (a clock that never runs out) resumes from the watermark and ends with the same rows as the unbounded fill. */
+            await ExecAsync(connection, "TRUNCATE collect.pg_io_stats_hourly, collect.pg_io_stats_hourly_state", ct);
+            var reads = 0;
+            var capped = await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance,
+                () => reads++ < 5 ? TimeSpan.Zero : PgIoStatsHourlyBuilder.TickBudget, ct);
+            Assert.Equal(5, capped.Built);
+            Assert.True(capped.Deferred > 100);
+
+            var resumed = await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, () => TimeSpan.Zero, ct);
+            Assert.Equal(0, resumed.Deferred);
+            Assert.Equal(before, (await RowsAsync(connection, "SELECT count(*), sum(row_count) FROM collect.pg_io_stats_hourly"))[0]);
+        });
+    }
+
+    [Fact]
+    public async Task ADisabledServersRollupRows_AreRemovedByTheTick_ThroughTheStateTable()
+    {
+        await RunLiveAsync(async (scratch, connection, dataSource, ct) =>
+        {
+            Assert.NotEqual("0", (await RowsAsync(connection, "SELECT count(*) FROM collect.pg_io_stats_hourly WHERE server_id = 1"))[0]);
+            await ExecAsync(connection, "UPDATE collect.servers SET is_enabled = FALSE WHERE server_id = 1", ct);
+
+            await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, ct);
+            Assert.Equal("0", (await RowsAsync(connection, "SELECT count(*) FROM collect.pg_io_stats_hourly"))[0]);
+            Assert.Equal("0", (await RowsAsync(connection, "SELECT count(*) FROM collect.pg_io_stats_hourly_state"))[0]);
+        });
+    }
+
+    [Fact]
+    public async Task ACombinationAbsentForSeveralHours_IsSeededFromItsLastRollupRowBeforeTheGap()
+    {
+        await RunLiveAsync(async (scratch, connection, dataSource, ct) =>
+        {
+            /* 'startup' has rows from 06:00 on the 19th only; take its 07:00-09:00 rows away so it reappears at 09:00 after a gap
+               of two hours, then rebuild everything: the 09:00 hour must be seeded from 06:00's last row, not from the hour before. */
+            await ExecAsync(connection, "DELETE FROM collect.pg_io_stats WHERE backend_type = 'startup' AND collection_time >= '2026-03-19 07:00' AND collection_time < '2026-03-19 09:00'", ct);
+            await ExecAsync(connection, "TRUNCATE collect.pg_io_stats_hourly, collect.pg_io_stats_hourly_state", ct);
+            await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, ct);
+
+            var start = new DateTime(2026, 3, 19, 5, 30, 0, DateTimeKind.Unspecified);
+            var end = Now.AddMinutes(-2);
+            var raw = await RowsAsync(connection, DarlingPgIoReader.PgIoSql, 1, Unspec(start), Unspec(end), 1000);
+            var span = await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(start), Unspec(end));
+            Assert.Single(span);
+            var parts = span[0].Split('|');
+            var stitched = await RowsAsync(connection, Fix(PgIoStatsHourly.StitchedReadSql), 1, Unspec(start), Unspec(end), 1000,
+                DateTime.Parse(parts[0], CultureInfo.InvariantCulture), DateTime.Parse(parts[1], CultureInfo.InvariantCulture));
+            Assert.Contains(raw, r => r.StartsWith("startup|", StringComparison.Ordinal));
+            Assert.Equal(raw, stitched);
         });
     }
 }
