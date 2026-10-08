@@ -1474,7 +1474,9 @@ SELECT COALESCE
             try
             {
                 var brin = await QueryStoreIntervalBrin.TurnOffAutosummarizeAsync(connection, table, logger, cancellationToken).ConfigureAwait(false);
-                if (brin.Outcome == StepOutcome.Done)
+
+                /* RetryLater still altered the indexes it got to (a lock timeout or a skipped index does not undo the others). */
+                if (brin.Outcome is StepOutcome.Done or StepOutcome.RetryLater)
                 {
                     changed += brin.Count;
                 }

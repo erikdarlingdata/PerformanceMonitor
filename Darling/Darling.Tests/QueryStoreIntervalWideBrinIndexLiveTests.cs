@@ -133,7 +133,7 @@ ORDER BY g;"), ct);
         Assert.Contains("USING brin (collection_time)", definition);
         Assert.Contains("autosummarize=off", definition);
 
-        var oid =await ScalarAsync(connection, $"SELECT '{Index}'::regclass::oid", ct);
+        var oid = await ScalarAsync(connection, $"SELECT '{Index}'::regclass::oid", ct);
         await EnsureAsync(connection, ct);
         Assert.Equal(oid, await ScalarAsync(connection, $"SELECT '{Index}'::regclass::oid", ct));
     }

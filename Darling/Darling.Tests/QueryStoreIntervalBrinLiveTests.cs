@@ -8,8 +8,10 @@
 
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -216,5 +218,341 @@ public sealed class QueryStoreIntervalBrinLiveTests
 
         Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.NotReady, step.Outcome);
         Assert.Contains("deadlock_timeout is 100 ms", step.Detail);
+    }
+
+    private const string LegacyTable = "collect.query_store_interval_wide_legacy";
+
+    private const string LegacyBrin = "collect." + Brin + "_legacy";
+
+    [Theory]
+    [InlineData(1000, 2000)]
+    [InlineData(200, 1200)]
+    [InlineData(1, 1001)]
+    [InlineData(0, 1001)]
+    [InlineData(4000, 5000)]
+    [InlineData(60000, 5000)]
+    [InlineData(int.MaxValue, 5000)]
+    public void TheTurnOffLockWait_IsDeadlockTimeoutPlusASecond_ButNeverMoreThanFiveSeconds(int deadlockMs, int expectedMs)
+    {
+        Assert.Equal(expectedMs, QueryStoreIntervalBrin.TurnOffLockTimeoutMs(deadlockMs));
+    }
+
+    /// <summary>The statement shapes #5594 review round 1 depends on: a text pin, so a rewrite back to the old shape fails here without a server.</summary>
+    [Fact]
+    public void TheStatementShapes_StopBetweenRanges_AndCountEveryVacuumThatCannotBeCancelled()
+    {
+        /* brin_summarize_new_values can only be cancelled, and a cancel strands a placeholder range that no later pass summarizes. */
+        Assert.Contains("brin_summarize_range", QueryStoreIntervalBrin.SummarizeIndexSql);
+        Assert.Contains("clock_timestamp()", QueryStoreIntervalBrin.SummarizeIndexSql);
+        Assert.DoesNotContain("brin_summarize_new_values", QueryStoreIntervalBrin.SummarizeIndexSql);
+
+        var holders = QueryStoreIntervalBrin.AutosummarizeOnSql;
+        Assert.Contains("pg_stat_progress_vacuum", holders);
+        Assert.Contains("autovacuum_freeze_max_age", holders);
+        Assert.Contains("autovacuum_multixact_freeze_max_age", holders);
+        Assert.Contains("autovacuum worker", holders);
+    }
+
+    /// <summary>V171's parent BRIN says off, so a leaf made by PARTITION OF or ATTACH clones off (#5594 review round 1).</summary>
+    [Fact]
+    public void TheWideRung_CreatesTheParentBrinWithAutosummarizeOff()
+    {
+        var rung = PgMigrations.Scripts.Single(m => m.Version == QueryStoreIntervalPartitionRungTests.WideRungVersion);
+        Assert.Contains("USING brin (collection_time) WITH (autosummarize = off)", rung.Sql);
+        Assert.DoesNotContain("autosummarize = on", rung.Sql);
+    }
+
+    /// <summary>A second session that watches pg_locks for a request on one relation that is not granted, and how long it stayed ungranted.</summary>
+    private sealed class WaiterWatch : IAsyncDisposable
+    {
+        private readonly Task _poll;
+        private bool _stop;
+
+        public WaiterWatch(NpgsqlConnection watcher, string relation, CancellationToken ct)
+        {
+            _poll = Task.Run(
+                async () =>
+                {
+                    Stopwatch? since = null;
+                    while (!Volatile.Read(ref _stop))
+                    {
+                        await using var command = new NpgsqlCommand(
+                            $"SELECT count(*) FROM pg_locks WHERE NOT granted AND relation = '{relation}'::regclass;", watcher);
+                        var waiting = (long)(await command.ExecuteScalarAsync(ct))! > 0;
+                        since = waiting ? since ?? Stopwatch.StartNew() : null;
+                        if (since is not null)
+                        {
+                            Seen = true;
+                            if (since.Elapsed > Longest)
+                            {
+                                Longest = since.Elapsed;
+                            }
+                        }
+
+                        await Task.Delay(10, ct);
+                    }
+                },
+                ct);
+        }
+
+        /// <summary>Whether a request on the relation was ever seen waiting.</summary>
+        public bool Seen { get; private set; }
+
+        public TimeSpan Longest { get; private set; }
+
+        public async Task StopAsync()
+        {
+            Volatile.Write(ref _stop, true);
+            await _poll;
+        }
+
+        public async ValueTask DisposeAsync() => await StopAsync();
+    }
+
+    /// <summary>
+    /// A manual VACUUM in a second session, throttled to one page per 100 ms so it is still running when the test's step
+    /// asks (a manual VACUUM is never cancelled by the deadlock check). Disposing cancels it and waits for it to end, which
+    /// the scratch database's drop needs.
+    /// </summary>
+    private sealed class SlowVacuum : IAsyncDisposable
+    {
+        private readonly NpgsqlConnection _connection;
+        private readonly CancellationTokenSource _cancel = new();
+        private readonly Task _run;
+
+        private SlowVacuum(NpgsqlConnection connection, string table)
+        {
+            _connection = connection;
+            _run = Task.Run(
+                async () =>
+                {
+                    try
+                    {
+                        await ExecAsync(connection, "SET vacuum_cost_delay = 100; SET vacuum_cost_limit = 1;", CancellationToken.None);
+                        await using var vacuum = new NpgsqlCommand($"VACUUM {table}", connection) { CommandTimeout = 300 };
+                        await vacuum.ExecuteNonQueryAsync(_cancel.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+                    catch (PostgresException)
+                    {
+                    }
+                });
+        }
+
+        public static async Task<SlowVacuum> StartAsync(ScratchPostgres scratch, NpgsqlConnection probe, string table, CancellationToken ct)
+        {
+            var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            var vacuum = new SlowVacuum(connection, table);
+            for (var attempt = 0; attempt < 300; attempt++)
+            {
+                if (await CountAsync(probe, $"SELECT count(*) FROM pg_stat_progress_vacuum WHERE relid = '{table}'::regclass", ct) > 0)
+                {
+                    return vacuum;
+                }
+
+                await Task.Delay(100, ct);
+            }
+
+            await vacuum.DisposeAsync();
+            throw new InvalidOperationException($"the throttled VACUUM of {table} never showed in pg_stat_progress_vacuum");
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await _cancel.CancelAsync();
+            await _run;
+            await _connection.DisposeAsync();
+            _cancel.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task TheTurnOff_WhileAManualVacuumRunsOnTheTable_LeavesTheIndexOn_AndNeverAsksForTheLock()
+    {
+        /* A manual VACUUM is never cancelled by the deadlock check, so an ALTER (ACCESS EXCLUSIVE on the index, which the
+           VACUUM holds ROW EXCLUSIVE) could only queue the leaf's writers and readers behind it for the whole lock wait. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var watcher = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+
+        await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON {LegacyTable} USING brin (collection_time) WITH (autosummarize = off)", ct);
+        await InsertManyAsync(connection, ct);
+        await ExecAsync(connection, $"ALTER INDEX {LegacyBrin} SET (autosummarize = on)", ct);
+
+        QueryStoreIntervalPartitions.StepResult step;
+        bool waiterSeen;
+        await using (var vacuum = await SlowVacuum.StartAsync(scratch, connection, LegacyTable, ct))
+        {
+            var watch = new WaiterWatch(watcher, LegacyBrin, ct);
+            step = await QueryStoreIntervalBrin.TurnOffAutosummarizeAsync(connection, Wide, logger, ct);
+            await watch.StopAsync();
+            waiterSeen = watch.Seen;
+        }
+
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.RetryLater, step.Outcome);
+        Assert.Contains("left on", step.Detail);
+        Assert.Equal(0, step.Count);
+        Assert.False(waiterSeen, "the turn-off asked for the index's lock while a manual VACUUM was running");
+        Assert.Equal(1L, await CountAsync(connection, LeafBrinOnCountSql, ct));
+
+        /* Once the VACUUM is gone the next pass turns it off. */
+        var after = await QueryStoreIntervalBrin.TurnOffAutosummarizeAsync(connection, Wide, logger, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, after.Outcome);
+        Assert.Equal(0L, await CountAsync(connection, LeafBrinOnCountSql, ct));
+    }
+
+    [Fact]
+    public async Task TheTurnOff_AReaderHoldingTheIndex_TimesOutBelowFiveSeconds_AndTheTableIsStillConverged()
+    {
+        /* A reader's ACCESS SHARE on the index is a lock no check sees as uncancellable, so the ALTER does ask and its lock
+           wait ends the request: rolled back, reported, and (L1) the table's NEXT index is still turned off. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var reader = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+
+        await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON collect.query_store_interval_wide_legacy USING brin (collection_time) WITH (autosummarize = on)", ct);
+        await ExecAsync(connection, $"CREATE INDEX {Brin} ON ONLY collect.query_store_interval_wide USING brin (collection_time) WITH (autosummarize = off)", ct);
+        await ExecAsync(connection, $"ALTER INDEX collect.{Brin} ATTACH PARTITION {LegacyBrin}", ct);
+        await PromoteAsync(connection, Wide, Now, logger, ct);
+
+        /* The legacy leaf sorts first by name; a day leaf is the one that must not be left behind. */
+        var dayLeaf = (string)(await ScalarAsync(
+            connection,
+            "SELECT format('%I.%I', n.nspname, i.relname) FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_namespace n ON n.oid = i.relnamespace "
+            + "JOIN pg_am am ON am.oid = i.relam WHERE am.amname = 'brin' AND i.relkind = 'i' AND i.relname <> '" + Brin + "_legacy' "
+            + "AND x.indrelid IN (SELECT relid FROM pg_partition_tree('collect.query_store_interval_wide'::regclass)) ORDER BY 1 LIMIT 1",
+            ct))!;
+        await ExecAsync(connection, $"ALTER INDEX {LegacyBrin} SET (autosummarize = on)", ct);
+        await ExecAsync(connection, $"ALTER INDEX {dayLeaf} SET (autosummarize = on)", ct);
+        Assert.Equal(2L, await CountAsync(connection, LeafBrinOnCountSql, ct));
+
+        var deadlockMs = (int)await CountAsync(connection, "SELECT setting::bigint FROM pg_settings WHERE name = 'deadlock_timeout'", ct);
+        var lockMs = QueryStoreIntervalBrin.TurnOffLockTimeoutMs(deadlockMs);
+        QueryStoreIntervalPartitions.StepResult step;
+        var elapsed = TimeSpan.Zero;
+        await using (var hold = await reader.BeginTransactionAsync(ct))
+        {
+            await ExecAsync(reader, $"SELECT count(*) FROM {LegacyTable}", ct);
+            Assert.True(
+                await CountAsync(connection, $"SELECT count(*) FROM pg_locks WHERE granted AND mode = 'AccessShareLock' AND relation = '{LegacyBrin}'::regclass", ct) > 0,
+                "the reader's transaction must hold the legacy BRIN index");
+
+            var watch = Stopwatch.StartNew();
+            step = await QueryStoreIntervalBrin.TurnOffAutosummarizeAsync(connection, Wide, logger, ct);
+            elapsed = watch.Elapsed;
+            await hold.RollbackAsync(ct);
+        }
+
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.RetryLater, step.Outcome);
+        Assert.Equal(1, step.Count);
+        Assert.Contains("1 lock timeout", step.Detail);
+        Assert.True(elapsed >= TimeSpan.FromMilliseconds(lockMs - 100), $"the legacy index's turn-off returned after {elapsed.TotalMilliseconds:F0} ms, before its {lockMs} ms lock timeout");
+        Assert.True(elapsed < TimeSpan.FromMilliseconds(lockMs + 3000), $"the turn-off took {elapsed.TotalMilliseconds:F0} ms against a {lockMs} ms lock timeout");
+        Assert.True(logger.Lines.Exists(l => l.Level == LogLevel.Warning && l.Message.Contains("lock timeout", StringComparison.Ordinal)), logger.Dump());
+
+        /* The day leaf, which sorts after the legacy leaf, was altered; the legacy leaf was rolled back and is still on. */
+        Assert.Equal(1L, await CountAsync(connection, LeafBrinOnCountSql, ct));
+        Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM pg_class WHERE oid = '{LegacyBrin}'::regclass AND reloptions @> ARRAY['autosummarize=on']", ct));
+
+        /* With the reader gone the next pass finishes. */
+        var after = await QueryStoreIntervalBrin.TurnOffAutosummarizeAsync(connection, Wide, logger, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, after.Outcome);
+        Assert.Equal(0L, await CountAsync(connection, LeafBrinOnCountSql, ct));
+    }
+
+    [Fact]
+    public async Task TheSummarize_WhileAManualVacuumRunsOnTheTable_SkipsTheIndex_AndNeverAsksForTheLock()
+    {
+        /* The pg_stat_progress_vacuum skip: a throttled manual VACUUM holds SHARE UPDATE EXCLUSIVE on the table, and the
+           summarize must not queue for it. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var watcher = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+
+        await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON {LegacyTable} USING brin (collection_time) WITH (autosummarize = off)", ct);
+        await InsertManyAsync(connection, ct);
+
+        QueryStoreIntervalPartitions.StepResult step;
+        bool waiterSeen;
+        await using (var vacuum = await SlowVacuum.StartAsync(scratch, connection, LegacyTable, ct))
+        {
+            var watch = new WaiterWatch(watcher, LegacyTable, ct);
+            step = await QueryStoreIntervalBrin.SummarizeNewRangesAsync(connection, Wide, logger, ct);
+            await watch.StopAsync();
+            waiterSeen = watch.Seen;
+        }
+
+        Assert.Contains("skipped 1 being vacuumed", step.Detail);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.NothingToDo, step.Outcome);
+        Assert.False(waiterSeen, "the summarize asked for the table's lock while a manual VACUUM was running");
+
+        /* Nothing was summarized, and once the VACUUM is gone the next pass does it. */
+        var after = await QueryStoreIntervalBrin.SummarizeNewRangesAsync(connection, Wide, logger, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, after.Outcome);
+        Assert.True(after.Count >= 1);
+    }
+
+    [Fact]
+    public async Task TheSummarizeStatement_StopsBetweenRanges_AndTheNextPassFinishesWithNothingLost()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+
+        await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON {LegacyTable} USING brin (collection_time) WITH (autosummarize = off)", ct);
+        await InsertManyAsync(connection, ct);
+        var blocks = await CountAsync(connection, $"SELECT pg_relation_size('{LegacyTable}') / 8192", ct);
+        var fullRanges = blocks / 128;
+        var rangesWalked = (blocks + 127) / 128;
+        Assert.True(fullRanges >= 2, $"expected several complete 128-block ranges; the table has {blocks} blocks");
+
+        /* A spent budget starts no range: nothing is summarized, every range is reported as not started. */
+        var (done, notStarted) = await RunSummarizeAsync(connection, LegacyBrin, 0.0, ct);
+        Assert.Equal(0L, done);
+        Assert.Equal(rangesWalked, notStarted);
+
+        /* The next pass, with a budget it will not spend, does all of it (the last, partial range is left alone by design). */
+        (done, notStarted) = await RunSummarizeAsync(connection, LegacyBrin, 60.0, ct);
+        Assert.InRange(done, fullRanges - 1, rangesWalked);
+        Assert.Equal(0L, notStarted);
+        (done, notStarted) = await RunSummarizeAsync(connection, LegacyBrin, 60.0, ct);
+        Assert.Equal((0L, 0L), (done, notStarted));
+
+        /* A leaf dropped after the target list was read reads no rows: (0, 0), not a NULL scalar that throws. */
+        (done, notStarted) = await RunSummarizeAsync(connection, "collect.no_such_brin_leaf", 60.0, ct);
+        Assert.Equal((0L, 0L), (done, notStarted));
+    }
+
+    private static async Task<(long Done, long NotStarted)> RunSummarizeAsync(NpgsqlConnection connection, string index, double budgetSeconds, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(QueryStoreIntervalBrin.SummarizeIndexSql, connection) { CommandTimeout = 120 };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = index });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Double, Value = budgetSeconds });
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return (reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+        return await command.ExecuteScalarAsync(ct);
     }
 }
