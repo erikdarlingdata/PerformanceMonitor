@@ -427,6 +427,8 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
       const allKeys = series.map((x) => x.key).concat(overlaySeries ? [overlaySeries.key] : []);
       const chartHost = hiddenId != null ? el("div", { class: "zoomable-chart" }) : null;
       const drawChart = () => renderLineChart({
+          /* The panel's identity also keys the width its chart was last measured at (#5586), so a poll's rebuild is drawn at it. */
+          widthKey: hiddenId,
           points,
           xKey: "bucket",
           series,
@@ -494,6 +496,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           unitX: axisUnit(unit),
           unitY: axisUnit(overlayUnit),
           onSelect,
+          widthKey: opts.panelSlot != null ? composedPanelId(panelSpec, opts.scope, opts.panelSlot) : null,
         })
       );
       break;

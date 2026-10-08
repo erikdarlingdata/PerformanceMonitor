@@ -48,8 +48,28 @@ function svg(tag, attrs) {
    between them. The tick count is how many labels fit across the plot, so none overlap at 360 px and a wide panel gets
    more ticks, not wider ones. */
 const X_LABEL_CHAR_PX = 6.6;
-const X_LABEL_GAP_PX = 24;
+const X_LABEL_GAP_PX = 32;
 const X_MAX_INTERVALS = 10;
+
+/* The last width each chart was measured at, by chart key (#5586): a line chart's menuKey (zoomableLineChart sets one) or the
+   widthKey a caller passes (the composed panels pass their panel id, and the scatter has no menuKey). Panels re-render on
+   every poll and a new chart is built before it is on the page, so it is first drawn at the width its predecessor measured:
+   the observer's first report is then within a pixel and skips the redraw, and each poll builds a chart once, not twice. A
+   chart with no key is drawn at CHART_DEFAULT_W and redrawn once, as before. */
+const plotWidths = new Map();
+const PLOT_WIDTH_KEYS = 200;
+
+/** The width a chart with this key is first drawn at. */
+function seedPlotW(key) {
+  return key != null && plotWidths.has(key) ? plotWidths.get(key) : CHART_DEFAULT_W;
+}
+
+function rememberPlotW(key, w) {
+  if (key == null) return;
+  plotWidths.delete(key);
+  plotWidths.set(key, w);
+  if (plotWidths.size > PLOT_WIDTH_KEYS) plotWidths.delete(plotWidths.keys().next().value);
+}
 
 /** The estimated width in px of the widest of these axis labels. */
 function labelsPx(labels) {
@@ -71,17 +91,44 @@ function xTickIntervals(plotW, labels) {
 }
 
 /**
+ * The x ticks of a time axis (#5586): { times, seconds }. No two labels may read the same, at any width and window. The tick
+ * count follows the plot width (xTickIntervals); a step of a minute or more puts the ticks on whole minutes and caps the
+ * count at the window's minutes, so a brush-zoomed span of a few minutes does not repeat HH:mm. A window too short for one
+ * minute per tick shows HH:mm:ss and puts the ticks on whole seconds, capped at the window's seconds. The two end ticks keep
+ * the exact domain bounds; the ticks between are floored onto the whole minute (second), which keeps them distinct from both
+ * ends because each step is at least that unit.
+ */
+function xTickPlan(tMin, spanMs, plotW, crossesDay) {
+  if (spanMs === 0) return { times: [tMin], seconds: false };
+  const tMax = tMin + spanMs;
+  const widthIntervals = (seconds) => xTickIntervals(plotW, [tMin, tMin + spanMs / 2, tMax].map((t) => axisTime(new Date(t), crossesDay, seconds)));
+  const evenTicks = (n, unit) => {
+    const times = [tMin];
+    for (let i = 1; i < n; i++) times.push(Math.floor((tMin + (spanMs * i) / n) / unit) * unit);
+    times.push(tMax);
+    return times;
+  };
+  const byWidth = widthIntervals(false);
+  if (byWidth === 0) return { times: [tMin], seconds: false };
+  const nMinutes = Math.min(byWidth, Math.floor(spanMs / 60000));
+  if (nMinutes >= 2 || (nMinutes === 1 && byWidth === 1)) return { times: evenTicks(nMinutes, 60000), seconds: false };
+  const nSeconds = Math.min(widthIntervals(true), Math.floor(spanMs / 1000));
+  if (nSeconds < 1) return { times: [tMin], seconds: true };
+  return { times: evenTicks(nSeconds, 1000), seconds: true };
+}
+
+/**
  * Keeps a plot drawn at the width its container really has (#5586). Observes `host` (the plot's box: it is 100% wide and
  * its height is fixed, so the plot never feeds back into the size it watches) and calls `draw(width)` when the width
  * changes by a pixel or more. The first measurement draws at once, so a chart built before it was mounted is redrawn
  * before the first paint; later changes are coalesced to one draw per animation frame. A height-only change, a change
  * under a pixel and a host that is not laid out (width 0) draw nothing. The observer is disconnected once the host has left
  * the page (a removed element reports a final size, which is when the check runs), so panels that re-render on every
- * refresh leave none behind.
+ * refresh leave none behind. `drawnW` is the width the chart was first built at (seedPlotW(key)); every measurement is
+ * remembered under `key`.
  */
-function watchPlotWidth(host, draw) {
+function watchPlotWidth(host, draw, key, drawnW) {
   if (typeof ResizeObserver !== "function") return;
-  let drawnW = CHART_DEFAULT_W;
   let pendingW = null;
   let frame = 0;
   let first = true;
@@ -114,10 +161,14 @@ function watchPlotWidth(host, draw) {
     const box = entries && entries.length ? entries[entries.length - 1].contentRect : host.getBoundingClientRect();
     if (!(box.width > 0)) return;
     const w = Math.max(CHART_MIN_W, box.width);
+    rememberPlotW(key, w);
+    /* Only the first measurement draws at once, whether or not it changed the width (a seeded chart's first report is
+       usually within a pixel and draws nothing); a later change waits for its frame. */
+    const wasFirst = first;
+    first = false;
     if (Math.abs(w - (pendingW == null ? drawnW : pendingW)) < 1) return;
     pendingW = w;
-    if (first || typeof requestAnimationFrame !== "function") {
-      first = false;
+    if (wasFirst || typeof requestAnimationFrame !== "function") {
       apply();
     } else if (!frame) {
       frame = requestAnimationFrame(apply);
@@ -176,6 +227,7 @@ function watchPlotWidth(host, draw) {
 export function renderLineChart(spec) {
   const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
+  const widthKey = menuKey || spec.widthKey || null;
   const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
   /* Legend hide/isolate: a hidden series is dropped from everything below (the y-domain, the stack, the drawn
      marks, the hover tooltip and the CSV) so the axis rescales to what is visible. The legend still lists it,
@@ -325,10 +377,10 @@ export function renderLineChart(spec) {
     const crossesDay = new Date(tMin).toDateString() !== new Date(tMax).toDateString();
     /* The tick count follows the plot width (#5586): as many evenly spaced labels as fit side by side with a gap, so none
        overlap on a phone and a wide panel gets more of them, not wider ones. */
-    const xIntervals = spanMs === 0 ? 0 : xTickIntervals(plotW, [tMin, tMin + spanMs / 2, tMax].map((t) => axisTime(new Date(t), crossesDay)));
-    /* One bucket spans no time, so the evenly-spaced loop would stack identical labels on the centered point. Draw a single
-       centered gridline + time label instead. */
-    const xTickTimes = xIntervals === 0 ? [tMin] : Array.from({ length: xIntervals + 1 }, (_, i) => tMin + (spanMs * i) / xIntervals);
+    const xPlan = xTickPlan(tMin, spanMs, plotW, crossesDay);
+    /* One bucket spans no time, so the evenly-spaced loop would stack identical labels on the centered point. The plan then
+       holds a single tick: one centered gridline + time label. */
+    const xTickTimes = xPlan.times;
     for (let i = 0; i < xTickTimes.length; i++) {
       const t = xTickTimes[i];
       const x = scaleX(t);
@@ -339,7 +391,7 @@ export function renderLineChart(spec) {
         y: H - 8,
         "text-anchor": anchor,
       });
-      label.textContent = axisTime(new Date(t), crossesDay);
+      label.textContent = axisTime(new Date(t), crossesDay, xPlan.seconds);
       axis.appendChild(label);
     }
     /* Dual-axis overlay (#1606): the series2 values get their OWN nice scale on a right-hand axis — tick
@@ -663,7 +715,9 @@ export function renderLineChart(spec) {
       }
       const renderedX = (px / W) * rect.width;
       tooltip.style.display = "block";
-      tooltip.style.left = Math.min(renderedX + 12, rect.width - tooltip.offsetWidth - 4) + "px";
+      /* Clamp to the box the reader can see: below CHART_MIN_W the SVG is wider than its clipped host (#5586). */
+      const visibleW = plotHost.clientWidth > 0 ? Math.min(rect.width, plotHost.clientWidth) : rect.width;
+      tooltip.style.left = Math.min(renderedX + 12, visibleW - tooltip.offsetWidth - 4) + "px";
       tooltip.style.top = "8px";
     });
 
@@ -676,7 +730,8 @@ export function renderLineChart(spec) {
     return root;
   };
 
-  const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(CHART_DEFAULT_W)]);
+  const seedW = seedPlotW(widthKey);
+  const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(seedW)]);
   const chart = el("div", { class: "chart" }, [plotHost]);
   chart.appendChild(tooltip);
   chart.appendChild(buildLegend(series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries, onSelect, legendHidden, onLegend));
@@ -685,7 +740,7 @@ export function renderLineChart(spec) {
     tooltip.style.display = "none";
     const old = cur.root;
     plotHost.replaceChild(buildPlot(width), old);
-  });
+  }, widthKey, seedW);
 
   /* Export Data to CSV writes every loaded point, the same as the Viewer, not just the zoomed span (exportPoints
      is the unzoomed set a zoomable chart passes). */
@@ -881,6 +936,7 @@ export function renderPieChart(spec) {
  * spec: { items:[{label, x, y, drill?}], formatX?, formatY?, unitX?, unitY?, onSelect? }
  */
 export function renderScatterChart(spec) {
+  const widthKey = spec.widthKey || null;
   const { items, formatX = (v) => String(v), formatY = (v) => String(v), unitX = null, unitY = null, onSelect = null } = spec;
   const pts = (items || []).filter((d) => d && d.x != null && !isNaN(d.x) && d.y != null && !isNaN(d.y));
   if (!pts.length) return el("div", { class: "chart" }, [emptyStrip("No paired values to plot.")]);
@@ -904,13 +960,17 @@ export function renderScatterChart(spec) {
       label.textContent = formatY(val);
       axis.appendChild(label);
     }
-    /* A narrow plot keeps every second (third, ...) x tick, so the value labels do not overlap (#5586). */
-    const xStride = Math.max(1, Math.ceil((labelsPx(sx.ticks.map((v) => formatX(v))) + X_LABEL_GAP_PX) / (plotW / Math.max(1, sx.ticks.length - 1))));
+    /* Every x gridline is drawn at any width; a narrow plot labels every second (third, ...) tick so the value labels do not
+       overlap (#5586). The first and the last tick always keep their label: the stride counts from the first, and a stride
+       tick too close to the last gives way to it. */
+    const lastTick = sx.ticks.length - 1;
+    const xStride = Math.max(1, Math.ceil((labelsPx(sx.ticks.map((v) => formatX(v))) + X_LABEL_GAP_PX) / (plotW / Math.max(1, lastTick))));
     for (let ti = 0; ti < sx.ticks.length; ti++) {
-      if (ti % xStride !== 0) continue;
       const val = sx.ticks[ti];
       const x = scaleX(val);
       axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
+      const labelled = ti === 0 || ti === lastTick || (ti % xStride === 0 && lastTick - ti >= xStride);
+      if (!labelled) continue;
       const label = svg("text", { x: Math.min(Math.max(x, M.l + 2), plotRight - 2), y: H - 8, "text-anchor": "middle" });
       label.textContent = formatX(val);
       axis.appendChild(label);
@@ -950,8 +1010,9 @@ export function renderScatterChart(spec) {
     return root;
   };
 
-  const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(CHART_DEFAULT_W)]);
-  watchPlotWidth(plotHost, (width) => plotHost.replaceChild(buildPlot(width), plotHost.firstChild));
+  const seedW = seedPlotW(widthKey);
+  const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(seedW)]);
+  watchPlotWidth(plotHost, (width) => plotHost.replaceChild(buildPlot(width), plotHost.firstChild), widthKey, seedW);
   return el("div", { class: "chart chart-scatter" }, [plotHost]);
 }
 

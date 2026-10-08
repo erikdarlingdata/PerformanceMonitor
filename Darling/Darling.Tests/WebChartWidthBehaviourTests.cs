@@ -159,7 +159,8 @@ public sealed class WebChartWidthBehaviourTests
     }
 
     /// <summary>The x tick labels never overlap at 360 and 600 px (a phone and a narrow panel), the first and last stay
-    /// inside the plot, and a wide panel gets more ticks.</summary>
+    /// inside the plot, and a wide panel gets more ticks. The harness measures a label with its own estimate, 17 % wider
+    /// than the 0.6 em a character the script plans with, so a script estimate that is too tight fails here.</summary>
     [Theory]
     [InlineData(360)]
     [InlineData(600)]
@@ -195,8 +196,82 @@ public sealed class WebChartWidthBehaviourTests
         Assert.True(s.GetProperty("gap").GetDouble() >= 8);
     }
 
-    /// <summary>Source pins for what the harness cannot see: the stretching viewBox is gone from both charts, and the CSS
-    /// that would stretch the SVG no longer applies to them.</summary>
+    /// <summary>No two x labels read the same at any width and window. A brush-zoomed chart's window can be a few minutes
+    /// or seconds wide, and the axis shows HH:mm: ticks are whole minutes capped at the window's minutes, and a window too
+    /// short for a minute per tick shows seconds. RED proof: with the pre-fix tick count (the plot width alone) the
+    /// 6-minute window at 2,000 px gets 11 labels over 7 distinct minutes.</summary>
+    [Fact]
+    public void NoTwoXLabelsReadTheSame_AtAnyWidthAndWindow()
+    {
+        var d = Run().GetProperty("distinctLabels");
+        foreach (var name in new[] { "sixMinutes2000", "sixMinutes1000", "twoMinutes2000", "ninetySeconds600", "ninetySeconds2000", "fortyFiveSeconds2000", "thirtyDays" })
+        {
+            var labels = d.GetProperty(name).EnumerateArray().Select(l => l.GetString()!).ToArray();
+            Assert.True(labels.Length >= 2, name + " drew fewer than two labels");
+            Assert.True(labels.Distinct().Count() == labels.Length, name + " repeats a label: " + string.Join(" | ", labels));
+        }
+
+        // a step of a minute or more: whole-minute ticks, one per minute at most, with no seconds
+        Assert.Equal(7, d.GetProperty("sixMinutes2000").GetArrayLength());
+        Assert.All(d.GetProperty("sixMinutes2000").EnumerateArray(), l => Assert.Equal(1, l.GetString()!.Count(c => c == ':')));
+        // too short for a minute per tick: seconds
+        Assert.All(d.GetProperty("ninetySeconds600").EnumerateArray(), l => Assert.Equal(2, l.GetString()!.Count(c => c == ':')));
+        // a long window is unchanged: evenly spaced ticks, ten intervals at this width
+        Assert.Equal(
+            d.GetProperty("thirtyDaysEvenly").EnumerateArray().Select(l => l.GetString()),
+            d.GetProperty("thirtyDays").EnumerateArray().Select(l => l.GetString()));
+    }
+
+    /// <summary>The tooltip is placed inside the box the reader sees. Below 300 px the SVG is wider than its clipped host;
+    /// RED proof: clamping to the SVG's width puts the tooltip at 176 px in a 260 px box.</summary>
+    [Fact]
+    public void TheTooltip_StaysInsideTheVisibleBox_WhenTheSvgIsWiderThanItsHost()
+    {
+        var tip = Run().GetProperty("tooltip");
+        Assert.True(
+            tip.GetProperty("left").GetDouble() + tip.GetProperty("tooltipWidth").GetDouble() <= tip.GetProperty("visibleWidth").GetDouble(),
+            "the tooltip reaches past the visible box");
+    }
+
+    /// <summary>A narrow scatter keeps every x gridline and thins only the labels, and the first and the last tick are
+    /// always labelled (a stride tick next to the last gives way to it).</summary>
+    [Fact]
+    public void TheScatter_KeepsEveryGridline_AndLabelsTheFirstAndLastTick()
+    {
+        var g = Run().GetProperty("scatterGrid");
+        var narrow = g.GetProperty("360");
+        var wide = g.GetProperty("2000");
+        Assert.Equal(wide.GetProperty("gridlines").GetInt32(), narrow.GetProperty("gridlines").GetInt32());
+        Assert.True(narrow.GetProperty("labels").GetArrayLength() < wide.GetProperty("labels").GetArrayLength(), "the narrow plot did not thin its labels");
+        Assert.Equal(wide.GetProperty("labels")[0].GetString(), narrow.GetProperty("labels")[0].GetString());
+        var wl = wide.GetProperty("labels");
+        var nl = narrow.GetProperty("labels");
+        Assert.Equal(wl[wl.GetArrayLength() - 1].GetString(), nl[nl.GetArrayLength() - 1].GetString());
+
+        var six = g.GetProperty("six");
+        Assert.Equal(6, six.GetProperty("gridlines").GetInt32());
+        Assert.Equal(new[] { "0 ms", "4 ms", "10 ms" }, six.GetProperty("labels").EnumerateArray().Select(l => l.GetString()).ToArray());
+    }
+
+    /// <summary>A poll rebuilds every chart. A chart that was measured before (keyed by its menuKey, or the widthKey the
+    /// composed panels and the scatter pass) is drawn at that width, so the observer's first report is within a pixel and
+    /// the build is the only one; a chart with no key is drawn at the default and redrawn once, as before.</summary>
+    [Fact]
+    public void AnAlreadyMeasuredChart_IsBuiltOncePerPoll()
+    {
+        var poll = Run().GetProperty("poll");
+        foreach (var name in new[] { "keyedLine", "widthKeyLine", "keyedScatter" })
+        {
+            Assert.Equal(1, poll.GetProperty(name).GetProperty("builds").GetInt32());
+            Assert.Equal(1234, poll.GetProperty(name).GetProperty("vbW").GetDouble());
+        }
+
+        Assert.Equal(2, poll.GetProperty("unkeyedLine").GetProperty("builds").GetInt32());
+    }
+
+    /// <summary>Source pins for what the harness cannot see: the stretching viewBox is gone from both charts, the CSS
+    /// that would stretch the SVG no longer applies to them, and the print rule (a source pin, because a print layout is
+    /// not something Node can run) puts the plot SVG back in the flow at the page width.</summary>
     [Fact]
     public void TheStretchingViewBox_IsGone_AndTheCssDoesNotScaleThePlotSvg()
     {
@@ -207,5 +282,8 @@ public sealed class WebChartWidthBehaviourTests
         var css = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
         Assert.Contains(".chart svg.plot-svg { position: absolute;", css, StringComparison.Ordinal);
         Assert.Contains(".chart .chart-plot { position: relative; width: 100%; overflow: hidden; }", css, StringComparison.Ordinal);
+        Assert.Contains("@media print {", css, StringComparison.Ordinal);
+        Assert.Contains(".chart svg.plot-svg { position: static; width: 100% !important; height: auto !important; }", css, StringComparison.Ordinal);
+        Assert.Contains(".chart .chart-plot { height: auto !important; overflow: visible; }", css, StringComparison.Ordinal);
     }
 }

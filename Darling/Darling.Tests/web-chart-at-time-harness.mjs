@@ -44,7 +44,12 @@ class FakeNode {
   click() {}
   get offsetWidth() { return this.attrs.role === "menu" ? 176 : 0; }
   get offsetHeight() { return this.attrs.role === "menu" ? 100 : 0; }
-  getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 320 }; }
+  replaceChild(next, old) { const i = this.children.indexOf(old); if (i >= 0) this.children[i] = next; return old; }
+  /* The drawn plot svg reports the size it was drawn at (one SVG unit is one CSS pixel, 300 px high); any other node is 1000 wide. */
+  getBoundingClientRect() {
+    if (this.tag === "svg" && this.attrs.width) return { left: 0, top: 0, width: Number(this.attrs.width), height: Number(this.attrs.height) };
+    return { left: 0, top: 0, width: 1000, height: 300 };
+  }
   set textContent(value) { this.children = []; this.text = String(value); }
   get textContent() { return (this.text || "") + this.children.map((c) => c.textContent).join(""); }
 }
@@ -62,6 +67,19 @@ globalThis.document = {
   querySelectorAll: (selector) => (selector === ".panel > h3" ? panelHeads : []),
 };
 globalThis.window = globalThis;
+
+/* A ResizeObserver for the measured-width case only (#5586): while globalThis.__plotW is set, a watched plot box reports that
+   width as the chart is built, as the browser does once it has laid the chart out. Every other case runs with no report, so it
+   keeps the default width (1000). */
+globalThis.ResizeObserver = class {
+  constructor(cb) { this.cb = cb; }
+  observe(target) {
+    if (!globalThis.__plotW) return;
+    target.isConnected = true;
+    this.cb([{ contentRect: { width: globalThis.__plotW, height: 300 } }]);
+  }
+  disconnect() {}
+};
 
 /* The page's hash. The browser fires hashchange, a task later, when the hash is set to a NEW value, and nothing when it is
    set to the value it already holds (goToTime raises the event itself then, through window.dispatchEvent, counted below).
@@ -304,8 +322,22 @@ await click(k2, "Show Active Queries at This Time");
 const kc = take()[0];
 out.rebuiltMiddle = kc ? (kc.startMs + kc.endMs) / 2 : null;
 
-/* The wait trend chart (atTime.item "wait", #5235): two series, WAIT_A drawn high and WAIT_B low (the plot spans y 26 to 290
-   in a 320-high box), and the item names the series drawn nearest the click. */
+/* A chart drawn at a measured width (1600 px, #5586): the plot spans x 58 to 1584, so its middle is x = 821 and still lands on
+   the point at T0 + 5 min, and the wait item still picks the series drawn nearest the click. */
+globalThis.__plotW = 1600;
+const wide = charts.zoomableLineChart(spec({ title: "CPU", atTime: { server: "A" } }), "t30", scope);
+const wideWait = charts.zoomableLineChart(spec({ title: "Waits", atTime: { server: "A", item: "wait" }, points: points.map((p) => ({ ...p, a: 100, b: 10 })), series: [{ key: "a", label: "WAIT_A", color: "#fff" }, { key: "b", label: "WAIT_B", color: "#0f0" }] }), "t31", scope);
+globalThis.__plotW = null;
+out.measuredWidth = Number(plotNode(wide).attrs.width);
+rightClick(wide, 821);
+await click(wide, "Show Active Queries at This Time");
+const wc = take()[0];
+out.measuredMiddle = wc ? (wc.startMs + wc.endMs) / 2 : null;
+rightClick(wideWait, 821, plotNode(wideWait), 30);
+out.measuredWaitItems = labels(wideWait);
+
+/* The wait trend chart (atTime.item "wait", #5235): two series, WAIT_A drawn high and WAIT_B low (the plot spans y 26 to 270
+   in a 300-high box), and the item names the series drawn nearest the click. */
 const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
 const waitPoints = points.map((p, i) => ({ ...p, a: 100, b: 10, c: i === 5 ? null : 1 }));
 const waitSeries = [

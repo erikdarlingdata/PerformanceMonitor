@@ -554,6 +554,12 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
    panel from shrinking, which would hide the narrowing from the width the chart watches. */
 .chart .chart-plot { position: relative; width: 100%; overflow: hidden; }
 .chart svg.plot-svg { position: absolute; left: 0; top: 0; max-height: none; }
+/* On paper the page is narrower than the screen the chart was drawn for, and nothing redraws it for the print layout: the SVG goes
+   back into the flow and scales to the page width uniformly (its viewBox keeps the aspect), so the newest data is not clipped (#5586). */
+@media print {
+  .chart .chart-plot { height: auto !important; overflow: visible; }
+  .chart svg.plot-svg { position: static; width: 100% !important; height: auto !important; }
+}
 .chart .axis text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart .axis .axis-unit { fill: var(--dim); font-size: 10px; }
 .chart .grid-line { stroke: var(--border); stroke-width: 1; }

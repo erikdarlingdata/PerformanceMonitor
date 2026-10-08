@@ -54,6 +54,10 @@ class FakeNode {
     (this.listeners[type] = this.listeners[type] || []).push(listener);
   }
   setPointerCapture() {}
+  /* The box a reader sees: an svg reports none (it is clipped by its host), any other node its host width. */
+  get clientWidth() {
+    return this.tag === "svg" ? 0 : this.hostWidth;
+  }
   getBoundingClientRect() {
     if (this.tag === "svg") return { left: 0, top: 0, width: Number(this.attrs.width), height: Number(this.attrs.height) };
     return { left: 0, top: 0, width: this.hostWidth, height: 300 };
@@ -184,11 +188,14 @@ const xLabels = (chart) =>
     anchor: n.attrs["text-anchor"],
     text: n.textContent,
   }));
-/* The least gap in px between neighbouring labels, from 11px text at 0.6 em per character (the estimate the tests use). */
+/* The least gap in px between neighbouring labels. The width of a label is this test's own estimate, 11px text at 0.7 em per
+   character: 17 % wider than the 0.6 em (6.6 px a character) the shipped code plans with, so a code estimate that is too tight
+   fails here instead of agreeing with itself. */
+const TEST_CHAR_PX = 11 * 0.7;
 const minGap = (labels) => {
   const spans = labels
     .map((l) => {
-      const w = l.text.length * 11 * 0.6;
+      const w = l.text.length * TEST_CHAR_PX;
       const left = l.anchor === "start" ? l.x : l.anchor === "end" ? l.x - w : l.x - w / 2;
       return [left, left + w];
     })
@@ -370,4 +377,80 @@ for (const w of [360, 600]) {
   sw[w] = { count: labels.length, gap: minGap(labels).least };
 }
 out.scatterTicks = sw;
+
+/* 6. no two x labels read the same, at any width and window (a brush-zoomed span can be a few minutes or seconds wide) */
+const windowChart = (startMs, spanMs, width) => {
+  const c = charts.renderLineChart({
+    points: [0, 1].map((i) => ({ t: iso(startMs + i * (spanMs - 1000)), v: i })),
+    xKey: "t",
+    series: [{ key: "v", label: "v", color: "#fff" }],
+    windowStart: startMs,
+    windowEnd: startMs + spanMs,
+  });
+  mount(c, width);
+  return xLabels(c).map((l) => l.text);
+};
+const THIRTY_DAYS = 30 * 24 * 60 * MIN;
+const monthTicks = windowChart(T0 + 40000, THIRTY_DAYS, 2000);
+const evenly = Array.from({ length: 11 }, (_, i) => {
+  const t = T0 + 40000 + (THIRTY_DAYS * i) / 10;
+  return new Date(t).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+});
+out.distinctLabels = {
+  // the start is 40 s past the minute, so the end of each window is not on a whole minute either
+  sixMinutes2000: windowChart(T0 + 40000, 6 * MIN, 2000),
+  sixMinutes1000: windowChart(T0 + 40000, 6 * MIN, 1000),
+  twoMinutes2000: windowChart(T0 + 40000, 2 * MIN, 2000),
+  ninetySeconds600: windowChart(T0 + 40000, 90000, 600),
+  ninetySeconds2000: windowChart(T0 + 40000, 90000, 2000),
+  fortyFiveSeconds2000: windowChart(T0 + 40000, 45000, 2000),
+  thirtyDays: monthTicks,
+  thirtyDaysEvenly: evenly,
+};
+
+/* 7. the tooltip is clamped to the visible box: in a 260 px host the svg is 300 px wide and clipped */
+{
+  const c = charts.zoomableLineChart(specFor(), "tip1", scope);
+  mount(c, 260);
+  const tip = find(c, (n) => String(n.className) === "chart-tooltip")[0];
+  tip.offsetWidth = 120;
+  const overlay = find(c, (n) => (n.listeners.mousemove || []).length)[0];
+  overlay.listeners.mousemove[0]({ clientX: 270 });
+  out.tooltip = { left: parseFloat(tip.style.left), visibleWidth: 260, tooltipWidth: 120 };
+}
+
+/* 8. the scatter keeps every gridline and labels fewer ticks on a narrow plot, always the first and the last */
+{
+  const verticalGrid = (c) => find(rootOf(c), (n) => n.tag === "line" && n.attrs.class === "grid-line" && n.attrs.x1 === n.attrs.x2).length;
+  const out8 = {};
+  for (const w of [360, 2000]) {
+    const s = charts.renderScatterChart(scatterSpec());
+    mount(s, w);
+    const labels = xLabels(s).filter((l) => l.text.endsWith(" ms"));
+    out8[w] = { gridlines: verticalGrid(s), labels: labels.map((l) => l.text) };
+  }
+  /* six ticks (0, 2 ... 10) with a stride of two: the tick before the last gives way to the last one */
+  const six = charts.renderScatterChart({ ...scatterSpec(), items: [1, 2, 3].map((i) => ({ label: "g" + i, x: i * 3.3, y: i, drill: null })) });
+  mount(six, 360);
+  out8.six = { gridlines: verticalGrid(six), labels: xLabels(six).filter((l) => l.text.endsWith(" ms")).map((l) => l.text) };
+  out.scatterGrid = out8;
+}
+
+/* 9. a poll builds a chart once: the second build of a chart already measured is drawn at that width and is not redrawn */
+{
+  const buildsFor = (make) => {
+    const first = make();
+    mount(first, 1234);
+    const before = svgCreated;
+    const second = make();
+    mount(second, 1234);
+    return { builds: svgCreated - before, vbW: geometry(second).vbW };
+  };
+  out.poll = {
+    keyedLine: buildsFor(() => charts.zoomableLineChart(specFor(), "poll1", scope)),
+    widthKeyLine: buildsFor(() => charts.renderLineChart(specFor({ widthKey: "composed|0|p" }))),
+    keyedScatter: buildsFor(() => charts.renderScatterChart({ ...scatterSpec(), widthKey: "composed|1|s" })),
+    unkeyedLine: buildsFor(() => charts.renderLineChart(specFor())),
+  };
+}
 console.log(JSON.stringify(out));
