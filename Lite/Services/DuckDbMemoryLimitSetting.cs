@@ -147,11 +147,17 @@ internal static class DuckDbMemoryLimitSetting
     }
 
     /// <summary>
+    /// The start of <see cref="OutOfMemoryHint"/>, which <see cref="AppLogger"/> looks for so a line that was
+    /// already described is not hinted twice. It must not contain DuckDB's own "Out of Memory Error:" text.
+    /// </summary>
+    internal const string HintMarker = "DuckDB ran out of memory (its memory limit is";
+
+    /// <summary>
     /// The sentence appended to a DuckDB out-of-memory error: names the setting, where it is, and its current
     /// value.
     /// </summary>
     internal static string OutOfMemoryHint(int currentGb) =>
-        $"DuckDB ran out of memory (its memory limit is {currentGb} GB). Raise \"DuckDB memory limit\" under "
+        $"{HintMarker} {currentGb} GB). Raise \"DuckDB memory limit\" under "
         + "Dashboard Defaults in Settings; the new value takes effect after Lite restarts.";
 
     /// <summary>
