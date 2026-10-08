@@ -160,33 +160,17 @@ internal static class DarlingLatchSpinlockReader
     /// The top-N spinlocks over the window, one row per spinlock — the collision analog of
     /// <see cref="LatchStatsTopNSql"/>, mirroring the Dashboard's <c>get_spinlock_stats</c> per-name
     /// aggregation (top by total delta collisions). Per-second collision/spin rates from the latest interval's
-    /// stored <c>sample_interval_seconds</c> (per-name <c>LAG</c> for pre-V127 rows), null when unknowable,
+    /// stored <c>sample_interval_seconds</c> (the gap to the previous in-window row of the name for pre-V127 rows),
+    /// null when unknowable,
     /// with that interval itself as <c>latest_interval_seconds</c> — the latch query's own line (#3541 A10),
     /// so a caller reading a null <c>collisions_per_second</c> sees WHY beside it rather than inferring it
     /// (#3653 A16). Runs on <c>v_spinlock_stats</c>. $1 server_id, $2 start, $3 end (naive UTC), $4 top.
+    /// <para>#5495: the window is read once, by a hash aggregate, and the newest row of each of the top-N names
+    /// is then fetched by its (server_id, collection_time) index key. The earlier shape window-sorted every
+    /// row of the window to find that one row per name, which took 3-5 s for a 7-day window.</para>
     /// </summary>
     public const string SpinlockStatsTopNSql = """
-        WITH windowed AS
-        (
-            SELECT
-                spinlock_name,
-                collection_time,
-                delta_collisions,
-                delta_spins,
-                delta_backoffs,
-                /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
-                   so the latest-interval rates below are NULL — reported as null, never 0.00 — when the newest
-                   collection was a restart. NULL (a pre-V127 row) falls back to the LAG. */
-                CASE WHEN sample_interval_seconds IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY spinlock_name ORDER BY collection_time))))
-                     ELSE NULLIF(sample_interval_seconds, 0)
-                END AS interval_seconds
-            FROM v_spinlock_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-        ),
-        agg AS
+        WITH agg AS
         (
             SELECT
                 spinlock_name,
@@ -194,34 +178,64 @@ internal static class DarlingLatchSpinlockReader
                 CAST(SUM(delta_spins) AS bigint) AS total_delta_spins,
                 CAST(SUM(delta_backoffs) AS bigint) AS total_delta_backoffs,
                 MAX(collection_time) AS latest_collection_time
-            FROM windowed
+            FROM v_spinlock_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
             GROUP BY spinlock_name
         ),
-        latest AS
+        top_n AS
         (
-            SELECT DISTINCT ON (spinlock_name)
-                spinlock_name,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS double precision) / interval_seconds END AS collisions_per_second,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_spins AS double precision) / interval_seconds END AS spins_per_second,
-                /* #3653 A16: the span the two rates above divide by, published beside them as interval_seconds
-                   (null when unknowable) — the same line LatchStatsTopNSql carries for the severity block. */
-                CASE WHEN interval_seconds > 0 THEN CAST(interval_seconds AS double precision) END AS latest_interval_seconds
-            FROM windowed
-            ORDER BY spinlock_name, collection_time DESC
+            SELECT *
+            FROM agg
+            ORDER BY total_delta_collisions DESC
+            LIMIT $4
         )
         SELECT
             a.spinlock_name,
             a.total_delta_collisions,
             a.total_delta_spins,
             a.total_delta_backoffs,
-            l.collisions_per_second,
-            l.spins_per_second,
+            CASE WHEN iv.interval_seconds > 0 THEN CAST(l.delta_collisions AS double precision) / iv.interval_seconds END AS collisions_per_second,
+            CASE WHEN iv.interval_seconds > 0 THEN CAST(l.delta_spins AS double precision) / iv.interval_seconds END AS spins_per_second,
             a.latest_collection_time,
-            l.latest_interval_seconds
-        FROM agg AS a
-        JOIN latest AS l ON l.spinlock_name = a.spinlock_name
+            /* #3653 A16: the span the two rates above divide by, published beside them as interval_seconds
+               (null when unknowable) - the same line LatchStatsTopNSql carries for the severity block. */
+            CASE WHEN iv.interval_seconds > 0 THEN CAST(iv.interval_seconds AS double precision) END AS latest_interval_seconds
+        FROM top_n AS a
+        /* #5495: the newest row per spinlock is looked up by its (server, time) index key for only the top-N
+           names, instead of window-sorting every row of the window (1.2M rows, ~3 s at 7 days on the test
+           rig) to find it. The window function that read used (a per-name lag over the whole window, plus a
+           distinct-row sort) was there only to produce one interval for the newest row. */
+        CROSS JOIN LATERAL
+        (
+            SELECT s.delta_collisions, s.delta_spins, s.sample_interval_seconds
+            FROM v_spinlock_stats AS s
+            WHERE s.server_id = $1
+            AND   s.collection_time = a.latest_collection_time
+            AND   s.spinlock_name IS NOT DISTINCT FROM a.spinlock_name
+            LIMIT 1
+        ) AS l
+        CROSS JOIN LATERAL
+        (
+            /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+               so the latest-interval rates above are NULL - reported as null, never 0.00 - when the newest
+               collection was a restart. NULL (a pre-V127 row) falls back to the gap to the previous row of the
+               same name INSIDE the window (what the old per-name LAG saw; null when the newest row is the first). */
+            SELECT CASE WHEN l.sample_interval_seconds IS NULL
+                        THEN extract(epoch FROM (date_trunc('second', a.latest_collection_time) - date_trunc('second',
+                                (SELECT p.collection_time
+                                 FROM v_spinlock_stats AS p
+                                 WHERE p.server_id = $1
+                                 AND   p.collection_time >= $2
+                                 AND   p.collection_time < a.latest_collection_time
+                                 AND   p.spinlock_name IS NOT DISTINCT FROM a.spinlock_name
+                                 ORDER BY p.collection_time DESC
+                                 LIMIT 1))))
+                        ELSE NULLIF(l.sample_interval_seconds, 0)
+                   END AS interval_seconds
+        ) AS iv
         ORDER BY a.total_delta_collisions DESC
-        LIMIT $4
         """;
 
     public static async Task<List<SpinlockStatRow>> GetSpinlockStatsTopNAsync(
