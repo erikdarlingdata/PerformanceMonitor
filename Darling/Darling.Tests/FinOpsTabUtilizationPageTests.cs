@@ -135,7 +135,7 @@ public sealed class FinOpsTabUtilizationPageTests
     {
         var tab = Tab();
         Assert.Equal(2, Regex.Matches(tab, "(?m)^\\s+if \\(res\\.kind === \"aborted\" \\|\\| res\\.kind === \"auth\"\\) return;$").Count);
-        Assert.Equal(2, Regex.Matches(tab, Regex.Escape("emptyStrip(res.message)")).Count);
+        Assert.Equal(2, Regex.Matches(tab, Regex.Escape("gatedEmptyStrip(res, ctx)")).Count);
         Assert.Equal(2, Regex.Matches(tab, Regex.Escape("readErrorStrip(res.message)")).Count);
         Assert.Equal(2, Regex.Matches(tab, Regex.Escape("\"Could not render this tab: \"")).Count);
         Assert.DoesNotContain("Promise.all", tab);

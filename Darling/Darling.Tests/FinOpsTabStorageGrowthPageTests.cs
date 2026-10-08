@@ -245,7 +245,7 @@ public sealed class FinOpsTabStorageGrowthPageTests
     {
         var tab = Tab();
         Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"aborted\" \\|\\| res\\.kind === \"auth\"\\) return;$", tab);
-        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return chrome\\(\\[emptyStrip\\(res\\.message\\)\\]\\);$", tab);
+        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return chrome\\(\\[gatedEmptyStrip\\(res, ctx\\)\\]\\);$", tab);
         Assert.Contains("Could not render this tab: ", tab);
     }
 
@@ -254,7 +254,8 @@ public sealed class FinOpsTabStorageGrowthPageTests
     {
         var tab = Tab();
         var imports = Regex.Matches(tab, "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../util.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../util.js", "./gate.js" }));
+        Assert.Contains("./gate.js", imports);
         var names = Regex.Match(tab, "import \\{([^}]*)\\} from \"../../util.js\"").Groups[1].Value.Split(',').Select(n => n.Trim());
         var body = tab.Substring(tab.IndexOf("const HOURS", System.StringComparison.Ordinal));
         Assert.All(names, n => Assert.Contains(n + "(", body));
