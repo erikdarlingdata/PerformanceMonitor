@@ -525,7 +525,9 @@ FROM (SELECT COUNT(*) AS c FROM {Table} GROUP BY {string.Join(", ", hotKey)} HAV
     /// <summary>
     /// The archived Query Store parquet files, oldest name first: the whole-month files and the part files
     /// (<c>YYYYMM_query_store_stats_ptNNN.parquet</c>) compaction splits a month into when its input is too big
-    /// for one merge (#4721). The archive views read both shapes, so the repair must too. Each part is a file in
+    /// for one merge (#4721), and, since compaction merges this table one day at a time (#5410), the day files
+    /// (<c>YYYYMMDD_query_store_stats.parquet</c>) and their parts. The archive views read these shapes, so the
+    /// repair must too (the same two globs match all of them). Each part is a file in
     /// its own right, surveyed and rewritten on its own with the same checks as a whole-month file.
     /// </summary>
     private IEnumerable<string> ArchiveFiles()
@@ -745,7 +747,7 @@ COPY (
     SELECT {projection}
     FROM read_parquet('{EscapePath(file.Path)}')
     GROUP BY {string.Join(", ", key)}
-) TO '{EscapePath(temp)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+) TO '{EscapePath(temp)}' ({ParquetCompaction.ArchiveCopyOptions})";
                 await command.ExecuteNonQueryAsync(cancellationToken);
             });
 
@@ -832,10 +834,13 @@ COPY (
     /// it back on restores normal behavior, verified including that a later connection reads the promoted file
     /// and the setting is left enabled.</para>
     ///
-    /// <para><b>Deliberately NOT applied to the monthly archive cycle, and that is not an oversight.</b> That
-    /// path only ever writes NEW file names and deletes old ones — it never replaces the bytes behind a path
-    /// that has been read — so it was never exposed to this and adding the eviction there would be defensive
-    /// noise that implies a hazard it does not have.</para>
+    /// <para><b>Not applied to the monthly archive cycle, though compaction does replace a path (#5377).</b> It
+    /// writes the merged month over an existing <c>YYYYMM_table.parquet</c> or part file, so it is a swap of the
+    /// same kind. Measured on DuckDB 1.5.5 the trap above did not reproduce for it (or for this helper's own
+    /// delete-and-move) in 54 swap variants, with <c>parquet_metadata_cache</c> off and on:
+    /// <c>validate_external_file_cache</c> defaults to <c>VALIDATE_ALL</c>, so an entry whose file changed is
+    /// dropped on its next read. <c>ArchiveCompactionLowDiskTests.ACompactedMonthFile_ReadsItsNewBytes_OnTheSameInstanceThatReadItBefore</c>
+    /// pins it on one instance; if it fails after a DuckDB upgrade, compaction's swap needs the eviction too.</para>
     /// </summary>
     private async Task PromoteRewrittenFileAsync(
         DuckDBConnection connection, string originalPath, string tempPath, CancellationToken cancellationToken)

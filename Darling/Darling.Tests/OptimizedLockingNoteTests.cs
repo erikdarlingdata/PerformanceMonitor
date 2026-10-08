@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// unknown flag gives JSON null. The existing <c>note</c> field is untouched.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class OptimizedLockingNoteLivePostgresTests
 {
     private const string ServerName = "darling-optimized-locking-note-e2e";
@@ -132,6 +133,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 
 /// <summary>Source pins for the surfaces that show the optimized-locking note: the web descriptor and the two
 /// WPF loaders.</summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class OptimizedLockingNoteSurfacePinTests
 {
     [Fact]

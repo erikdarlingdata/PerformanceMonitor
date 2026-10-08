@@ -315,7 +315,7 @@ public sealed class OversizedPlanBacklogReadPins
     [Fact]
     public void TheListing_IsNotOrderedLikeTheClaim()
     {
-        /* The claim takes oldest ATTEMPT first so nothing starves, and only breaks ties by size. Ordering
+        /* The claim takes tried rows oldest ATTEMPT first (half its slots at most) and never-tried rows by size. Ordering
            the listing the same way would read as a prediction of the sweep's next picks while silently
            omitting the rows it will skip — a listing that answers a question it was not asked. Largest
            first answers the one a reader has, and the key columns in the tiebreak keep the page stable

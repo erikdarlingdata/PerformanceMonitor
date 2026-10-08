@@ -492,7 +492,9 @@ public sealed class DarlingObservabilityTests
         Assert.Contains("create_hypertable('collect.collection_log', by_range('collection_time', INTERVAL '1 days')", v23, StringComparison.Ordinal);
         Assert.Contains("migrate_data => true", v23, StringComparison.Ordinal);
         Assert.Contains("if_not_exists => true", v23, StringComparison.Ordinal);
-        /* Compression mirrors TimescaleSupport for this one table: segment by server_id, 1-day compress-after. */
+        /* V23's own compression text: segment by server_id, 1-day compress-after. Since #4951 the runtime path moves
+           collection_log to server_id and collector_name at first start; this text stays as written, because a
+           migration is never edited. */
         Assert.Contains("ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", v23, StringComparison.Ordinal);
         Assert.Contains("add_compression_policy('collect.collection_log', compress_after => INTERVAL '1 days', if_not_exists => true)", v23, StringComparison.Ordinal);
 

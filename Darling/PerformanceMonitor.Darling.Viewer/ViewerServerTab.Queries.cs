@@ -9,8 +9,10 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using PerformanceMonitor.Ui;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -174,31 +176,69 @@ public partial class ViewerServerTab
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
+        var read = dataReadTask.Result;
+        var rows = read.Rows;
         _queryStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
            ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
            tier disclosure are independent facts, so both may show at once (a window aged past raw AND
            routed to hourly). */
-        UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
+        UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
         await LoadQueryStatsSlicerAsync(startUtc, endUtc);
         await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
     }
 
     /// <summary>#4231 stage 3: the Queries-tab grid header's hourly-routing disclosure — appended to the
     /// existing "Showing since" banner (#4278) rather than a new widget, per the lane's ruling.</summary>
-    private const string HourlyTierSuffix = " — aggregated hourly, per-caller detail unavailable";
+    private const string HourlyTierSuffix = " — aggregated hourly: per-caller detail, reads, writes, spills and min/max CPU and duration are not kept, so they show blank";
+
+    /// <summary>#5329: the same disclosure when the io hourly rollup served the grid: it keeps logical reads, physical reads
+    /// and logical writes (the grid fills them), so those are not named as blank.</summary>
+    private const string HourlyIoTierSuffix = " — aggregated hourly: per-caller detail, spills and min/max CPU and duration are not kept, so they show blank";
+
+    /// <summary>
+    /// #5329: the banner suffix an hourly-routed grid carries: <see cref="HourlyTierSuffix"/> plus the window's real edges
+    /// (<see cref="ViewerDataService.HourlyEdgesNote"/>, the MCP tools' own text: the hourly rollup starts on the hour, a
+    /// rollup that starts after the window's start, and a materialization ceiling before its end). Null for a raw read, so
+    /// the raw route's banner is unchanged. A hourly read whose edges did not move carries the tier suffix alone.
+    /// </summary>
+    internal static string? HourlyBannerSuffix(string tier, bool ioRoute, string? edgesNote)
+    {
+        if (tier != "hourly")
+        {
+            return null;
+        }
+
+        var suffix = ioRoute ? HourlyIoTierSuffix : HourlyTierSuffix;
+        return string.IsNullOrEmpty(edgesNote) ? suffix : $"{suffix}. Window edges: {edgesNote}";
+    }
+
+    /// <summary>
+    /// #5329: what an hourly-routed grid really covers, for <see cref="UpdateTruncationBanner"/>. The grid sums the rollup
+    /// buckets this server holds, so its start is <paramref name="FirstBucket"/> (per server, null when none), not the raw
+    /// table's floor, which only the slicer and the comparison read.
+    /// </summary>
+    internal readonly record struct HourlyServed(DateTime? FirstBucket);
+
+    /// <summary>The <see cref="HourlyServed"/> of a routed read, or null for a raw one (whose banner names raw's floor).</summary>
+    internal static HourlyServed? HourlyServedOf(string tier, DateTime? firstBucket) =>
+        tier == "hourly" ? new HourlyServed(firstBucket) : null;
 
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
+        var read = dataReadTask.Result;
+        var rows = read.Rows;
         _procStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
            banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
-        UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
+        UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
         await LoadProcStatsSlicerAsync(startUtc, endUtc);
         await RefreshProcStatsComparisonAsync(startUtc, endUtc);
     }
@@ -210,10 +250,12 @@ public partial class ViewerServerTab
            applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
            the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
            ordinary read (M1) — null tells the gate this end is open. */
-        var (rows, widePlan) = await _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
+        var dataReadTask = _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
+        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
+        var (rows, widePlan) = dataReadTask.Result;
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan);
+        UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan);
         await LoadQueryStoreSlicerAsync(startUtc, endUtc);
         await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
     }
@@ -223,32 +265,62 @@ public partial class ViewerServerTab
     /// <paramref name="floor"/> sits past <see cref="RawWindowFloor.IsTruncated"/>'s slack after
     /// <paramref name="requestedStartUtc"/>, collapsed otherwise. The chart-title idiom
     /// (<see cref="DescribeTrendCoverage"/>) states the same fact on Performance Trends; this is its grid-header
-    /// form, in <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>'s <c>yyyy-MM-dd HH:mm</c>, the format
-    /// every trend chart title already uses for a head timestamp.
+    /// form, in <c>yyyy-MM-dd HH:mm:ss</c>, with seconds as Lite's banner has them, in the display zone and on the
+    /// invariant culture (<see cref="BannerTime"/>).
     /// </summary>
     internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
-        QueryStoreIntervalWide.WideReadPlan? widePlan = null)
+        HourlyServed? hourly = null, QueryStoreIntervalWide.WideReadPlan? widePlan = null)
     {
         /* #4689: when the interval table served, the rows start at the plan's EffectiveStart, not at raw's
            floor. The banner names that start and the bound that set it; the slicer still reads raw, so a
-           truncated raw floor is named beside it. The raw route's banner below is unchanged. */
-        if (widePlan?.EffectiveStart is DateTime wideStart)
+           truncated raw floor is named beside it. The raw route's banner below is unchanged.
+           #5329: the same shape when the HOURLY rollups served: the grid starts at this server's first bucket
+           (the Query Stats / Procedure Stats arms' per-server probe), so "Showing since" names that start and raw's
+           floor is named as the slicer's. An hourly read that found no bucket has no start to name (the grid is
+           empty), and an hourly start inside the slack is the hour alignment alone, which the edges note states. */
+        DateTime? servedStart = widePlan?.EffectiveStart;
+        var startReason = servedStart is null ? string.Empty : QueryStoreIntervalWide.BannerReason(widePlan!.Value.StartBound);
+        var hourlyServed = servedStart is null && hourly is not null;
+        if (hourlyServed)
         {
-            var wideTruncated = RawWindowFloor.IsTruncated(wideStart, requestedStartUtc);
+            servedStart = hourly!.Value.FirstBucket;
+        }
+
+        if (servedStart is not null || hourlyServed)
+        {
+            var wideTruncated = RawWindowFloor.IsTruncated(servedStart, requestedStartUtc);
             /* The slicer and comparison read raw whatever tier served the grid, so a truncated raw floor is
                named whether or not the grid itself was cut. */
             var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
             if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))
             {
                 var slicerSince = slicerTruncated
-                    ? ViewerTimeHelper.FormatForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc), "yyyy-MM-dd HH:mm")
+                    ? BannerTime(RawWindowFloor.EffectiveStart(floor, requestedStartUtc))
                     : null;
-                var text = wideTruncated
-                    ? $"Showing since {ViewerTimeHelper.FormatForDisplay(wideStart, "yyyy-MM-dd HH:mm")}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
-                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}")
-                    : slicerSince is null
-                        ? $"Showing {ViewerTimeHelper.FormatForDisplay(requestedStartUtc, "yyyy-MM-dd HH:mm")}"
+                /* #5329: "the grid shows the full window" is the wide plan's claim and is true only there. On the hourly
+                   route the edges note in the suffix says where the grid really starts and stops, so the claim would
+                   contradict it, and an empty grid (no bucket) has no start to name at all. */
+                string text;
+                if (wideTruncated)
+                {
+                    text = $"Showing since {BannerTime(servedStart!.Value)}{startReason}"
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}");
+                }
+                else if (hourlyServed && hourly!.Value.FirstBucket is null)
+                {
+                    text = slicerSince is null ? "No rollup bucket in the window" : $"Slicer since {slicerSince}";
+                }
+                else if (hourlyServed)
+                {
+                    text = $"Showing {BannerTime(requestedStartUtc)}"
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}");
+                }
+                else
+                {
+                    text = slicerSince is null
+                        ? $"Showing {BannerTime(requestedStartUtc)}"
                         : $"Slicer since {slicerSince} (the grid shows the full window)";
+                }
 
                 banner.Text = text + tierSuffix;
                 banner.Visibility = Visibility.Visible;
@@ -272,9 +344,57 @@ public partial class ViewerServerTab
         }
 
         banner.Text = truncated
-            ? $"Showing since {ViewerTimeHelper.FormatForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc), "yyyy-MM-dd HH:mm")}{tierSuffix}"
-            : $"Showing {ViewerTimeHelper.FormatForDisplay(requestedStartUtc, "yyyy-MM-dd HH:mm")}{tierSuffix}";
+            ? $"Showing since {BannerTime(RawWindowFloor.EffectiveStart(floor, requestedStartUtc))}{tierSuffix}"
+            : $"Showing {BannerTime(requestedStartUtc)}{tierSuffix}";
         banner.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// The instant a "Showing since" banner names, in the display zone with the ambiguous-hour offset suffix (the same
+    /// zone and suffix <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> gives) but on the invariant
+    /// culture, as Lite's banner (<c>DisplayZone.Format</c>) and the web's notice are. A banner is one line of
+    /// disclosure, not a grid cell, and a machine whose default calendar is not the Gregorian one (Thai Buddhist,
+    /// Hijri) would otherwise print 2026 as 2569 or 1448. <c>FormatForDisplay</c> stays on the current culture on
+    /// purpose for the grids' own columns. The time carries its seconds (Lite's banner does too): a grid that reaches
+    /// back no further than its oldest row names that row, and a note in whole minutes could print the range's own
+    /// start minute for a row some seconds into it, which reads as if the grid started at the range's start.
+    /// This is the one formatter every "Showing since" note on the server tab goes through.
+    /// </summary>
+    private static string BannerTime(DateTime naiveUtc) =>
+        PerformanceMonitor.Ui.DisplayZone.Format(naiveUtc, ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>
+    /// Where a data-start probe says the data starts (Active Queries, Current Waits, and the Queries tab's Query Stats,
+    /// Procedure Stats and Query Store window-floor probes: the caller starts the probe before its grid read and awaits
+    /// it here), or null when the probe throws. The probe is only the "Showing since" disclosure, so its failure must
+    /// not unwind the refresh past the slicer, the comparison or the charts that follow it: the answer goes on to
+    /// <see cref="UpdateTruncationBanner"/>, for which a null floor names no cut (the banner hides, unless the hourly-tier
+    /// suffix or the interval-table plan the Queries tab passes beside it still has something to say), the failure is
+    /// logged (<paramref name="warn"/> takes the log source and the message, <see cref="ViewerLogger.Warn"/> by
+    /// default), and the refresh goes on.
+    /// </summary>
+    internal static async Task<DateTime?> DataStartOrNullAsync(Task<DateTime?> probe, string surface, Action<string, string>? warn = null) =>
+        (await DataStartAnswerAsync(probe, surface, warn)).Start;
+
+    /// <summary>
+    /// <see cref="DataStartOrNullAsync"/> with the two kinds of nothing kept apart (#4966): a probe that found no coverage in
+    /// the window answers null with <c>Failed</c> false, and a probe that threw answers null with <c>Failed</c> true (logged
+    /// the same way). An event surface needs the difference: with no coverage it still names the earliest event it lists, and
+    /// after a failure it names nothing (<see cref="ViewerEventDataStart.Of"/>).
+    /// </summary>
+    internal static async Task<(bool Failed, DateTime? Start)> DataStartAnswerAsync(Task<DateTime?> probe, string surface, Action<string, string>? warn = null)
+    {
+        try
+        {
+            return (false, await probe);
+        }
+        catch (Exception ex)
+        {
+            (warn ?? ViewerLogger.Warn)(
+                "ViewerServerTab",
+                $"{surface}: the data-start probe failed, so no \"Showing since\" banner is shown | {ex.GetType().Name}: {ex.Message}");
+            return (true, null);
+        }
     }
 
     /// <summary>
@@ -287,10 +407,35 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadQueryStoreRegressionsAsync(DateTime startUtc, DateTime endUtc)
     {
-        var rows = await _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        /* #4966: the probe starts beside the read and asks about the baseline window (the data layer keys it there), and the banner
+           step compares its answer with that window's start. The rows are ranked by added duration, not by time, so they name no
+           earlier start and the cap rule does not apply. */
+        var floorTask = _dataService.GetQueryStoreRegressionsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var floorReadTask = _dataService.GetQueryStoreRegressionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(floorReadTask, floorTask, "Query Store Regressions");
+        var rows = floorReadTask.Result;
         _queryStoreRegressionsFilterMgr!.UpdateData(rows);
+        await ShowQueryStoreRegressionsDataStartAsync(QueryStoreRegressionsTruncationBanner, floorTask, startUtc);
         SetDefaultSortIfNone(QueryStoreRegressionsGrid, "DurationRegressionPercent", ListSortDirection.Descending);
     }
+
+    /// <summary>
+    /// Raises or hides the "Showing since" banner of the Query Store Regressions grid (#4966). The read compares the range with
+    /// the baseline of the 7 days before it, so the notice keys on that EARLIER window: a server added two days ago covers the
+    /// range whole but has two days of baseline, not seven, and a note compared with the range's own start would stay silent. The
+    /// probe's answer (<paramref name="probe"/>, started beside the read: <see cref="ViewerDataService.GetQueryStoreRegressionsDataStartAsync"/>)
+    /// is therefore compared with <see cref="ViewerDataService.QueryStoreRegressionsBaselineStart"/> of the range's start, through
+    /// <see cref="UpdateTruncationBanner"/>. The probe is awaited through <see cref="DataStartOrNullAsync"/>, so a probe that
+    /// throws costs this banner and nothing after it. <c>internal static</c> so the store-backed tests run the same step as the tab.
+    /// </summary>
+    /// <param name="banner">The grid's banner.</param>
+    /// <param name="probe">The grid's data-start probe, started beside its read.</param>
+    /// <param name="startUtc">The start of the RANGE the grid just drew (not of its baseline).</param>
+    internal static async Task ShowQueryStoreRegressionsDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc) =>
+        UpdateTruncationBanner(
+            banner,
+            await DataStartOrNullAsync(probe, "Query Store Regressions"),
+            ViewerDataService.QueryStoreRegressionsBaselineStart(startUtc));
 
     /// <summary>
     /// Loads the Plan Corrections grid (#1952) — the engine's own automatic plan correction recommendations
@@ -301,8 +446,16 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadPlanCorrectionsAsync(DateTime startUtc, DateTime endUtc)
     {
-        var rows = await _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataStartTask = _dataService.GetPlanCorrectionsDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var dataReadTask = _dataService.GetPlanCorrectionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Plan Corrections");
+        var rows = dataReadTask.Result;
         _planCorrectionFilterMgr!.UpdateData(rows);
+        /* #4966: the read keeps the newest 200 rows, and the collector re-captures every open recommendation on each cycle, so a
+           few recommendations fill the page within hours and a wide range is answered from its newest hours. A full page names its
+           oldest row, over a range the store covers too; a read under the cap names the earlier of the coverage start and the
+           earliest row shown. The rows window on collection_time, the column they show, so there is no earlier event time to name. */
+        await ShowEventDataStartAsync(PlanCorrectionsTruncationBanner, dataStartTask, "Plan Corrections", startUtc, rows.Select(r => (DateTime?)r.CollectionTime), ViewerDataService.PlanCorrectionsRowCap);
         SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
     }
 
@@ -313,7 +466,9 @@ public partial class ViewerServerTab
         var data = await _dataService.GetQueryStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStatsSlicerData = data;
         _queryStatsSlicerMetric = "TotalCpu";
-        if (data.Count > 0)
+        if (data.Count == 0)
+            QueryStatsSlicer.ShowEmpty("No query statistics in the selected time window.");
+        else
             QueryStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
     }
 
@@ -322,9 +477,12 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
+            var read = dataReadTask.Result;
+            var rows = read.Rows;
             _queryStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
+            UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), e.StartUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -338,7 +496,9 @@ public partial class ViewerServerTab
         var data = await _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _procStatsSlicerData = data;
         _procStatsSlicerMetric = "TotalCpu";
-        if (data.Count > 0)
+        if (data.Count == 0)
+            ProcStatsSlicer.ShowEmpty("No procedure statistics in the selected time window.");
+        else
             ProcStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
     }
 
@@ -347,9 +507,12 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
+            var read = dataReadTask.Result;
+            var rows = read.Rows;
             _procStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
+            UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), e.StartUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -363,7 +526,9 @@ public partial class ViewerServerTab
         var data = await _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStoreSlicerData = data;
         _queryStoreSlicerMetric = "TotalCpu";
-        if (data.Count > 0)
+        if (data.Count == 0)
+            QueryStoreSlicer.ShowEmpty("No Query Store data in the selected time window.");
+        else
             QueryStoreSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
     }
 
@@ -373,9 +538,11 @@ public partial class ViewerServerTab
         {
             var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             /* #3953 clause 4: a slicer selection is always a literal, user-drawn sub-range, never a preset. */
-            var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc);
+            var dataReadTask = _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc);
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
+            var rows = dataReadTask.Result;
             _queryStoreFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, e.StartUtc);
+            UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), e.StartUtc);
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)

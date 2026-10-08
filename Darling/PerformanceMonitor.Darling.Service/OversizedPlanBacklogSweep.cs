@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Targets;
 
@@ -139,7 +140,15 @@ internal static class OversizedPlanBacklogSweep
     ///
     /// <para><b>What it costs at the top of the range.</b> One server's pass is serial under
     /// <see cref="PerPlanBudget"/>, so the worst case for one monitored server is ten times fifteen seconds,
-    /// 150 seconds; the fleet pass is serial too, so 42 servers all timing out at the cap is 105 minutes.
+    /// 150 seconds of fetch; the fleet pass is serial too, so 42 servers all timing out at the cap is 105 minutes of
+    /// fetch. The statement filter's judging is the service's own work, not the monitored server's, and adds to that:
+    /// a row never tried shares one 15-second judging budget with the rest of its batch, and a row tried before
+    /// judges on a budget of its own (<see cref="SessionFor"/>, #5367). A claim takes at most
+    /// <c>OversizedPlanBacklog.TriedRowsPerClaim</c> tried rows while never-tried rows are waiting (five of ten), so the
+    /// worst pass is five tried rows that each overrun their own budget plus five never-tried rows that share one:
+    /// five times (15 s fetch plus 15 s judging) plus five times 15 s fetch plus one 15 s budget, 240 seconds. With no
+    /// never-tried rows waiting the tried rows fill the claim, ten times (15 s fetch plus 15 s judging), 300 seconds;
+    /// that pass spends no time on new rows because there are none.
     /// Two passes never overlap whatever the interval — <c>DarlingWorker</c> tracks the pass and its gate
     /// will not launch on top of an incomplete one — so a pass that outruns <see cref="SweepInterval"/> runs
     /// back-to-back with its successor at the SAME one-plan-at-a-time load rather than at two passes' worth
@@ -155,7 +164,8 @@ internal static class OversizedPlanBacklogSweep
     /// trickles never trips it. Fifteen seconds is the top of the issue's range, and a plan that cannot be
     /// read in fifteen seconds on the collector's own same-region path is one this pass should abandon and
     /// re-attempt on a later pass rather than hold a connection for — later rather than next, because the
-    /// claim sends an attempted row to the back of the queue so nothing can starve.
+    /// claim orders the tried rows by attempt age, so a row just tried waits behind the other tried rows, and takes
+    /// at most half of a claim's slots so it cannot keep a never-tried row out.
     /// </summary>
     internal static readonly TimeSpan PerPlanBudget = TimeSpan.FromSeconds(15);
 
@@ -209,8 +219,14 @@ WHERE tqp.query_plan IS NOT NULL;";
         /// <summary>The handle no longer renders a plan — a benign, expected end state.</summary>
         Expired,
 
-        /// <summary>The fetch could not complete. Nothing was learned; the row stays claimable.</summary>
+        /// <summary>The fetch could not complete (a connect failure, a driver fault, its own budget, or a judging
+        /// budget an earlier plan had already used). Nothing was learned; the row stays claimable and the attempt is
+        /// NOT counted toward <see cref="MaxJudgeAttempts"/>.</summary>
         Failed,
+
+        /// <summary>The plan had the whole judging budget to itself and overran it. The row stays claimable and the
+        /// attempt IS counted: this is the only outcome that counts toward <see cref="MaxJudgeAttempts"/> (#5367 review, A-M1).</summary>
+        JudgeTimedOut,
     }
 
     /// <summary>
@@ -452,6 +468,10 @@ WHERE tqp.query_plan IS NOT NULL;";
         var pending = await ClaimAsync(postgres, server.ServerId, cancellationToken).ConfigureAwait(false);
         tally.PlansClaimed += pending.Count;
 
+        /* #4348: one standalone scrub session per batch (a pass over one server's claimed plans), so the 15-second
+           judging budget is shared across the batch and a plan the budget cannot cover stays claimable. */
+        var scrub = new SensitiveStatements.Session();
+
         if (pending.Count == 0)
         {
             return;
@@ -462,6 +482,7 @@ WHERE tqp.query_plan IS NOT NULL;";
             if (cancellationToken.IsCancellationRequested)
             {
                 tally.Interrupted = true;
+                LogScrub(scrub, server, logger);
                 return;
             }
 
@@ -470,8 +491,14 @@ WHERE tqp.query_plan IS NOT NULL;";
                outcome write fall to the storage phase where they belong. */
             var fetchStart = Stopwatch.GetTimestamp();
 
-            var (verdict, planXml, error) = await FetchOnePlanAsync(server, plan, logger, cancellationToken)
+            var session = SessionFor(plan, scrub);
+            var (verdict, planXml, error) = await FetchOnePlanAsync(server, plan, session, logger, cancellationToken)
                 .ConfigureAwait(false);
+
+            if (!ReferenceEquals(session, scrub))
+            {
+                LogScrub(session, server, logger);
+            }
 
             tally.TargetMs += (long)Stopwatch.GetElapsedTime(fetchStart).TotalMilliseconds;
 
@@ -502,6 +529,22 @@ WHERE tqp.query_plan IS NOT NULL;";
                     break;
             }
         }
+
+        LogScrub(scrub, server, logger);
+    }
+
+    /// <summary>#4348: the batch's statement-filter counters, once per batch and only when the batch judged
+    /// something it withheld or could not judge.</summary>
+    private static void LogScrub(SensitiveStatements.Session scrub, ServerRuntime server, ILogger? logger)
+    {
+        if (scrub.Named == 0 && scrub.TimedOut == 0 && scrub.Unjudged == 0)
+        {
+            return;
+        }
+
+        logger?.LogInformation(
+            "Oversized-plan backlog: statement filter on '{Server}': {Named} withheld, {TimedOut} timed out, {Unjudged} unjudged, {Ms} ms",
+            server.Config.DisplayName, scrub.Named, scrub.TimedOut, scrub.Unjudged, scrub.ElapsedMs);
     }
 
     /// <summary>
@@ -509,7 +552,7 @@ WHERE tqp.query_plan IS NOT NULL;";
     /// marks nothing, because the sweep is the single writer on this path and a lock held across a
     /// target fetch is the one shape a bound must never take.
     /// </summary>
-    private static async Task<List<OversizedPlanBacklog.PendingPlan>> ClaimAsync(
+    internal static async Task<List<OversizedPlanBacklog.PendingPlan>> ClaimAsync(
         NpgsqlDataSource postgres,
         int serverId,
         CancellationToken cancellationToken)
@@ -537,7 +580,9 @@ WHERE tqp.query_plan IS NOT NULL;";
                     reader.GetInt32(4),
                     reader.IsDBNull(5) ? null : reader.GetString(5),
                     QueryHash: null,
-                    reader.GetInt64(6))));
+                    reader.GetInt64(6)),
+                reader.GetInt32(7),
+                reader.GetBoolean(8)));
         }
 
         return claimed;
@@ -551,6 +596,7 @@ WHERE tqp.query_plan IS NOT NULL;";
     private static async Task<(PlanFetchVerdict Verdict, string? PlanXml, string? Error)> FetchOnePlanAsync(
         ServerRuntime server,
         OversizedPlanBacklog.PendingPlan plan,
+        SensitiveStatements.Session scrub,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -590,7 +636,7 @@ WHERE tqp.query_plan IS NOT NULL;";
                a cycle's drain, not one of them. */
             var planXml = reader.GetString(0);
 
-            return (PlanFetchVerdict.Captured, planXml, null);
+            return JudgeFetchedPlan(scrub, planXml, plan.AttemptCount);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || budget.IsCancellationRequested)
         {
@@ -612,6 +658,92 @@ WHERE tqp.query_plan IS NOT NULL;";
     }
 
     /// <summary>
+    /// How many judge timeouts a row gets before a plan the judging budget keeps failing to cover is retired as the
+    /// whole-plan marker (#5320). The backlog table had no cap on attempts (the claim orders by the last attempt
+    /// and nothing else), so without this a plan that always needs more than the session budget would be fetched
+    /// and judged again on every pass with no end. Two: the first timeout leaves the row claimable, in case the
+    /// budget was only short that once; the second is the plan, not the pass. Only a timeout on a plan that had the
+    /// WHOLE budget to itself counts (<see cref="PlanFetchVerdict.JudgeTimedOut"/> is the one verdict that adds to
+    /// <c>attempt_count</c>); a connect failure, an expiry, or a plan that met a budget an earlier plan had partly
+    /// used says nothing about the plan (#5367 review, A-M1).
+    /// </summary>
+    internal const int MaxJudgeAttempts = 2;
+
+    /// <summary>
+    /// #4348: the statement filter on a fetched plan, where the value first lands and before it is stored.
+    /// <paramref name="scrub"/> is the batch's session, passed in; the sweep never makes one of its own here.
+    ///
+    /// <para>A plan the judging budget could not cover is normally NOT stored as the marker: the verdict is
+    /// <see cref="PlanFetchVerdict.Failed"/> or <see cref="PlanFetchVerdict.JudgeTimedOut"/>, so the backlog row
+    /// stays claimable and the next pass, with a fresh budget, fetches it again. Only a plan that had the WHOLE
+    /// budget to itself (nothing judged on the session before it) can say anything about itself. If it overruns,
+    /// it is <see cref="PlanFetchVerdict.JudgeTimedOut"/>, which counts one attempt; on a row already timed out
+    /// <see cref="MaxJudgeAttempts"/> minus one times that is terminal: the whole-plan marker is stored as the
+    /// capture, which sets <c>captured_at</c>, so the claim never returns the row again. A plan that met a budget
+    /// an earlier plan in the batch had partly or wholly used stays Failed, which is not counted, however many
+    /// attempts the row has.</para>
+    /// </summary>
+    /// <param name="scrub">The batch's statement-filter session.</param>
+    /// <param name="planXml">The fetched plan.</param>
+    /// <param name="priorAttempts">The row's <c>attempt_count</c> when it was claimed.</param>
+    internal static (PlanFetchVerdict Verdict, string? PlanXml, string? Error) JudgeFetchedPlan(
+        SensitiveStatements.Session scrub, string planXml, int priorAttempts)
+    {
+        /* Whole budget: nothing was presented to this session before this plan, so the 15 seconds are this plan's
+           alone. Values counts every non-empty value, which is what charges the budget, and a spent session has
+           had values presented, so the one test covers the partly spent and the fully spent. */
+        var wholeBudget = scrub.Values == 0 && !scrub.Spent;
+
+        if (!scrub.TryXml(planXml, out var judged))
+        {
+            if (!wholeBudget)
+            {
+                return (PlanFetchVerdict.Failed, null, "the statement filter's judging budget was spent before this plan");
+            }
+
+            if (priorAttempts + 1 >= MaxJudgeAttempts)
+            {
+                return (PlanFetchVerdict.Captured, judged, null);
+            }
+
+            return (PlanFetchVerdict.JudgeTimedOut, null, "the plan overran the statement filter's judging budget");
+        }
+
+        return (PlanFetchVerdict.Captured, judged, null);
+    }
+
+    /// <summary>
+    /// The judging session for one claimed plan (#5367): the batch's shared session for a row never tried, a session of
+    /// its own for a row that was tried before.
+    ///
+    /// <para><b>Why a session of its own, not a claim order alone.</b> <see cref="JudgeFetchedPlan"/> retires a plan
+    /// only when it was judged on a whole budget, which on the shared session means first in its batch. A row that
+    /// was tried once (a connect failure, or a budget an earlier plan had used) is claimed behind the rows never tried
+    /// and, even claimed first among the tried rows, is first in the batch only when nothing is ahead of it. That
+    /// order can repeat for ever, and the row is then fetched and judged again on every pass, the forever-retry the
+    /// retirement limit removed. A session of its own gives every tried row a whole budget whatever its place in the
+    /// batch, so each claim of it ends in a judged plan, a counted timeout, or (on the second timeout) the marker.
+    /// The cost is the time bound: see <see cref="MaxPlansPerServerPerTick"/>.</para>
+    /// </summary>
+    internal static SensitiveStatements.Session SessionFor(
+        OversizedPlanBacklog.PendingPlan plan,
+        SensitiveStatements.Session batch,
+        Func<SensitiveStatements.Session>? fresh = null) =>
+        plan.Tried ? (fresh ?? (() => new SensitiveStatements.Session()))() : batch;
+
+    /// <summary>
+    /// The statement that records a verdict. Only a judge timeout adds to <c>attempt_count</c> (and a capture, which
+    /// retires the row): a connect failure, an expiry or a budget skip stamps the attempt time and nothing else.
+    /// </summary>
+    internal static string OutcomeSql(PlanFetchVerdict verdict) => verdict switch
+    {
+        PlanFetchVerdict.Captured => OversizedPlanBacklog.RecordCaptureSql,
+        PlanFetchVerdict.Expired => OversizedPlanBacklog.RecordExpirySql,
+        PlanFetchVerdict.JudgeTimedOut => OversizedPlanBacklog.RecordAttemptSql,
+        _ => OversizedPlanBacklog.RecordFailureSql,
+    };
+
+    /// <summary>
     /// Stamps one row's outcome. Runs on <see cref="CancellationToken.None"/> for the reason the stall probe's
     /// store write does: the target query is already paid for, so a shutdown arriving between the fetch and
     /// the write would discard content that cost a real DMV read. Never throws.
@@ -624,12 +756,7 @@ WHERE tqp.query_plan IS NOT NULL;";
         string? planXml,
         ILogger? logger)
     {
-        var sql = verdict switch
-        {
-            PlanFetchVerdict.Captured => OversizedPlanBacklog.RecordCaptureSql,
-            PlanFetchVerdict.Expired => OversizedPlanBacklog.RecordExpirySql,
-            _ => OversizedPlanBacklog.RecordAttemptSql,
-        };
+        var sql = OutcomeSql(verdict);
 
         try
         {

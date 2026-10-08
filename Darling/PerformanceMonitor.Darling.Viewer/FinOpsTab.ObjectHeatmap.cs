@@ -71,7 +71,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsStorageGrowthAsync()
     {
-        var data = await _dataService.GetStorageGrowthAsync(_server.ServerId);
+        var data = await _dataService.GetStorageGrowthAsync(_server.ServerId, SelectedDatabaseFilter);
         _finopsStorageGrowthFilterMgr!.UpdateData(data);
         FinOpsNoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";

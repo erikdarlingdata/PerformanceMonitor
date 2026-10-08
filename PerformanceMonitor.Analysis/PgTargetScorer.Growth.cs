@@ -25,13 +25,14 @@ namespace PerformanceMonitor.Analysis;
 /// COUNTED (<see cref="GrowthDatabasesUnsizedKey"/>) — never read as zero growth; a database with fewer than three
 /// samples in the lookback is not a trend and is not graded; a fact with nothing to grade says which gate withheld it.</para>
 ///
-/// <para><b>Lineage — every bar here is unmeasured, and the family says so.</b> The table is one day old at this
-/// family's birth (V136, 2026-09-20); the fleet calibration of 2026-09-19 ran before it existed and there is no
-/// growth distribution to cite. So the growth line (10 % AND 1 GiB), the critical line (25 % AND 10 GiB), the
-/// lookback (14 days), the three-sample minimum and the co-fire boosts are all <b>chosen, not measured — calibrate
-/// against <c>pg_database_size_stats</c> once it holds 14 d before the next release</b>, and every fact this
-/// family emits carries <c>threshold_lineage = 0</c> so <c>get_analysis_facts</c> shows it. No bar is a SQL Server
-/// constant reused by value (the SQL Server engine has no growth trend fact at all).</para>
+/// <para><b>Lineage — the bars are measured (#4404); the two co-fire boosts are not.</b> The table was one day old at
+/// this family's birth (V136, 2026-09-20) and the fleet calibration of 2026-09-19 ran before it existed, so every bar
+/// was first chosen. The 14-day read of 2026-10-06 (#4404) graded them over 393 databases on 50 Aurora PostgreSQL
+/// clusters: the growth line (10 % AND 1 GiB), the critical line (25 % AND 10 GiB), the lookback (14 days) and the
+/// three-sample minimum all stand as written, so every fact this family emits carries <c>threshold_lineage = 1</c>
+/// and <c>get_analysis_facts</c> shows it. The two co-fire boosts are severity lifts, not bars, and stay
+/// <b>unmeasured</b>: chosen, not measured. No bar is a SQL Server constant reused by value (the SQL Server engine
+/// has no growth trend fact at all).</para>
 ///
 /// <para><b>Why two arms on each line.</b> Bytes alone would name a 2 TB warehouse's routine week; a fraction alone
 /// would name a 200 MB sandbox doubling. Both must hold, and the grade is the WEAKER arm's ramp — 0.5 when both sit
@@ -49,25 +50,29 @@ public static partial class PgTargetScorer
     /// <summary>
     /// Days the trend reads back from the window END, regardless of the pass window: the analysis window is hours
     /// and a database grows in days, so the fact reads a LONGER span than the pass (the bloat family's shape) and
-    /// stamps <see cref="GrowthLookbackDaysKey"/>. Lineage: <b>unmeasured</b> — chosen, not measured: fourteen days
-    /// matches the bloat family's lookback so the two trends' spans agree and the growth → bloat edge compares like
-    /// with like; calibrate against <c>pg_database_size_stats</c> once it holds 14 d before the next release.
+    /// stamps <see cref="GrowthLookbackDaysKey"/>. Lineage: measured: confirmed, not moved — 391 of the 393 databases
+    /// graded had the full fourteen days (335 samples each) on 50 Aurora PostgreSQL clusters of the dogfood fleet,
+    /// 2026-10-06 (<c>pg_database_size_stats</c>, #4404). Fourteen days matches the bloat family's lookback so the two
+    /// trends' spans agree and the growth → bloat edge compares like with like.
     /// </summary>
     public const int GrowthLookbackDays = 14;
 
     /// <summary>
     /// Growth in bytes across the lookback at which the trend is a finding (with <see cref="GrowthConcerningFraction"/>).
-    /// Lineage: <b>unmeasured</b> — chosen, not measured: the table is one day old; a gibibyte in two weeks is the
-    /// smallest growth an operator is likely to plan storage around. Calibrate against <c>pg_database_size_stats</c>
-    /// once it holds 14 d before the next release.
+    /// Lineage: measured: confirmed, not moved — over 14 days on 393 databases of 50 Aurora PostgreSQL clusters
+    /// of the dogfood fleet, 2026-10-06 (<c>pg_database_size_stats</c>, #4404), growth had median 0 B and p95 1.10 GiB;
+    /// 23 databases met this bytes half and, with the fraction half, 1 met both. A gibibyte in two weeks is the
+    /// smallest growth an operator is likely to plan storage around.
     /// </summary>
     public const long GrowthConcerningBytes = 1024L * 1024 * 1024;
 
     /// <summary>
     /// Growth as a fraction of the EARLIEST size that must accompany <see cref="GrowthConcerningBytes"/>. Lineage:
-    /// <b>unmeasured</b> — chosen, not measured; ten per cent in two weeks is a doubling in about five months, the
-    /// slope at which "when does the disk fill" becomes a planning question. Calibrate against
-    /// <c>pg_database_size_stats</c> once it holds 14 d before the next release. An earliest size of ZERO satisfies
+    /// measured: confirmed, not moved — over 14 days on 393 databases of 50 Aurora PostgreSQL clusters of the dogfood
+    /// fleet, 2026-10-06 (<c>pg_database_size_stats</c>, #4404), growth had median 0 % and p95 37.0 %; 25 databases met
+    /// this fraction half and 1 met both halves (the fraction half alone mostly names small databases, which is why the
+    /// bytes half is ANDed in). Ten per cent in two weeks is a doubling in about five months, the slope at which "when
+    /// does the disk fill" becomes a planning question. An earliest size of ZERO satisfies
     /// this arm trivially (a tenth of nothing is nothing) — the bytes arm decides alone and the fact says the
     /// percentage is not computable rather than carrying an infinity.
     /// </summary>
@@ -75,23 +80,27 @@ public static partial class PgTargetScorer
 
     /// <summary>
     /// Growth in bytes at which the trend grades 1.0 (with <see cref="GrowthCriticalFraction"/>). Lineage:
-    /// <b>unmeasured</b> — chosen, not measured; calibrate against <c>pg_database_size_stats</c> once it holds 14 d
-    /// before the next release.
+    /// measured: confirmed, not moved — over 14 days on 393 databases of 50 Aurora PostgreSQL
+    /// clusters of the dogfood fleet, 2026-10-06 (<c>pg_database_size_stats</c>, #4404), the largest growth was 10.21 GiB;
+    /// 1 database met this bytes half and, with the fraction half, none met both. No database shrank by more than 10 %.
     /// </summary>
     public const long GrowthCriticalBytes = 10L * 1024 * 1024 * 1024;
 
     /// <summary>
     /// Growth as a fraction of the earliest size at which the trend grades 1.0 (with <see cref="GrowthCriticalBytes"/>):
-    /// a quarter in two weeks doubles in about two months. Lineage: <b>unmeasured</b> — chosen, not measured; calibrate
-    /// against <c>pg_database_size_stats</c> once it holds 14 d before the next release.
+    /// a quarter in two weeks doubles in about two months. Lineage: measured: confirmed, not moved — over 14 days on 393
+    /// databases of 50 Aurora PostgreSQL clusters of the dogfood fleet, 2026-10-06 (<c>pg_database_size_stats</c>, #4404),
+    /// 21 databases met this fraction half and none met both halves (the 21 are all small, so the bytes half keeps them out).
     /// </summary>
     public const double GrowthCriticalFraction = 0.25;
 
     /// <summary>
     /// Samples a database (or the instance total) needs inside the lookback before its trend is graded: two points
     /// are a line and three is the first count with a middle to disagree with the ends — the bloat family's index
-    /// minimum, for the same reason. Lineage: <b>unmeasured</b> — chosen, not measured; calibrate against
-    /// <c>pg_database_size_stats</c> once it holds 14 d before the next release. A fact withheld by this gate carries
+    /// minimum, for the same reason. Lineage: measured: confirmed, not moved — the read counted the databases that
+    /// had at least 3 samples, 393 of them, and 391 of those had 335, the full 14 days at the collector's hourly rate; it
+    /// shows the floor is small against a full lookback, not that the minimum never excludes a database (50 Aurora
+    /// PostgreSQL clusters of the dogfood fleet, 2026-10-06, <c>pg_database_size_stats</c>, #4404). A fact withheld by this gate carries
     /// <see cref="GrowthUnavailableReasonKey"/> = <see cref="GrowthReasonInsufficientSamples"/>.
     /// </summary>
     public const int GrowthMinimumSamples = 3;
@@ -99,7 +108,6 @@ public static partial class PgTargetScorer
     /// <summary>How many databases the fact names (the worst in <see cref="Fact.ObjectName"/>, all of them by name
     /// in metadata). Three, because the advice leads with one and mentions the others; the read's own bound, not a bar.</summary>
     public const int GrowthTopDatabases = 3;
-
     /// <summary>Boost when the bloat trend fired on a database this fact names — growth that is bloat is a different
     /// remedy than growth that is data. Lineage: <b>unmeasured</b> — chosen, not measured; calibrate against the
     /// dogfood PostgreSQL fleet's co-fire rates before the next release.</summary>
@@ -200,14 +208,15 @@ public static partial class PgTargetScorer
     /// <summary>
     /// The trend grade: nothing without a graded subject; otherwise the BEST of the named databases' and the instance
     /// total's two-arm grades (<see cref="GrowthGrade"/>), with <see cref="GrowthGradedSubjectKey"/> stamped so the
-    /// advice can say which it was. Every exit stamps <c>threshold_lineage = 0</c>: every bar in this family is chosen.
+    /// advice can say which it was. Every exit stamps <c>threshold_lineage = 1</c>: every bar in this family is measured (the co-fire boosts
+    /// are severity lifts, not bars).
     /// The fraction arm reads the earliest size from metadata, so an earliest zero passes it (a tenth of nothing) and
     /// the bytes line decides alone — the honest reading of a database created inside the lookback.
     /// </summary>
     private static double ScoreDatabaseGrowth(Fact fact)
     {
-        /* unmeasured: every bar in this family (see the class summary) — the flag is the family's, not one gate's. */
-        fact.Metadata["threshold_lineage"] = 0;
+        /* measured (Aurora, 2026-10-06, #4404): every bar in this family (see the class summary) — the flag is the family's, not one gate's. */
+        fact.Metadata["threshold_lineage"] = 1;
 
         if (fact.Metadata.GetValueOrDefault(GrowthAvailableKey) < 1)
             return 0.0;
@@ -252,13 +261,13 @@ public static partial class PgTargetScorer
     /// </summary>
     public static double GrowthGrade(double growthBytes, double? pct)
     {
-        /* unmeasured: GrowthConcerningBytes / GrowthConcerningFraction — chosen, not measured (see the constants). */
+        /* measured (Aurora, 2026-10-06, #4404): GrowthConcerningBytes / GrowthConcerningFraction (see the constants). */
         if (growthBytes < GrowthConcerningBytes)
             return 0.0;
         if (pct is { } fraction && fraction < 100.0 * GrowthConcerningFraction)
             return 0.0;
 
-        /* unmeasured: the ramps' ends are the chosen concerning and critical lines above. */
+        /* measured (Aurora, 2026-10-06, #4404): the ramps' ends are the concerning and critical lines above. */
         var bytesGrade = FactScorer.ApplyThresholdFormula(growthBytes, GrowthConcerningBytes, GrowthCriticalBytes);
         var pctGrade = pct is { } f
             ? FactScorer.ApplyThresholdFormula(f, 100.0 * GrowthConcerningFraction, 100.0 * GrowthCriticalFraction)

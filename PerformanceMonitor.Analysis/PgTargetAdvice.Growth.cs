@@ -29,7 +29,7 @@ namespace PerformanceMonitor.Analysis;
 /// one-off load inside the lookback reads as the same bytes as a steady drift, and the anomaly beside this card is
 /// what tells the two apart.</para>
 ///
-/// <para>Every bar the card quotes is chosen, not measured (the table is a day old) and the investigation says so;
+/// <para>Every bar the card quotes is measured (#4404: 14 days of the dogfood fleet, 2026-10-06) and the investigation says so;
 /// the <c>withheld</c> shapes — nothing sized, too few samples — get their own card, because a fact the role could
 /// not measure must never read as "no growth".</para>
 /// </summary>
@@ -51,8 +51,8 @@ public static partial class PgTargetAdvice
             "pg_database_size_stats samples every database's size hourly (the engine's own per-database size figure), and the instance total beside it. " +
             "This finding is a TREND, never a spot size: the latest size against the earliest sample inside a fourteen-day " +
             "lookback ending at the analysis window, graded only when the growth is both at least 1 GB and at least 10 % of " +
-            "where the database started (25 % and 10 GB is the critical line). Both lines are chosen, not measured — the " +
-            "table is new and no fleet distribution exists yet — and the fact carries threshold_lineage = 0 to say so. A " +
+            "where the database started (25 % and 10 GB is the critical line). Both lines are measured against the dogfood fleet " +
+            "(393 databases on 50 Aurora clusters, 14 days, 2026-10-06): growth had median 0 and 95th percentile 1.10 GB, so the lines stand as written (threshold_lineage = 1). A " +
             "database the monitoring role may not size is excluded and counted, never read as zero growth; the instance " +
             "total is NULL whenever one such database exists, because a sum over the databases this role can see is not " +
             "the instance total.",
@@ -130,7 +130,7 @@ public static partial class PgTargetAdvice
             inv.Append($"The instance total could not be trended: {unsized:0} database{(unsized == 1 ? string.Empty : "s")} could not be sized by the monitoring role (no CONNECT privilege and not a member of pg_read_all_stats — on a managed service, typically the vendor's own database), the collector writes the total as NULL on every row in that case, and a sum over the databases this role can see is not the instance total. Their growth is unknown, not zero. ");
         }
 
-        inv.Append($"The line is chosen, not measured — growth of at least {FmtBytes(PgTargetScorer.GrowthConcerningBytes)} AND at least {Pct(100.0 * PgTargetScorer.GrowthConcerningFraction)} of the earliest size; {FmtBytes(PgTargetScorer.GrowthCriticalBytes)} AND {Pct(100.0 * PgTargetScorer.GrowthCriticalFraction)} is the critical line, and the grade is the weaker arm's — the table behind this family is new and no fleet distribution has been read for it (threshold_lineage = 0 on this fact). ");
+        inv.Append($"The line is measured against the dogfood fleet (393 databases on 50 Aurora clusters, 14 days, 2026-10-06) — growth of at least {FmtBytes(PgTargetScorer.GrowthConcerningBytes)} AND at least {Pct(100.0 * PgTargetScorer.GrowthConcerningFraction)} of the earliest size; {FmtBytes(PgTargetScorer.GrowthCriticalBytes)} AND {Pct(100.0 * PgTargetScorer.GrowthCriticalFraction)} is the critical line, and the grade is the weaker arm's — the fleet read confirmed these lines rather than moved them (threshold_lineage = 1 on this fact). ");
         inv.Append(graded
             ? subject == PgTargetScorer.GrowthSubjectInstance
                 ? "The instance total crossed it. "
@@ -194,7 +194,7 @@ public static partial class PgTargetAdvice
                 break;
             default:
                 headline = $"Database growth has sized databases, but none has {PgTargetScorer.GrowthMinimumSamples} hourly samples in the lookback yet";
-                inv.Append($"A trend needs {PgTargetScorer.GrowthMinimumSamples} samples before it is graded (a chosen minimum, not a measured one — threshold_lineage = 0 on this fact). The size collector is hourly, so this is a store younger than three hours of PostgreSQL collection, or a target the collector has only just reached. ");
+                inv.Append($"A trend needs {PgTargetScorer.GrowthMinimumSamples} samples before it is graded (three hourly samples is a floor on store age, not a tuned bar: in the fleet read of 2026-10-06, 391 of 393 databases had the full 14 days of samples — threshold_lineage = 1 on this fact). The size collector is hourly, so this is a store younger than three hours of PostgreSQL collection, or a target the collector has only just reached. ");
                 rem.Append("Nothing to do but wait for the collector: the fact grades itself once three hourly samples exist for a sized database. ");
                 break;
         }

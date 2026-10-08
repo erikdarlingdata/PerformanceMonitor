@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// agent's empty result), against the scorer's own switch arms (a subset — two sources carry context and
 /// are deliberately not scored), and against the two tools' descriptions and refusals.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class FactSourceRegistryTests
 {
     /// <summary>A source literal wherever it is stamped: <c>Source = "waits"</c> on a fact, or the one named

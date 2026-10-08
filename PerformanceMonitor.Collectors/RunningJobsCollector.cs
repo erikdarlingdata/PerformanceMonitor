@@ -108,7 +108,7 @@ WITH
     GROUP BY
         jhr.job_id
 )
-SELECT
+SELECT /* PerformanceMonitorLite */
     rj.job_name,
     rj.job_id,
     rj.job_enabled,

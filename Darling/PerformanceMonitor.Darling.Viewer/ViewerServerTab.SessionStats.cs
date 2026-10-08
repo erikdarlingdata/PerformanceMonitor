@@ -85,6 +85,8 @@ public partial class ViewerServerTab
         SessionStatsTopAppText.Text = topApp;
         SessionStatsTopHostText.Text = topHost;
         SessionStatsDatabasesText.Text = databases;
+        /* #4966: the newest collection in the last bucket (where Top Application and Top Host come from), not the bucket's grid time. */
+        SessionStatsCollectedText.Text = HistoryTime.SnapshotCollected(data?.LatestCollectionTime, "N/A");
     }
 
     /// <summary>Tears down the Session Stats hover helper (mirrors the other tabs' dispose) so its tooltip

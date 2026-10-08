@@ -58,6 +58,7 @@ namespace Darling.Tests;
 /// declaration carrying the C#-side evidence, pinned at set equality against the classifier's own
 /// unreadable set and counted, so the hole cannot quietly grow.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ConsumedTimestampFrameDisciplineTests
 {
     /// <summary>Which clock a stored value is in. Naive UTC is the store's default and the frame every
@@ -854,6 +855,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// </summary>
     private static readonly (string File, string Method, string Renderer)[] RenderWrappers =
     [
+        /* The Overview card's Last Collect text (D4 of the final walk): the stored collection time is naive UTC and
+           FormatLastCollect hands it to the UTC renderer with the display zone, only choosing the format (time alone
+           for today, date and time otherwise), so the frame is the renderer's own and the wrapper adds no conversion. */
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Overview.cs", "FormatLastCollect", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "FormatForDisplay"),
         /* #4766: the Default Trace row's bare renderer. A time read from the stored server wall clock cannot say which
@@ -861,6 +866,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "StoredWallClock", "ForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "FormatForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "SnapshotTime", "FormatForDisplay"),
         ("Lite/Services/LocalDataService.ConfigChanges.cs", "Local", "FormatServerTime"),
         ("Lite/Services/LocalDataService.SystemEvents.cs", "Local", "FormatServerTime"),
     ];
@@ -948,6 +954,12 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             + "phantom staleness lands on the question it exists to answer; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
             "offrow_version_cleaner_end_time", "pvs_stats", 1, "get_pvs_stats; de-skewed at the read by #3206"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+            "creation_time", "query_stats", 1,
+            "get_top_queries_by_cpu detail=full; converted per row through the server's clock at the read (DarlingDataReader.ReadTopQueryDetail)"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+            "cached_time", "procedure_stats", 1,
+            "get_top_procedures_by_cpu detail=full; converted per row through the server's clock at the read (DarlingDataReader.ReadTopProcedureDetail)"),
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
             "blocked_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1, "Lite get_blocking; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
@@ -1024,7 +1036,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        TrendPayloads.CpuUtilization builder. */
     private const int McpPayloadUnmarkedSites = 1;
     private const int DesktopRenderMismatchSites = 0;
-    private const int DeSkewedAtReadSites = 25;
+    private const int DeSkewedAtReadSites = 27;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
 
@@ -1317,7 +1329,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// </summary>
     private static readonly (string File, string Column, int Sites)[] DeclinedAmbiguousMcpSites =
     [
-        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "last_execution_time", 1),
+        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "last_execution_time", 3),
         ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgCpuUtilizationTools.cs", "sample_time", 1),
         ("Lite/Mcp/McpBlockingTools.cs", "event_time", 2),
         ("Lite/Mcp/McpDefaultTraceTools.cs", "event_time", 1),
@@ -1863,6 +1875,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 "DarlingServerClockReader.ToUtc(clock, reader, 10),"),
             ("offrow_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
                 "DarlingServerClockReader.ToUtc(clock, reader, 11),"),
+            ("creation_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
+                "DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);"),
+            ("cached_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
+                "DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);"),
             ("blocked_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
                 "UtcOrNull(r.BlockedLastTranStarted)"),
             ("blocking_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
@@ -1892,6 +1908,22 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.Equal(
             Inventory.Count(i => i.Label == SiteLabel.DeSkewedAtRead),
             evidence.Length);
+
+        /* get_top_queries_by_cpu detail=full emits last_execution_time beside creation_time. The name is frame-ambiguous
+           and DarlingMcpDataTools.cs reads several tables, so the census declines that emission (see
+           DeclinedAmbiguousMcpSites) and its conversion is pinned here instead: both timestamps come out of one reader
+           that converts through the server's clock, and both are written with the "o" format. */
+        var topQueriesReader = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs"));
+        Assert.Contains("Time(0), Time(1),", topQueriesReader, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time = d.LastExecutionTime?.ToString(\"o\")",
+            File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs")), StringComparison.Ordinal);
+
+        /* get_top_procedures_by_cpu detail=full emits last_execution_time beside cached_time, declined for the same reason
+           and pinned the same way: one reader converts both through the server's clock. */
+        var topProceduresReader = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs"));
+        Assert.Contains("ReadTopProcedureDetail(reader, 17, clock)", topProceduresReader, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time = d.LastExecutionTime?.ToString(\"o\")",
+            File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs")), StringComparison.Ordinal);
 
         foreach (var (column, readerFile, conversion) in evidence)
         {

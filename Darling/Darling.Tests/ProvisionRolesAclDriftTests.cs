@@ -54,6 +54,7 @@ namespace Darling.Tests;
 /// identical comparison against a mutated copy of the file and asserts it reports the difference, so a parser
 /// that silently matched nothing (a reformatted GRANT, a renamed file) can never pass as "no drift".</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ProvisionRolesAclDriftTests
 {
     /// <summary>
@@ -228,6 +229,14 @@ public sealed class ProvisionRolesAclDriftTests
         var drifted = script.Replace("GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO viewer;", "", StringComparison.Ordinal);
         Assert.NotEqual(script, drifted);
         Assert.False(ReadRoleTableGrants(drifted).SetEquals(ReadRoleTableGrants(managed)));
+    }
+
+    [Fact]
+    public void ProvisionRolesSql_GrantsMcpReadOnTheCollectorRunTimes()
+    {
+        var script = StripComments(ReadProvisionRolesSql());
+
+        Assert.Contains("GRANT SELECT ON config.config_collector_run_times TO mcp;", script, StringComparison.Ordinal);
     }
 
     [Fact]

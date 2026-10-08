@@ -12,7 +12,9 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Media;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
@@ -329,6 +331,10 @@ public static class ServerCardStatusRules
 public class ServerSummaryItem
 {
     public string DisplayName { get; set; } = "";
+
+    /// <summary>What a screen reader announces for an Overview card item: the server's name, not the type name.</summary>
+    public override string ToString() => DisplayName;
+
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
 
@@ -469,6 +475,28 @@ public class ServerSummaryItem
             LastCollectionTime, registeredAtUtc, RetentionService.OldestRetainedInstant(nowUtc), nowUtc);
 
     /// <summary>
+    /// The clock of the server this card is for, stamped by the overview refresh: the server's own collected clock,
+    /// else its open tab's, else the machine's (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>),
+    /// the chain Alert History and Job History use. <see cref="LastCollectionDisplay"/> converts on it in Server
+    /// mode, so the card reads the same wall clock as that server's alert and job rows. Null on a hand-built item,
+    /// which then takes the active server's clock.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary>
+    /// The Last Collect time as the card words it: <paramref name="lastCollectionUtc"/> (naive UTC) in the selected
+    /// "Show timestamps in" mode on <paramref name="clock"/> (the same zone choice as the Alert History and Job History
+    /// rows), as "HH:mm:ss" when that wall time falls on today's date in the same zone, and with its date
+    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from nine days ago does not read as one from this morning.
+    /// </summary>
+    internal static string FormatLastCollect(DateTime lastCollectionUtc, TimeDisplayMode mode, ServerClock? clock, DateTime nowUtc)
+    {
+        var zone = ServerTimeHelper.DisplayZoneFor(mode, clock ?? ServerTimeHelper.ActiveServerClock);
+        var isToday = DisplayZone.ToDisplay(lastCollectionUtc, zone).Date == DisplayZone.ToDisplay(nowUtc, zone).Date;
+        return ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+    }
+
+    /// <summary>
     /// The Last Collect row. Names its band in words when the collection is not current, because a colour
     /// alone is what this row already had against it: it was a bare "HH:mm:ss" in the plain foreground
     /// brush, so a timestamp from four hours ago looked exactly like one from four seconds ago and nothing
@@ -483,7 +511,7 @@ public class ServerSummaryItem
             if (!LastCollectionTime.HasValue)
                 return CollectionFreshness == ServerFreshness.Offline ? "None retained (stopped)" : "Never";
 
-            var stamp = ServerTimeHelper.FormatServerTime(LastCollectionTime, "HH:mm:ss");
+            var stamp = FormatLastCollect(LastCollectionTime.Value, ServerTimeHelper.CurrentDisplayMode, Clock, DateTime.UtcNow);
             return CollectionFreshness switch
             {
                 ServerFreshness.Stale => $"{stamp} (stale)",

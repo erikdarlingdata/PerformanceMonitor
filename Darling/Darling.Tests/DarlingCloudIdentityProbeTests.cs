@@ -512,6 +512,7 @@ public sealed class DarlingCloudIdentityProbeTests
 /// lane orders' "real gates" list). Proved once, by hand, that each assertion fails when the source it pins is
 /// broken (reverted after).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingCloudIdentityProbeSourcePinTests
 {
     private const string ProbeClassName = "DarlingCloudIdentityProbe";
@@ -553,11 +554,13 @@ public sealed class DarlingCloudIdentityProbeSourcePinTests
     }
 
     [Fact]
-    public void GetStoreHostCallSite_OnlyInTheMcpToolAndTheWebDispatch()
+    public void GetStoreHostCallSite_OnlyInTheMcpToolTheWebDispatchAndTheDiagnosticsBundle()
     {
+        /* The diagnostics bundle (#5097) reads the store host the way the MCP tool serves it, once, from a verb an
+           operator runs by hand, as --check-settings does through GatherAsync. */
         var files = FilesContainingAcrossServiceProject("GetStoreHost(");
 
-        Assert.Equal(new[] { "DarlingWebEndpoints.cs", "Mcp/DarlingMcpStoreHostTools.cs" }, files);
+        Assert.Equal(new[] { "DarlingWebEndpoints.cs", "DiagnosticsBundleRunner.cs", "Mcp/DarlingMcpStoreHostTools.cs" }, files);
     }
 
     /// <summary>Every <c>.cs</c> file under <c>Darling/PerformanceMonitor.Darling.Service/</c> (skipping

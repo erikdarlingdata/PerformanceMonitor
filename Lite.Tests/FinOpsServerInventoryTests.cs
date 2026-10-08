@@ -34,6 +34,7 @@ namespace PerformanceMonitorLite.Tests;
 /// other tests that do the same share.</para>
 /// </summary>
 [Collection("app-logger-statics")]
+[Trait("Stage", "Guard")]
 public sealed class FinOpsServerInventoryTests : IDisposable
 {
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteFinOpsInv_" + Guid.NewGuid().ToString("N")[..8]);
@@ -156,7 +157,7 @@ public sealed class FinOpsServerInventoryTests : IDisposable
     [Fact]
     public async Task ACollectedServerThatIsNoLongerListed_NeverAppearsInTheInventory()
     {
-        var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "inventory.duckdb"));
+        using var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "inventory.duckdb"));
         await initializer.InitializeAsync();
 
         var listed = Server("inv-still-listed");

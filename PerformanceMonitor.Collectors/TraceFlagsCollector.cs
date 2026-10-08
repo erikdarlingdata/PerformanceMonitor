@@ -51,7 +51,7 @@ INSERT
 )
 EXECUTE(N'DBCC TRACESTATUS(-1) WITH NO_INFOMSGS;');
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     tf.trace_flag,
     tf.status,
     tf.is_global,

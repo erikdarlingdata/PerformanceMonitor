@@ -67,6 +67,20 @@ public sealed partial class ViewerDataService
     /// <c>SUM(deadlocks)</c>: the column is a lifetime counter repeated in every sample. $1 window start,
     /// $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all naive UTC).
     ///
+    /// <para>The PostgreSQL arm orders only the pairs that moved (#5526): the service's
+    /// <c>DarlingFleetReader.FleetPgDeadlockSql</c> carries the reasoning and the measurement, and this is the
+    /// same shape keeping only the total. On a store with 50 PostgreSQL targets one <c>LAG</c> window over every
+    /// server's rows took 6.7 to 6.8 s for 7 days and this form 0.64 to 0.80 s; the one caller here asks for the
+    /// last hour. A <c>(server_id, database_name)</c> pair whose
+    /// counter never takes two different values inside the window adds nothing to the sum of positive
+    /// differences: every difference between two present samples is 0, and one touching a NULL is NULL. So one
+    /// unordered aggregate keeps only the pairs with <c>min(deadlocks) &lt;&gt; max(deadlocks)</c> (a NULL
+    /// counter does not change that: <c>min</c> and <c>max</c> skip NULLs, and a column that is NULL throughout
+    /// has neither) and the ordered <c>LAG</c> runs one server at a time over those pairs only. Unlike the
+    /// service's read, this one needs no "a counter in every row" half of the rule, because it returns only
+    /// the total, not the number of differences taken. The totals are unchanged: the same <c>LAG</c> per
+    /// database series, the same first-row NULL, the same clamp at zero.</para>
+    ///
     /// <para>$3 bounds the three event-table scans on the partition column (#3895), the bound the service's
     /// fleet reader carries on the same counts: bounded on <c>event_time</c> alone they open every retained
     /// chunk to count the last hour — 69.8 ms on DARLING01, 1.1 ms with it. The PostgreSQL arm is already
@@ -111,14 +125,39 @@ SELECT
     )
     +
     (
-        SELECT COALESCE(SUM(GREATEST(sampled.raw_delta, 0)), 0)
+        SELECT COALESCE(SUM(per_server.cnt), 0)
         FROM
         (
-            SELECT deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time) AS raw_delta
-            FROM pg_database_stats
-            WHERE collection_time >= $1
-            AND   collection_time <= $2
-        ) AS sampled
+            SELECT
+                server_id,
+                array_agg(database_name) FILTER (WHERE database_name IS NOT NULL) AS ordered_names,
+                coalesce(bool_or(database_name IS NULL), false) AS ordered_null_name
+            FROM
+            (
+                SELECT
+                    server_id,
+                    database_name
+                FROM pg_database_stats
+                WHERE collection_time >= $1
+                AND   collection_time <= $2
+                GROUP BY server_id, database_name
+                HAVING min(deadlocks) <> max(deadlocks)
+            ) AS moved
+            GROUP BY server_id
+        ) AS s
+        CROSS JOIN LATERAL
+        (
+            SELECT COALESCE(SUM(GREATEST(sampled.raw_delta, 0)), 0) AS cnt
+            FROM
+            (
+                SELECT deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time) AS raw_delta
+                FROM pg_database_stats
+                WHERE server_id = s.server_id
+                AND   collection_time >= $1
+                AND   collection_time <= $2
+                AND   (database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL))
+            ) AS sampled
+        ) AS per_server
     ) AS total_deadlocks";
 
     /// <summary>
@@ -188,6 +227,11 @@ public sealed class FleetRankedServer
 
     public int ServerId { get; init; }
     public string DisplayName { get; init; } = "";
+
+    /// <summary>What a screen reader announces for a Needs Attention row: UI Automation names a list row by its item's text, and the
+    /// default text is the type name ("PerformanceMonitor.Darling.Viewer.FleetRankedServer").</summary>
+    public override string ToString() => DisplayName;
+
     public FleetHealthBand Band { get; init; }
 
     /// <summary>The composite worst-first ordering score (band rank + severity magnitude + incident tiebreak).</summary>
@@ -325,10 +369,19 @@ public sealed class FleetRollup
         ? "All 1 server healthy"
         : $"All {TotalServers} servers healthy";
 
-    /// <summary>"Monitoring N servers" subtitle for the fleet header.</summary>
-    public string MonitoringText => TotalServers == 1
-        ? "Monitoring 1 server"
-        : $"Monitoring {TotalServers} servers";
+    /// <summary>The registered fleet size when this roll-up counts only the servers the Overview search leaves
+    /// (<see cref="OverviewCardView.BuildRollup"/>); null when it counts the whole fleet.</summary>
+    public int? FilteredOfTotal { get; internal set; }
+
+    /// <summary>"Monitoring N servers" subtitle for the fleet header; "Monitoring N of M servers" while the
+    /// Overview search narrows it to N of the M registered.</summary>
+    public string MonitoringText => FilteredOfTotal.HasValue
+        ? FilteredOfTotal.Value == 1
+            ? $"Monitoring {TotalServers} of 1 server"
+            : $"Monitoring {TotalServers} of {FilteredOfTotal.Value} servers"
+        : TotalServers == 1
+            ? "Monitoring 1 server"
+            : $"Monitoring {TotalServers} servers";
 
     /// <summary>"N server(s)" for the collection-failures total line.</summary>
     public string CollectionFailuresText => ServersWithCollectionFailures == 1

@@ -125,7 +125,7 @@ public sealed class CpuUtilizationCollector : CollectorDefinitionBase<CpuUtiliza
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP (60)
+SELECT /* PerformanceMonitorLite */ TOP (60)
     sample_time = drs.end_time,
     sqlserver_cpu_utilization = CONVERT(integer, drs.avg_cpu_percent),
     other_process_cpu_utilization = 0,
@@ -138,7 +138,7 @@ OPTION(RECOMPILE);";
     private const string AzureSqlDbWatermarkedQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     sample_time = drs.end_time,
     sqlserver_cpu_utilization = CONVERT(integer, drs.avg_cpu_percent),
     other_process_cpu_utilization = 0,
@@ -157,7 +157,7 @@ DECLARE
     @start_time datetime2(7),
     @is_linux bit = 0;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     @ms_ticks = dosi.ms_ticks,
     @start_time = dosi.sqlserver_start_time
 FROM sys.dm_os_sys_info AS dosi;
@@ -173,10 +173,10 @@ FROM sys.dm_os_sys_info AS dosi;
    sp_executesql so SQL 2016 never binds it (@is_linux = 0). */
 IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
     EXEC sys.sp_executesql
-        N'SELECT @linux = CASE WHEN hi.host_platform = N''Linux'' THEN 1 ELSE 0 END FROM sys.dm_os_host_info AS hi;',
+        N'SELECT /* PerformanceMonitorLite */ @linux = CASE WHEN hi.host_platform = N''Linux'' THEN 1 ELSE 0 END FROM sys.dm_os_host_info AS hi;',
         N'@linux bit OUTPUT', @linux = @is_linux OUTPUT;
 
-SELECT TOP (60)
+SELECT /* PerformanceMonitorLite */ TOP (60)
     /* MILLISECOND, not SECOND-truncated: dividing by 1000 before DATEADD(SECOND, ...) discards the
        sub-second remainder of the elapsed-ticks offset, and that remainder is different on every poll
        (SYSDATETIME() keeps moving while a given ring-buffer entry's own timestamp does not). Since this
@@ -244,7 +244,7 @@ OPTION(RECOMPILE);
    idiom for a per-run fact the rows cannot carry). @start_time is the sqlserver_start_time this batch
    read above; a login without VIEW SERVER STATE fails this batch at its first DMV and never reaches
    this set, so an unknown start time here means the column was NULL, not that the read was refused. */
-SELECT
+SELECT /* PerformanceMonitorLite */
     server_start_time = @start_time,
     server_name = @@SERVERNAME;";
 

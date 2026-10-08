@@ -55,7 +55,7 @@ public sealed class ComposeAnnotationServerClockTests
     public void ClockRead_IsScopedByThePanelsServers_AndReadsTheFleetWhenItNamesNone()
     {
         var scoped = ComposeCompiler.CompileServerClockRead(Context(new[] { "SERVER-A", "SERVER-B" }));
-        Assert.Contains("AND   server_name = ANY($1)", scoped.Sql, StringComparison.Ordinal);
+        Assert.Contains("AND   server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($1)))", scoped.Sql, StringComparison.Ordinal);
         Assert.Equal(new[] { "SERVER-A", "SERVER-B" }, Assert.IsType<string[]>(Assert.Single(scoped.Parameters).Value));
         Assert.DoesNotContain("SERVER-A", scoped.Sql, StringComparison.Ordinal);
 
@@ -87,7 +87,7 @@ public sealed class ComposeAnnotationServerClockTests
         Assert.Contains($"SELECT {deSkewed} AS ts", scoped.Sql, StringComparison.Ordinal);
         Assert.Contains($"WHERE {deSkewed} >= $1", scoped.Sql, StringComparison.Ordinal);
         Assert.Contains($"AND {deSkewed} <= $2", scoped.Sql, StringComparison.Ordinal);
-        Assert.Contains("f.server_name = ANY($3)", scoped.Sql, StringComparison.Ordinal);
+        Assert.Contains("f.server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($3)))", scoped.Sql, StringComparison.Ordinal);
         Assert.Equal(7, scoped.Parameters.Count);
 
         /* The newest-offset subquery is gone from the annotation query: it is what drew a marker from before

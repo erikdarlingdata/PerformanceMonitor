@@ -27,6 +27,7 @@ import {
   loadingStrip,
   errorStrip,
   emptyStrip,
+  noticeStrip,
   localTime,
   relTime,
   fmtInt,
@@ -81,7 +82,15 @@ export async function renderAg(main) {
     return;
   }
 
-  mount(main, [pageHead(d), rollup(d), ...groups.map(agCard)]);
+  mount(main, [pageHead(d), truncationNote(d), rollup(d), ...groups.map(agCard)]);
+}
+
+/* #5042: the tiles count every view in scope, so when a response says it was cut (a limit or a byte cap) the page
+   must say so too, or the tiles and the cards disagree silently. /api/ag applies no byte cap today; this guards a
+   future limit. Returns null (mount skips it) when nothing was cut. */
+function truncationNote(d) {
+  if (!d || d.groups_truncated !== true) return null;
+  return noticeStrip(d.groups_truncated_note || "Some availability group views are not shown.");
 }
 
 function pageHead(d) {
@@ -152,7 +161,11 @@ function agCard(g) {
 /* Whose view this is, and how fresh. The two collector sweeps land independently, so the database grain gets its
    own "as of" whenever it differs from the replica grain. */
 function viewSubtitle(g) {
-  let text = "As reported by " + g.server_name + " · collected " + relTime(g.collection_time);
+  /* #5489: a group past the fleet's offline mark is a memory of the last snapshot, not a current status — say
+     so ahead of the "as reported by" line, which keeps the time the snapshot was taken. */
+  let text =
+    (g.is_stale ? "Stale: no current data. " : "") +
+    "As reported by " + g.server_name + " · " + (g.is_stale ? "last collected " : "collected ") + relTime(g.collection_time);
   if (g.database_collection_time && g.database_collection_time !== g.collection_time) {
     text += " · databases " + relTime(g.database_collection_time);
   }

@@ -66,7 +66,7 @@ internal static class DarlingHostBinding
         /// <summary>Exposed + managed but no bearer token — fail-closed to loopback.</summary>
         TokenMissing,
 
-        /// <summary>Exposed + managed + token but allowFrom is missing/not a valid CIDR or its family does not match the listen — fail-closed to loopback.</summary>
+        /// <summary>Exposed + managed + token but allowFrom is missing, is not a valid CIDR list (one CIDR, or CIDRs separated by commas, #5288), or an entry's family does not match the listen — fail-closed to loopback.</summary>
         AllowFromInvalid,
     }
 
@@ -92,7 +92,8 @@ internal static class DarlingHostBinding
     /// (non-loopback) address (via <see cref="DarlingNetwork.IsExposedListenAddress"/> — so <c>127.0.0.1</c>
     /// stays loopback, never a network bind/collision) that ALSO parses as an IP, AND <paramref name="managed"/>
     /// is true, AND a bearer token is present (<paramref name="tokenPresent"/> — presence only; the host
-    /// decrypts later), AND <paramref name="allowFrom"/> is a valid CIDR of the SAME address family as the
+    /// decrypts later), AND <paramref name="allowFrom"/> is a valid CIDR list (#5288: one CIDR, or CIDRs separated
+    /// by commas — see <see cref="CidrAllowList"/>) whose EVERY entry is of the SAME address family as the
     /// listen. Otherwise loopback-only with the specific reason. Never throws; never consults a logger.
     /// <paramref name="networkConfigured"/> is "the surface's network block has any field set" — used only for
     /// the BYO "network.* is ignored" notice (the network path never runs in BYO).
@@ -142,15 +143,19 @@ internal static class DarlingHostBinding
             return new BindDecision(BindMode.LoopbackOnly, BindReason.TokenMissing);
         }
 
-        /* allowFrom must be a valid CIDR (host bits zeroed) whose address family matches the listen: a
-           mismatched family would bind one family while the in-app CIDR check rejects the other, 403-ing every
-           network client — fail-closed but silently non-functional, so degrade with a clear reason instead. */
-        if (string.IsNullOrWhiteSpace(allowFrom) || !IPNetwork.TryParse(allowFrom.Trim(), out var cidr))
-        {
-            return new BindDecision(BindMode.LoopbackOnly, BindReason.AllowFromInvalid);
-        }
+        /* allowFrom must be a valid CIDR LIST (#5288: one CIDR, or CIDRs separated by commas; CidrAllowList
+           holds the exact rules — host bits are MASKED rather than refused, an empty entry or an IPv4-mapped
+           IPv6 entry is refused) and EVERY entry's address family must match the listen: a mismatched entry
+           can never admit a client on a listener bound to the other family, which is dead config, and the old
+           single-CIDR form of this rule existed to refuse dead config loudly rather than 403 every network
+           client in silence. One wrong entry degrades the whole listener (Critical, loopback-only) instead of
+           being dropped, because a quietly narrower list is the wrong way to learn about a typo.
 
-        if (cidr.BaseAddress.AddressFamily != listenIp.AddressFamily)
+           The rule stays strict on a "::" listen. Kestrel binds IPv6Any dual-stack, so IPv4 clients DO arrive
+           there, as IPv4-mapped IPv6 addresses (IsRemoteAddressAllowed unwraps them before it asks the list),
+           yet an IPv4 entry is still refused: "::" takes IPv6 entries only. */
+        if (!CidrAllowList.TryParse(allowFrom, out var allowList)
+            || !allowList.AllInFamily(listenIp.AddressFamily))
         {
             return new BindDecision(BindMode.LoopbackOnly, BindReason.AllowFromInvalid);
         }
@@ -191,9 +196,12 @@ internal static class DarlingHostBinding
     /// PURE in-app CIDR check: is <paramref name="remoteIp"/> allowed? Loopback (<c>127.0.0.0/8</c> or
     /// <c>::1</c>, incl. an IPv4-mapped-IPv6 form) is ALWAYS allowed — it is not in
     /// <paramref name="allowedCidr"/>, so otherwise the loopback bind's local clients would be rejected.
-    /// Everything else must fall inside the CIDR. A null remote (unverifiable origin) fails closed.
+    /// Everything else must fall inside ANY entry of the list (#5288). An IPv4-mapped IPv6 remote
+    /// (<c>::ffff:a.b.c.d</c>, how an IPv4 client reaches a dual-stack <c>::</c> listener) is unwrapped to IPv4
+    /// first, so it matches an IPv4 entry. A null remote (unverifiable origin) fails closed, and so does an
+    /// empty (<c>default</c>) list.
     /// </summary>
-    internal static bool IsRemoteAddressAllowed(IPAddress? remoteIp, IPNetwork allowedCidr)
+    internal static bool IsRemoteAddressAllowed(IPAddress? remoteIp, CidrAllowList allowedCidr)
     {
         if (remoteIp is null)
         {
@@ -211,13 +219,18 @@ internal static class DarlingHostBinding
     /// this forwarder keeps it reachable where the rest of the two hosts' bind/auth helpers live, so neither
     /// host reaches past this class. Pass <paramref name="networkListenIp"/> = null in loopback-only mode.
     ///
-    /// <para><paramref name="extraAllowedHost"/> (#4220) admits ONE more exact Host value beside
-    /// <see cref="HostHeaderGuard"/>'s own list — the web host passes <c>web.publicBaseUrl</c>'s host, since
-    /// that value is operator-configured (darling.json on this box), not attacker-reachable, and is exactly
-    /// the standard <c>AllowedHosts</c> pattern: a DNS rebind needs a hostname the ATTACKER chooses, and this
-    /// admits only the one the OPERATOR chose. Defaults to null so every existing 2-arg caller (the MCP hosts)
-    /// is byte-for-byte unchanged — <see cref="HostHeaderGuard"/>'s own default stays exactly as it was.
-    /// Compared case-insensitively, with no port (the caller already split that off).</para>
+    /// <para><paramref name="extraAllowedHost"/> admits ONE more exact Host value beside
+    /// <see cref="HostHeaderGuard"/>'s own list. BOTH Darling hosts pass one: the web host passes
+    /// <c>web.publicBaseUrl</c>'s host (#4220) and the MCP host passes <c>mcp.network.hostName</c> (#5288, in
+    /// network mode only; null otherwise). Each value is operator-configured (darling.json on this box), not
+    /// attacker-reachable, and is exactly the standard <c>AllowedHosts</c> pattern: a DNS rebind needs a
+    /// hostname the ATTACKER chooses, and this admits only the one the OPERATOR chose. Defaults to null, so a
+    /// caller with no name is byte-for-byte unchanged and <see cref="HostHeaderGuard"/>'s own default stays
+    /// exactly as it was. Compared case-insensitively, with no port (the caller already split that off), and
+    /// compared AS GIVEN. The <paramref name="host"/> a host hands in is <c>HttpRequest.Host.Host</c>, which
+    /// ASP.NET Core has already DECODED (a punycode <c>xn--bcher-kva.example</c> arrives as
+    /// <c>b&#252;cher.example</c>), so each host converts its configured name once, with
+    /// <c>HostString.FromUriComponent(...).Host</c>, before it passes it here (#5288).</para>
     /// </summary>
     internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp, string? extraAllowedHost = null)
         => HostHeaderGuard.IsAllowedHost(host, networkListenIp)

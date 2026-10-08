@@ -30,6 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("CollectionResetGate")]
 public sealed class ArchiveInterruptedRunTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly string _archiveDir;
@@ -45,6 +47,11 @@ public sealed class ArchiveInterruptedRunTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -92,6 +99,7 @@ public sealed class ArchiveInterruptedRunTests : IDisposable
     private async Task<DuckDbInitializer> SeedAsync()
     {
         var initializer = new DuckDbInitializer(_dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeAsync();
 
         await ExecAsync(@"
@@ -221,7 +229,7 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
     [Fact]
     public async Task StaleTempFiles_AreRemovedAtTheStartOfTheNextRun()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         /* What a process killed inside a COPY, a compaction merge or a journal write leaves behind. */
@@ -239,7 +247,7 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
     [Fact]
     public async Task ATempNamedByASwapJournalThatIsStillLive_IsKept_WhileOtherTempsGo()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         MakeParquet("202609_t.parquet", 0, 1_000);              /* merged output, in place */

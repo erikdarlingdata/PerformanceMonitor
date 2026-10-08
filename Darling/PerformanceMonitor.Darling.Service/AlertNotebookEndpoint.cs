@@ -245,7 +245,8 @@ internal static partial class AlertNotebookEndpoint
                 body["scope_server"] = scopeServer;
             }
 
-            return Results.Text(body.ToJsonString(), "application/json");
+            /* #4348: the notebook's own body carries the alert row's text, so it is swept whole. */
+            return DarlingWebStatementSweep.JsonText(body, "/api/alert-notebook", logger, 0);
         });
     }
 
@@ -1318,9 +1319,8 @@ internal static partial class AlertNotebookEndpoint
         return node;
     }
 
-    private static string? Query(HttpContext context, string key)
-    {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
-    }
+    /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
+    /// calls rather than restates (#5245: a repeated key is its first value, not the values joined by a comma).</summary>
+    internal static string? Query(HttpContext context, string key) =>
+        DarlingWebEndpoints.First(context, key);
 }

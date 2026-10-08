@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// expects and the labeler turns them into the sentence.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class RecurrenceLabelStoreReadTests
 {
     private const string ServerName = "recurrence-label-e2e";

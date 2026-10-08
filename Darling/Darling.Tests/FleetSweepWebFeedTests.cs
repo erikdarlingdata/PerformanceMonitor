@@ -538,10 +538,11 @@ public sealed class FleetSweepWebFeedTests
     [Fact]
     public void TheWorklistRender_PrefersTheName_AndNeverSaysServerZeroForTheFleet()
     {
-        Assert.Contains(
-            "w.fleet_scope ? \"Fleet\" : (w.server || \"server \" + w.server_id)",
-            FrontendSource("js/pages/sweeps.js"),
-            StringComparison.Ordinal);
+        // The labels now live in two helpers the Server column shows, sorts and exports (one text for all three).
+        var src = FrontendSource("js/pages/sweeps.js");
+        Assert.Contains("w.fleet_scope ? \"Fleet\" : serverText(w)", src, StringComparison.Ordinal);
+        Assert.Contains("w.server || \"server \" + w.server_id", src, StringComparison.Ordinal);
+        Assert.Contains("display: watchServerText, sortValue: watchServerText, copyValue: watchServerText", src, StringComparison.Ordinal);
     }
 
     /// <summary>The cadence knob is DISPLAY-ONLY on this page: it reads the same
@@ -627,7 +628,7 @@ public sealed class FleetSweepWebFeedTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
         Assert.Contains("builder.Logging.ClearProviders();", host, StringComparison.Ordinal);
         Assert.Contains(
-            "DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState);",
+            "DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads);",
             host, StringComparison.Ordinal);
     }
 

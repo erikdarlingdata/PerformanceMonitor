@@ -31,7 +31,8 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class PgSettingRedactionLivePostgresTests
 {
-    private const string RoleName = "s1a_4348_redact_probe";
+    /* #4981: a role belongs to the whole cluster, so the name is unique to the run (8 lowercase hex characters). */
+    private static readonly string RoleName = "s1a_4348_redact_" + Guid.NewGuid().ToString("N")[..8];
     private const string RolePassword = "S1aRedactProbe4348Only";
     private const string SecretConninfo = "host=127.0.0.1 port=1 user=replicator password=hunter2 application_name=s1a";
 

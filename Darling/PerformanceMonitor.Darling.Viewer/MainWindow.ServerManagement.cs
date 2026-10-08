@@ -80,7 +80,10 @@ public partial class MainWindow
         var selected = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
         _fleet.SetAll(SortWithFavorites(_fleet.All.ToList()));
         ServerList.ItemsSource = _fleet.Visible;
-        ServerList.SelectedItem = _fleet.ResolveSelection(selected);
+
+        /* A re-sort is not the user choosing a server, so the restore leaves the Recommendations and FinOps
+           pickers where they are. */
+        RestoreSidebarSelection(_fleet.ResolveSelection(selected));
     }
 
     /// <summary>Single-flight guard for <see cref="RefreshServerStatusAsync"/>. Declared beside the one method
@@ -300,10 +303,11 @@ public partial class MainWindow
     /// <c>UpdateCollectorHealth</c>: a per-server tab shows THAT server's collectors; an aggregate tab
     /// (Overview / Alert History / FinOps / Recommendations) shows the FLEET-CUMULATIVE total across all
     /// enabled servers (Lite's <c>GetHealthSummary(null)</c> on a non-server view). "Collectors: N OK" when
-    /// all healthy, or "Collectors: N erroring" (with the failing names) when any collector is FAILING. Reuses
-    /// the Collection Health tab's <see cref="ViewerDataService.GetCollectionHealthAsync"/> /
-    /// <see cref="ViewerDataService.GetFleetCollectionHealthAsync"/> aggregates and the
-    /// <see cref="CollectorHealthRow.HealthStatus"/> banding, so the status bar and that tab always agree.
+    /// all healthy, or "Collectors: N erroring" (with the failing names) when any collector is FAILING. Reads
+    /// <see cref="ViewerDataService.GetFleetCollectionHealthByServerAsync"/> (#4226), whose rows carry the interval
+    /// each collector is scheduled at on its server (#4999), and the
+    /// <see cref="CollectorHealthRow.HealthStatus"/> banding the Collection Health tab's
+    /// <see cref="ViewerDataService.GetCollectionHealthAsync"/> uses, so the status bar and that tab always agree.
     /// FAILING is the only "erroring" band — NO_PERMISSIONS (e.g. an RDS login lacking msdb rights) and
     /// SKIPPED-as-healthy (e.g. running_jobs on Azure SQL DB) surface in the Collection Health tab, not here,
     /// exactly like Lite. The server COUNT is a separate field (ServerCountText); this one is collectors,
@@ -346,12 +350,12 @@ public partial class MainWindow
             /* #4226: the same fleet-wide rollup-backed, memoized read the Overview cards take their counts
                from — a per-server tab filters it to that server's rows; an aggregate tab concatenates every
                server's rows for the cumulative total, replacing what used to be a second raw fleet scan
-               (FleetCollectionHealthSql) or a raw per-server scan (GetCollectionHealthAsync) every tick.
+               (the fleet-cumulative statement #4999 removed) or a raw per-server scan (GetCollectionHealthAsync) every tick.
                FleetCollectionHealthByServerSql itself carries no config_monitored_servers.is_enabled scope
                (a #4226 regression, fixed below it): a per-server tab must see that EXACT server's rows
                whether or not it is currently enabled or even registered yet, the same as the raw scans it
                replaced. Only the CUMULATIVE branch (no tab scope) still wants "enabled fleet only" — the
-               scope FleetCollectionHealthSql had — so it is applied here, against the registry already in
+               scope that removed statement had — so it is applied here, against the registry already in
                memory, instead of inside the shared SQL. */
             var byServer = await _dataService.GetFleetCollectionHealthByServerAsync();
             if (serverId.HasValue)

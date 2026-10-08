@@ -175,6 +175,12 @@ public class ServerConnection : INotifyPropertyChanged
     public string DisplayNameWithIntent => ReadOnlyIntent ? $"{DisplayName} (Read-Only)" : DisplayName;
 
     /// <summary>
+    /// What a screen reader announces for a server in a list or drop-down box (UI Automation names an item by its text):
+    /// the name the box shows, not the type name "ServerConnection".
+    /// </summary>
+    public override string ToString() => DisplayNameWithIntent;
+
+    /// <summary>
     /// Display-only property for showing authentication type in UI.
     /// </summary>
     [JsonIgnore]

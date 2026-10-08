@@ -30,8 +30,7 @@ public sealed class ViewerQueryTrendBucketWidthSqlTests
     public void QueryDurationTrendSql_CarriesABucketWidth()
     {
         /* server/start/end/filter = $1-$4, so the width is $5 — proven once by hand against the pre-#4234
-           text: DurationTrendRouting.BuildRawTrendSql's per-collection output (what this field built before)
-           has no date_bin anywhere. */
+           text, the per-collection output this field built before, which had no date_bin anywhere. */
         Assert.Contains("date_bin(CAST($5 AS integer) * INTERVAL '1 minute'", ViewerDataService.QueryDurationTrendSql, StringComparison.Ordinal);
         Assert.Contains(TrendBucketSql.OriginSql, ViewerDataService.QueryDurationTrendSql, StringComparison.Ordinal);
     }

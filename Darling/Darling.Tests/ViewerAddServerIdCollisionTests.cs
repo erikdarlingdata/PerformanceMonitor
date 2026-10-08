@@ -257,10 +257,17 @@ public sealed class ViewerAddServerIdCollisionTests
         Assert.True(start >= 0 && end > start, "the Add method and the classifier must both be there, in that order");
 
         var body = source[start..end];
-        Assert.Contains("InsertMonitoredServerIfAbsentAsync(row, cancellationToken)", body, StringComparison.Ordinal);
-        Assert.Contains("CreateCommand(MonitoredServerByIdNoSecretSql)", body, StringComparison.Ordinal);
+        /* #5240: the insert-if-absent and the holder read now run on the transaction that holds the identity lock,
+           so they are built on that connection (new NpgsqlCommand(sql, connection, transaction)) instead of through
+           the data source; the statements are the same ones, and the lock is taken before the insert. */
+        Assert.Contains("new NpgsqlCommand(MonitoredServerInsertIfAbsentSql, connection, transaction)", body, StringComparison.Ordinal);
+        Assert.Contains("new NpgsqlCommand(MonitoredServerByIdNoSecretSql, connection, transaction)", body, StringComparison.Ordinal);
         Assert.Contains("ClassifyAddAgainstOccupant(row, occupant)", body, StringComparison.Ordinal);
         Assert.DoesNotContain("Upsert", body, StringComparison.Ordinal);
+        Assert.True(
+            body.IndexOf("TakeIdentityLockAndFindClaimantAsync(", StringComparison.Ordinal) is var lockAt and >= 0
+            && lockAt < body.IndexOf("MonitoredServerInsertIfAbsentSql", StringComparison.Ordinal),
+            "the add must take the identity lock and re-read the addresses before it inserts");
     }
 
     private static int CountOf(string source, string needle)

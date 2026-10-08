@@ -129,7 +129,7 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 /* Size + row counts (one scan of dm_db_partition_stats) */
-SELECT
+SELECT /* PerformanceMonitorLite */
     dps.object_id,
     dps.index_id,
     partition_count = COUNT_BIG(*),
@@ -147,7 +147,7 @@ GROUP BY
 OPTION(RECOMPILE);
 
 /* Usage counters (one scan of dm_db_index_usage_stats for this database) */
-SELECT
+SELECT /* PerformanceMonitorLite */
     us.object_id,
     us.index_id,
     us.user_seeks,
@@ -164,7 +164,7 @@ WHERE us.database_id = DB_ID()
 OPTION(RECOMPILE);
 
 /* Locking/latch counters (one scan of dm_db_index_operational_stats - the heavy DMV) */
-SELECT
+SELECT /* PerformanceMonitorLite */
     ios.object_id,
     ios.index_id,
     leaf_insert_count = SUM(ios.leaf_insert_count),
@@ -198,7 +198,7 @@ OPTION(RECOMPILE);
    catalog once per index - so a wide schema paid per index (a 54K-index database spent ~28s
    in this body). Staging drops that to one scan apiece; the emitted strings and flags are
    byte-identical. */
-SELECT
+SELECT /* PerformanceMonitorLite */
     ic.object_id,
     ic.index_id,
     ic.column_id,
@@ -221,7 +221,7 @@ CREATE CLUSTERED INDEX cx_index_columns
    set), built once here by correlating to the staged #index_columns instead of the live
    catalog. key_ordinal > 0 drops the partitioning column that rides at key_ordinal = 0 on a
    partitioned index (sp_IndexCleanup fix ae32a4c) so it cannot land as a phantom leading key. */
-SELECT
+SELECT /* PerformanceMonitorLite */
     d.object_id,
     d.index_id,
     key_columns =
@@ -288,7 +288,7 @@ OPTION(RECOMPILE);
    the staged KEY columns (is_included_column = 0) instead of a correlated EXISTS per index.
    is_foreign_key = a key column backs an outgoing FK (supporting index); is_foreign_key_reference
    = a key column is referenced by an incoming FK. */
-SELECT DISTINCT
+SELECT /* PerformanceMonitorLite */ DISTINCT
     ic.object_id,
     ic.index_id
 INTO #foreign_key_supporting
@@ -299,7 +299,7 @@ JOIN sys.foreign_key_columns AS fkc
 WHERE ic.is_included_column = 0
 OPTION(RECOMPILE);
 
-SELECT DISTINCT
+SELECT /* PerformanceMonitorLite */ DISTINCT
     ic.object_id,
     ic.index_id
 INTO #foreign_key_referenced
@@ -314,7 +314,7 @@ OPTION(RECOMPILE);
    with ANY uncompressed partition surfaces as NONE (sp_IndexCleanup's compressibility signal).
    One windowed scan instead of a correlated TOP(1) per index; ties resolve to the same lowest
    data_compression level, hence the same desc the correlated ORDER BY returned. */
-SELECT
+SELECT /* PerformanceMonitorLite */
     p.object_id,
     p.index_id,
     p.data_compression_desc
@@ -339,7 +339,7 @@ FROM
 WHERE p.rn = 1
 OPTION(RECOMPILE);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     sqlserver_start_time = (SELECT osi.sqlserver_start_time FROM sys.dm_os_sys_info AS osi),
     database_name = DB_NAME(),
     database_id = DB_ID(),
@@ -489,7 +489,7 @@ OPTION(RECOMPILE);";
         var (exclusionClause, exclusionParameters) = DatabaseScopeFilter.BuildEnumerationPredicate(context, "d.name");
         var text = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-SELECT
+SELECT /* PerformanceMonitorLite */
     d.name
 FROM sys.databases AS d
 WHERE d.state_desc = N'ONLINE'

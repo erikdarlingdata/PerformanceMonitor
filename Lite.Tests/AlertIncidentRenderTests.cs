@@ -151,6 +151,71 @@ public class AlertIncidentRenderTests
         }
     }
 
+    /// <summary>
+    /// The delivery filter's two hand-rolled copies — the filtered render and the roster press
+    /// (<see cref="IncidentDeliveryFilter"/>'s WithRoster remarks explain why they enumerate members rather
+    /// than clone) — must carry every member the render reads. Stated two ways, because either alone rots
+    /// silently: the census is a reflection pin of <see cref="AlertContext"/>'s whole public member set, so
+    /// a member added to the type is a decision about the copies rather than an accident; and the carry
+    /// half sets the members a COPY must keep and reads them back off both copies, so a copy that forgets
+    /// one goes red here. Exact, not a floor, so a REMOVAL is a decision too.
+    /// </summary>
+    [Fact]
+    public void TheDeliveryFilterCopies_CarryEveryRenderMember_TheCensusPinsAlertContext()
+    {
+        var census = typeof(AlertContext).GetProperties()
+            .Select(p => p.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+            new[]
+            {
+                "AgReplicaIdentity", "AttachmentFileName", "AttachmentXml", "CollectorName", "Details",
+                "Incidents", "Route", "Routing", "SeverityOverride", "WaitType"
+            },
+            census);
+
+        var context = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
+        context.SeverityOverride = AlertSeverityLevel.Critical;
+        context.AttachmentXml = "<graph/>";
+        context.AttachmentFileName = "deadlock_graph.xml";
+        AlertIncidentRenderer.Apply(context, new[]
+        {
+            new AlertIncident("stale-census", new[] { "SalesDb.dbo.Orders" }),
+            new AlertIncident("fresh-census", new[] { "SalesDb.dbo.Shipments" })
+        });
+
+        var filtered = IncidentDeliveryFilter.ForDelivery(context, null, new[] { "fresh-census" }).Context;
+        var pressed = IncidentDeliveryFilter.ForDelivery(
+            context, null, deliverableDedupKeys: null,
+            aggregateRoster: new AlertDetailItem { Heading = "roster-census" }).Context;
+
+        Assert.NotNull(filtered);
+        Assert.NotNull(pressed);
+        Assert.NotSame(context, filtered);
+        Assert.NotSame(context, pressed);
+
+        /* The two copies carry different halves (both deliberate): the FILTERED render resolves the
+           attachment from the incidents it KEEPS (none here, so none — the alert-level graph may belong
+           to a held-back incident) and keeps only the delivered incident, while the roster press copies
+           the alert-level pair and the whole incident list as-is (the press filters nothing). Severity and
+           the identity are identical on both. */
+        foreach (var copy in new[] { filtered!, pressed! })
+        {
+            Assert.Equal(AlertSeverityLevel.Critical, copy.SeverityOverride);
+            Assert.Equal("OrdersAG:REPLICA-A", copy.AgReplicaIdentity);
+        }
+
+        Assert.Null(filtered!.AttachmentXml);
+        Assert.Null(filtered!.AttachmentFileName);
+        Assert.Equal(new[] { "fresh-census" }, filtered!.Incidents!.Select(i => i.DedupKey).ToArray());
+
+        Assert.Equal("<graph/>", pressed!.AttachmentXml);
+        Assert.Equal("deadlock_graph.xml", pressed!.AttachmentFileName);
+        Assert.Equal(new[] { "stale-census", "fresh-census" }, pressed!.Incidents!.Select(i => i.DedupKey).ToArray());
+    }
+
     [Fact]
     public void DedupKey_RendersOnTeamsSlackAndBothEmailBodies()
     {

@@ -16,6 +16,7 @@ using System.Windows.Media;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -674,6 +675,11 @@ public sealed class ServerSummaryItem
     private static readonly SolidColorBrush s_unknownBrush = MakeBrush("#888888");
 
     public string DisplayName { get; set; } = "";
+
+    /// <summary>What a screen reader announces for an Overview card: UI Automation names a list item by its text, and the default text is
+    /// the type name ("PerformanceMonitor.Darling.Viewer.ServerSummaryItem").</summary>
+    public override string ToString() => DisplayName;
+
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
     public bool? IsOnline { get; set; }
@@ -909,7 +915,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
-            if (!TotalCpuPercent.HasValue) return "--";
+            if (!TotalCpuPercent.HasValue || IsOffline) return "--";
 
             /* #3281: on the Performance Insights arm the headline is percent of the capacity CURRENTLY
                ALLOCATED, which is NOT the figure the band read — so the figure that did is shown beside
@@ -930,11 +936,24 @@ public sealed class ServerSummaryItem
     /// serverless target (#3281 — "ACU 33% of 12 configured", the sentence that makes a green 100%
     /// headline make sense), else the non-SQL host CPU (the Dashboard's CPU detail), when known.</summary>
     public string CpuDetail =>
-        AcuUtilizationPercent.HasValue && MaxConfiguredAcu.HasValue
+        IsOffline ? StaleDetail
+        : AcuUtilizationPercent.HasValue && MaxConfiguredAcu.HasValue
             ? $"ACU {AcuUtilizationPercent:F0}% of {MaxConfiguredAcu:0.#} configured"
             : OtherProcessCpuPercent.HasValue ? $"Other: {OtherProcessCpuPercent:F0}%" : "";
 
-    public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+    public string MemoryDisplay => MemoryMb.HasValue && !IsOffline ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+
+    /// <summary>
+    /// #5489, the twin of the web fleet card's stale chips: the detail an Offline card's measurement rows
+    /// carry in place of a reading. A server whose newest collection is past the fleet's offline mark has no
+    /// CURRENT value, only the last one collected, days ago; "0% CPU" and a calm memory row off a 12-day-old
+    /// sample read as live health. Those rows read "--" in the neutral tone, and this says when it was last
+    /// collected.
+    /// </summary>
+    public string StaleDetail =>
+        LastCollectionTime.HasValue
+            ? "last collected " + FormatMinutesAgo(Math.Max(0, (int)(DateTime.UtcNow - LastCollectionTime.Value).TotalMinutes))
+            : "no recent collection";
 
     /// <summary>
     /// The Memory detail: under resource-semaphore pressure it names the pressure (grant waiters, then
@@ -945,6 +964,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
+            if (IsOffline) return "";
             if (HasMemoryPressure)
             {
                 var parts = new List<string>();
@@ -961,7 +981,7 @@ public sealed class ServerSummaryItem
         }
     }
 
-    public string BlockingDisplay => BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
 
     /// <summary>
     /// The blocking detail (Dashboard's BlockingDetailText): while blocking is present in the window, the
@@ -974,6 +994,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
+            if (IsOffline) return "";
             if (BlockingCount > 0)
             {
                 var max = $"max: {MaxBlockedSeconds:F0}s";
@@ -990,7 +1011,7 @@ public sealed class ServerSummaryItem
     /// <summary>The worst blocking wait in the window, in seconds.</summary>
     public double MaxBlockedSeconds => MaxBlockingWaitMs / 1000.0;
 
-    public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
+    public string DeadlockDisplay => IsOffline ? "--" : DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
 
     /// <summary>
     /// The deadlock detail — the banded RATE, then how long since the last deadlock ever ("Last: N ago").
@@ -1005,6 +1026,11 @@ public sealed class ServerSummaryItem
     {
         get
         {
+            /* Round-1 L7: an Offline card's Deadlocks value reads "--", so the rate and "Last: N ago" of the old
+               collection must not sit beside it as if they were current (the web fleet card's offline chip also
+               swaps them for the stale sentence). Blocking and Threads already blank their detail here. */
+            if (IsOffline) return "";
+
             var parts = new List<string>(2);
             if (DeadlockRatePerHour.HasValue)
             {
@@ -1025,7 +1051,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
-            if (!TotalThreads.HasValue) return "--";
+            if (!TotalThreads.HasValue || IsOffline) return "--";
             if (RequestsWaitingForThreads > 0) return $"{RequestsWaitingForThreads} starved";
             if (ThreadsWaitingForCpu >= 20) return $"{ThreadsWaitingForCpu} runnable";
             if (TotalThreads.Value > 0 && AvailableThreads < TotalThreads.Value * 0.10) return "Low";
@@ -1035,7 +1061,7 @@ public sealed class ServerSummaryItem
 
     /// <summary>Threads detail — "Available: in/ceiling" (Dashboard's ThreadsDetailText); blank with no snapshot.</summary>
     public string ThreadsDetail =>
-        TotalThreads is > 0 ? $"Available: {AvailableThreads}/{TotalThreads}" : "";
+        IsOffline ? "" : TotalThreads is > 0 ? $"Available: {AvailableThreads}/{TotalThreads}" : "";
 
     /// <summary>
     /// Collectors value — "Stale" when the server is offline, else "N failed" / "OK" (Dashboard's
@@ -1070,8 +1096,20 @@ public sealed class ServerSummaryItem
     /// was collected, and none of it is retained, which is what the row says.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(LastCollectionTime.Value, "HH:mm:ss")
+        ? FormatLastCollect(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayZone(), DateTime.UtcNow)
         : IsOnline == false ? "None retained" : "Never";
+
+    /// <summary>
+    /// The Last Collect time as the card words it (D4 of the final walk, the twin of Lite's
+    /// <c>FormatLastCollect</c>): <paramref name="lastCollectionUtc"/> (naive UTC) in <paramref name="zone"/>, as
+    /// "HH:mm:ss" when that wall time falls on today's date in the same zone and with its date
+    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from last week does not read as one from this morning.
+    /// </summary>
+    internal static string FormatLastCollect(DateTime lastCollectionUtc, TimeZoneInfo zone, DateTime nowUtc)
+    {
+        var isToday = DisplayZone.ToDisplay(lastCollectionUtc, zone).Date == DisplayZone.ToDisplay(nowUtc, zone).Date;
+        return ViewerTimeHelper.FormatForDisplay(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+    }
 
     /* Collection status. The (IsOnline, CollectionStale, AwaitingFirstCollection) triple is resolved by
        ServerCollectionStatusRules.Classify and nowhere else in the viewer — the sidebar row's dot carried its
@@ -1282,14 +1320,16 @@ public sealed class ServerSummaryItem
 
     // ── Per-metric dot / value brushes ───────────────────────────────────────────────────────────────
 
-    public SolidColorBrush CpuSeverityBrush => SeverityBrush(CpuSeverity);
-    public SolidColorBrush MemorySeverityBrush => SeverityBrush(MemorySeverity);
-    public SolidColorBrush BlockingSeverityBrush => SeverityBrush(BlockingSeverity);
-    public SolidColorBrush DeadlockSeverityBrush => SeverityBrush(DeadlockSeverity);
-    public SolidColorBrush ThreadsSeverityBrush => SeverityBrush(ThreadsSeverity);
+    public SolidColorBrush CpuSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(CpuSeverity);
+    public SolidColorBrush MemorySeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(MemorySeverity);
+    public SolidColorBrush BlockingSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(BlockingSeverity);
+    public SolidColorBrush DeadlockSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(DeadlockSeverity);
+    public SolidColorBrush ThreadsSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(ThreadsSeverity);
     public SolidColorBrush CollectorSeverityBrush => SeverityBrush(CollectorSeverity);
 
-    public bool HasAlerts => BlockingCount > 0 || DeadlockCount > 0;
+    /// <summary>Whether the card has a current blocking or deadlock count to flag. An Offline card has no current data
+    /// (its values read "--"), so the counts of the last collection are not an alert (round-1 L7).</summary>
+    public bool HasAlerts => !IsOffline && (BlockingCount > 0 || DeadlockCount > 0);
 
     /// <summary>
     /// The card border reflects the worst signal: offline (red) &gt; a Critical metric (red) &gt; a Warning

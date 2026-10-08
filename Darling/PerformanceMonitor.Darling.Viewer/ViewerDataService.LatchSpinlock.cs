@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -36,11 +37,15 @@ public sealed record LatchStatsSnapshotRow(
     long MaxWaitTimeMs,
     long? DeltaWaitingRequestsCount,
     long? DeltaWaitTimeMs,
-    int? SampleIntervalSeconds)
+    int? SampleIntervalSeconds,
+    DateTime CollectionTime)
 {
     /// <summary>True when the row's deltas are the unknowable marker — a stored interval of exactly 0 (the
     /// <c>FileIoStatsRow</c> / resource-semaphore idiom).</summary>
     public bool IsUnknowable => SampleIntervalSeconds == 0;
+
+    /// <summary><see cref="CollectionTime"/> (naive UTC) in the display zone, to the second; the "Collected" column sorts by <see cref="CollectionTime"/>.</summary>
+    public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
 
     /// <summary>The grid's Interval (sec) cell — see <see cref="DeltaSeriesShaping.IntervalDisplay"/>.</summary>
     public string IntervalDisplay => DeltaSeriesShaping.IntervalDisplay(SampleIntervalSeconds);
@@ -63,10 +68,14 @@ public sealed record SpinlockStatsSnapshotRow(
     long Backoffs,
     long? DeltaCollisions,
     long? DeltaSpins,
-    int? SampleIntervalSeconds)
+    int? SampleIntervalSeconds,
+    DateTime CollectionTime)
 {
     /// <summary>True when the row's deltas are the unknowable marker — a stored interval of exactly 0.</summary>
     public bool IsUnknowable => SampleIntervalSeconds == 0;
+
+    /// <summary><see cref="CollectionTime"/> (naive UTC) in the display zone, to the second; the "Collected" column sorts by <see cref="CollectionTime"/>.</summary>
+    public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
 
     /// <summary>The grid's Interval (sec) cell — see <see cref="DeltaSeriesShaping.IntervalDisplay"/>.</summary>
     public string IntervalDisplay => DeltaSeriesShaping.IntervalDisplay(SampleIntervalSeconds);
@@ -144,7 +153,8 @@ public sealed partial class ViewerDataService
             max_wait_time_ms,
             delta_waiting_requests_count,
             delta_wait_time_ms,
-            sample_interval_seconds
+            sample_interval_seconds,
+            collection_time
         FROM v_latch_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT mx FROM latest)
@@ -220,7 +230,8 @@ public sealed partial class ViewerDataService
             backoffs,
             delta_collisions,
             delta_spins,
-            sample_interval_seconds
+            sample_interval_seconds,
+            collection_time
         FROM v_spinlock_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT mx FROM latest)
@@ -278,7 +289,8 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 DeltaSeriesShaping.ReadableDelta(reader.IsDBNull(4) ? 0 : reader.GetInt64(4), interval),
                 DeltaSeriesShaping.ReadableDelta(reader.IsDBNull(5) ? 0 : reader.GetInt64(5), interval),
-                interval));
+                interval,
+                reader.GetDateTime(7)));
         }
 
         return result;
@@ -334,9 +346,21 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 DeltaSeriesShaping.ReadableDelta(reader.IsDBNull(6) ? 0 : reader.GetInt64(6), interval),
                 DeltaSeriesShaping.ReadableDelta(reader.IsDBNull(7) ? 0 : reader.GetInt64(7), interval),
-                interval));
+                interval,
+                reader.GetDateTime(9)));
         }
 
         return result;
     }
+
+    /// <summary>Where this server's latch_stats coverage starts for the window (the shared probe), so the trend chart can say so
+    /// when an empty stretch would otherwise draw as a flat zero (#4966).</summary>
+    public Task<DateTime?> GetLatchStatsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("latch_stats"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>The spinlock_stats twin of <see cref="GetLatchStatsDataStartAsync"/>.</summary>
+    public Task<DateTime?> GetSpinlockStatsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("spinlock_stats"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 }

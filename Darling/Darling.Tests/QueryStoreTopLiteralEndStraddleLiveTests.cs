@@ -97,6 +97,7 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
         async Task<(long SeqScan, long IdxScan)> WideTableScanCountsAsync()
         {
+            await QuiesceScanStatisticsAsync(connection, ct);
             await using var command = new NpgsqlCommand(
                 "SELECT COALESCE(seq_scan, 0), COALESCE(idx_scan, 0) FROM pg_stat_user_tables WHERE relname = 'query_store_interval_wide'", connection);
             await using var reader = await command.ExecuteReaderAsync(ct);
@@ -199,10 +200,10 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
         /* Clause 3's own floor control: UseTable's tableFloor is MIN(first_execution_time) across the WHOLE
            server, not just this identity, and clause 3 refuses unless raw's chunk floor or WindowStart minus
-           IntervalSpanMargin ("skewFloor") reaches at or past it. Left with only the 7001 identity below, the
-           table's floor sits at day0 (WindowStart + 1h) - AFTER skewFloor (WindowStart - 1 day) - so clause 3
+           PurgeEdgeMargin ("edgeFloor") reaches at or past it. Left with only the 7001 identity below, the
+           table's floor sits at day0 (WindowStart + 1h) - AFTER edgeFloor (WindowStart - 26 h) - so clause 3
            alone refuses even the open-end positive control, before clause 4 is ever reached. A second,
-           unrelated identity anchored at or before skewFloor pulls the server's table floor down there, so
+           unrelated identity anchored at or before edgeFloor pulls the server's table floor down there, so
            clause 3 passes and only clause 4 (LiteralEnd vs applied_through) can still refuse the straddle read. */
         var floorAnchorFirst = WindowStart.AddDays(-2);
         var floorAnchor = new QueryStoreCollector.Row
@@ -288,6 +289,36 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
     {
         await using var command = new NpgsqlCommand(sql, connection);
         return (bool)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// The scan counters in pg_stat_user_tables are a backend's to report, and a backend reports late: a read's
+    /// connection closes before its backend exits, and the backend flushes its counters as it exits (a busy runner
+    /// stretches that, and a backend that reported a moment ago holds new counts for up to 10 seconds). A snapshot
+    /// read straight after a read therefore missed that read's scans, and the next snapshot saw them
+    /// (Expected (2, 5) Actual (2, 6)). Wait until no other client backend is left in this database (every read here
+    /// runs on its own unpooled connection, and a backend leaves pg_stat_activity only after its exit flush), then
+    /// flush this connection's own pending counters, so a snapshot holds every scan made before it, and only those.
+    /// </summary>
+    private static async Task QuiesceScanStatisticsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        long others;
+        do
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()", connection);
+            others = (long)(await command.ExecuteScalarAsync(ct))!;
+            if (others > 0)
+            {
+                Assert.True(DateTime.UtcNow < deadline, $"{others} other client backend(s) are still connected 30 seconds after the reads ended, so their scan counters are not final");
+                await Task.Delay(50, ct);
+            }
+        }
+        while (others > 0);
+
+        await using var flush = new NpgsqlCommand("SELECT pg_stat_force_next_flush()", connection);
+        await flush.ExecuteScalarAsync(ct);
     }
 
     private static async Task<NpgsqlConnection> OpenMigratedAsync(ScratchPostgres scratch, CancellationToken ct)

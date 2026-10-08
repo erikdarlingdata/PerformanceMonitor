@@ -96,7 +96,12 @@ public sealed class DarlingCliUnusableStoreConnectionTests
                 enable: true, ["wait_stats", "--config", configPath], output, error, ct),
             "--disable-collector" => await DarlingCliCommands.ToggleCollectorAsync(
                 enable: false, ["wait_stats", "--config", configPath], output, error, ct),
+            "--set-collector-run-at" => await DarlingCliCommands.SetCollectorRunAtAsync(
+                ["index_object_stats", "02:00", "--config", configPath], output, error, ct),
+            "--reset-password-key" => await DarlingCliCommands.ResetPasswordKeyAsync(["--config", configPath], output, error, ct),
             "--drop-xe-sessions" => await DarlingCliCommands.DropXeSessionsAsync(["SQL2022", "--dry-run", "--config", configPath], output, error, ct),
+            "--diagnostics-bundle" => await DarlingCliCommands.DiagnosticsBundleAsync(
+                [Path.Combine(Path.GetTempPath(), "darling-unusable-" + Guid.NewGuid().ToString("N") + ".json"), "--config", configPath], output, error, ct),
             _ => throw new ArgumentOutOfRangeException(nameof(verb), verb, "not a verb this class knows"),
         };
 
@@ -115,7 +120,10 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--backfill-rollups")]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
+    [InlineData("--set-collector-run-at")]
+    [InlineData("--reset-password-key")]
     [InlineData("--drop-xe-sessions")]
+    [InlineData("--diagnostics-bundle")]
     public async Task ConnectionStringThatDoesNotParse_ExitsWithOne_AndNamesTheSetting(string verb)
     {
         var root = Directory.CreateTempSubdirectory("darling-cli-4744-badconn-");
@@ -149,6 +157,8 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--backfill-rollups")]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
+    [InlineData("--set-collector-run-at")]
+    [InlineData("--reset-password-key")]
     [InlineData("--drop-xe-sessions")]
     public async Task ManagedCredentialThatCannotBeRead_ExitsWithOne_InsteadOfThrowing(string verb)
     {
@@ -194,6 +204,8 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--backfill-rollups")]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
+    [InlineData("--set-collector-run-at")]
+    [InlineData("--reset-password-key")]
     [InlineData("--drop-xe-sessions")]
     public async Task ManagedCredentialThatDpapiCannotUnprotect_IsDescribedAsDpapi_NotAsARawCryptoError(string verb)
     {
@@ -238,10 +250,12 @@ public sealed class DarlingCliUnusableStoreConnectionTests
 
         /* Eight verbs open the store through it: --validate-config, --check-settings, the four endpoint toggles (one
            shared body), --collapse-legacy-slices, --recompress-plan-dim, --add-server, --backfill-rollups, and the
-           two collector toggles (one shared body). That is eight call sites; a ninth verb that opens the store
-           adds a ninth here, and growing this count is the point. */
+           two collector toggles (one shared body). That is eight call sites. The ninth is --drop-xe-sessions reading
+           this install's id, the long-query schedule rows and the instance names (#4961), after it has resolved the
+           server through the first one's shared body. The tenth is --diagnostics-bundle (#5097). An eleventh verb that
+           opens the store adds an eleventh here, and growing this count is the point. */
         var calls = Regex.Matches(code, @"(?<!bool\s)TryBuildStoreConnectionString\(").Count;
-        Assert.Equal(8, calls);
+        Assert.Equal(10, calls);
 
         /* The stored credential is read bare in exactly two places: inside that method, and in the firewall verb's
            best-effort read (TryReadEndpointTogglesAsync), which turns a failure into a reason it prints rather than

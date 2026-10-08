@@ -16,6 +16,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -33,6 +34,7 @@ public sealed class DarlingMcpPgWaitTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum wait events to return, heaviest total wait first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -73,7 +75,13 @@ public sealed class DarlingMcpPgWaitTools
                         + "PostgreSQL one at all — check list_servers.");
             }
 
-            return BuildWaitStatsJson(resolved.ServerName, hours_back, page, limit);
+            /* #4966: where the store's coverage of the window starts. The probe is the web's source for this read (WebDataStartNote), the
+               rows are windowed on collection_time over [start, now], the probe's own column. The empty answer above is unavailable and
+               stays bare. A data answer over 90 minutes or less starts no probe; a failed probe costs the notice, never the rows. */
+            var windowStart = now.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_wait_stats", resolved.ServerName, windowStart, now, emptyAnswer: false, logger, cancellationToken);
+            return BuildWaitStatsJson(resolved.ServerName, hours_back, page, limit, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -98,7 +106,8 @@ public sealed class DarlingMcpPgWaitTools
         string serverName,
         int hoursBack,
         DarlingPgWaitReader.PgWaitStatsPage page,
-        int limit)
+        int limit,
+        McpWindowNotice? notice = null)
     {
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
@@ -120,10 +129,13 @@ public sealed class DarlingMcpPgWaitTools
         })
         .ToList();
 
-        return JsonSerializer.Serialize(new
+        var json = JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
+            effective_start = notice?.EffectiveStart,
+            window_truncated = notice?.WindowTruncated,
+            truncation_note = notice?.TruncationNote,
             /* #3541 A3 dialect: the page described as a page. No time bounds — the rows are per-event
                aggregates over the whole window, so there is no page reach to report, only a cap. */
             wait_events_returned = result.Count,
@@ -150,5 +162,6 @@ public sealed class DarlingMcpPgWaitTools
                  + "returned_wait_time_ms is what the rows returned add up to.",
             waits = result,
         }, McpHelpers.JsonOptions);
+        return notice is null || notice.Value.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
     }
 }

@@ -53,7 +53,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>Top-N indexes by lock+latch wait across ALL databases, at the SERVER's latest capture (#3878 —
-    /// see the file header for why this is not per-database latest). $1 server_id, $2 topN.</summary>
+    /// see the file header for why this is not per-database latest). $1 server_id, $2 topN, $3 the saved database filter (a text[],
+    /// NULL = every database; #5312, the web's get_object_locking predicate). The ORDER BY ends in the same total-order tie-break
+    /// columns as Lite and the MCP reader (#5372), so the topN cap picks the same rows when the wait sums tie.</summary>
     public const string IndexLockingAllSql = @"
 SELECT
     ios.database_name,
@@ -77,6 +79,7 @@ SELECT
 FROM v_index_object_stats ios
 WHERE ios.server_id = $1
 AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+AND   ($3::text[] IS NULL OR ios.database_name = ANY($3))
 AND (
     COALESCE(ios.row_lock_wait_in_ms, 0) > 0
     OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
@@ -86,12 +89,14 @@ AND (
 )
 ORDER BY
     COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
+    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+    COALESCE(ios.index_lock_promotion_count, 0) DESC,
+    ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
 LIMIT $2";
 
     /// <summary>Top-N indexes by lock+latch wait for ONE database, at the SERVER's latest capture — the same
     /// anchor as <see cref="IndexLockingAllSql"/>, so the filtered arm cannot resurrect a name the grid and the
-    /// selector have dropped (#3878). $1 server_id, $2 database, $3 topN.</summary>
+    /// selector have dropped (#3878). $1 server_id, $2 database, $3 topN, $4 the saved database filter (#5312): the box AND the filter both apply.</summary>
     public const string IndexLockingByDbSql = @"
 SELECT
     ios.database_name,
@@ -116,6 +121,7 @@ FROM v_index_object_stats ios
 WHERE ios.server_id = $1
 AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
 AND   ios.database_name = $2
+AND   ($4::text[] IS NULL OR ios.database_name = ANY($4))
 AND (
     COALESCE(ios.row_lock_wait_in_ms, 0) > 0
     OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
@@ -125,10 +131,12 @@ AND (
 )
 ORDER BY
     COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
+    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+    COALESCE(ios.index_lock_promotion_count, 0) DESC,
+    ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
 LIMIT $3";
 
-    public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null, CancellationToken cancellationToken = default)
+    public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = databaseName == null
             ? _dataSource.CreateCommand(IndexLockingAllSql)
@@ -141,6 +149,8 @@ LIMIT $3";
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
         }
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
+        /* #5312: the saved per-server filter, bound last in both statements ($3 for the all-databases one, $4 with the box's name). */
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var items = new List<IndexLockingRow>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -173,12 +183,13 @@ LIMIT $3";
 
     /// <summary>Distinct databases with any lock/latch contention at the SERVER's latest capture — the DB
     /// selector's source, and the half of #3878 that let a renamed-away database still be PICKED rather than
-    /// merely displayed. Same anchor as the grid it drives. $1 server_id.</summary>
+    /// merely displayed. Same anchor as the grid it drives. $1 server_id, $2 the saved database filter (#5312, a text[], NULL = every database): only databases inside it are listed.</summary>
     public const string IndexLockingDatabasesSql = @"
 SELECT DISTINCT ios.database_name
 FROM v_index_object_stats ios
 WHERE ios.server_id = $1
 AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
 AND (
     COALESCE(ios.row_lock_wait_in_ms, 0) > 0
     OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
@@ -188,19 +199,21 @@ AND (
 )
 ORDER BY ios.database_name";
 
-    /// <summary>The newest stored <c>is_optimized_locking_on</c> flag per database on the server. $1 server_id.</summary>
+    /// <summary>The newest stored <c>is_optimized_locking_on</c> flag per database on the server. $1 server_id, $2 the saved database filter (#5312, a text[], NULL = every database): only the chosen databases' flags count, as in get_object_locking.</summary>
     public const string OptimizedLockingFlagsSql = @"
 SELECT is_optimized_locking_on
 FROM database_config
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)";
+AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+AND   ($2::text[] IS NULL OR database_name = ANY($2))";
 
     /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise.</summary>
-    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, CancellationToken cancellationToken = default)
+    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(OptimizedLockingFlagsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var flags = new List<bool?>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -209,11 +222,12 @@ AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server
         return OptimizedLockingNote.For(flags);
     }
 
-    public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId, CancellationToken cancellationToken = default)
+    public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(IndexLockingDatabasesSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var items = new List<string>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

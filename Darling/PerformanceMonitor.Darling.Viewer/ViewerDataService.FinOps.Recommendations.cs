@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -47,98 +48,31 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>The four system databases (master/model/msdb/tempdb) — Lite's <c>database_id &gt; 4</c> filter by name.</summary>
-    private static readonly HashSet<string> RecommendationsSystemDatabases =
-        new(StringComparer.OrdinalIgnoreCase) { "master", "model", "msdb", "tempdb" };
+    private static readonly IReadOnlySet<string> RecommendationsSystemDatabases = FinOpsRecommendationFigures.SystemDatabases;
 
     /// <summary>
     /// The server's latest collected edition / product version / logical CPU count for the license audit, plus the
     /// collected AG replica role + Always On master switch that drive the AG-aware branches. $1 server_id.
     /// </summary>
-    public const string RecommendationsEditionFactsSql = @"
-SELECT
-    edition,
-    product_version,
-    cpu_count,
-    ag_replica_role,
-    is_hadr_enabled
-FROM server_properties
-WHERE server_id = $1
-ORDER BY collection_time DESC
-LIMIT 1";
+    public const string RecommendationsEditionFactsSql = DarlingFinOpsRecommendationsReader.EditionFactsSql;
 
     /// <summary>7-day P95 of Total Server Memory (MB) + sample count, for the memory right-sizing checks. $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsMemoryP95Sql = @"
-SELECT
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_server_memory_mb) AS p95_mb,
-    COUNT(*) AS sample_count,
-    MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample,
-    COUNT(total_server_memory_mb) AS window_samples
-FROM v_memory_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
+    public const string RecommendationsMemoryP95Sql = DarlingFinOpsRecommendationsReader.MemoryP95Sql;
 
     /// <summary>7-day P95 of SQL Server CPU utilization, for the VM right-sizing CPU prescription. $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsCpuP95Sql = @"
-SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu,
-       MIN(collection_time) AS first_sample, MAX(collection_time) AS last_sample,
-       COUNT(sqlserver_cpu_utilization) AS window_samples
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
+    public const string RecommendationsCpuP95Sql = DarlingFinOpsRecommendationsReader.CpuP95Sql;
 
     /// <summary>SQL Agent jobs that ran long at least 3 times in the window (maintenance-window efficiency). $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsMaintenanceWindowSql = @"
-SELECT
-    job_name,
-    COUNT(*) AS run_count,
-    AVG(current_duration_seconds) AS avg_duration_seconds,
-    MAX(current_duration_seconds) AS max_duration_seconds,
-    AVG(avg_duration_seconds) AS avg_historical,
-    SUM(CASE WHEN is_running_long THEN 1 ELSE 0 END) AS times_ran_long
-FROM v_running_jobs
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   avg_duration_seconds > 0
-GROUP BY job_name
-HAVING SUM(CASE WHEN is_running_long THEN 1 ELSE 0 END) >= 3
-ORDER BY times_ran_long DESC
-LIMIT 10";
+    public const string RecommendationsMaintenanceWindowSql = DarlingFinOpsRecommendationsReader.MaintenanceWindowSql;
 
     /// <summary>Per-database aggregate read/write I/O + stall over the window (storage-tier optimization). $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsStorageTierSql = @"
-SELECT
-    database_name,
-    SUM(delta_reads) AS total_reads,
-    SUM(delta_stall_read_ms) AS total_stall_read_ms,
-    SUM(delta_writes) AS total_writes,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms,
-    MIN(collection_time) AS first_sample,
-    MAX(collection_time) AS last_sample,
-    COUNT(*) AS window_samples
-FROM v_file_io_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   delta_reads > 0
-GROUP BY database_name
-HAVING SUM(delta_reads) > 1000";
+    public const string RecommendationsStorageTierSql = DarlingFinOpsRecommendationsReader.StorageTierSql;
 
-    /// <summary>Oldest query-stats sample for the server (idle-database advice waits until it is at or before the 7-day cutoff). $1 server_id.</summary>
-    public const string RecommendationsQueryStatsFirstSampleSql = @"
-SELECT MIN(collection_time)
-FROM v_query_stats
-WHERE server_id = $1";
+    /// <summary>The oldest query-stats sample, and how many complete UTC days in [$2, $3) hold one (idle-database advice needs each of the last 7). $1 server_id, $2 the coverage start (D-7 00:00), $3 the coverage end (today 00:00, exclusive).</summary>
+    public const string RecommendationsIdleCoverageSql = DarlingFinOpsOptimizationReader.IdleCoverageSql;
 
     /// <summary>CPU utilization mean + standard deviation + sample count (reserved-capacity stability). $1 server_id, $2 cutoff (naive UTC).</summary>
-    public const string RecommendationsReservedCapacitySql = @"
-SELECT
-    AVG(sqlserver_cpu_utilization) AS avg_cpu,
-    STDDEV(sqlserver_cpu_utilization) AS stddev_cpu,
-    COUNT(*) AS sample_count
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-HAVING COUNT(*) >= 24";
+    public const string RecommendationsReservedCapacitySql = DarlingFinOpsRecommendationsReader.ReservedCapacitySql;
 
     /// <summary>
     /// The server's latest collected edition facts for the license audit (null when nothing collected yet), including
@@ -151,26 +85,8 @@ HAVING COUNT(*) >= 24";
     /// <summary>Reads the server's latest collected edition / product-version-major / CPU count + AG role / HADR flag, or null when no server_properties row exists yet.</summary>
     public async Task<EditionFacts?> GetEditionFactsAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(RecommendationsEditionFactsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-        {
-            return null;
-        }
-
-        var edition = reader.IsDBNull(0) ? "" : reader.GetString(0);
-        var productVersion = reader.IsDBNull(1) ? null : reader.GetString(1);
-        var cpuCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture);
-        /* The collected AG state: ServerPropertiesCollector resolves ag_replica_role live from
-           sys.dm_hadr_availability_replica_states, and is_hadr_enabled is SERVERPROPERTY('IsHadrEnabled').
-           Absent/NULL (non-AG platforms, Azure SQL DB, nothing collected yet) => the Standalone / feature-off
-           fallback — exactly Lite's own behaviour where the AG DMVs are unavailable. */
-        var agReplicaRole = reader.IsDBNull(3) ? "Standalone" : reader.GetString(3);
-        var isHadrEnabled = !reader.IsDBNull(4) && reader.GetBoolean(4);
-        return new EditionFacts(edition, ParseMajorVersion(productVersion), cpuCount, agReplicaRole, isHadrEnabled);
+        var facts = await DarlingFinOpsRecommendationsReader.GetEditionFactsAsync(_dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return facts is { } f ? new EditionFacts(f.Edition, f.MajorVersion, f.CpuCount, f.AgReplicaRole, f.IsHadrEnabled) : null;
     }
 
     /// <summary>
@@ -178,28 +94,14 @@ HAVING COUNT(*) >= 24";
     /// apply to Azure SQL Database. Same row Lite reads (<c>GetSqlEngineEditionAsync</c>): the newest collected
     /// <c>server_properties</c> row. $1 server_id.
     /// </summary>
-    public const string RecommendationsEngineEditionSql = @"
-SELECT engine_edition
-FROM server_properties
-WHERE server_id = $1
-ORDER BY collection_time DESC
-LIMIT 1";
+    public const string RecommendationsEngineEditionSql = DarlingFinOpsRecommendationsReader.EngineEditionSql;
 
     /// <summary>
     /// The server's latest collected engine edition, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/>
     /// when nothing is collected yet (or the row carries no edition).
     /// </summary>
-    public async Task<int> GetRecommendationEngineEditionAsync(int serverId, CancellationToken cancellationToken = default)
-    {
-        await using var command = _dataSource.CreateCommand(RecommendationsEngineEditionSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0)
-            ? Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture)
-            : CollectorEngineCapability.UnknownEngineEdition;
-    }
+    public Task<int> GetRecommendationEngineEditionAsync(int serverId, CancellationToken cancellationToken = default) =>
+        DarlingFinOpsRecommendationsReader.GetEngineEditionAsync(_dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// Selects the databases running Transparent Data Encryption from a collected database-config snapshot — the
@@ -208,31 +110,16 @@ LIMIT 1";
     /// excluded, mirroring Lite's probe. Ordered by name for stable output.
     /// </summary>
     public static List<string> SelectTdeDatabaseNames(IEnumerable<DatabaseConfigRow> configRows) =>
-        configRows
-            .Where(r => r.IsEncrypted
-                && string.Equals(r.StateDesc, "ONLINE", StringComparison.OrdinalIgnoreCase)
-                && !RecommendationsSystemDatabases.Contains(r.DatabaseName))
-            .Select(r => r.DatabaseName)
-            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        FinOpsRecommendationFigures.SelectTdeDatabaseNames(
+            configRows.Select(r => new DatabaseEncryptionFact(r.DatabaseName, r.StateDesc, r.IsEncrypted)));
 
     /// <summary>
     /// Matches the collected database names against Lite's dev/test name patterns (<c>%dev% / %test% / %staging% /
     /// %qa%</c>, case-insensitive) excluding the system databases (Lite's <c>database_id &gt; 4</c>). Pure so the
     /// pattern logic is unit-testable without a store.
     /// </summary>
-    public static List<string> MatchDevTestDatabases(IEnumerable<string> databaseNames)
-    {
-        static bool IsDevTest(string name) =>
-            name.Contains("dev", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("test", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("staging", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("qa", StringComparison.OrdinalIgnoreCase);
-
-        return databaseNames
-            .Where(n => !RecommendationsSystemDatabases.Contains(n) && IsDevTest(n))
-            .ToList();
-    }
+    public static List<string> MatchDevTestDatabases(IEnumerable<string> databaseNames) =>
+        FinOpsRecommendationFigures.MatchDevTestDatabases(databaseNames);
 
     /// <summary>
     /// Builds the Edition / license audit recommendations from the collected facts (check 1 + Lite's check 10
@@ -257,122 +144,9 @@ LIMIT 1";
         string agReplicaRole,
         bool isHadrEnabled)
     {
-        var recommendations = new List<RecommendationRow>();
-
-        if (!edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase))
-        {
-            return recommendations;
-        }
-
-        var agRole = string.IsNullOrWhiteSpace(agReplicaRole) ? "Standalone" : agReplicaRole.Trim();
-        var isSecondary = string.Equals(agRole, "Secondary", StringComparison.OrdinalIgnoreCase);
-
-        /* Lite computes advancedAgCount = GetAdvancedAgCountAsync() (COUNT of sys.availability_groups WHERE
-           basic_features = 0) and skips the probe on a secondary. Darling's collected stand-in: an Enterprise
-           instance acting as an AG PRIMARY with Always On enabled — a Basic AG is a Standard-Edition-only feature,
-           so an Enterprise-hosted AG is effectively always advanced. Secondary gets its own branch below (Lite
-           forces advancedAgCount = 0 there); Standalone / feature-off => no caveat, no confidence downgrade. */
-        var hasAdvancedAg = !isSecondary
-            && string.Equals(agRole, "Primary", StringComparison.OrdinalIgnoreCase)
-            && isHadrEnabled;
-
-        /* Standard Edition offers only Basic Availability Groups, so caveat any edition-downgrade guidance when this
-           instance hosts an (advanced) AG: a downgrade would force the workload onto Basic AG limitations (#1085).
-           Lite names the advanced-AG count; Darling has only the collected role, so it names the primary replica. */
-        var agDowngradeCaveat = hasAdvancedAg
-            ? " Note: this instance is the primary replica of an Always On Availability Group. Standard Edition " +
-              "supports only Basic Availability Groups, which are limited to two replicas, a single database per " +
-              "group, and provide no readable secondary or backups on the secondary " +
-              "(see https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/basic-availability-groups-always-on-availability-groups#limitations). " +
-              "Factor this into any downgrade decision."
-            : "";
-
-        if (isSecondary)
-        {
-            /* On an Availability Group secondary, a "downgrade to Standard to save money" recommendation is
-               misleading: every replica in an AG must run the same SQL Server edition, so the decision belongs to
-               the AG as a whole and must be evaluated on the primary. Emit an informational note instead and skip
-               the savings estimates (#980). */
-            recommendations.Add(new RecommendationRow
-            {
-                Category = "Licensing",
-                Severity = "Low",
-                Confidence = "High",
-                Finding = "Enterprise Edition — Availability Group secondary replica",
-                Detail = "This instance is currently a secondary replica in an Availability Group. " +
-                         "Every replica in an AG must run the same SQL Server edition, so edition and " +
-                         "licensing decisions apply to the whole group and should be evaluated on the " +
-                         "primary replica. A secondary used only for failover may also be covered by " +
-                         "Software Assurance rather than separately licensed."
-            });
-        }
-        // SQL Server 2019 (major version 15) moved TDE to Standard Edition, so on 2019+ we give
-        // version-appropriate guidance rather than a TDE-specific check.
-        else if (majorVersion >= 15)
-        {
-            recommendations.Add(new RecommendationRow
-            {
-                Category = "Licensing",
-                Severity = "High",
-                Confidence = hasAdvancedAg ? "Low" : "Medium",
-                Finding = "Enterprise Edition may not be required",
-                Detail = "Starting with SQL Server 2019, most previously Enterprise-only features " +
-                         "(including TDE, compression, partitioning, and columnstore) are available " +
-                         "in Standard Edition. Review whether remaining Enterprise-only features " +
-                         "(such as Always On availability groups with multiple secondaries) are in use " +
-                         "before considering a downgrade to Standard Edition." + agDowngradeCaveat,
-                EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
-            });
-        }
-        else if (tdeDbNames.Count == 0)
-        {
-            // Pre-2019: TDE is the only commonly-used feature still restricted to Enterprise since 2016 SP1.
-            recommendations.Add(new RecommendationRow
-            {
-                Category = "Licensing",
-                Severity = "High",
-                Confidence = hasAdvancedAg ? "Medium" : "High",
-                Finding = hasAdvancedAg
-                    ? "Enterprise Edition — review Availability Group requirements before downgrading"
-                    : "Enterprise Edition with no Enterprise-only features detected",
-                Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
-                         "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
-                         "Review whether Standard Edition would meet workload requirements for potential license savings." +
-                         agDowngradeCaveat,
-                EstMonthlySavings = monthlyCost > 0 ? monthlyCost * 0.40m : null
-            });
-        }
-        else
-        {
-            recommendations.Add(new RecommendationRow
-            {
-                Category = "Licensing",
-                Severity = "Low",
-                Confidence = "High",
-                Finding = "TDE in use — Enterprise Edition downgrade blocker",
-                Detail = $"The following databases use Transparent Data Encryption: {string.Join(", ", tdeDbNames.Take(20))}" +
-                         (tdeDbNames.Count > 20 ? $" and {tdeDbNames.Count - 20} more" : "") +
-                         ". TDE must be removed before downgrading to Standard Edition."
-            });
-
-            // Check 10: license cost impact estimate (only when features ARE in use).
-            if (cpuCount > 0)
-            {
-                var monthlySavings = cpuCount * 5000m / 12m;
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Licensing",
-                    Severity = "Low",
-                    Confidence = "Low",
-                    Finding = $"Enterprise to Standard would save ~${monthlySavings:N0}/mo at list pricing ({cpuCount} cores)",
-                    Detail = "Based on list pricing differential of ~$5,000/core/year between Enterprise and Standard. " +
-                             "Actual savings depend on your licensing agreement. See Enterprise feature audit for downgrade blockers.",
-                    EstMonthlySavings = monthlySavings
-                });
-            }
-        }
-
-        return recommendations;
+        return FinOpsRecommendationFigures.EditionAudit(
+            edition, majorVersion, cpuCount, tdeDbNames, monthlyCost, agReplicaRole, isHadrEnabled)
+            .Select(RecommendationRow.From).ToList();
     }
 
     /// <summary>
@@ -383,32 +157,8 @@ LIMIT 1";
     /// </summary>
     public static RecommendationRow? BuildCompressionRecommendation(IEnumerable<IndexCleanupIndexInput> indexes)
     {
-        var candidates = indexes
-            .Where(i => string.Equals(i.DataCompressionDesc, "NONE", StringComparison.OrdinalIgnoreCase)
-                && (i.ReservedMb ?? 0m) >= 1024m)
-            .OrderByDescending(i => i.ReservedMb ?? 0m)
-            .ToList();
-
-        if (candidates.Count == 0)
-        {
-            return null;
-        }
-
-        var totalGb = candidates.Sum(c => c.ReservedMb ?? 0m) / 1024m;
-        var topItems = candidates.Take(5)
-            .Select(c => $"{c.SchemaName}.{c.TableName} ({(c.ReservedMb ?? 0m) / 1024m:N1}GB)")
-            .ToList();
-
-        return new RecommendationRow
-        {
-            Category = "Storage",
-            Severity = totalGb > 50 ? "High" : totalGb > 10 ? "Medium" : "Low",
-            Confidence = "High",
-            Finding = $"{candidates.Count} uncompressed object(s) >= 1GB ({totalGb:N1}GB total)",
-            Detail = $"Large uncompressed tables/indexes: {string.Join("; ", topItems)}" +
-                     (candidates.Count > 5 ? $" and {candidates.Count - 5} more" : "") +
-                     ". Consider PAGE or ROW compression to reduce storage and improve I/O."
-        };
+        var recommendation = FinOpsRecommendationFigures.Compression(indexes);
+        return recommendation == null ? null : RecommendationRow.From(recommendation);
     }
 
     /// <summary>
@@ -420,23 +170,8 @@ LIMIT 1";
     /// </summary>
     internal static RecommendationRow? BuildCpuRightSizingRecommendation(UtilizationEfficiencyRow? util, decimal monthlyCost)
     {
-        if (util == null || !util.HasCpuSample || util.P95CpuPct >= 30 || util.CpuCount <= 4
-            || util.ProvisioningStatus == ProvisioningVerdict.NotApplicable)
-            return null;
-
-        var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
-        var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
-        var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
-        return new RecommendationRow
-        {
-            Category = "Compute",
-            Severity = util.P95CpuPct < 15 ? "High" : "Medium",
-            Confidence = "Medium",
-            Finding = $"CPU over-provisioned ({util.CpuCount} {cpuNoun}, P95 = {util.P95CpuPct:N1}%)",
-            Detail = $"P95 CPU utilization is {util.P95CpuPct:N1}% (avg {util.AvgCpuPct:N1}%, max {util.MaxCpuPct}%) across {util.CpuCount} {cpuNoun}. " +
-                     $"Consider reducing to ~{targetCores} {cpuNoun}.",
-            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * savingsPct * 0.60m : null
-        };
+        var recommendation = FinOpsRecommendationFigures.CpuRightSizing(util?.ToDto(), monthlyCost);
+        return recommendation == null ? null : RecommendationRow.From(recommendation);
     }
 
     /// <summary>
@@ -446,439 +181,11 @@ LIMIT 1";
     /// empty tab. <paramref name="monthlyCost"/> is the per-server budget (0 → findings emit with no savings
     /// estimate, mirroring Lite's <c>monthlyCost &gt; 0 ? … : null</c>).
     /// </summary>
-    public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, decimal monthlyCost, CancellationToken cancellationToken = default)
-    {
-        var recommendations = new List<RecommendationRow>();
-        var memoryCutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
-
-        // 1. Enterprise feature / license audit (collected server_properties + database_config.is_encrypted).
-        try
-        {
-            var facts = await GetEditionFactsAsync(serverId, cancellationToken);
-            if (facts is { } f)
-            {
-                var isEnterprise = f.Edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase);
-
-                // TDE is only the deciding factor on pre-2019 Enterprise — read the config snapshot just then.
-                var tdeDbNames = new List<string>();
-                if (isEnterprise && f.MajorVersion < 15)
-                {
-                    var configRows = await GetLatestDatabaseConfigAsync(serverId, cancellationToken: cancellationToken);
-                    tdeDbNames = SelectTdeDatabaseNames(configRows);
-                }
-
-                recommendations.AddRange(
-                    BuildEditionAuditRecommendations(
-                        f.Edition, f.MajorVersion, f.CpuCount, tdeDbNames, monthlyCost, f.AgReplicaRole, f.IsHadrEnabled));
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (Enterprise features): {ex.Message}");
-        }
-
-        // 2. CPU right-sizing (collected utilization efficiency).
-        try
-        {
-            var util = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            var cpuRecommendation = BuildCpuRightSizingRecommendation(util, monthlyCost);
-            if (cpuRecommendation != null)
-                recommendations.Add(cpuRecommendation);
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (CPU right-sizing): {ex.Message}");
-        }
-
-        // 3. Memory right-sizing (7-day P95 Total Server Memory vs physical RAM).
-        try
-        {
-            var util = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            /* No memory advice on an Azure SQL Database (engine_edition 5): its memory comes with its service objective
-               and cannot be resized on its own. util.PhysicalMemoryMb is the database's own memory limit there
-               (memory_stats, filled from committed_target_kb), not the host's, so the skip is not about a wrong
-               denominator: there is nothing to resize. Managed Instance (8) and SQL Server are unchanged. */
-            if (util != null && util.PhysicalMemoryMb > 8192
-                && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
-            {
-                var (p95Mb, sampleCount, window) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
-
-                // Need ~16 samples to smooth a single-point anomaly without delaying the recommendation for hours.
-                if (sampleCount >= 16)
-                {
-                    var memRatio = (decimal)p95Mb / util.PhysicalMemoryMb;
-                    var targetMb = Math.Max(8192, p95Mb * 2);
-                    // Compared in the whole GB the text prints, so the advice never reads "of 8GB RAM ... reducing to ~8GB".
-                    if (memRatio < 0.50m && targetMb / 1024 < util.PhysicalMemoryMb / 1024)
-                    {
-                        recommendations.Add(new RecommendationRow
-                        {
-                            Category = "Memory",
-                            Severity = memRatio < 0.30m ? "High" : "Medium",
-                            Confidence = "Medium",
-                            Finding = $"Memory over-provisioned (P95 SQL memory uses {memRatio:P0} of {util.PhysicalMemoryMb / 1024}GB RAM)",
-                            Detail = $"P95 SQL Server memory from {window} is {p95Mb:N0} MB out of {util.PhysicalMemoryMb:N0} MB physical RAM ({memRatio:P0} utilization). " +
-                                     $"Consider reducing to ~{targetMb / 1024}GB.",
-                            EstMonthlySavings = monthlyCost > 0 ? monthlyCost * (1m - (decimal)targetMb / util.PhysicalMemoryMb) * 0.30m : null
-                        });
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (Memory right-sizing): {ex.Message}");
-        }
-
-        // 5. Compression candidates (collected index_object_stats snapshot; Lite's check 4 is dropped — Darling
-        //    has native Index Analysis, so the sp_IndexCleanup-existence prompt is obsolete).
-        try
-        {
-            var indexes = await GetIndexCleanupInputsAsync(serverId, cancellationToken);
-            var rec = BuildCompressionRecommendation(indexes);
-            if (rec != null)
-            {
-                recommendations.Add(rec);
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (Compression): {ex.Message}");
-        }
-
-        // 6. Dormant database detection with cost impact (collected idle DBs + database sizes).
-        try
-        {
-            /* "No query activity in 7 days" is only true once 7 days of query stats exist: a server enrolled hours
-               ago has not been watched long enough to call any database idle. */
-            var idleDbs = await HasQueryStatsCoverageAsync(serverId, memoryCutoff, cancellationToken)
-                ? await GetIdleDatabasesAsync(serverId, cancellationToken: cancellationToken)
-                : new List<IdleDatabaseRow>();
-            if (idleDbs.Count > 0)
-            {
-                var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
-                var dbNames = string.Join(", ", idleDbs.Take(5).Select(d => d.DatabaseName));
-                var costShare = 0m;
-                if (monthlyCost > 0)
-                {
-                    var allDbSizes = await GetDatabaseSizeLatestAsync(serverId, cancellationToken);
-                    var totalMb = DatabaseSizeRow.AllocatedTotalMb(allDbSizes);
-                    if (totalMb > 0)
-                        costShare = (idleDbs.Sum(d => d.TotalSizeMb) / totalMb) * monthlyCost;
-                }
-
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Databases",
-                    Severity = idleDbs.Count >= 3 ? "High" : "Medium",
-                    Confidence = "High",
-                    Finding = $"{idleDbs.Count} idle database(s) consuming {totalSizeGb:N1}GB",
-                    Detail = $"No query activity in 7 days: {dbNames}" +
-                             (idleDbs.Count > 5 ? $" and {idleDbs.Count - 5} more" : "") +
-                             ". Consider archiving or removing these databases.",
-                    EstMonthlySavings = costShare > 0 ? costShare : null
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (Dormant databases): {ex.Message}");
-        }
-
-        // 7. Dev/test workload detection (collected database name list).
-        try
-        {
-            var configRows = await GetLatestDatabaseConfigAsync(serverId, cancellationToken: cancellationToken);
-            var devDbs = MatchDevTestDatabases(configRows.Select(r => r.DatabaseName));
-            if (devDbs.Count > 0)
-            {
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Environment",
-                    Severity = "Medium",
-                    Confidence = "Low",
-                    Finding = $"{devDbs.Count} possible dev/test database(s) on production server",
-                    Detail = $"Databases matching dev/test patterns: {string.Join(", ", devDbs.Take(10))}" +
-                             (devDbs.Count > 10 ? $" and {devDbs.Count - 10} more" : "") +
-                             ". If these are non-production workloads, consider moving to a lower-cost tier or separate server."
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (Dev/test detection): {ex.Message}");
-        }
-
-        // 11. Maintenance window efficiency — jobs running long (collected running_jobs).
-        try
-        {
-            await using var command = _dataSource.CreateCommand(RecommendationsMaintenanceWindowSql);
-            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = memoryCutoff });
-
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var jobName = reader.IsDBNull(0) ? "" : reader.GetString(0);
-                var avgDuration = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture);
-                var maxDuration = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture);
-                var avgHistorical = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture);
-                var timesLong = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5), CultureInfo.InvariantCulture);
-
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Maintenance",
-                    Severity = timesLong >= 5 ? "Medium" : "Low",
-                    Confidence = "High",
-                    Finding = $"{jobName} ran long {timesLong} times in 7 days",
-                    Detail = $"Average duration: {FormatDuration(avgDuration)}, max: {FormatDuration(maxDuration)}, " +
-                             $"historical average: {FormatDuration(avgHistorical)}. " +
-                             "Review whether this job's schedule or operations need tuning."
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (Maintenance window): {ex.Message}");
-        }
-
-        // 12. VM right-sizing — prescriptive core/memory targets (collected 7-day P95 CPU + memory).
-        try
-        {
-            var vmUtil = await GetUtilizationEfficiencyAsync(serverId, cancellationToken);
-            /* No VM to resize on Azure SQL Database (its cores and memory come with its service objective),
-               and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
-            if (vmUtil != null && vmUtil.HasCpuSample
-                && await GetRecommendationEngineEditionAsync(serverId, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
-            {
-                decimal p95Cpu7d = vmUtil.P95CpuPct;
-                var cpuWindow = "recent samples"; // neutral until the 7-day read supplies its own span; the 24-hour fallback has no span of its own
-                int cpuCount = vmUtil.CpuCount;
-                int physMb = vmUtil.PhysicalMemoryMb;
-
-                // Prefer the 7-day P95 CPU; fall back to the 24-hour P95 already on vmUtil.
-                try
-                {
-                    await using var cpuCommand = _dataSource.CreateCommand(RecommendationsCpuP95Sql);
-                    cpuCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                    cpuCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                    cpuCommand.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = memoryCutoff });
-
-                    await using var cpuReader = await cpuCommand.ExecuteReaderAsync(cancellationToken);
-                    if (await cpuReader.ReadAsync(cancellationToken) && !cpuReader.IsDBNull(0))
-                    {
-                        p95Cpu7d = Convert.ToDecimal(cpuReader.GetValue(0), CultureInfo.InvariantCulture);
-                        cpuWindow = RightSizingWindow.Describe(cpuReader.IsDBNull(3) ? 0L : Convert.ToInt64(cpuReader.GetValue(3), CultureInfo.InvariantCulture), cpuReader.IsDBNull(1) || cpuReader.IsDBNull(2) ? TimeSpan.Zero : cpuReader.GetDateTime(2) - cpuReader.GetDateTime(1));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Recommendation check (VM right-sizing) 7-day CPU P95 fell back to 24h: {ex.Message}");
-                }
-
-                var (p95MemMb, memSampleCount, memWindow) = await ReadMemoryP95Async(serverId, memoryCutoff, cancellationToken);
-
-                // CPU prescription: only if >= 4 cores.
-                if (cpuCount >= 4)
-                {
-                    int targetCores = 0;
-                    if (p95Cpu7d < 15)
-                        targetCores = Math.Max(2, cpuCount / 4);
-                    else if (p95Cpu7d < 30)
-                        targetCores = Math.Max(2, cpuCount / 2);
-
-                    if (targetCores > 0 && targetCores < cpuCount)
-                    {
-                        recommendations.Add(new RecommendationRow
-                        {
-                            Category = "Hardware",
-                            Severity = "Medium",
-                            Confidence = "Medium",
-                            Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                            Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
-                                     $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
-                            EstMonthlySavings = monthlyCost > 0
-                                ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
-                                : null
-                        });
-                    }
-                }
-
-                // Memory prescription: needs >= 4 GB physical and a handful of samples.
-                if (physMb >= 4096 && physMb > 0 && memSampleCount >= 16)
-                {
-                    var memRatio = (decimal)p95MemMb / physMb;
-                    int targetMb = 0;
-                    if (memRatio < 0.25m)
-                        targetMb = Math.Max(4096, physMb / 4);
-                    else if (memRatio < 0.40m)
-                        targetMb = Math.Max(4096, physMb / 2);
-
-                    if (targetMb > 0 && targetMb / 1024 < physMb / 1024)
-                    {
-                        recommendations.Add(new RecommendationRow
-                        {
-                            Category = "Hardware",
-                            Severity = "Medium",
-                            Confidence = "Medium",
-                            Finding = $"Memory: reduce from {physMb / 1024}GB to {targetMb / 1024}GB (P95 SQL memory uses {memRatio:P0})",
-                            Detail = $"P95 SQL Server memory from {memWindow} is {p95MemMb:N0} MB of {physMb:N0} MB physical RAM ({memRatio:P0}). " +
-                                     $"Reducing to {targetMb / 1024}GB would still leave headroom.",
-                            EstMonthlySavings = monthlyCost > 0
-                                ? monthlyCost * (1m - (decimal)targetMb / physMb) * 0.30m
-                                : null
-                        });
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (VM right-sizing): {ex.Message}");
-        }
-
-        // 13. Storage tier optimization — databases with low I/O latency (collected file_io_stats).
-        try
-        {
-            var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
-            var storageMin = DateTime.MaxValue;
-            var storageMax = DateTime.MinValue;
-            long storageSamples = 0;
-
-            await using (var command = _dataSource.CreateCommand(RecommendationsStorageTierSql))
-            {
-                command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = memoryCutoff });
-
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    var dbName = reader.IsDBNull(0) ? "" : reader.GetString(0);
-                    var totalReads = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
-                    var totalStallRead = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture);
-                    var totalWrites = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture);
-                    var totalStallWrite = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture);
-
-                    var avgReadMs = totalReads > 0 ? (decimal)totalStallRead / totalReads : 0m;
-                    var avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : 0m;
-
-                    if (avgReadMs < 5m && avgWriteMs < 3m)
-                    {
-                        lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
-                        storageSamples += reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture);
-                        if (!reader.IsDBNull(5) && !reader.IsDBNull(6))
-                        {
-                            storageMin = reader.GetDateTime(5) < storageMin ? reader.GetDateTime(5) : storageMin;
-                            storageMax = reader.GetDateTime(6) > storageMax ? reader.GetDateTime(6) : storageMax;
-                        }
-                    }
-                }
-            }
-
-            if (lowLatencyDbs.Count > 0)
-            {
-                var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
-                var detail = string.Join("; ", lowLatencyDbs.Take(10)
-                    .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
-                recommendations.Add(new RecommendationRow
-                {
-                    Category = "Storage",
-                    Severity = "Low",
-                    Confidence = "Medium",
-                    Finding = $"{lowLatencyDbs.Count} database(s) with low IO latency — standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
-                             (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
-                             ". Premium/high-performance storage may not be needed."
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (Storage tier): {ex.Message}");
-        }
-
-        // 14. Reserved capacity candidates — stable CPU utilization (collected cpu_utilization_stats).
-        try
-        {
-            await using var command = _dataSource.CreateCommand(RecommendationsReservedCapacitySql);
-            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = memoryCutoff });
-
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
-            {
-                var avgCpu = Convert.ToDecimal(reader.GetValue(0), CultureInfo.InvariantCulture);
-                var stddevCpu = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1), CultureInfo.InvariantCulture);
-
-                if (avgCpu > 20 && stddevCpu > 0)
-                {
-                    var cv = stddevCpu / avgCpu;
-                    if (cv < 0.3m)
-                    {
-                        var confidence = cv < 0.15m ? "High" : "Medium";
-                        recommendations.Add(new RecommendationRow
-                        {
-                            Category = "Cloud",
-                            Severity = "Low",
-                            Confidence = confidence,
-                            Finding = $"Stable CPU utilization (avg {avgCpu:N1}%, CV {cv:N2}) — reserved capacity candidate",
-                            Detail = $"CPU utilization is consistently {avgCpu:N1}% with low variance (±{stddevCpu:N1}%). " +
-                                     "Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads."
-                        });
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Recommendation check failed (Reserved capacity): {ex.Message}");
-        }
-
-        return recommendations.OrderBy(r => r.SeveritySort).ToList();
-    }
-
-    /// <summary>True once the server's query stats reach back to the start of the 7-day window. The advice text claims 7 days, so the data must cover all 7: the first sample has to be at or before the cutoff, with no slack.</summary>
-    private async Task<bool> HasQueryStatsCoverageAsync(int serverId, DateTime cutoff, CancellationToken cancellationToken)
-    {
-        await using var command = _dataSource.CreateCommand(RecommendationsQueryStatsFirstSampleSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        var first = await command.ExecuteScalarAsync(cancellationToken);
-        return first is DateTime firstSample && firstSample <= cutoff;
-    }
-
-    /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>
-    private async Task<(int P95Mb, long SampleCount, string Window)> ReadMemoryP95Async(int serverId, DateTime cutoff, CancellationToken cancellationToken)
-    {
-        await using var command = _dataSource.CreateCommand(RecommendationsMemoryP95Sql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
-        {
-            var p95Mb = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
-            var sampleCount = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
-            var window = RightSizingWindow.Describe(reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture), reader.IsDBNull(2) || reader.IsDBNull(3) ? TimeSpan.Zero : reader.GetDateTime(3) - reader.GetDateTime(2));
-            return (p95Mb, sampleCount, window);
-        }
-
-        return (0, 0L, RightSizingWindow.Describe(0, TimeSpan.Zero));
-    }
+    public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, decimal monthlyCost, CancellationToken cancellationToken = default) =>
+        (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(_dataSource, serverId, monthlyCost, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken)).Select(RecommendationRow.From).ToList();
 
     /// <summary>Human-readable duration formatting for the maintenance-window finding (Lite's FinOps FormatDuration, verbatim).</summary>
-    private static string FormatDuration(long seconds)
-    {
-        if (seconds >= 3600)
-            return $"{seconds / 3600}h {(seconds % 3600) / 60}m {seconds % 60}s";
-        if (seconds >= 60)
-            return $"{seconds / 60}m {seconds % 60}s";
-        return $"{seconds}s";
-    }
+    private static string FormatDuration(long seconds) => FinOpsRecommendationFigures.FormatDuration(seconds);
 }
 
 /// <summary>
@@ -895,12 +202,19 @@ public sealed class RecommendationRow
     public string Finding { get; set; } = "";
     public string Detail { get; set; } = "";
     public decimal? EstMonthlySavings { get; set; }
+
+    /// <summary>The savings as text ("$1,500"), or empty with no estimate. The grid binds the number itself (a dash with a tooltip when empty); this is the plain text form.</summary>
     public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
-    public int SeveritySort => Severity switch
+    public int SeveritySort => FinOpsRecommendationFigures.SeveritySort(Severity);
+
+    /// <summary>The viewer row for a Storage recommendation.</summary>
+    public static RecommendationRow From(FinOpsRecommendation r) => new()
     {
-        "High" => 1,
-        "Medium" => 2,
-        "Low" => 3,
-        _ => 4
+        Category = r.Category,
+        Severity = r.Severity,
+        Confidence = r.Confidence,
+        Finding = r.Finding,
+        Detail = r.Detail,
+        EstMonthlySavings = r.EstMonthlySavings
     };
 }

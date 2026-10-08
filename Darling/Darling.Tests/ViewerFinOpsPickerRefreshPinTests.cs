@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// refills the picker before refreshing. WPF cannot run here, so this is a source pin on the FinOps case of
 /// <c>LoadVisibleTabAsync</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerFinOpsPickerRefreshPinTests
 {
     [Fact]

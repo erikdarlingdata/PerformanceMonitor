@@ -58,7 +58,10 @@ public sealed class DailySummaryAzureMasterScopeLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteRowsAsync(connection, ct);
-        await using var postgres = NpgsqlDataSource.Create(cs!);
+        /* #4981: the data source the code under test reads through is pinned to UTC the way every product store
+           connection is (DarlingStoreConnection.PinSessionTimeZoneUtc), so this class does not lean on the test
+           run's own pin of the connection string. */
+        await using var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(cs!));
         var bodySucceeded = false;
         try
         {
@@ -66,7 +69,7 @@ public sealed class DailySummaryAzureMasterScopeLiveTests
             {
                 await Exec(connection, @"
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, sql_engine_edition, created_date, modified_date)
-VALUES ($1, $2, $2, TRUE, 16, $3, now()::timestamp, now()::timestamp)
+VALUES ($1, $2, $2, TRUE, 16, $3, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')
 ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3", ct, id, name, edition);
                 await Exec(connection, "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1,$2,$3,$4,$5)",
                     ct, CollectionIdGenerator.Next(), DateTime.UtcNow.AddMinutes(-30), id, name, edition);
@@ -212,10 +215,13 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
         Assert.Null(resolved);
     });
 
+    /* #4981: a DateTime is bound as naive UTC (Kind Unspecified, a plain timestamp). A Kind=Utc value goes out as
+       timestamptz, which the server turns back into a naive value in the SESSION's time zone, so seeds written this
+       way only held where the session happened to be UTC. */
     private static async Task Exec(NpgsqlConnection c, string sql, CancellationToken ct, params object[] p)
     {
         using var cmd = new NpgsqlCommand(sql, c);
-        foreach (var v in p) cmd.Parameters.AddWithValue(v);
+        foreach (var v in p) cmd.Parameters.AddWithValue(v is DateTime d ? DateTime.SpecifyKind(d, DateTimeKind.Unspecified) : v);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

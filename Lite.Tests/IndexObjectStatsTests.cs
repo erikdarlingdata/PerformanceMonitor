@@ -58,6 +58,10 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
 
     private async Task SeedScenarioAsync()
     {
+        // Six rows, one commit (#5208).
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+
         // BigTable (object 100): 200 MB -> 600 MB  => +400 MB / 200% growth
         await InsertObjectStat(_prior, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 200m, 1_000_000, 0, 0, 0, 0, 0, 0);
         await InsertObjectStat(_latest, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 600m, 3_000_000, 5000, 100, 10, 50, 0, 0);
@@ -69,6 +73,8 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         // HotTable (object 300 index 1): 10000ms -> 100000ms lock wait => +90000ms contention
         await InsertObjectStat(_prior, "AppDb", 300, 1, "dbo", "HotTable", "PK_HotTable", 80m, 250_000, 100, 5, 0, 200, 10_000, 0);
         await InsertObjectStat(_latest, "AppDb", 300, 1, "dbo", "HotTable", "PK_HotTable", 80m, 250_000, 200, 8, 0, 400, 100_000, 3);
+
+        batch.Commit();
     }
 
     private async Task InsertObjectStat(
@@ -107,10 +113,10 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
     // ── read layer ──
 
     [Fact]
-    public async Task ObjectGrowthDrill_ATableWithNoEarlierSampleReadsUnknown_NotZero()
+    public async Task ObjectGrowthDrill_ATableCreatedInTheWindowCountsItsWholeSize()
     {
         await SeedScenarioAsync();
-        // NewTable exists only in the latest snapshot: there is nothing earlier to compare with.
+        // NewTable exists only in the latest snapshot: it was created after the earliest one, so it grew from nothing.
         await InsertObjectStat(_latest, "AppDb", 900, 1, "dbo", "NewTable", "PK_NewTable", 30m, 1_000, 0, 0, 0, 0, 0, 0);
 
         var (objects, _) = await _dataService.GetObjectGrowthHeatmapDataAsync(ServerId, "AppDb");
@@ -119,10 +125,10 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.Equal(400m, big.Growth30dMb!.Value);
         Assert.Equal(400m / 30m, big.DailyGrowthRateMb!.Value, 4);
         var added = Assert.Single(objects, o => o.TableName == "NewTable");
-        Assert.Null(added.Growth30dMb);
-        Assert.Null(added.DailyGrowthRateMb);
+        Assert.Equal(30m, added.Growth30dMb!.Value);
+        Assert.Equal(30m / 30m, added.DailyGrowthRateMb!.Value, 4);
         Assert.Null(added.GrowthPct30d);
-        Assert.Equal("NewTable", objects[^1].TableName);
+        Assert.Equal("BigTable", objects[0].TableName);
     }
 
     [Fact]

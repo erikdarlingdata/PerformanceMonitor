@@ -30,6 +30,7 @@ namespace PerformanceMonitorLite.Tests;
 /// pass. Literal- and comment-aware through that walker, so a method name inside a doc comment or a string
 /// is never counted as a call.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertDeliveryModeThreadingGuardTests
 {
     private const string Method = "TrySendAlertEmailAsync";

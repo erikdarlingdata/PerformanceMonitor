@@ -117,6 +117,22 @@ public static class StoreLogClassifier
     /// </summary>
     public const string SlowStatementClass = "slow_statement";
 
+    /// <summary>
+    /// An <c>auto_explain</c> plan, kept as redacted JSON (#5097). The class is decided AFTER the
+    /// <c>duration: </c> rule has matched, by <see cref="TrySanitizePlan"/>, so it has no rule of its own in
+    /// <see cref="Rules"/>: a second <c>duration: </c> rule would move first-match ordering for every other
+    /// duration line. It is listed in <see cref="ClassNames"/> all the same, so a window that saw none names it.
+    /// </summary>
+    public const string SlowPlanClass = "slow_plan";
+
+    /// <summary>The message a kept plan has when it could not be read whole (text format, cut by the entry cap
+    /// or a read boundary, not JSON): every such plan is one row, whatever the statement was.</summary>
+    public const string WithheldPlanMessage = "plan withheld";
+
+    /// <summary>What a plan that parsed but is too large to keep holds in place of its JSON: the marker and the
+    /// JSON's length in characters, never any of its content.</summary>
+    public const string PlanTooLargeMarker = "plan too large to keep: ";
+
     /// <summary>What a kept statement reads as when it cannot be read to its end (cut at a cap or a read
     /// boundary, or opening a literal it never closes): the masking fails closed rather than trusting a mask
     /// that cannot know what the cut hid.</summary>
@@ -254,9 +270,11 @@ public static class StoreLogClassifier
            past any line an operator sets. PostgreSQL writes it as LOG with the duration first and the statement
            after, on the same line and the tab-indented continuation lines below it. Retained for the reason
            statement_timeout is: the text is what makes one actionable, and a count throws it away. Its text is
-           rewritten before it is kept (SlowStatementClass says how and why), and a duration line that names no
-           statement (log_duration's bare one, auto_explain's plan, whose Query Text is verbatim) is counted as
-           routine instead. */
+           rewritten before it is kept (SlowStatementClass says how and why). A duration line that names no
+           statement is counted as routine instead (log_duration's bare one), except auto_explain's plan head
+           (`duration: N ms  plan:`): the same rule claims it, and MaskRetained keeps it as SlowPlanClass when
+           the plan parses as JSON (Query Text and bind values removed, literals masked), or as its head alone
+           when it does not. Its Query Text is verbatim, so raw plan text is never kept. */
         new(SlowStatementClass, Log, MatchKind.StartsWith, "duration: ", true,
             "a statement ran past the store's slow-statement line (a third of the viewer and mcp roles' statement_timeout) - kept as the statement, comments stripped, literals masked, bind parameters dropped"),
 
@@ -418,7 +436,7 @@ public static class StoreLogClassifier
     /// classified, because a fixture legitimately ends that way and dropping it would make the pin's own
     /// last case silently untested.</para>
     /// </summary>
-    public static Census Classify(string? slab)
+    public static Census Classify(string? slab, bool detailInEnglish = true)
     {
         var entries = new List<Entry>();
         var lines = 0;
@@ -448,7 +466,7 @@ public static class StoreLogClassifier
                 var raw = currentRaw.ToString();
                 if (retained)
                 {
-                    (eventClass, retained, message, raw) = MaskRetained(eventClass, currentMessage, raw);
+                    (eventClass, retained, message, raw) = MaskRetained(eventClass, currentMessage, raw, detailInEnglish: detailInEnglish);
                 }
 
                 entries.Add(new Entry(
@@ -674,6 +692,8 @@ public static class StoreLogClassifier
             }
         }
 
+        /* Decided by TrySanitizePlan, not by a rule (see SlowPlanClass), so it is added here. */
+        names.Add(SlowPlanClass);
         names.Add(UnclassifiedClass);
         names.Add(RoutineClass);
         return [.. names];
@@ -696,6 +716,11 @@ public static class StoreLogClassifier
             return false;
         }
 
+        if (string.Equals(eventClass, SlowPlanClass, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
         foreach (var rule in Rules)
         {
             if (string.Equals(rule.EventClass, eventClass, StringComparison.Ordinal))
@@ -715,6 +740,12 @@ public static class StoreLogClassifier
         {
             return "a WARNING or worse that no rule recognises - kept with its text on purpose, so a shape "
                 + "nobody anticipated is visible rather than filtered";
+        }
+
+        if (string.Equals(eventClass, SlowPlanClass, StringComparison.Ordinal))
+        {
+            return "an auto_explain plan - kept as redacted JSON (statement text and bind values removed, literals "
+                + "masked), one row per plan (runs with the same plan and estimates share a row); a plan that could not be read whole keeps only its duration line";
         }
 
         if (string.Equals(eventClass, RoutineClass, StringComparison.Ordinal))
@@ -1065,18 +1096,108 @@ public static class StoreLogClassifier
     }
 
     /// <summary>
+    /// An <c>auto_explain</c> plan report as it is KEPT (#5097): <see cref="SlowPlanClass"/>. The plan is the
+    /// tab-led lines under a <c>duration: N ms  plan:</c> first line (<see cref="PgLogTextRedactor.IsPlanHead"/>,
+    /// the one spelling of that head). It is kept ONLY if it parses whole as an <c>auto_explain</c> JSON plan,
+    /// through <see cref="PgPlanLogParser.FromBlock"/> (the redaction the monitored-target plan route uses, not a
+    /// second one: <c>Query Text</c> and <c>Query Parameters</c> removed, quoted literals and condition numbers
+    /// masked). Its MESSAGE is <c>plan &lt;hash&gt; &lt;top node&gt; queryid=&lt;id or ?&gt;</c>, so one plan
+    /// shape is one row however often it ran (the kept sample carries one capture's own estimates), and the id is the statement's, when the plan carries one
+    /// (<c>auto_explain.log_verbose</c> with <c>compute_query_id</c>). The kept ENTRY is the first line and the
+    /// compact redacted JSON on one tab-led line. A plan that does not parse whole (text, YAML or XML format, a
+    /// cut by the entry cap or a read boundary, bad JSON, or a body the reader throws on) keeps only its first line
+    /// and <see cref="PgLogTextRedactor.WithheldPlan"/>. One that parses but whose kept entry would pass
+    /// <see cref="MaxSampleLength"/> keeps the same message and a <see cref="PlanTooLargeMarker"/> sample in place of
+    /// the JSON:
+    /// raw plan text is never kept. Every line under the plan that is not tab-led (a field such as CONTEXT) is
+    /// dropped. Idempotent: the kept JSON re-parses to the same shape hash. False when the first line is not a plan head.
+    /// </summary>
+    internal static bool TrySanitizePlan(string message, string rawText, out string sanitizedMessage, out string sanitizedRaw)
+    {
+        sanitizedMessage = message;
+        sanitizedRaw = rawText;
+
+        if (!PgLogTextRedactor.IsPlanHead(message))
+        {
+            return false;
+        }
+
+        var lines = rawText.Split('\n');
+        var firstLine = lines[0].TrimEnd();
+        var body = new StringBuilder();
+        for (var i = 1; i < lines.Length && lines[i].StartsWith('\t'); i++)
+        {
+            body.Append(lines[i], 1, lines[i].Length - 1).Append('\n');
+        }
+
+        /* Fail closed: a body the reader chokes on (a non-string Node Type, say) is withheld, never thrown, so one odd
+           line cannot stop the sweep. */
+        try
+        {
+            if (PgPlanLogParser.FromBlock(0, 0, body.ToString()) is { } plan)
+            {
+                sanitizedMessage = "plan " + plan.PlanHash + " " + (plan.TopNodeType ?? "?") + " queryid=" + QueryIdOf(plan.PlanJson);
+                var kept = firstLine + "\n\t" + plan.PlanJson;
+                sanitizedRaw = kept.Length <= MaxSampleLength
+                    ? kept
+                    : firstLine + "\n\t" + PlanTooLargeMarker + plan.PlanJson.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + " characters";
+                return true;
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        sanitizedMessage = WithheldPlanMessage;
+        sanitizedRaw = firstLine + "\n\t" + PgLogTextRedactor.WithheldPlan;
+        return true;
+    }
+
+    /// <summary>The statement's query id in a redacted plan's root (<c>Query Identifier</c>), or <c>?</c>.</summary>
+    private static string QueryIdOf(string planJson)
+    {
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(planJson) is System.Text.Json.Nodes.JsonObject root
+                && root["Query Identifier"] is System.Text.Json.Nodes.JsonValue value
+                && value.TryGetValue<long>(out var id))
+            {
+                return id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return "?";
+    }
+
+    /// <summary>
     /// A retained entry as it is KEPT (#3915, #3944): <see cref="SlowStatementClass"/>'s own rewrite, or for every
     /// other retained class the message's grouping key (<see cref="GroupingKeyOf"/>) and the entry through
-    /// <see cref="MaskEntry"/>. A slow-statement entry whose first line names no statement falls to
-    /// <see cref="RoutineClass"/>, counted and keeping no text.
+    /// <see cref="MaskEntry"/>. A slow-statement entry whose first line is an <c>auto_explain</c> plan head becomes
+    /// <see cref="SlowPlanClass"/> (<see cref="TrySanitizePlan"/>); one whose first line names no statement and no
+    /// plan falls to <see cref="RoutineClass"/>, counted and keeping no text.
     /// </summary>
     internal static (string EventClass, bool Retained, string Message, string RawText) MaskRetained(
-        string eventClass, string message, string rawText, bool cut = false)
+        string eventClass, string message, string rawText, bool cut = false, bool detailInEnglish = true)
     {
         if (eventClass == SlowStatementClass)
         {
-            return TrySanitizeSlowStatement(message, rawText, out var slowMessage, out var slowRaw)
-                ? (eventClass, true, slowMessage, slowRaw)
+            if (TrySanitizeSlowStatement(message, rawText, out var slowMessage, out var slowRaw))
+            {
+                return (eventClass, true, slowMessage, slowRaw);
+            }
+
+            return TrySanitizePlan(message, rawText, out var planMessage, out var planRaw)
+                ? (SlowPlanClass, true, planMessage, planRaw)
+                : (RoutineClass, false, message, rawText);
+        }
+
+        if (eventClass == SlowPlanClass)
+        {
+            return TrySanitizePlan(message, rawText, out var storedMessage, out var storedRaw)
+                ? (SlowPlanClass, true, storedMessage, storedRaw)
                 : (RoutineClass, false, message, rawText);
         }
 
@@ -1085,7 +1206,7 @@ public static class StoreLogClassifier
            pairs with nothing. Read off the kept entry's first line, not off the raw first line alone (#4006): a
            catalogue that writes the token first (`"$$ BEGIN` ... `"またはその近辺で...`) names its form only after
            the token, which can run past that line, and the first line alone named no form to withhold it by. */
-        var masked = MaskEntry(rawText, cut);
+        var masked = MaskEntry(rawText, cut, detailInEnglish);
         var kept = PrimaryMessageOf(masked) ?? PgLogTextRedactor.RedactMessage(message, cut) ?? message;
         return (eventClass, true, GroupingKeyOf(kept), masked);
     }
@@ -1125,7 +1246,7 @@ public static class StoreLogClassifier
     /// </summary>
     public static string DisplayMessageOf(string eventClass, string? key, string? sample)
     {
-        if (eventClass == SlowStatementClass || sample is null)
+        if (eventClass == SlowStatementClass || eventClass == SlowPlanClass || sample is null)
         {
             return key ?? string.Empty;
         }
@@ -1154,7 +1275,7 @@ public static class StoreLogClassifier
     /// the same function. <paramref name="cut"/> says the entry's end may be missing, and is passed to
     /// <see cref="PgLogTextRedactor.RedactMessage"/>.
     /// </summary>
-    internal static string MaskEntry(string rawText, bool cut = false)
+    internal static string MaskEntry(string rawText, bool cut = false, bool detailInEnglish = true)
     {
         var lines = rawText.Split('\n');
         var result = new StringBuilder(rawText.Length);
@@ -1206,7 +1327,8 @@ public static class StoreLogClassifier
                 var masked = field.Name switch
                 {
                     "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
-                    "DETAIL" => PgLogTextRedactor.RedactDetail(text, detailComplete) ?? string.Empty,
+                    "DETAIL" when !detailInEnglish => WithheldDetail,
+                    "DETAIL" => MaskRowValues(PgLogTextRedactor.RedactDetail(text, detailComplete) ?? string.Empty),
                     _ => PgLogTextRedactor.RedactContext(text) ?? string.Empty,
                 };
 
@@ -1225,6 +1347,61 @@ public static class StoreLogClassifier
         }
 
         return result.ToString();
+    }
+
+    /* The failing-row label in any case (`Failing row contains`, `Partition key of the failing row contains`). */
+    private static readonly Regex FailingRowPattern = new(
+        @"(failing row contains) \(.*",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    /* The key's column list takes one level of parentheses, so an expression index's key
+       (`Key (COALESCE(parent_id, 0), lower(name))=(0, prod)`) reads like a plain column list. */
+    private static readonly Regex KeyValuePattern = new(
+        @"Key \(((?:[^()]|\([^()]*\))*)\)=\(.*\)(?= (?:already exists|is not present|is still referenced))",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    private static readonly Regex KeyValueUnterminatedPattern = new(
+        @"Key \(((?:[^()]|\([^()]*\))*)\)=\((?!\.\.\.\))(.*)",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    /// <summary>The DETAIL a retained entry keeps when the store's <c>lc_messages</c> is not English: the row-carrying
+    /// forms are worded by the catalogue in use, so the patterns of <see cref="MaskRowValues"/> would not read them.</summary>
+    public const string WithheldDetail = "<detail withheld: the store's lc_messages is not English>";
+
+    /// <summary>
+    /// Whether a store's <c>lc_messages</c> setting writes PostgreSQL's English wording: <c>C</c> (also <c>C.UTF-8</c>),
+    /// <c>POSIX</c>, or an <c>en</c> locale (<c>en_US.UTF-8</c>, <c>English_United States.1252</c>). A setting that could
+    /// not be read (null or blank) counts as not English.
+    /// </summary>
+    public static bool IsEnglishLcMessages(string? lcMessages)
+    {
+        if (string.IsNullOrWhiteSpace(lcMessages))
+        {
+            return false;
+        }
+
+        var value = lcMessages.Trim();
+        return value.Equals("C", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("POSIX", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("C.", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A DETAIL's row values withheld (#5452): the tuple in <c>Failing row contains (...)</c> and the value in
+    /// <c>Key (columns)=(value)</c> are replaced by <c>...</c>, so the stored text names the constraint and the
+    /// columns and holds no stored value. Idempotent, like <see cref="MaskEntry"/>.
+    /// </summary>
+    internal static string MaskRowValues(string detail)
+    {
+        if (detail.Length == 0)
+        {
+            return detail;
+        }
+
+        detail = FailingRowPattern.Replace(detail, "$1 (...).");
+        detail = KeyValuePattern.Replace(detail, "Key ($1)=(...)");
+        return KeyValueUnterminatedPattern.Replace(detail, "Key ($1)=(...)");
     }
 
     /// <summary>A field's text (<see cref="MaskEntry"/>): its first line from <paramref name="from"/>, and the
@@ -1267,6 +1444,7 @@ public static class StoreLogClassifier
         var firstLine = sample.Split('\n', 2)[0];
         var primary = FindField(firstLine);
         if (eventClass != SlowStatementClass
+            && eventClass != SlowPlanClass
             && primary.Kind == FieldKind.Primary
             && IsStatementLog(primary.Name, firstLine[primary.MessageStart..]))
         {
@@ -1286,8 +1464,10 @@ public static class StoreLogClassifier
            syntax error's token first names its form only after the token, so what the cap left names none. */
         var cut = sample.Length >= MaxSampleLength && !sample.Contains('\n');
         var lineMessage = PrimaryMessageOf(sample) ?? message ?? firstLine;
-        var (_, retained, key, maskedSample) = MaskRetained(eventClass, lineMessage, sample, cut);
-        if (!retained)
+        var (maskedClass, retained, key, maskedSample) = MaskRetained(eventClass, lineMessage, sample, cut);
+        /* A legacy slow_statement row whose sample is a plan head comes back as another class: empty it, as before
+           plans were kept, rather than relabel it in place. */
+        if (!retained || !string.Equals(maskedClass, eventClass, StringComparison.Ordinal))
         {
             return (null, null);
         }

@@ -28,7 +28,7 @@ public sealed class WaitStatsCollectorDefinitionTests
     private const string ExpectedQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     wait_type = ws.wait_type,
     waiting_tasks_count = ws.waiting_tasks_count,
     wait_time_ms = ws.wait_time_ms,
@@ -41,7 +41,7 @@ OPTION(RECOMPILE);";
        carrier's exact column names, read straight from the DMV. Not on Azure SQL DB (below). */
     private const string ExpectedIdentitySet = @"
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     server_start_time = dosi.sqlserver_start_time,
     server_name = @@SERVERNAME
 FROM sys.dm_os_sys_info AS dosi;";

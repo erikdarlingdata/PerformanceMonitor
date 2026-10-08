@@ -58,6 +58,7 @@ namespace Darling.Tests;
 /// after the writer has stored a twin, and after the post-rung rows are gone again); the dedup is pinned in
 /// <c>Lite.Tests/CpuUtilizationCollectorDefinitionTests</c>.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class TimeHonestyRungTests
 {
     private const int RungVersion = 134;
@@ -506,6 +507,7 @@ public sealed class TimeHonestyRungTests
 /// against every other live class because it shares the store.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class TimeHonestyRungLivePostgresTests
 {
     private const int ServerId = -134134;

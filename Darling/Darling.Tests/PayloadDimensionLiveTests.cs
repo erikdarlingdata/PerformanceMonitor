@@ -1707,7 +1707,14 @@ public sealed class PayloadDimensionLiveTests
         try
         {
             /* INSIDE the try: creating aggregates is the shared-fixture mutation the finally restores.
-               Policies removed immediately - see EnsureAggregatesWithoutPoliciesAsync. */
+               Policies removed immediately - see EnsureAggregatesWithoutPoliciesAsync.
+
+               The clamp is this test's own arrangement, not a property of whatever ran before it: an
+               aggregate a sibling test left standing with deep coverage would report query_stats as
+               covered and the clamp would not hold. So every standing aggregate is dropped first and the
+               ensure below builds them empty; the single recent refresh further down is then the only
+               coverage there is. The finally puts the original set back. */
+            await DropStandingCaggsAsync(connection, ct);
             await EnsureAggregatesWithoutPoliciesAsync(connection, ct);
 
             /* The held digest-carrying fact... */
@@ -1782,7 +1789,12 @@ public sealed class PayloadDimensionLiveTests
                 await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
                 await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, referencedDigest, cleanupCt);
                 await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, orphanDigest, cleanupCt);
-                await RestoreCaggsAsync(cleanup, preexistingCaggs, cleanupCt);
+                await RestoreCaggsAsync(cleanup, Array.Empty<string>(), cleanupCt);
+                if (preexistingCaggs.Length > 0)
+                {
+                    await EnsureAggregatesWithoutPoliciesAsync(cleanup, cleanupCt);
+                    await RestoreCaggsAsync(cleanup, preexistingCaggs, cleanupCt);
+                }
             });
         }
     }
@@ -1956,6 +1968,13 @@ public sealed class PayloadDimensionLiveTests
             await batch.RemoveRefreshPolicyAsync(view, ct);
         }
     }
+
+    /// <summary>
+    /// Drops every continuous aggregate standing in <c>collect</c>, verified, so the caller starts from a
+    /// store whose rollups hold no coverage at all. The caller owns putting the original set back.
+    /// </summary>
+    private static async Task DropStandingCaggsAsync(NpgsqlConnection connection, CancellationToken ct)
+        => await new LiveCleanupBatch(connection).DropContinuousAggregatesAsync(await ExistingCaggsAsync(connection, ct), ct);
 
     /// <summary>
     /// Makes the raw tier's rollup coverage reach back over everything raw holds, so the #1784 gate judges a
