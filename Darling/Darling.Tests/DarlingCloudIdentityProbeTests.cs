@@ -95,6 +95,73 @@ public sealed class DarlingCloudIdentityProbeTests
     /// cannot delay either one, so time past this bar is a wait inside the probe, not the machine.</summary>
     private const long NoPoolStepLimitMs = 1000;
 
+    /// <summary>A dedicated thread (never a pool thread) that ticks every 10 ms and records each tick that came
+    /// late (#5600). A stop-the-world GC pause or a descheduled process delays every thread at once, so a stall
+    /// the watcher saw inside a window is machine time, not probe time, and the budget test below grants that
+    /// window the stall as extra allowance. A probe that really waits (an untokened delay, say) leaves the
+    /// watcher ticking on time, so the wait gets no allowance and still fails.</summary>
+    private sealed class StallWatcher : IDisposable
+    {
+        private const int TickMs = 10;
+        private const long MinStallMs = 25;
+        private readonly Stopwatch _clock;
+        private readonly object _gate = new();
+        private readonly List<(long Start, long End)> _stalls = [];
+        private readonly Thread _thread;
+        private volatile bool _stop;
+
+        public StallWatcher(Stopwatch clock)
+        {
+            _clock = clock;
+            _thread = new Thread(Run) { IsBackground = true, Name = "probe-test-stall-watcher" };
+            _thread.Start();
+        }
+
+        private void Run()
+        {
+            var last = _clock.ElapsedMilliseconds;
+            while (!_stop)
+            {
+                Thread.Sleep(TickMs);
+                var now = _clock.ElapsedMilliseconds;
+                if (now - last - TickMs >= MinStallMs)
+                {
+                    lock (_gate)
+                    {
+                        _stalls.Add((last, now));
+                    }
+                }
+
+                last = now;
+            }
+        }
+
+        /// <summary>The milliseconds of [from, to] that fall inside a stall the watcher saw.</summary>
+        public long StallMsWithin(long from, long to)
+        {
+            long total = 0;
+            lock (_gate)
+            {
+                foreach (var (start, end) in _stalls)
+                {
+                    var overlap = Math.Min(end, to) - Math.Max(start, from);
+                    if (overlap > 0)
+                    {
+                        total += overlap;
+                    }
+                }
+            }
+
+            return total;
+        }
+
+        public void Dispose()
+        {
+            _stop = true;
+            _thread.Join();
+        }
+    }
+
     [Fact]
     public async Task ProbeAsync_NeitherCloudResponds_ReturnsNone_WithinItsOwnBudget()
     {
@@ -147,11 +214,34 @@ public sealed class DarlingCloudIdentityProbeTests
             throw new InvalidOperationException("unreachable");
         });
 
+        /* #5600: this failed again in the whole-suite guards job (about 28,000 tests in one process) at 1083 ms
+           after the request ended, with the probe unchanged. Two things in the old measure belonged to the
+           machine, not the probe:
+             - returnedAt was read in THIS method after `await ... .WaitAsync(...)`, so it included the hop
+               from the probe task's completion back to this test (WaitAsync's own completion, then the awaiter's
+               continuation). The probe's task completion is stamped instead by a synchronous continuation on the
+               probe task itself, which runs on whichever thread completes the probe, with no hop;
+             - a stop-the-world pause or a descheduled process delays the cancel-to-return step by itself. The
+               StallWatcher (a dedicated thread) records those, and the window gets that much extra allowance.
+           A probe that waits after the cancel is still caught: its task completes late with the watcher ticking
+           on time, so the stamp is past the bar with no stall to excuse it. */
+        using var watcher = new StallWatcher(clock);
+        var returnedAtMs = new long[] { -1 };
+
         clock.Start();
         CloudIdentity identity;
+        long returnedAt;
         try
         {
-            identity = await DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None).WaitAsync(HangGuard);
+            var probe = DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None);
+            var stamp = probe.ContinueWith(
+                _ => Interlocked.CompareExchange(ref returnedAtMs[0], clock.ElapsedMilliseconds, -1),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            identity = await probe.WaitAsync(HangGuard);
+            await stamp.WaitAsync(HangGuard);
+            returnedAt = Interlocked.Read(ref returnedAtMs[0]);
         }
         catch (TimeoutException)
         {
@@ -159,21 +249,23 @@ public sealed class DarlingCloudIdentityProbeTests
             throw;
         }
 
-        var returnedAt = clock.ElapsedMilliseconds;
+        var resumedAt = clock.ElapsedMilliseconds;
 
         Assert.Equal(CloudIdentity.None, identity);
         var startedAt = Interlocked.Read(ref handlerStartedAtMs[0]);
         var endedAt = Interlocked.Read(ref handlerEndedAtMs[0]);
+        var startStallMs = watcher.StallMsWithin(0, Math.Max(startedAt, 0));
+        var returnStallMs = watcher.StallMsWithin(Math.Max(endedAt, 0), returnedAt);
         Assert.True(
-            startedAt >= 0 && startedAt <= NoPoolStepLimitMs,
-            $"the handler's first request started at {startedAt} ms (-1 means it never started), not within {NoPoolStepLimitMs} ms of the call: the probe waited before sending it, and nothing bounds that wait");
+            startedAt >= 0 && startedAt - startStallMs <= NoPoolStepLimitMs,
+            $"the handler's first request started at {startedAt} ms (-1 means it never started; {startStallMs} ms of that was a machine stall), not within {NoPoolStepLimitMs} ms of the call: the probe waited before sending it, and nothing bounds that wait");
         Assert.True(endedAt >= 0, "ProbeAsync returned while the handler's request was still pending: the budget must cancel the request, not abandon it");
         Assert.True(
             endedAt >= DarlingCloudIdentityProbe.ProbeBudget.TotalMilliseconds / 2,
             $"the handler's request ended after {endedAt} ms, well before the {DarlingCloudIdentityProbe.ProbeBudget.TotalMilliseconds:0} ms budget: something other than the probe's budget ended it");
         Assert.True(
-            returnedAt - endedAt <= NoPoolStepLimitMs,
-            $"ProbeAsync returned {returnedAt - endedAt} ms after the handler's request ended (at {endedAt} ms), not within {NoPoolStepLimitMs} ms: the probe waited after the budget cancelled the request, and nothing bounds that wait");
+            returnedAt - endedAt - returnStallMs <= NoPoolStepLimitMs,
+            $"ProbeAsync returned {returnedAt - endedAt} ms after the handler's request ended (at {endedAt} ms; {returnStallMs} ms of that was a machine stall; this test resumed at {resumedAt} ms), not within {NoPoolStepLimitMs} ms: the probe waited after the budget cancelled the request, and nothing bounds that wait");
     }
 
     /// <summary>The number the timing test above no longer measures against a clock (#4741): the 200 ms total
