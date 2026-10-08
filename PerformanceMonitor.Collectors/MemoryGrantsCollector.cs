@@ -57,7 +57,7 @@ public sealed class MemoryGrantsCollector : CollectorDefinitionBase<MemoryGrants
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     resource_semaphore_id = deqrs.resource_semaphore_id,
     pool_id = deqrs.pool_id,
     target_memory_mb = CONVERT(decimal(18,2), deqrs.target_memory_kb / 1024.0),

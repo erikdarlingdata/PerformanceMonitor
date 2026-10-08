@@ -1646,7 +1646,7 @@
                                        Background="#22FFAA00"/>
                             <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryPressureEventsChart"/>
                             <!-- Shown only where the memory_pressure_events collector does not collect for this server and the chart has no points. -->
-                            <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                            <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Text="No memory pressure events in the selected time window." Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
                     </TabItem>
 

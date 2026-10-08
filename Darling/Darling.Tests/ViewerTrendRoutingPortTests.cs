@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// materialization watermark rather than this ladder — its own disclosure, in the same title idiom, off the
 /// floor the route already carried; those pins are here too, beside the siblings'.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerTrendRoutingPortTests
 {
     private static readonly DateTime Now = new(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);
@@ -508,6 +509,7 @@ public sealed class ViewerTrendRoutingPortTests
 /// in CI; the seed's shape is the sibling test's, and the routing assertions are the pure ones above run
 /// against the real relation.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerTrendRoutingLivePostgresTests
 {
     private const int ServerId = -936536;

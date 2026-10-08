@@ -44,6 +44,13 @@ public partial class FinOpsTab : UserControl
        for a server switch that never happened. Darling's FinOps tab carries the same flag. */
     private bool _populatingServers;
 
+    /* When the last whole per-server load began (UTC). The tab loads once at start-up, before the first collection has run; showing it
+       later re-runs that load, the same one a server reselect runs, unless this is recent (FinOpsShowReloadPolicy). */
+    private DateTime? _lastPerServerLoadUtc;
+
+    /* True until the tab's first show after start-up has run its reload: that one never skips on the age of the start-up load. */
+    private bool _firstShowPending = true;
+
     private DataGridFilterManager<DatabaseResourceUsageRow>? _dbResourcesFilterMgr;
     private DataGridFilterManager<StorageGrowthRow>? _storageGrowthFilterMgr;
     private DataGridFilterManager<DatabaseSizeRow>? _dbSizesFilterMgr;
@@ -257,6 +264,7 @@ public partial class FinOpsTab : UserControl
         using var _profiler = Helpers.MethodProfiler.StartTiming("FinOps-PerServerData");
         var serverId = GetSelectedServerId();
         if (serverId == 0 || _dataService == null) return;
+        _lastPerServerLoadUtc = DateTime.UtcNow;
 
         // Re-read monthly cost from server manager in case user edited the server config
         if (ServerSelector.SelectedItem is Models.ServerConnection selectedServer && _serverManager != null)
@@ -502,9 +510,10 @@ public partial class FinOpsTab : UserControl
         /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
            Database is the database's own. */
         data.HealthScore = data.ComputeHealthScore();
-        /* A window with no CPU sample has no CPU term (ComputeHealthScore leaves it out), and the tooltip says so. */
-        HealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;
-        HealthScoreText.Text = $"Health: {data.HealthScore}";
+        /* A window with no CPU sample has no score: the memory and storage terms alone would read a full 100 next to "No Data".
+           It shows a dash on a gray badge, and the tooltip says why. */
+        HealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;
+        HealthScoreText.Text = data.HealthScoreText;
         HealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         HealthScoreBorder.Visibility = Visibility.Visible;
     }
@@ -596,12 +605,41 @@ public partial class FinOpsTab : UserControl
     private void ReloadUnfinishedSizeGridsOnShow()
     {
         if (!IsVisible || _dataService == null) return;
-        /* A show while a flagged load is still in flight starts a second load that supersedes the first: one
-           extra local read, and the generation check keeps only the newest paint. */
         var serverId = GetSelectedServerId();
         if (serverId == 0) return;
+
+        /* The first show: the start-up load ran before any collection, against a store that may be days old, so every grid on this
+           tab (and the recommendations built from them) can still be that empty window. Re-run the same whole load a server
+           reselect runs, for the server already selected; the per-grid generations drop any paint it supersedes. Filters stay: no
+           server switch happened. It covers both size grids, so the flagged reloads below are for a recent load. */
+        var firstShow = _firstShowPending;
+        _firstShowPending = false;
+        if (FinOpsShowReloadPolicy.ShouldReloadOnShow(_lastPerServerLoadUtc, DateTime.UtcNow, firstShow))
+        {
+            _ = LoadPerServerDataAsync();
+            return;
+        }
+
+        /* A show while a flagged load is still in flight starts a second load that supersedes the first: one
+           extra local read, and the generation check keeps only the newest paint. */
         if (_dbSizesNeedReload) _ = LoadDatabaseSizesAsync(serverId);
         if (_storageGrowthNeedReload) _ = LoadStorageGrowthAsync(serverId);
+    }
+
+    /// <summary>
+    /// The Overview refresh saw that a collection for <paramref name="serverId"/> finished at <paramref name="lastCollectionUtc"/>.
+    /// A tab that is visible on that server reloads (see <see cref="FinOpsShowReloadPolicy.ShouldReloadAfterCollection"/>): the load it
+    /// holds may have read the window before the collection, and nothing else re-runs it while the tab stays shown.
+    /// </summary>
+    public void NoteCollection(int serverId, DateTime? lastCollectionUtc)
+    {
+        if (!IsVisible || _dataService == null || lastCollectionUtc is not DateTime collected) return;
+        if (serverId == 0 || GetSelectedServerId() != serverId) return;
+
+        if (FinOpsShowReloadPolicy.ShouldReloadAfterCollection(_lastPerServerLoadUtc, collected, DateTime.UtcNow))
+        {
+            _ = LoadPerServerDataAsync();
+        }
     }
 
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)
@@ -799,12 +837,9 @@ public partial class FinOpsTab : UserControl
             // Compute health scores for each server
             foreach (var item in data)
             {
-                /* A server with no CPU sample in the window has a null average: its CPU term is left out, because scoring it
-                   as 0% CPU would hand it a full 100 made from nothing. */
-                int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;
-                var memScore = 80; // Default — we don't have buffer pool ratio in inventory
-                var storScore = FinOpsHealthCalculator.StorageScore(50); // Default — no file-level free space in inventory
-                item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
+                /* A server with no CPU sample in the window has a null average and so no score (a dash): memory and storage here are
+                   defaults, and a score made only of defaults says nothing about the server. */
+                item.HealthScore = FinOpsHealthCalculator.InventoryScore(item.AvgCpuPct);
             }
 
             _serverInventoryCache = data;
@@ -868,9 +903,16 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetIdleDatabasesAsync(serverId));
+            // The same 7-day coverage rule the recommendation row uses: a database is idle only when each of the last 7 UTC days was
+            // watched, else the grid says why it is empty instead of "No idle databases detected".
+            var (covered, data) = await Task.Run(async () =>
+            {
+                var hasCoverage = await _dataService.HasQueryStatsCoverageAsync(serverId);
+                return (hasCoverage, hasCoverage ? await _dataService.GetIdleDatabasesAsync(serverId) : new List<IdleDatabaseRow>());
+            });
             if (_loads.Superseded(nameof(LoadIdleDatabasesAsync), gen)) return;
             _idleDbsFilterMgr!.UpdateData(data);
+            IdleDatabasesNoDataMessage.Text = LocalDataService.IdleDatabasesEmptyText(covered);
             IdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
         }

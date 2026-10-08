@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// at source, the idiom this suite already uses for cross-artifact contracts.</para>
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class CollectorStateContractTests
 {
     private const string RepoRootNotFound = "repo root not found -- the source pin cannot run";

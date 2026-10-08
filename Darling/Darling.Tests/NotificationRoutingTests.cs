@@ -526,6 +526,9 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.NotificationChannelFailingMetric,
             /* #4732: fired through the constant, so the FireAsync literal scan below cannot see it. */
             DarlingSelfAlertEvaluator.FleetGateMetric,
+            /* #5493: fired through the constants (DecideStateAlert / FireAsync with CaptureDownMetric and
+               AgentDownMetric), so the FireAsync literal scan below cannot see them. */
+            DarlingSelfAlertEvaluator.CaptureDownMetric, DarlingSelfAlertEvaluator.AgentDownMetric,
             /* #3816: the policy-job self-heal's two new per-family names and its total_failures arm. Listed
                here rather than found by the FireAsync literal scan below because all three fire through a
                band record's field (band.Metric) rather than a quoted string at the call site — the scan

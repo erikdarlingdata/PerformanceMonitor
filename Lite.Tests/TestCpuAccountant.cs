@@ -120,7 +120,7 @@ internal static class TestCpuAccountant
         return delta;
     }
 
-    private static long ThreadCpuTicks()
+    internal static long ThreadCpuTicks()
     {
         if (!Enabled)
         {

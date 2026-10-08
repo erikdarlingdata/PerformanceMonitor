@@ -62,6 +62,7 @@ namespace Darling.Tests;
 /// across it, which is why one was not used.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class ViewerScopedPaintGuardTests
 {
     /// <summary>
