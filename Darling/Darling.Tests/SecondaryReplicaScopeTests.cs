@@ -32,7 +32,7 @@ public sealed class PgSecondaryReplicaScopeTests
 {
     private static AnalysisContext ContextWith(params string[] secondaries) => new()
     {
-        SecondaryReplicaDatabases = new HashSet<string>(secondaries, StringComparer.OrdinalIgnoreCase),
+        SecondaryReplicaDatabases = new HashSet<string>(secondaries, StringComparer.Ordinal),
     };
 
     [Fact]
@@ -49,17 +49,53 @@ public sealed class PgSecondaryReplicaScopeTests
     }
 
     [Fact]
-    public void Apply_WithASecondary_BindsTheLowerCasedNamesAsOneArray_NumberedAfterTheExistingParameters()
+    public void Apply_WithASecondary_BindsTheNamesAsTheyAreAsOneArray_NumberedAfterTheExistingParameters()
     {
         using var cmd = new NpgsqlCommand("SELECT 1 FROM t WHERE a = $1 /*SEC*/ ORDER BY 1");
         cmd.Parameters.AddWithValue(1);
 
         PgSecondaryReplicaScope.Apply(cmd, ContextWith("SecDb", "OtherDb"), "DB_CONFIG", "database_name");
 
-        Assert.Contains("AND (database_name IS NULL OR lower(database_name) <> ALL($2::text[]))", cmd.CommandText, StringComparison.Ordinal);
+        Assert.Contains("AND (database_name IS NULL OR database_name <> ALL($2::text[]))", cmd.CommandText, StringComparison.Ordinal);
         Assert.Equal(2, cmd.Parameters.Count);
         var names = Assert.IsType<string[]>(cmd.Parameters[1].Value);
-        Assert.Equal(["otherdb", "secdb"], names.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Equal(["OtherDb", "SecDb"], names.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public void Apply_MatchesTheNameExactly_ASecondarySalesDbDoesNotHideASeparateSalesdb()
+    {
+        /* #5558 round 2: on a case-sensitive server collation, SalesDb (a secondary copy) and salesdb (a standalone
+           database) are two databases. The set carries only the secondary's exact name and the predicate compares
+           it as is, so the standalone one keeps its rows. */
+        using var cmd = new NpgsqlCommand("SELECT 1 FROM t WHERE a = $1 /*SEC*/");
+        cmd.Parameters.AddWithValue(1);
+
+        PgSecondaryReplicaScope.Apply(cmd, ContextWith("SalesDb"), "DB_CONFIG", "database_name");
+
+        Assert.Equal(["SalesDb"], Assert.IsType<string[]>(cmd.Parameters[1].Value));
+        Assert.DoesNotContain("lower(", cmd.CommandText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5558 round 2 (L4): the regressed-queries drill-down has two SQL variants, the raw one and the interval-table one, and
+    /// the live drill-down test runs whichever the seeded store picks. Each must carry the marker exactly once and before its
+    /// <c>LIMIT 5</c>; a variant that lost it would leave <c>Apply</c> binding a parameter nothing references and the filter
+    /// would silently not run there.
+    /// </summary>
+    [Theory]
+    [InlineData("raw")]
+    [InlineData("table")]
+    public void EachRegressedQueriesVariant_CarriesTheMarkerExactlyOnce_BeforeItsLimit(string variant)
+    {
+        var sql = variant == "raw" ? PgDrillDownCollector.RegressedQueriesSql : PgDrillDownCollector.RegressedQueriesTableSql;
+
+        var first = sql.IndexOf(PgSecondaryReplicaScope.Marker, StringComparison.Ordinal);
+        Assert.True(first >= 0, variant + " variant lost the secondary-replica marker");
+        Assert.Equal(-1, sql.IndexOf(PgSecondaryReplicaScope.Marker, first + PgSecondaryReplicaScope.Marker.Length, StringComparison.Ordinal));
+
+        var limit = sql.IndexOf("LIMIT 5", first, StringComparison.Ordinal);
+        Assert.True(limit > first, variant + " variant: the marker must come before its LIMIT 5, so the filter runs before the cut");
     }
 
     [Fact]
@@ -67,7 +103,7 @@ public sealed class PgSecondaryReplicaScopeTests
     {
         using var cmd = new NpgsqlCommand("SELECT 1 FROM t /*SEC*/ GROUP BY 1");
         PgSecondaryReplicaScope.Apply(cmd, ContextWith("SecDb"), "PLAN_REGRESSION", "database_name", "WHERE");
-        Assert.Contains(" WHERE (database_name IS NULL OR lower(database_name) <> ALL($1::text[]))", cmd.CommandText, StringComparison.Ordinal);
+        Assert.Contains(" WHERE (database_name IS NULL OR database_name <> ALL($1::text[]))", cmd.CommandText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -79,7 +115,7 @@ public sealed class PgSecondaryReplicaScopeTests
         PgSecondaryReplicaScope.Apply(cmd, ContextWith("SecDb"), "MISSING_INDEX", "database_name");
 
         Assert.DoesNotContain("/*SEC*/", cmd.CommandText, StringComparison.Ordinal);
-        Assert.DoesNotContain("lower(", cmd.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("<> ALL(", cmd.CommandText, StringComparison.Ordinal);
         Assert.Single(cmd.Parameters);
     }
 
@@ -91,7 +127,7 @@ public sealed class PgSecondaryReplicaScopeTests
 
         PgSecondaryReplicaScope.Apply(cmd, new AnalysisContext(), "DB_CONFIG", "database_name");
 
-        Assert.DoesNotContain("lower(", cmd.CommandText, StringComparison.Ordinal);
+        Assert.DoesNotContain("<> ALL(", cmd.CommandText, StringComparison.Ordinal);
         Assert.Single(cmd.Parameters);
     }
 
@@ -119,7 +155,7 @@ public sealed class PgSecondaryReplicaScopeTests
         Assert.NotNull(context.SecondaryReplicaDatabases);
         Assert.Empty(context.SecondaryReplicaDatabases!);
 
-        var resolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "SecDb" };
+        var resolved = new HashSet<string>(StringComparer.Ordinal) { "SecDb" };
         var already = new AnalysisContext { ServerId = 1, SecondaryReplicaDatabases = resolved };
         await PgSecondaryReplicaScope.EnsureAsync(unreachable, already, logger: null);
         Assert.Same(resolved, already.SecondaryReplicaDatabases);
@@ -183,10 +219,14 @@ public sealed class AnalysisContextSecondaryScopeSourceScanTests
             foreach (Match m in construction.Matches(text))
             {
                 sites++;
-                var close = text.IndexOf("};", m.Index, StringComparison.Ordinal);
-                var initializer = close < 0 ? text[m.Index..] : text[m.Index..close];
                 var end = memberEnd.Match(text, m.Index);
-                var member = end.Success ? text[m.Index..end.Index] : text[m.Index..];
+                var limit = end.Success ? end.Index : text.Length;
+                var member = text[m.Index..limit];
+                /* The initializer's closing brace is searched only up to the member's end: an inline construction
+                   such as Foo(new AnalysisContext { ... }); closes with "})", and an unbounded search would run on into
+                   a LATER construction's initializer and borrow its SecondaryReplicaDatabases setting (#5558 round 2). */
+                var close = text.IndexOf("};", m.Index, limit - m.Index, StringComparison.Ordinal);
+                var initializer = close < 0 ? member : text[m.Index..close];
                 var name = m.Groups["name"].Value;
                 var inInitializer = initializer.Contains("SecondaryReplicaDatabases", StringComparison.Ordinal);
                 var ensured = name.Length > 0 && Regex.IsMatch(member, @"SecondaryReplicaScope\.EnsureAsync\([^)]*\b" + Regex.Escape(name) + @"\b");

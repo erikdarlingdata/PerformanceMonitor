@@ -91,11 +91,17 @@ public sealed class AgReplicaScopeTests
     }
 
     [Fact]
-    public void Names_AreMatchedWithoutRegardToCase_AndRoleCaseDoesNotMatter()
+    public void RoleCaseDoesNotMatter_ButDatabaseNamesAreKeptExactly()
     {
-        var set = AgReplicaScope.SecondaryDatabases([Replica("ag1", "secondary")], [Db("AG1", "Sales")]);
-        Assert.Contains("SALES", set);
-        Assert.Contains("sales", set);
+        /* #5558 round 2: the snapshot's database_name is sys.databases.name, the same catalog the replicated facts'
+           names come from, so the casing is identical on both sides and the match is ordinal. On a case-sensitive
+           server collation a secondary SalesDb and a separate salesdb are two databases. */
+        var set = AgReplicaScope.SecondaryDatabases([Replica("ag1", "secondary")], [Db("AG1", "SalesDb")]);
+        Assert.Contains("SalesDb", set);
+        Assert.DoesNotContain("salesdb", set);
+        Assert.True(AgReplicaScope.IsSkipped(set, "SalesDb"));
+        Assert.False(AgReplicaScope.IsSkipped(set, "salesdb"));
+        Assert.Equal(["salesdb"], AgReplicaScope.WithoutSecondaries(["SalesDb", "salesdb"], set));
     }
 
     [Fact]
@@ -165,8 +171,8 @@ public sealed class FactReplicaScopeCoverageTests
         var empty = new AnalysisContext();
         Assert.Empty(FactReplicaScope.SecondariesFor(empty, "DB_CONFIG"));
 
-        var context = new AnalysisContext { SecondaryReplicaDatabases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "SecDb" } };
-        Assert.Equal(["secdb"], FactReplicaScope.SecondariesFor(context, "DB_CONFIG"));
+        var context = new AnalysisContext { SecondaryReplicaDatabases = new HashSet<string>(StringComparer.Ordinal) { "SecDb" } };
+        Assert.Equal(["SecDb"], FactReplicaScope.SecondariesFor(context, "DB_CONFIG"));
         Assert.Empty(FactReplicaScope.SecondariesFor(context, "MISSING_INDEX"));
     }
 
@@ -300,6 +306,50 @@ public sealed class SecondaryReplicaFactTests : IClassFixture<SharedDuckDbFixtur
         var drill = new DrillDownCollector(_duckDb);
         var files = await LatestValueSeed.AutogrowthFilesAsync(drill, context);
         Assert.Equal(["PrimDb", "StandDb"], files.Select(f => f.GetProperty("database").GetString()!).OrderBy(n => n).ToArray());
+    }
+
+    [Fact]
+    public async Task ASecondarySecDb_DoesNotHideASeparateDatabaseNamedSecdb()
+    {
+        /* #5558 round 2: on a case-sensitive server collation these are two databases; the filter compares the
+           exact name, so the lower-case twin keeps its DB_CONFIG row. */
+        var end = Now();
+        await SeedAsync(async c =>
+        {
+            await SeedDatabasesAsync(c, end);
+            await LatestValueSeed.InsertDatabaseConfigAsync(c, ServerId, end.AddDays(-1), "secdb", autoShrink: true, rcsiOn: false);
+            await SeedAgAsync(c, end.AddMinutes(-1));
+        });
+
+        var (facts, context) = await FactsAsync(end);
+
+        Assert.Equal(["SecDb"], context.SecondaryReplicaDatabases!.ToArray());
+        var config = facts["DB_CONFIG"];
+        Assert.Equal(3, config.Metadata["database_count"]);
+        Assert.Equal(3, config.Metadata["auto_shrink_on_count"]);
+    }
+
+    [Fact]
+    public async Task CompareAndFactsReads_CarryTheSetTheirContextFilteredWith_SoTheNoteCannotDisagree()
+    {
+        /* #5558 round 2: compare_analysis and get_analysis_facts build secondary_replica_note from what the read
+           returns, not from a second read of the role. The baseline window ends BEFORE the only snapshot (nothing known,
+           nothing skipped) and the comparison window ends after it (SecDb skipped): each window's returned set is its own. */
+        var end = Now();
+        await SeedAsync(async c => { await SeedDatabasesAsync(c, end); await SeedAgAsync(c, end.AddMinutes(-1)); });
+        var service = new AnalysisService(_duckDb);
+
+        var (_, _, _, _, _, baselineSecondaries, comparisonSecondaries) = await service.ComparePeriodsAsync(
+            ServerId, "ag-scope",
+            end.AddHours(-30), end.AddHours(-26), end.AddHours(-4), end,
+            TestContext.Current.CancellationToken);
+        Assert.Empty(baselineSecondaries!);
+        Assert.Null(AgReplicaScope.SkippedNote(baselineSecondaries));
+        Assert.Equal(["SecDb"], comparisonSecondaries!.ToArray());
+        Assert.Equal(AgReplicaScope.SkippedNote(1), AgReplicaScope.SkippedNote(comparisonSecondaries));
+
+        var (_, _, caveats) = await service.CollectAndScoreFactsAsync(ServerId, "ag-scope", 4, end, TestContext.Current.CancellationToken);
+        Assert.Equal(["SecDb"], caveats.SecondaryReplicaDatabases!.ToArray());
     }
 
     [Fact]

@@ -30,7 +30,7 @@ public static class PgSecondaryReplicaScope
     public const string Marker = "/*SEC*/";
 
     /// <summary>The set a pass that reads only node-local facts carries: nothing is skipped, and no AG read is paid for.</summary>
-    public static IReadOnlySet<string> NoneSkipped { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    public static IReadOnlySet<string> NoneSkipped { get; } = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>Fills the set once per context. Never throws except an abandonment: a read fault logs and leaves the pass unfiltered.</summary>
     public static async Task EnsureAsync(NpgsqlDataSource postgres, AnalysisContext context, Microsoft.Extensions.Logging.ILogger? logger)
@@ -52,7 +52,7 @@ public static class PgSecondaryReplicaScope
             var replicaTime = await NewestAsync(connection, "ag_replica_states", serverId, asOf, cancellationToken);
             var databaseTime = await NewestAsync(connection, "ag_database_replica_states", serverId, asOf, cancellationToken);
             if (!AgReplicaScope.IsFresh(replicaTime, asOfUtc) || !AgReplicaScope.IsFresh(databaseTime, asOfUtc))
-                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                return new HashSet<string>(StringComparer.Ordinal);
 
             var replicas = new List<AgReplicaReading>();
             using (var cmd = new NpgsqlCommand(
@@ -95,7 +95,7 @@ public static class PgSecondaryReplicaScope
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             logger?.LogWarning(ex, "Availability Group role lookup failed for server {ServerId}; no database is skipped this pass", serverId);
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return new HashSet<string>(StringComparer.Ordinal);
         }
     }
 
@@ -128,7 +128,7 @@ public static class PgSecondaryReplicaScope
 
     /// <summary>
     /// Replaces <see cref="Marker"/> in the command's text with the predicate that drops the skipped databases of
-    /// <paramref name="factKey"/> (<see cref="FactReplicaScope"/>), binding the lower-cased names as one text[]
+    /// <paramref name="factKey"/> (<see cref="FactReplicaScope"/>), binding the names (exact casing) as one text[]
     /// parameter numbered after the parameters already added. <paramref name="keyword"/> is AND for a clause that
     /// extends a WHERE and WHERE for one that opens it. With nothing to skip the marker just disappears: the SQL is
     /// the same as before and no parameter is added. Call it after every other parameter is bound.
@@ -145,6 +145,6 @@ public static class PgSecondaryReplicaScope
         var index = cmd.Parameters.Count + 1;
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = names });
         cmd.CommandText = cmd.CommandText.Replace(
-            Marker, $" {keyword} ({column} IS NULL OR lower({column}) <> ALL(${index}::text[]))", StringComparison.Ordinal);
+            Marker, $" {keyword} ({column} IS NULL OR {column} <> ALL(${index}::text[]))", StringComparison.Ordinal);
     }
 }

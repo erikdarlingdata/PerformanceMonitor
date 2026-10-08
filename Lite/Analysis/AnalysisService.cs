@@ -667,8 +667,13 @@ public class AnalysisService
     /// that fails must not cost the caller the comparison it was only meant to refine, so it degrades
     /// to an empty map and every key takes the absolute rule — the never-blind fallback the anomaly
     /// gate follows.</para>
+    ///
+    /// <para>#5558: the last two elements are the secondary-replica sets the two windows' contexts filtered with (null
+    /// when collection threw), each as of its own window end. <c>compare_analysis</c> builds its per-window
+    /// <c>secondary_replica_note</c> from them rather than reading the role a second time, so a note cannot name a skip
+    /// the facts did not make.</para>
     /// </summary>
-    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(
+    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion, IReadOnlySet<string>? BaselineSecondaries, IReadOnlySet<string>? ComparisonSecondaries)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd,
@@ -708,14 +713,15 @@ public class AnalysisService
 
             var dispersion = await LookUpDispersionAsync(serverId, serverName, baselineFacts, comparisonFacts, comparisonStart, cancellationToken);
 
-            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
+            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion,
+                baselineContext.SecondaryReplicaDatabases, comparisonContext.SecondaryReplicaDatabases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
                not be swallowed into an empty result and logged as a fault. */
             AppLogger.Error("AnalysisService", $"Period comparison failed for {serverName}: {ex.Message}");
-            return ([], [], null, null, new Dictionary<string, BaselineBucket>());
+            return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
     }
 
@@ -1007,7 +1013,7 @@ ORDER BY event_time";
             var windows = ConfigChangeAttribution.WindowsFor(anchorTime, context.TimeRangeEnd);
 
             context.CancellationToken.ThrowIfCancellationRequested();
-            var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
+            var (before, after, beforeCoverage, afterCoverage, dispersion, _, _) = await ComparePeriodsAsync(
                 context.ServerId, context.ServerName,
                 windows.BeforeStart, windows.BeforeEnd,
                 windows.AfterStart, windows.AfterEnd,

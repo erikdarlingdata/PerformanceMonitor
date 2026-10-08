@@ -240,6 +240,33 @@ VALUES ($1, $2, $3, $4, $5, 7, 1, 'ROWS', $6, 'D:\data.mdf', 20480, 10000, TRUE,
         });
     }
 
+    /// <summary>
+    /// #5558 round 2 (L1): compare_analysis and get_analysis_facts build secondary_replica_note from the set their own context
+    /// filtered with, not from a second read of the role. The baseline window ends before the only snapshot (nothing known,
+    /// nothing skipped); the comparison window ends after it (SecDb skipped). Each returned set is its own.
+    /// </summary>
+    [Fact]
+    public async Task CompareAndFactsReads_CarryTheSetTheirContextFilteredWith_SoTheNoteCannotDisagree()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            var end = Now();
+            await SeedAgAsync(c, ct, end.AddMinutes(-1));
+            var service = new DarlingAnalysisService(postgres);
+
+            var (_, _, _, _, _, baselineSecondaries, comparisonSecondaries) = await service.ComparePeriodsAsync(
+                ServerId, ServerName, DarlingMcpTestData.Naive(end.AddHours(-30)), DarlingMcpTestData.Naive(end.AddHours(-26)),
+                DarlingMcpTestData.Naive(end.AddHours(-4)), DarlingMcpTestData.Naive(end), ct);
+            Assert.Empty(baselineSecondaries!);
+            Assert.Null(AgReplicaScope.SkippedNote(baselineSecondaries));
+            Assert.Equal(["SecDb"], comparisonSecondaries!.ToArray());
+            Assert.Equal(AgReplicaScope.SkippedNote(1), AgReplicaScope.SkippedNote(comparisonSecondaries));
+
+            var (_, _, caveats) = await service.CollectAndScoreFactsAsync(ServerId, ServerName, 4, DarlingMcpTestData.Naive(end), ct);
+            Assert.Equal(["SecDb"], caveats.SecondaryReplicaDatabases!.ToArray());
+        });
+    }
+
     private static Task SeedRegressionAsync(NpgsqlConnection c, CancellationToken ct, DateTime end, string db, long planId, string hash,
         long avgCpu, DateTime firstExec, DateTime lastExec, long queryId = 101) =>
         ExecAsync(c, ct, @"

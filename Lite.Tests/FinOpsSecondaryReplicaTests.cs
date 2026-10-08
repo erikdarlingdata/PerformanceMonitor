@@ -145,10 +145,13 @@ public sealed class FinOpsSecondaryReplicaTests : IClassFixture<SharedDuckDbFixt
     [Fact]
     public void TheFilterHelper_DropsOnlyTheSecondaries_ThatTheDevTestTdeAndCompressionRulesShare()
     {
-        var secondary = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "SalesDev" };
+        var secondary = new HashSet<string>(StringComparer.Ordinal) { "SalesDev" };
 
-        Assert.Equal(["OrdersTest", "qa_one"], AgReplicaScope.WithoutSecondaries(["salesdev", "OrdersTest", "qa_one"], secondary));
-        Assert.True(AgReplicaScope.IsSkipped(secondary, "SALESDEV"));
+        /* Exact names (#5558 round 2): the set and the lists come from the same catalog, so a name that differs only by
+           case is a different database on a case-sensitive server and is kept. */
+        Assert.Equal(["salesdev", "OrdersTest", "qa_one"], AgReplicaScope.WithoutSecondaries(["salesdev", "SalesDev", "OrdersTest", "qa_one"], secondary));
+        Assert.True(AgReplicaScope.IsSkipped(secondary, "SalesDev"));
+        Assert.False(AgReplicaScope.IsSkipped(secondary, "SALESDEV"));
         Assert.False(AgReplicaScope.IsSkipped(secondary, "OrdersTest"));
         /* Fail open: nothing, null and blank skip nothing. */
         Assert.Equal(["a", "b"], AgReplicaScope.WithoutSecondaries(["a", "b"], null));

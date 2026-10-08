@@ -910,8 +910,13 @@ public sealed class DarlingAnalysisService
     /// that fails must not cost the caller the comparison it was only meant to refine, so it degrades
     /// to an empty map and every key takes the absolute rule — the never-blind fallback the anomaly
     /// gate follows.</para>
+    ///
+    /// <para>#5558: the last two elements are the secondary-replica sets the two windows' contexts filtered with (null
+    /// when collection threw), each as of its own window end. <c>compare_analysis</c> builds its per-window
+    /// <c>secondary_replica_note</c> from them rather than reading the role a second time, so a note cannot name a skip
+    /// the facts did not make.</para>
     /// </summary>
-    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(
+    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion, IReadOnlySet<string>? BaselineSecondaries, IReadOnlySet<string>? ComparisonSecondaries)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd,
@@ -952,7 +957,8 @@ public sealed class DarlingAnalysisService
 
             var dispersion = await LookUpDispersionAsync(engine, serverId, serverName, baselineFacts, comparisonFacts, comparisonStart);
 
-            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
+            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion,
+                baselineContext.SecondaryReplicaDatabases, comparisonContext.SecondaryReplicaDatabases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -962,7 +968,7 @@ public sealed class DarlingAnalysisService
                caller's own token, the same reasoning CollectConfigAuditFactsAsync's catch already states (#4203). */
             _logger?.LogError("[DarlingAnalysisService] Period comparison failed for {Server}: {Message}",
                 serverName, ex.Message);
-            return ([], [], null, null, new Dictionary<string, BaselineBucket>());
+            return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
     }
 
@@ -1336,7 +1342,7 @@ ORDER BY event_time_local";
             var windows = ConfigChangeAttribution.WindowsFor(anchorTime, context.TimeRangeEnd);
 
             context.CancellationToken.ThrowIfCancellationRequested();
-            var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
+            var (before, after, beforeCoverage, afterCoverage, dispersion, _, _) = await ComparePeriodsAsync(
                 context.ServerId, context.ServerName,
                 windows.BeforeStart, windows.BeforeEnd,
                 windows.AfterStart, windows.AfterEnd);

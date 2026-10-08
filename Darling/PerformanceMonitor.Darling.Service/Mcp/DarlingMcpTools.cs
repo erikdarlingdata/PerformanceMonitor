@@ -341,10 +341,10 @@ public sealed class DarlingMcpTools
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken: cancellationToken);
 
             /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
-               availability group, as of the window end; the facts below were trimmed of them. Read like
-               compare_analysis and get_analysis_findings read it, not through the service's last-pass state, so two
-               concurrent reads cannot swap notes. Null when none, and then the field is simply null. */
-            var secondaryReplicaNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, anchor);
+               availability group, as of the window end; the facts below were trimmed of them. Built from the set the
+               read's own context filtered with (carried on the returned collection state), not from a second read, so
+               the note cannot disagree with what was skipped. Null when none, and then the field is simply null. */
+            var secondaryReplicaNote = AgReplicaScope.SkippedNote(collection.SecondaryReplicaDatabases);
 
             /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
@@ -481,16 +481,17 @@ public sealed class DarlingMcpTools
             var baselineEnd = windowEnd.AddHours(-baseline_hours_back + hours_back);
             var baselineStart = windowEnd.AddHours(-baseline_hours_back);
 
-            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion) = await analysisService.ComparePeriodsAsync(
+            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion, baselineSecondaries, comparisonSecondaries) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
                 comparisonStart, comparisonEnd,
                 cancellationToken);
 
             /* #5558: per window, because each window uses the role at its own end and the two can straddle a
-               failover. Same read the windows' contexts made, so the note names what the comparison skipped. */
-            var baselineSecondaryNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, baselineEnd);
-            var comparisonSecondaryNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, comparisonEnd);
+               failover. Built from the sets the windows' contexts filtered with (returned beside the coverages), not
+               from a second read, so the note names exactly what the comparison skipped. */
+            var baselineSecondaryNote = AgReplicaScope.SkippedNote(baselineSecondaries);
+            var comparisonSecondaryNote = AgReplicaScope.SkippedNote(comparisonSecondaries);
 
             /* The COLLECTION_GAP context fact (#3538 A2) is an observation of the COLLECTOR, not of the
                server, and it is reported through the coverage blocks and caveat below. Left in the

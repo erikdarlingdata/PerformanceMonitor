@@ -42,6 +42,17 @@ public readonly record struct AgDatabaseMembership(string AgName, string Databas
 /// its own (second-level) group and a SECONDARY under the distributed group. A database with any non-secondary local
 /// role is kept, so the forwarder skips nothing and reports the replicated findings, as a primary does. That is
 /// deliberate (fail open): do not "fix" it by treating the distributed group's secondary role as decisive.</para>
+///
+/// <para><b>Name matching (ordinal).</b> A database name is matched exactly, with no case folding, here and in the
+/// SQL predicates built from the set (<c>FactReplicaScope</c>, <c>PgSecondaryReplicaScope</c>). Both sides come from
+/// the same catalog and so carry identical casing: the AG snapshot's <c>database_name</c> is <c>sys.databases.name</c>
+/// (<c>AgDatabaseReplicaStatesCollector</c>, <c>d.name</c>), and the replicated facts' names are
+/// <c>sys.databases.name</c> too (<c>DatabaseConfigCollector</c> <c>d.name</c>, <c>QueryStoreCollector</c> and
+/// <c>IndexObjectStatsCollector</c> <c>d.name</c> / <c>DB_NAME()</c>, <c>FileIoStatsCollector</c> <c>DB_NAME()</c>). On a
+/// case-sensitive server collation a secondary <c>SalesDb</c> and a separate <c>salesdb</c> are different databases,
+/// and folding case would hide the second one's findings. The limit: a database whose name was renamed by case only
+/// (<c>ALTER DATABASE ... MODIFY NAME</c>) between a stored row and the snapshot is not matched until the rows
+/// are re-collected, which only ever shows a finding (fail open).</para>
 /// </summary>
 public static class AgReplicaScope
 {
@@ -93,8 +104,8 @@ public static class AgReplicaScope
             }
         }
 
-        var secondary = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var notSecondary = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var secondary = Empty();
+        var notSecondary = Empty();
         foreach (var database in databases)
         {
             if (database.IsLocal != true || string.IsNullOrWhiteSpace(database.DatabaseName)
@@ -124,13 +135,13 @@ public static class AgReplicaScope
     public static string? SkippedNote(IReadOnlyCollection<string>? secondaryDatabases) =>
         secondaryDatabases is null ? null : SkippedNote(secondaryDatabases.Count);
 
-    /// <summary>True when <paramref name="databaseName"/> is in the skipped set (case-insensitive, like the engine's
-    /// database names). A null or empty set, or a null/blank name, is false: fail open.</summary>
+    /// <summary>True when <paramref name="databaseName"/> is in the skipped set (an exact, ordinal match: see
+    /// <see cref="AgReplicaScope"/>, "Name matching"). A null or empty set, or a null/blank name, is false: fail open.</summary>
     public static bool IsSkipped(IReadOnlyCollection<string>? secondaryDatabases, string? databaseName)
     {
         if (secondaryDatabases is not { Count: > 0 } || string.IsNullOrWhiteSpace(databaseName)) return false;
         foreach (var name in secondaryDatabases)
-            if (string.Equals(name, databaseName, StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(name, databaseName, StringComparison.Ordinal)) return true;
         return false;
     }
 
@@ -140,5 +151,5 @@ public static class AgReplicaScope
     public static List<string> WithoutSecondaries(IEnumerable<string> databaseNames, IReadOnlyCollection<string>? secondaryDatabases) =>
         databaseNames.Where(name => !IsSkipped(secondaryDatabases, name)).ToList();
 
-    private static HashSet<string> Empty() => new(StringComparer.OrdinalIgnoreCase);
+    private static HashSet<string> Empty() => new(StringComparer.Ordinal);
 }

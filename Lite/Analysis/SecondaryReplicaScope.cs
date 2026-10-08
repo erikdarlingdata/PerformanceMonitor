@@ -27,7 +27,7 @@ namespace PerformanceMonitorLite.Analysis;
 internal static class SecondaryReplicaScope
 {
     /// <summary>The set a pass that reads only node-local facts carries: nothing is skipped, and no AG read is paid for.</summary>
-    internal static IReadOnlySet<string> NoneSkipped { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    internal static IReadOnlySet<string> NoneSkipped { get; } = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>Fills the set once per context. Never throws except an abandonment (#2443): a read fault logs and
     /// leaves the pass unfiltered.</summary>
@@ -50,7 +50,7 @@ internal static class SecondaryReplicaScope
             var replicaTime = await NewestAsync(connection, "v_ag_replica_states", serverId, asOfUtc, cancellationToken);
             var databaseTime = await NewestAsync(connection, "v_ag_database_replica_states", serverId, asOfUtc, cancellationToken);
             if (!AgReplicaScope.IsFresh(replicaTime, asOfUtc) || !AgReplicaScope.IsFresh(databaseTime, asOfUtc))
-                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                return new HashSet<string>(StringComparer.Ordinal);
 
             var replicas = new List<AgReplicaReading>();
             using (var cmd = connection.CreateCommand())
@@ -100,7 +100,7 @@ AND   collection_time = $2";
         {
             AppLogger.Warn("SecondaryReplicaScope",
                 $"Availability Group role lookup failed for server {serverId}; no database is skipped this pass: {ex.Message}");
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return new HashSet<string>(StringComparer.Ordinal);
         }
     }
 

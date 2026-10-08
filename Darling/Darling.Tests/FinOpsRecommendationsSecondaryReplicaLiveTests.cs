@@ -83,9 +83,9 @@ public sealed class FinOpsRecommendationsSecondaryReplicaLiveTests
         Assert.NotNull(Find(baseline, "uncompressed object"));
         Assert.Contains("OrdersA", Find(baseline, "low IO latency")!.Detail, StringComparison.Ordinal);
 
-        /* ArchiveA (idle), app_dev_a (dev/test) and SalesA (TDE and the 2 GB index) are secondary copies; the case of
-           a name is the engine's, not the store's, so one is written in the wrong case on purpose. */
-        var secondary = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "archivea", "APP_DEV_A", "SalesA" };
+        /* ArchiveA (idle), app_dev_a (dev/test) and SalesA (TDE and the 2 GB index) are secondary copies. Names are matched
+           exactly (#5558 round 2): the set and the stored names both come from sys.databases.name, so the casing is shared. */
+        var secondary = new HashSet<string>(StringComparer.Ordinal) { "ArchiveA", "app_dev_a", "SalesA" };
         var rows = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
             dataSource, ServerId, 1000m, TimeoutSeconds, secondaryDatabases: secondary, cancellationToken: ct);
 

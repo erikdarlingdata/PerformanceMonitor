@@ -100,27 +100,27 @@ public static class FactReplicaScope
         return FactReplicaKind.NodeLocal;
     }
 
-    /// <summary>The lower-cased database names a <paramref name="factKey"/> read must skip on this pass: the context's
+    /// <summary>The database names (exact casing: see <c>AgReplicaScope</c>, "Name matching") a <paramref name="factKey"/> read must skip on this pass: the context's
     /// secondary set when the key is <see cref="FactReplicaKind.Replicated"/>, else empty. A read builds its
     /// predicate from a non-empty answer and leaves its SQL byte-identical on an empty one.</summary>
     public static string[] SecondariesFor(AnalysisContext context, string factKey)
     {
         if (context.SecondaryReplicaDatabases is not { Count: > 0 } set) return [];
         if (Of(factKey) != FactReplicaKind.Replicated) return [];
-        return LowerNames(set);
+        return Names(set);
     }
 
-    /// <summary>The set's names lower-cased, de-duplicated and ordered, for a SQL <c>lower(database_name)</c> compare.</summary>
-    public static string[] LowerNames(IEnumerable<string> names) =>
-        names.Select(n => n.ToLowerInvariant()).Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+    /// <summary>The set's names as they are, de-duplicated and ordered, for an exact SQL <c>database_name</c> compare.</summary>
+    public static string[] Names(IEnumerable<string> names) =>
+        names.Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
     /// <summary>A DuckDB predicate fragment (leading AND) that drops rows of the skipped databases, with positional
     /// parameters starting at <paramref name="firstParameter"/>; empty when there is nothing to skip. A NULL
-    /// database passes. Add the values with <see cref="LowerNames"/> in the same order.</summary>
-    public static string PositionalFilter(string[] lowerNames, string column, int firstParameter)
+    /// database passes. Add the values with <see cref="Names"/> in the same order.</summary>
+    public static string PositionalFilter(string[] names, string column, int firstParameter)
     {
-        if (lowerNames.Length == 0) return string.Empty;
-        var placeholders = string.Join(", ", lowerNames.Select((_, i) => "$" + (firstParameter + i)));
-        return " AND (" + column + " IS NULL OR lower(" + column + ") NOT IN (" + placeholders + "))";
+        if (names.Length == 0) return string.Empty;
+        var placeholders = string.Join(", ", names.Select((_, i) => "$" + (firstParameter + i)));
+        return " AND (" + column + " IS NULL OR " + column + " NOT IN (" + placeholders + "))";
     }
 }
