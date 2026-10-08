@@ -72,7 +72,7 @@ const WAIT_COLUMNS = [
 
 const QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
-  { key: "query_preview", label: "Query preview" },
+  { key: "query_preview", label: "Query preview", valueList: false },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms_per_exec", label: "Avg CPU/exec (ms)", format: "num2" },
   { key: "total_reads", label: "Total reads", format: "int" },

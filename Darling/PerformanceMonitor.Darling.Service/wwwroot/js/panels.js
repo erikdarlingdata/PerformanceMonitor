@@ -48,6 +48,22 @@ import {
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { plainText, plainTextNamed } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
+import {
+  VALUE_LIST_MAX_LEN,
+  VALUE_LIST_CAP,
+  FILTER_STORE_KEY,
+  NO_VALUES,
+  valueKey,
+  listableColumn,
+  valuesOn,
+  collectValues,
+  compileValues,
+  valuePasses,
+  nextValues,
+  valuesPhrase,
+  serializeFilters,
+  parseFilters,
+} from "./grid-value-filter.js";
 
 /* The AbortSignal for the render currently building panels (#4191). A page sets it (setPanelSignal)
    synchronously, immediately before calling a tab's build()/a page's descriptor array, and renderPanel below
@@ -432,8 +448,27 @@ function gridTools(desc, cols, tbody) {
    and grouped-away ones too, in the current sort order). A strip under the header lists each active filter with a
    button to clear it, a Clear all button and "Showing N of M rows". The filter texts and which box is open live at
    module scope under gridSortKey(), so the 60 s repaint keeps them and another server's grid starts unfiltered.
-   Escape closes the box and returns focus to its header button; focus leaving the box closes it. */
-const gridFilters = new Map(); // table key -> Map(column id -> text); bounded by routes x tables x columns the session filters
+   Escape closes the box and returns focus to its header button; focus leaving the box closes it.
+
+   A text column also offers a list of its values to tick, like Excel's (#5565): "Select All", a search box, a
+   "(Blanks)" entry and a checkbox per distinct value of the rows the grid holds now, compared ignoring case. The
+   filter then is { op, text, values: { mode, set, blank } }, the value part as grid-value-filter.js defines it, and a
+   row has to pass both parts. The list is not offered on a number or time column, on a column marked
+   `valueList: false` (query and statement text, XML, definitions) or on one whose longest value is over
+   VALUE_LIST_MAX_LEN characters; those keep the text match. A column is also left without a list when its key is
+   named like a statement or prose (the shared name rule in grid-value-filter.js: text, sql, query, plan, xml, message,
+   detail, description, error, script, info and the rest, which the desktop pins to the same list). The list holds the
+   cell's raw value, not the text it draws, and the search folds case as .NET OrdinalIgnoreCase does. Every value
+   reaches the page as a text node. The active filters are also kept in localStorage (FILTER_STORE_KEY), per route
+   (which carries the server) + grid + columns, so a reload or a restart of the browser keeps them; the write waits
+   300 ms of quiet and is flushed on pagehide. A text match on a column that gets no list is kept for the session only
+   (never written, never read back); a value part kept on such a column shows read-only in the box with a Clear button.
+   A missing, unreadable or refused store starts empty and never stops a grid from drawing. */
+const gridFilters = new Map(); // table key -> Map(column id -> { op, text, values? }), least recently used first; the kept copy holds the newest 200 grids
+let gridFiltersLoaded = false;
+let gridFilterStoreWarned = false;
+const gridValueSearch = new Map(); // table key -> the value list's search text while its box is open
+const gridValueTyping = new Set(); // table keys whose value search box had the focus when the page was last drawn
 const gridFilterOpen = new Map(); // table key -> column id of the open box
 const gridFilterTyping = new Set(); // table keys whose box had the focus when the page was last drawn
 const filteredOut = new WeakSet();
@@ -458,6 +493,70 @@ const FILTER_OPS_BY_KIND = {
   text: ["contains", "equals", "notEquals", "startsWith", "endsWith", "isEmpty", "isNotEmpty"],
 };
 const filterNeedsNoText = (op) => op === "isEmpty" || op === "isNotEmpty";
+/* Whether the text part of a filter narrows anything, and whether the filter as a whole does. */
+const filterTextOn = (f) => !!f && (filterNeedsNoText(f.op) || !!String(f.text ?? "").trim());
+const filterIsOn = (f) => filterTextOn(f) || (!!f && valuesOn(f.values));
+
+/* The kept copy of the active filters (#5565). Every touch of the store is guarded: a browser that refuses
+   localStorage, or holds something unreadable, leaves the filters in the page only, and says so once. */
+function warnFilterStore(e) {
+  if (gridFilterStoreWarned) return;
+  gridFilterStoreWarned = true;
+  if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+    console.warn("Column filters are not kept across a reload: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+function loadGridFilters() {
+  if (gridFiltersLoaded) return;
+  gridFiltersLoaded = true;
+  try {
+    if (typeof localStorage === "undefined") return;
+    const text = localStorage.getItem(FILTER_STORE_KEY);
+    if (!text) return;
+    for (const [k, cols] of parseFilters(text, Object.keys(FILTER_OP_LABELS))) {
+      if (!gridFilters.has(k)) gridFilters.set(k, cols);
+    }
+  } catch (e) {
+    warnFilterStore(e);
+  }
+}
+
+function writeGridFilters() {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (gridFilters.size) localStorage.setItem(FILTER_STORE_KEY, serializeFilters(gridFilters));
+    else localStorage.removeItem(FILTER_STORE_KEY);
+  } catch (e) {
+    warnFilterStore(e);
+  }
+}
+
+/* The kept copy is written at most once per FILTER_SAVE_DELAY_MS of quiet, so typing in the text match or ticking
+   through a long list does not serialize and write the whole store on every keystroke and click. The page's copy
+   is the live one; the write is flushed when the page is hidden or closed (pagehide), so nothing a reader did is lost. */
+const FILTER_SAVE_DELAY_MS = 300;
+let gridFilterSaveTimer = null;
+
+function saveGridFilters() {
+  if (gridFilterSaveTimer !== null) clearTimeout(gridFilterSaveTimer);
+  gridFilterSaveTimer = setTimeout(() => {
+    gridFilterSaveTimer = null;
+    writeGridFilters();
+  }, FILTER_SAVE_DELAY_MS);
+}
+
+/** Write a pending change now. Runs on pagehide; the tests call it for "the reader closed the page". */
+export function flushGridFilters() {
+  if (gridFilterSaveTimer === null) return;
+  clearTimeout(gridFilterSaveTimer);
+  gridFilterSaveTimer = null;
+  writeGridFilters();
+}
+
+if (typeof window !== "undefined" && window && typeof window.addEventListener === "function") {
+  window.addEventListener("pagehide", flushGridFilters);
+}
 
 /* A typed number: thousands separators, a percent sign, a dollar sign and spaces are dropped, as the desktop does. */
 function parseFilterNumber(t) {
@@ -507,6 +606,30 @@ function gridFilter(desc, cols, head, tbody) {
   const key = gridSortKey(desc, cols);
   const idx = cols.map((_, i) => i).filter((i) => cols[i].filter !== false && cols[i].copy !== false);
   if (!idx.length) return null;
+  loadGridFilters();
+  /* Drawing a grid uses it: the one the reader came back to is the last the store lets go of. */
+  if (gridFilters.has(key)) {
+    const mine = gridFilters.get(key);
+    gridFilters.delete(key);
+    gridFilters.set(key, mine);
+  }
+  /* A text match read back from the kept copy on a column that gets no list (valueList: false) is dropped: that text lasts
+     the session only. A value part it holds stays, shown read-only in the box with a way to clear it. */
+  const loaded = gridFilters.get(key);
+  if (loaded) {
+    let pruned = false;
+    for (const c of cols) {
+      const f = loaded.get(colId(c));
+      if (!f || f.session || listableColumn(c)) continue;
+      pruned = true;
+      if (valuesOn(f.values)) loaded.set(colId(c), { op: "contains", text: "", values: f.values, session: true });
+      else loaded.delete(colId(c));
+    }
+    if (pruned) {
+      if (!loaded.size) gridFilters.delete(key);
+      saveGridFilters();
+    }
+  }
   const active = () => gridFilters.get(key) || new Map();
   const bar = el("div", { class: "grid-filter-bar", role: "group", "aria-label": "Column filters" });
   const popHolder = el("div", { class: "grid-filter-holder" });
@@ -514,9 +637,11 @@ function gridFilter(desc, cols, head, tbody) {
   bar.appendChild(popHolder);
   bar.appendChild(chips);
   const btns = new Map();
-  const needle = (t) => String(t ?? "").trim().toLowerCase();
-  /* A filter is { op, text }; the value-less operators are active with no text. */
-  const isOn = (f) => !!f && (filterNeedsNoText(f.op) || !!needle(f.text));
+  /* A filter is { op, text, values? }; the value-less operators are active with no text, and a value part is active
+     when it hides or shows a chosen set. */
+  const isOn = filterIsOn;
+  let valuesRefresh = null; // rebuilds the open value list from the rows now
+  let valueSearchBox = null; // the open value list's search box
   /* The sort kind of column i over the rows now in the body: number, time or text. */
   const kindOf = (i) =>
     sortKindOf(
@@ -526,23 +651,45 @@ function gridFilter(desc, cols, head, tbody) {
   /* The operator in force: a stored one the column's kind does not offer (the rows changed under it) falls back to Contains. */
   const opFor = (f, kind) => (f && FILTER_OPS_BY_KIND[kind].includes(f.op) ? f.op : "contains");
 
+  /* What one cell is in the value list: the column's raw value, not the rendered text (#5565). A cell is blank when its
+     raw value is null, empty or whitespace, whatever the cell draws. A text column's raw value is the string the cell
+     renders, so for plain text the two are the same; they differ only where a column draws something other than its
+     value (a format, a badge), and then the raw value is what the desktop's list reads too. A raw value that is a list
+     or an object has no text of its own, so the rendered text stands for it. A row with no raw field at all
+     (undefined) under a column that draws its cell with `render` or `display` is a column built from other fields
+     (the Alerts Status column): the shown text stands for it, as it did before the list read raw values, so the list
+     holds what the cells show and a stored value that names a shown label still matches. */
+  function listCell(c, raw, text) {
+    if (raw === undefined && (typeof c.display === "function" || typeof c.render === "function")) {
+      return filterCellEmpty(c, raw, text) ? { blank: true, text: "" } : { blank: false, text };
+    }
+    if (isEmptyValue(raw) || (typeof raw === "string" && raw.trim() === "") || (Array.isArray(raw) && raw.length === 0)) return { blank: true, text: "" };
+    if (typeof raw === "string") return { blank: false, text: raw };
+    if (typeof raw === "number" || typeof raw === "boolean" || typeof raw === "bigint") return { blank: false, text: String(raw) };
+    return { blank: text.trim() === "", text };
+  }
+
   function applyRows() {
     const tests = [];
     cols.forEach((c, i) => {
       const f = active().get(colId(c));
       if (isOn(f)) {
         const kind = kindOf(i);
-        tests.push([i, opFor(f, kind), kind, f.text ?? ""]);
+        tests.push({ i, op: opFor(f, kind), kind, term: f.text ?? "", textOn: filterTextOn(f), vals: valuesOn(f.values) ? compileValues(f.values) : null });
       }
     });
     let shown = 0;
     let total = 0;
     for (const tr of tbody.children) {
       total++;
-      const out = tests.some(([i, op, kind, term]) => {
+      const out = tests.some(({ i, op, kind, term, textOn, vals }) => {
         const td = tr.children[i];
         if (!td) return true;
-        return !filterPasses(op, kind, term, cols[i], trRow.has(tr) ? columnValue(trRow.get(tr), cols[i]) : undefined, td.textContent);
+        const raw = trRow.has(tr) ? columnValue(trRow.get(tr), cols[i]) : undefined;
+        if (textOn && !filterPasses(op, kind, term, cols[i], raw, td.textContent)) return true;
+        if (!vals) return false;
+        const cell = listCell(cols[i], raw, td.textContent);
+        return !valuePasses(vals, cell.blank, cell.text);
       });
       if (out) filteredOut.add(tr);
       else {
@@ -554,13 +701,24 @@ function gridFilter(desc, cols, head, tbody) {
     return { shown, total, tests: tests.length };
   }
 
-  function setFilter(c, op, text) {
+  /* Change one column's filter: `patch` is merged over what it holds, a filter that narrows nothing is dropped, and
+     the active filters are kept. The text part and the value part change on their own. */
+  function patchFilter(c, patch) {
     const next = new Map(active());
-    if (isOn({ op, text })) next.set(colId(c), { op, text });
+    const cur = next.get(colId(c)) || { op: "contains", text: "" };
+    const merged = { ...cur, ...patch };
+    if (!valuesOn(merged.values)) delete merged.values;
+    /* A text match on a column that gets no list (statement, query, plan, XML, message...) lasts the session: it is
+       never written to the kept copy, and never read back (serializeFilters, parseFilters). */
+    if (!listableColumn(c)) merged.session = true;
+    if (isOn(merged)) next.set(colId(c), merged);
     else next.delete(colId(c));
+    gridFilters.delete(key);
     if (next.size) gridFilters.set(key, next);
-    else gridFilters.delete(key);
+    saveGridFilters();
   }
+  const setFilter = (c, op, text) => patchFilter(c, { op, text });
+  const clearColumn = (c) => patchFilter(c, { op: "contains", text: "", values: NO_VALUES });
 
   function renderChips() {
     const r = applyRows();
@@ -571,10 +729,11 @@ function gridFilter(desc, cols, head, tbody) {
         const f = active().get(colId(c));
         if (!isOn(f)) continue;
         const op = opFor(f, kindOf(i));
-        const chipText = op === "contains" ? String(f.text).trim() : FILTER_OP_LABELS[op] + (filterNeedsNoText(op) ? "" : " " + String(f.text).trim());
+        const textChip = !filterTextOn(f) ? "" : op === "contains" ? String(f.text).trim() : FILTER_OP_LABELS[op] + (filterNeedsNoText(op) ? "" : " " + String(f.text).trim());
+        const chipText = [valuesPhrase(f.values), textChip].filter(Boolean).join(", ");
         const x = el("button", { type: "button", class: "grid-filter-x", text: "×", title: "Clear the filter on " + c.label, "aria-label": "Clear the filter on " + c.label });
         x.addEventListener("click", () => {
-          setFilter(c, "contains", "");
+          clearColumn(c);
           renderPop();
           renderChips();
         });
@@ -583,6 +742,7 @@ function gridFilter(desc, cols, head, tbody) {
       const all = el("button", { type: "button", class: "btn grid-filter-clear-all", text: "Clear all filters" });
       all.addEventListener("click", () => {
         gridFilters.delete(key);
+        saveGridFilters();
         renderPop();
         renderChips();
       });
@@ -601,6 +761,8 @@ function gridFilter(desc, cols, head, tbody) {
     const open = gridFilterOpen.get(key);
     gridFilterOpen.delete(key);
     gridFilterTyping.delete(key);
+    gridValueTyping.delete(key);
+    gridValueSearch.delete(key);
     renderPop();
     renderChips();
     const i = cols.findIndex((c) => colId(c) === open);
@@ -608,8 +770,113 @@ function gridFilter(desc, cols, head, tbody) {
     if (refocus && b && typeof b.focus === "function") b.focus();
   }
 
+  /* The distinct values of column i over every row the body holds now (before any filter), and whether the column is
+     offered as a list: a text column, not opted out by `valueList: false` or by the shared name rule (query and
+     statement text, plans, XML, scripts, messages, details, descriptions, errors), and no value longer than
+     VALUE_LIST_MAX_LEN. */
+  function universeOf(i) {
+    const c = cols[i];
+    return collectValues(
+      Array.from(tbody.children, (tr) => {
+        const td = tr.children[i];
+        return listCell(c, trRow.has(tr) ? columnValue(trRow.get(tr), c) : undefined, td ? td.textContent : "");
+      })
+    );
+  }
+  const listed = (i, uni) => listableColumn(cols[i]) && kindOf(i) === "text" && uni.maxLen <= VALUE_LIST_MAX_LEN;
+
+  /* The checklist under the text match: a search box, Select All, "(Blanks)" when any cell is blank and one checkbox
+     per value, at most VALUE_LIST_CAP of them (the search reaches the rest). Ticking works on the whole list, not on
+     what the search shows, except Select All, which ticks or unticks every value the search matches. Returns null for a
+     column that is not offered a list. */
+  function valuesSection(c, i) {
+    if (!listed(i, universeOf(i))) return null;
+    const id = colId(c);
+    const search = el("input", { type: "search", class: "gfv-search", "aria-label": "Search the values of " + c.label, placeholder: "Search values…" });
+    search.value = gridValueSearch.get(key) || "";
+    const allBox = el("input", { type: "checkbox", "aria-label": "Select All" });
+    const allRow = el("label", { class: "gfv-item gfv-all" }, [allBox, el("span", { text: "Select All" })]);
+    const list = el("div", { class: "gfv-list", role: "group", "aria-label": "Values of " + c.label });
+    const capNote = el("div", { class: "gfv-note gfv-cap-note", role: "status", "aria-live": "polite" });
+    const noneNote = el("div", { class: "gfv-note gfv-none-note", role: "status", "aria-live": "polite" });
+    const node = el("div", { class: "grid-filter-values" }, [search, allRow, list, capNote, noneNote]);
+    let uni = null;
+    let matches = [];
+    let items = []; // { box, key } for a value, { box, blank: true } for (Blanks)
+    const current = () => (active().get(id) || {}).values || NO_VALUES;
+    const query = () => valueKey(search.value.trim()); // folded like the values, as .NET OrdinalIgnoreCase does
+    const blankListed = () => uni.blank && query() === "";
+
+    /* Set the boxes from the filter in force; the boxes stay where they are, so keyboard focus is not lost. */
+    function sync() {
+      const v = compileValues(current());
+      let ticked = 0;
+      for (const it of items) {
+        const on = it.blank ? valuePasses(v, true, "") : valuePasses(v, false, it.value);
+        it.box.checked = on;
+        if (on) ticked++;
+      }
+      allBox.checked = items.length > 0 && ticked === items.length;
+      allBox.indeterminate = ticked > 0 && ticked < items.length;
+      const f = current();
+      noneNote.textContent = f.mode === "showOnly" && f.set.length === 0 && !f.blank ? "No values are ticked, so no rows show." : "";
+    }
+
+    /* Rebuild the rows from the grid and the search text. */
+    function rebuild() {
+      uni = universeOf(i);
+      const q = query();
+      matches = q ? uni.values.filter((v) => valueKey(v).includes(q)) : uni.values;
+      const shownValues = matches.slice(0, VALUE_LIST_CAP);
+      items = [];
+      const rows = [];
+      if (blankListed()) {
+        const box = el("input", { type: "checkbox", "aria-label": "(Blanks)" });
+        box.addEventListener("change", () => change((m) => (m.blank = box.checked)));
+        items.push({ box, blank: true });
+        rows.push(el("label", { class: "gfv-item gfv-blank" }, [box, el("span", { text: "(Blanks)" })]));
+      }
+      for (const v of shownValues) {
+        const box = el("input", { type: "checkbox", "aria-label": v });
+        box.addEventListener("change", () => change((m) => (box.checked ? m.ticked.add(valueKey(v)) : m.ticked.delete(valueKey(v)))));
+        items.push({ box, value: v });
+        rows.push(el("label", { class: "gfv-item" }, [box, el("span", { text: v })]));
+      }
+      list.textContent = "";
+      for (const r of rows) list.appendChild(r);
+      if (!rows.length) list.appendChild(el("div", { class: "gfv-empty", text: q ? "No value matches the search." : "No values." }));
+      capNote.textContent = matches.length > VALUE_LIST_CAP ? "Showing " + VALUE_LIST_CAP.toLocaleString("en-US") + " of " + matches.length.toLocaleString("en-US") + " values. Search to find the rest." : "";
+      sync();
+    }
+
+    function change(mutate) {
+      patchFilter(c, { values: nextValues(uni, current(), mutate) });
+      renderChips();
+      sync();
+    }
+
+    allBox.addEventListener("change", () => {
+      const on = allBox.checked;
+      change((m) => {
+        for (const v of matches) {
+          if (on) m.ticked.add(valueKey(v));
+          else m.ticked.delete(valueKey(v));
+        }
+        if (blankListed()) m.blank = on;
+      });
+    });
+    search.addEventListener("input", () => {
+      gridValueSearch.set(key, search.value);
+      rebuild();
+    });
+    search.addEventListener("focus", () => gridValueTyping.add(key));
+    rebuild();
+    return { node, search, refresh: rebuild, sync };
+  }
+
   function renderPop() {
     popHolder.textContent = "";
+    valuesRefresh = null;
     const open = gridFilterOpen.get(key);
     const i = open == null ? -1 : cols.findIndex((c) => colId(c) === open);
     if (i < 0 || !btns.has(i)) {
@@ -631,7 +898,21 @@ function gridFilter(desc, cols, head, tbody) {
     syncInput();
     const clear = el("button", { type: "button", class: "btn grid-filter-clear", text: "Clear" });
     const done = el("button", { type: "button", class: "btn grid-filter-close", text: "Close" });
-    const panel = el("div", { class: "grid-filter-pop", role: "dialog", "aria-label": "Filter " + c.label }, [el("span", { class: "grid-filter-label", text: c.label }), ops.length > 1 ? opSel : null, input, clear, done].filter(Boolean));
+    const values = valuesSection(c, i);
+    /* A value part kept on a column that no longer gets a list: shown read-only, with a way to clear it. */
+    let kept = null;
+    if (!values && stored && valuesOn(stored.values)) {
+      const clearKept = el("button", { type: "button", class: "btn gfv-kept-clear", text: "Clear the value filter" });
+      clearKept.addEventListener("click", () => {
+        patchFilter(c, { values: NO_VALUES });
+        renderPop();
+        renderChips();
+      });
+      kept = el("div", { class: "gfv-kept" }, [el("span", { class: "gfv-note gfv-kept-note", text: "A kept value filter " + valuesPhrase(stored.values) + ". This column has no value list." }), clearKept]);
+    }
+    const panel = el("div", { class: "grid-filter-pop", role: "dialog", "aria-label": "Filter " + c.label }, [el("span", { class: "grid-filter-label", text: c.label }), ops.length > 1 ? opSel : null, input, clear, done, values ? values.node : kept].filter(Boolean));
+    if (values) valuesRefresh = values.refresh;
+    valueSearchBox = values ? values.search : null;
     input.addEventListener("input", () => {
       setFilter(c, op, input.value);
       renderChips();
@@ -650,8 +931,9 @@ function gridFilter(desc, cols, head, tbody) {
       }
     });
     clear.addEventListener("click", () => {
-      setFilter(c, op, "");
+      clearColumn(c);
       input.value = "";
+      if (values) values.sync();
       renderChips();
       if (typeof input.focus === "function") input.focus();
     });
@@ -670,6 +952,7 @@ function gridFilter(desc, cols, head, tbody) {
         const at = typeof document !== "undefined" ? document.activeElement : null;
         if (at && typeof panel.contains === "function" && panel.contains(at)) return;
         gridFilterTyping.delete(key);
+        gridValueTyping.delete(key);
         close(false);
       }, 0);
     });
@@ -697,11 +980,17 @@ function gridFilter(desc, cols, head, tbody) {
   }
   const input = renderPop();
   renderChips();
-  tbodyFilter.set(tbody, { reapply: renderChips });
-  /* The page was redrawn while the box had the focus: give it back once the new box is in the document. */
-  if (input && gridFilterTyping.has(key)) {
+  tbodyFilter.set(tbody, {
+    reapply: () => {
+      renderChips();
+      if (valuesRefresh) valuesRefresh();
+    },
+  });
+  /* The page was redrawn while a box had the focus: give it back once the new box is in the document. */
+  const refocus = gridValueTyping.has(key) && valueSearchBox ? valueSearchBox : input && gridFilterTyping.has(key) ? input : null;
+  if (refocus) {
     setTimeout(() => {
-      if (input.isConnected !== false && typeof input.focus === "function") input.focus();
+      if (refocus.isConnected !== false && typeof refocus.focus === "function") refocus.focus();
     }, 0);
   }
   return bar;

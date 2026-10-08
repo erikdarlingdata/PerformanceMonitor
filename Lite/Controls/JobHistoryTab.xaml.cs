@@ -43,6 +43,8 @@ public partial class JobHistoryTab : UserControl
     public JobHistoryTab()
     {
         InitializeComponent();
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
