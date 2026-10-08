@@ -138,7 +138,36 @@ public sealed class DarlingAgReaderTests
         var group = Assert.Single(Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0).AddDays(12)).AvailabilityGroups);
         Assert.True(group.IsStale);
         Assert.Equal("Stale", group.SeverityLabel);
-        Assert.Equal(HealthSeverity.Unknown, group.Severity);
+        Assert.Equal(HealthSeverity.Warning, group.Severity);
+    }
+
+    [Fact]
+    public void Build_AStaleGroupAlongsideAFreshHealthyOne_ReadsWarningAndSortsFirst()
+    {
+        /* Round-1 M1: AG1's last rows said Critical but are 12 days old; AG2 was collected a minute ago and is
+           Healthy. Stale used to band Unknown (the lowest enum value), so worst_severity read Healthy and AG1
+           sorted after AG2. */
+        var now = At(0).AddDays(12);
+        var staleCritical = Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY", syncHealth: "NOT_HEALTHY");
+        var freshHealthy = Replica(2, "NODE2", "AG2", "NODE2", "PRIMARY") with { CollectionTime = now.AddMinutes(-1) };
+
+        var result = Reader.Build(new[] { staleCritical, freshHealthy }, Array.Empty<Reader.DatabaseRow>(), now);
+
+        Assert.Equal(HealthSeverity.Warning, result.WorstSeverity);
+        Assert.Equal("AG1", result.AvailabilityGroups[0].AgName);
+        Assert.True(result.AvailabilityGroups[0].IsStale);
+        Assert.Equal("Stale", result.AvailabilityGroups[0].SeverityLabel);
+        Assert.Equal(HealthSeverity.Healthy, result.AvailabilityGroups[1].Severity);
+    }
+
+    [Fact]
+    public void Build_AFleetWhoseOnlyNonHealthyGroupIsStale_NeverReadsHealthy()
+    {
+        var replicas = new[] { Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY") };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0).AddDays(12));
+
+        Assert.Equal(HealthSeverity.Warning, result.WorstSeverity);
     }
 
     [Fact]

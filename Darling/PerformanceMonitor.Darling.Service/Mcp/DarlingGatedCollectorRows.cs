@@ -51,6 +51,22 @@ internal static class DarlingGatedCollectorRows
         Array.IndexOf(AlwaysOnCollectors, collectorName) >= 0;
 
     /// <summary>
+    /// True for a logged row that a server without Always On shows as "not applicable" (round-1 L5): an Always On
+    /// collector whose own band is HEALTHY, the ordinary run-and-find-nothing case. An Always On collector that is
+    /// FAILING (any other band) is a real problem on a HADR-off server too, and keeps its logged row, Last Error
+    /// and all, instead of vanishing behind the not-applicable sentence.
+    /// </summary>
+    internal static bool IsNotApplicableWhenAlwaysOnOff(CollectorHealth row) =>
+        IsAlwaysOnCollector(row.CollectorName) && string.Equals(row.HealthStatus, "HEALTHY", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The logged rows a server without Always On still lists: everything except the HEALTHY Always On collectors
+    /// (<see cref="IsNotApplicableWhenAlwaysOnOff"/>), which <see cref="AlwaysOnOffRows"/> replaces.
+    /// </summary>
+    internal static List<CollectorHealth> RowsShownWhenAlwaysOnOff(IEnumerable<CollectorHealth> loggedRows) =>
+        loggedRows.Where(r => !IsNotApplicableWhenAlwaysOnOff(r)).ToList();
+
+    /// <summary>
     /// True when the server's latest <c>server_properties</c> snapshot says Always On (HADR) is off. No snapshot, or a
     /// failed read, is false: with no evidence the log-driven rows stand as they are.
     /// </summary>
@@ -68,13 +84,13 @@ internal static class DarlingGatedCollectorRows
     }
 
     /// <summary>
-    /// One <c>not_collected</c> row per Always On collector that <paramref name="loggedRows"/> lists, in collector-name order,
+    /// One <c>not_collected</c> row per HEALTHY Always On collector that <paramref name="loggedRows"/> lists, in collector-name order,
     /// with the same three keys as the engine-gated rows.
     /// </summary>
     internal static IReadOnlyList<object> AlwaysOnOffRows(IEnumerable<CollectorHealth> loggedRows) =>
         loggedRows
+            .Where(IsNotApplicableWhenAlwaysOnOff)
             .Select(r => r.CollectorName)
-            .Where(IsAlwaysOnCollector)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(n => n, StringComparer.Ordinal)
             .Select(n => (object)new { collector = n, status = NotCollectedStatus, message = AlwaysOnOffMessage })

@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
@@ -122,5 +123,49 @@ public sealed class CollectionHealthAlwaysOnRowsTests
         Assert.Contains("not enabled on this server", PerformanceMonitor.Darling.Service.Mcp.DarlingGatedCollectorRows.AlwaysOnOffMessage);
         Assert.DoesNotContain("needs a look", PerformanceMonitor.Darling.Service.Mcp.DarlingGatedCollectorRows.AlwaysOnOffMessage);
         Assert.Empty(PerformanceMonitor.Darling.Service.Mcp.DarlingGatedCollectorRows.AlwaysOnOffRows([]));
+    }
+
+    private static PerformanceMonitor.Darling.Service.Mcp.CollectorHealth AgRow(string name, bool failing)
+    {
+        var last = DateTime.UtcNow.AddMinutes(-1);
+        return new PerformanceMonitor.Darling.Service.Mcp.CollectorHealth
+        {
+            CollectorName = name,
+            TotalRuns = 10,
+            SuccessCount = failing ? 0 : 10,
+            ErrorCount = failing ? 10 : 0,
+            LastSuccessTime = failing ? null : last,
+            LastRunTime = last,
+            LastError = failing ? "Msg 1234: the AG DMV read failed" : null,
+        };
+    }
+
+    [Fact]
+    public void AHealthyAgCollector_IsReplacedByTheNotApplicableRow()
+    {
+        var healthy = AgRow("ag_replica_states", failing: false);
+        var rows = new[] { healthy, AgRow("wait_stats", failing: false) };
+
+        Assert.Equal("HEALTHY", healthy.HealthStatus);
+        Assert.Equal(new[] { "wait_stats" }, PerformanceMonitor.Darling.Service.Mcp.DarlingGatedCollectorRows.RowsShownWhenAlwaysOnOff(rows).Select(r => r.CollectorName));
+        Assert.Single(PerformanceMonitor.Darling.Service.Mcp.DarlingGatedCollectorRows.AlwaysOnOffRows(rows));
+    }
+
+    [Fact]
+    public void AFailingAgCollector_KeepsItsLogRowAndItsLastError()
+    {
+        /* Round-1 L5: a HADR-off server whose AG collector is actually failing used to lose the row, and with it the
+           Last Error, behind the not-applicable sentence. */
+        var failing = AgRow("ag_database_replica_states", failing: true);
+        var rows = new[] { failing, AgRow("ag_replica_states", failing: false) };
+
+        Assert.NotEqual("HEALTHY", failing.HealthStatus);
+        var shown = PerformanceMonitor.Darling.Service.Mcp.DarlingGatedCollectorRows.RowsShownWhenAlwaysOnOff(rows);
+        Assert.Equal(new[] { "ag_database_replica_states" }, shown.Select(r => r.CollectorName));
+        Assert.Equal("Msg 1234: the AG DMV read failed", shown[0].LastError);
+        var notApplicable = PerformanceMonitor.Darling.Service.Mcp.DarlingGatedCollectorRows.AlwaysOnOffRows(rows);
+        Assert.Single(notApplicable);
+        Assert.Contains("ag_replica_states", System.Text.Json.JsonSerializer.Serialize(notApplicable));
+        Assert.DoesNotContain("ag_database_replica_states", System.Text.Json.JsonSerializer.Serialize(notApplicable));
     }
 }

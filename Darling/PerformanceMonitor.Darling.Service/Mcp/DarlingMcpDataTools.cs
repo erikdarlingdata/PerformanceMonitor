@@ -1653,10 +1653,11 @@ public sealed class DarlingMcpDataTools
                log HEALTHY with zero rows, and the zero-output sentence then called a persistent zero something that "needs a
                look". They are shown as not applicable instead (a not_collected row saying why), exactly where the server's
                latest properties say Always On is off. A server with no properties row yet makes no claim. The rows still
-               feed the sweep arithmetic below: this only changes what the response lists. */
+               feed the sweep arithmetic below: this only changes what the response lists. An AG collector whose band is not
+               HEALTHY keeps its real row (L5): a failing collector must keep its Last Error. */
             var alwaysOnOff = await DarlingGatedCollectorRows.AlwaysOnOffAsync(postgres, resolved.ServerId, cancellationToken);
             List<CollectorHealth> shownRows = alwaysOnOff
-                ? rows.Where(r => !DarlingGatedCollectorRows.IsAlwaysOnCollector(r.CollectorName)).ToList()
+                ? DarlingGatedCollectorRows.RowsShownWhenAlwaysOnOff(rows)
                 : rows;
 
             var compactCount = full_detail ? 0 : shownRows.Count(IsCollectionHealthCompactEligible);
