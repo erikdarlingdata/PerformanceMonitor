@@ -178,9 +178,56 @@ public sealed class WebPerfmonMultiSelectBehaviourTests
     public void FastClicks_AbortTheSupersededReads_AndLeaveOneDrawsReadsInFlight()
     {
         var r = Run("fastClicks");
-        Assert.Equal(30, r.GetProperty("sent").GetInt32());
-        Assert.Equal(25, r.GetProperty("aborted").GetInt32());
+        // Reads for the same counter that are still in flight are shared (apiGetJoined), so the repeated clicks send fewer
+        // than the thirty they once did; every read nobody waits for any more is aborted and five stay in flight.
+        // The harness is deterministic, so the counts are exact: the four clicks send 18 reads, at most 13 are in flight at
+        // once, 13 are cancelled because nothing waits for them any more, and the last click's five stay in flight.
+        Assert.Equal(18, r.GetProperty("sent").GetInt32());
+        Assert.Equal(13, r.GetProperty("maxInFlight").GetInt32());
         Assert.Equal(5, r.GetProperty("stillInFlight").GetInt32());
+        Assert.Equal(13, r.GetProperty("aborted").GetInt32());
+    }
+
+    [Fact]
+    public void ClicksThatChangeTheSeries_AbortTheSupersededReads_AndSendOnlyTheNewOnes()
+    {
+        // Round-1 M5: each series has its own path, so nothing is shared; "Clear All" supersedes every read the
+        // Default counters click sent, and each is the only caller on its request, so the fetch itself is cancelled.
+        var r = Run("changedParameter");
+        Assert.Equal(5, r.GetProperty("readsByClear").GetInt32());
+        Assert.Equal(5, r.GetProperty("abortedByClear").GetInt32());
+        Assert.Equal(5 + 2, r.GetProperty("sent").GetInt32());
+        Assert.Equal(5, r.GetProperty("aborted").GetInt32());
+        Assert.Equal(2, r.GetProperty("stillInFlight").GetInt32());
+        Assert.Equal(5, r.GetProperty("maxInFlight").GetInt32());
+        Assert.Equal(new[] { "C13", "C14" }, Strings(r.GetProperty("chart").GetProperty("labels")));
+    }
+
+    [Fact]
+    public void TheSoleWaiterUnchecking_CancelsTheUnderlyingFetch()
+    {
+        var r = Run("soleWaiterUnchecks");
+        Assert.Equal(1, r.GetProperty("sentAfterCheck").GetInt32());
+        Assert.Equal(1, r.GetProperty("inFlightAfterCheck").GetInt32());
+        Assert.Equal(1, r.GetProperty("aborted").GetInt32());
+        Assert.Equal(0, r.GetProperty("inFlightAfterUncheck").GetInt32());
+        Assert.Equal(1, r.GetProperty("sent").GetInt32());
+    }
+
+    [Fact]
+    public void ASharedRead_IsCancelledOnlyWhenItsLastCallerAborts_AndALaterCallerSendsAFreshOne()
+    {
+        var r = Run("joinedAbort");
+        Assert.Equal(1, r.GetProperty("sentForTwo").GetInt32());
+        Assert.Equal(1, r.GetProperty("inFlightForTwo").GetInt32());
+        Assert.Equal("aborted", r.GetProperty("firstKind").GetString());
+        Assert.Equal(0, r.GetProperty("abortedAfterFirst").GetInt32());
+        Assert.Equal(1, r.GetProperty("inFlightAfterFirst").GetInt32());
+        Assert.Equal("aborted", r.GetProperty("secondKind").GetString());
+        Assert.Equal(1, r.GetProperty("abortedAfterSole").GetInt32());
+        Assert.Equal(0, r.GetProperty("inFlightAfterSole").GetInt32());
+        Assert.Equal(2, r.GetProperty("sentAfterLater").GetInt32());
+        Assert.Equal("data", r.GetProperty("laterKind").GetString());
     }
 
     [Fact]

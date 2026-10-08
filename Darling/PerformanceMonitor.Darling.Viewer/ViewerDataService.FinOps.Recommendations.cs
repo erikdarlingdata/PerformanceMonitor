@@ -68,8 +68,8 @@ public sealed partial class ViewerDataService
     /// <summary>Per-database aggregate read/write I/O + stall over the window (storage-tier optimization). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsStorageTierSql = DarlingFinOpsRecommendationsReader.StorageTierSql;
 
-    /// <summary>Oldest query-stats sample for the server (idle-database advice waits until it is at or before the 7-day cutoff). $1 server_id.</summary>
-    public const string RecommendationsQueryStatsFirstSampleSql = DarlingFinOpsRecommendationsReader.QueryStatsFirstSampleSql;
+    /// <summary>The oldest query-stats sample, and how many complete UTC days in [$2, $3) hold one (idle-database advice needs each of the last 7). $1 server_id, $2 the coverage start (D-7 00:00), $3 the coverage end (today 00:00, exclusive).</summary>
+    public const string RecommendationsIdleCoverageSql = DarlingFinOpsOptimizationReader.IdleCoverageSql;
 
     /// <summary>CPU utilization mean + standard deviation + sample count (reserved-capacity stability). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsReservedCapacitySql = DarlingFinOpsRecommendationsReader.ReservedCapacitySql;
@@ -202,6 +202,8 @@ public sealed class RecommendationRow
     public string Finding { get; set; } = "";
     public string Detail { get; set; } = "";
     public decimal? EstMonthlySavings { get; set; }
+
+    /// <summary>The savings as text ("$1,500"), or empty with no estimate. The grid binds the number itself (a dash with a tooltip when empty); this is the plain text form.</summary>
     public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
     public int SeveritySort => FinOpsRecommendationFigures.SeveritySort(Severity);
 

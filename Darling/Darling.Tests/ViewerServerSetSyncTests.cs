@@ -239,7 +239,7 @@ public sealed class ViewerServerSetSyncTests
         var setServers = MethodBody("FinOpsTab.xaml.cs", "SetServers");
 
         Assert.Matches(
-            @"ServerSelector\s*\.\s*SelectedItem\s*=\s*ViewerServerSetSync\s*\.\s*PickerSelectionAfterReload\s*\(",
+            @"ServerSelector\s*\.\s*SelectedItem\s*=\s*FinOpsServerChoice\s*\.\s*Selection\s*\(",
             setServers);
 
         /* The reload hands it the list, and so does the FinOps tab when it opens. Both pass the sidebar's

@@ -19,6 +19,13 @@ namespace PerformanceMonitor.Darling.Storage.FinOps;
 /// </summary>
 public static class FinOpsInventoryFigures
 {
+    /// <summary>
+    /// The score the Server Inventory shows: <see cref="HealthScore"/>, or null (a dash) when the server has no CPU sample in the window.
+    /// The memory and storage terms here are defaults (the inventory has no buffer pool ratio or file-level free space), and a score made
+    /// only of defaults says nothing about the server, so it reads a dash rather than a full-looking number.
+    /// </summary>
+    public static int? HealthScoreOrNull(decimal? avgCpuPct) => avgCpuPct is null ? null : HealthScore(avgCpuPct);
+
     /// <summary>The 0-100 health score for a server's average CPU; a null average leaves the CPU term out.</summary>
     public static int HealthScore(decimal? avgCpuPct)
     {

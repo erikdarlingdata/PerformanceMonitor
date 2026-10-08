@@ -58,6 +58,14 @@ public static class FinOpsUtilizationFigures
             cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(freeSpacePct));
     }
 
+    /// <summary>
+    /// The score the Utilization card shows: <see cref="HealthScore(UtilizationEfficiencyDto, decimal)"/>, or null (a dash) when the
+    /// window held no CPU sample. Memory and storage alone can read a perfect 100 beside a "No Data" card, so with no CPU sample there is
+    /// no score, not a partial one.
+    /// </summary>
+    public static int? HealthScoreOrNull(UtilizationEfficiencyDto d, decimal freeSpacePct) =>
+        HasCpuSample(d) ? HealthScore(d, freeSpacePct) : null;
+
     /// <summary>The health score for a read result and the free-space percentage.</summary>
     public static int HealthScore(UtilizationEfficiencyDto d, decimal freeSpacePct) =>
         HealthScore(HasCpuSample(d), d.P95CpuPct, d.PhysicalMemoryMb, d.BufferPoolMb, freeSpacePct);

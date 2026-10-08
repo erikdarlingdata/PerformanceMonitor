@@ -14,6 +14,7 @@
 import { VIZ } from "../../panels.js";
 import { planColumn } from "../plan-viewer.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat } from "../../util.js";
+import { gatedEmptyStrip, gatedSections } from "./gate.js";
 
 // The default window.
 const HOURS = 24;
@@ -155,8 +156,8 @@ export const tab = {
         if (mine !== seq) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
-        const data = res.data || {};
+        if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
+        const data = gatedSections(res.data || {}, ctx);
         mount(body, [
           noticeStrip(costLine(data)),
           sectionView("Idle Databases", data.idle_databases, IDLE_COLUMNS, "No idle databases detected", idleNotice),
