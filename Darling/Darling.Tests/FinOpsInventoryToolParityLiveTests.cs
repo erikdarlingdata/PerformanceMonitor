@@ -141,8 +141,9 @@ public sealed class FinOpsInventoryToolParityLiveTests
 
         var gamma = servers[1];
         Assert.False(gamma.TryGetProperty("avg_cpu_pct", out _));
-        Assert.Equal(FinOpsInventoryFigures.HealthScore(null), gamma.GetProperty("health_score").GetInt32());
-        Assert.NotEqual(FinOpsInventoryFigures.HealthScore(0m), gamma.GetProperty("health_score").GetInt32());
+        // No CPU sample is a dash, not a score: the property is left out rather than carrying a made-up number.
+        Assert.False(gamma.TryGetProperty("health_score", out _));
+        Assert.Null(FinOpsInventoryFigures.HealthScoreOrNull(null));
 
         var beta = servers[2];
         Assert.Equal("stopped", beta.GetProperty("monitoring").GetString());

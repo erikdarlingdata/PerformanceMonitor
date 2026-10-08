@@ -112,11 +112,22 @@ public static class FinOpsRecommendationFigures
         && !edition.Contains("Evaluation", StringComparison.OrdinalIgnoreCase)
         && !edition.Contains("Express", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>How long the server's CPU samples must span before either CPU right-sizing rule may speak.</summary>
+    /// <summary>How long the 7-day CPU right-sizing rule's samples must span before it may speak: its window is 7 days, and a first collect backfills only minutes.</summary>
     public static readonly TimeSpan CpuRightSizingMinSpan = TimeSpan.FromHours(24);
 
-    /// <summary>True when CPU samples spanning <paramref name="span"/> are enough for CPU right-sizing advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
+    /// <summary>True when the 7-day rule's CPU samples spanning <paramref name="span"/> are enough for advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
     public static bool CpuSamplesSpanEnough(TimeSpan span) => span >= CpuRightSizingMinSpan;
+
+    /// <summary>How old the oldest CPU sample inside the last 24 hours must be before the 24-hour rule (CPU over-provisioned) may speak.</summary>
+    public static readonly TimeSpan Cpu24HourRuleMinOldestAge = TimeSpan.FromHours(23);
+
+    /// <summary>
+    /// True when the 24-hour rule's window is watched: its oldest CPU sample inside the last 24 hours is at least 23 hours old. A span from
+    /// the oldest to the newest sample over 7 days is the wrong test for a rule that reads only 24 hours: a server with two days of
+    /// samples last week and 60 minutes since a restart spans days, yet its 24-hour window holds one hour.
+    /// </summary>
+    public static bool Cpu24HourWindowWatched(DateTime? oldestSampleInWindowUtc, DateTime nowUtc) =>
+        oldestSampleInWindowUtc is DateTime oldest && nowUtc - oldest >= Cpu24HourRuleMinOldestAge;
 
     /// <summary>
     /// True when the prescriptive CPU row (the VM right-sizing one) replaces the compute row (the utilization one) or stands alone: it

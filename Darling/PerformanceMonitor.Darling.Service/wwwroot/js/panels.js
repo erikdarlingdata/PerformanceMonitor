@@ -131,6 +131,11 @@ async function loadPanelBody(desc, body, signal) {
     body.parentNode.hidden = true;
     return;
   }
+  /* A panel on a PostgreSQL FinOps target that does not apply says one short line (`notCollectedLine`) instead of the server's gate paragraph. */
+  if (res.kind === "empty" && res.status === "not_collected" && desc.notCollectedLine) {
+    mount(body, emptyStrip(desc.notCollectedLine));
+    return;
+  }
   if (res.kind === "empty") {
     /* #4966: a grid that looked and found nothing still says where its table's data starts when that is after the
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a

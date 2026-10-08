@@ -193,6 +193,17 @@ ORDER BY database_name";
     public static Task<bool> HasQueryStatsCoverageAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
         DarlingFinOpsOptimizationReader.HasIdleCoverageAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
 
+    /// <summary>The oldest CPU sample since <paramref name="cutoff"/>, or null when there is none (the 24-hour rule's window check).</summary>
+    public static async Task<DateTime?> GetOldestCpuSampleAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand(CpuSampleSpanSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetDateTime(0) : null;
+    }
+
     /// <summary>The span from the oldest to the newest CPU sample since <paramref name="cutoff"/>: zero when there is none.</summary>
     public static async Task<TimeSpan> GetCpuSampleSpanAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
@@ -379,14 +390,19 @@ ORDER BY database_name";
             onCheckFailed?.Invoke("Enterprise features", ex);
         }
 
-        /* Both CPU right-sizing rules (2 and 12) read the same samples. A server enrolled minutes ago holds only the ring-buffer
-           backfill of its first collect ("68 samples over 4 minutes"), which is not a week of load, so neither rule speaks until the
-           samples span a full day, and the two never both land in the list: the one that keeps more cores wins. */
+        /* A server enrolled minutes ago holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which
+           is not a day of load, so each CPU right-sizing rule waits for its own window to be watched, and the two never both land in
+           the list: the one that keeps more cores wins. The 24-hour rule (2, utilization efficiency) reads the last 24 hours, so its
+           oldest sample inside that window has to be 23 hours old; the 7-day rule (12) reads 7 days and keeps a 24-hour span. */
         var cpuSpanEnough = false;
+        var cpu24HourWatched = false;
         try
         {
             cpuSpanEnough = FinOpsRecommendationFigures.CpuSamplesSpanEnough(
                 await GetCpuSampleSpanAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken));
+            var now = DateTime.UtcNow;
+            cpu24HourWatched = FinOpsRecommendationFigures.Cpu24HourWindowWatched(
+                await GetOldestCpuSampleAsync(dataSource, serverId, DateTime.SpecifyKind(now.AddHours(-24), DateTimeKind.Unspecified), commandTimeoutSeconds, cancellationToken), now);
         }
         catch (Exception ex)
         {
@@ -400,7 +416,7 @@ ORDER BY database_name";
         try
         {
             var util = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
-            computeCpuRow = cpuSpanEnough ? FinOpsRecommendationFigures.CpuRightSizing(util, monthlyCost) : null;
+            computeCpuRow = cpu24HourWatched ? FinOpsRecommendationFigures.CpuRightSizing(util, monthlyCost) : null;
             if (computeCpuRow != null)
             {
                 computeCpuTarget = FinOpsRecommendationFigures.CpuRightSizingTargetCores(util);

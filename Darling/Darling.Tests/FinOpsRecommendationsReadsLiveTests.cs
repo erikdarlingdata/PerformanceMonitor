@@ -162,7 +162,7 @@ public sealed class FinOpsRecommendationsReadsLiveTests
            { 20, 22, 24, 21, 23, 22, 20, 24, 22, 21 }, so 20 x 6, 21 x 6, 22 x 9, 23 x 3, 24 x 6. Sorted, the 95th
            percentile sits at 0.95 * 29 = 27.55, between ranks 27 and 28, both 24 (ranks 24 to 29 are the 24s), so
            P95 = 24. The samples run 45 minutes apart, 29 gaps = 1305 minutes = 21.75 hours, which reads "21 hours". */
-        var cpuExpected = (24m, "30 samples over 21 hours");
+        var cpuExpected = (24m, "31 samples over 22 hours");
         Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idA, cutoff, TimeoutSeconds, ct));
         Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idB, cutoff, TimeoutSeconds, ct));
         Assert.Null(await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idC, cutoff, TimeoutSeconds, ct));

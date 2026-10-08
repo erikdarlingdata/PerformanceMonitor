@@ -151,14 +151,20 @@ active_dbs AS (
     AND   delta_execution_count > 0
 ),
 /* The recommendation row's coverage rule (DarlingFinOpsOptimizationReader.HasIdleCoverageAsync): a database is called idle for 7
-   days only when query stats hold a sample on each of the last 7 UTC days. A server without that coverage gets NO idle_dbs row, so its
+   days only when the oldest query-stats sample is at or before $2 (now - 7 days) AND each complete UTC day in [$3, $5) -- D-7 through
+   D-1, today excluded -- holds a sample ($4 is how many days). A server without that coverage gets NO idle_dbs row, so its
    count is NULL (a dash), never a count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
 idle_coverage AS (
-    SELECT server_id
-    FROM v_query_stats
-    WHERE collection_time >= $3
-    GROUP BY server_id
-    HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
+    SELECT d.server_id
+    FROM (
+        SELECT server_id
+        FROM v_query_stats
+        WHERE collection_time >= $3
+        AND   collection_time <  $5
+        GROUP BY server_id
+        HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
+    ) AS d
+    WHERE EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = d.server_id AND o.collection_time <= $2)
 ),
 /* LEFT JOIN from servers, not an EXCEPT grouped by server_id: a server whose every known database is
    active has ZERO rows surviving an EXCEPT, and GROUP BY over zero rows contributes NO ROW for that
@@ -213,39 +219,55 @@ WHERE s.server_id <> 0";
     /// <summary>The RAW <c>idle_coverage</c> CTE in <see cref="ServerMetricsSql"/>, verbatim — the second anchor <see cref="ServerMetricsSqlFor"/>
     /// replaces, so the coverage days come from the same hourly rollup as the activity check rather than a raw 7-day scan of every server.</summary>
     private const string IdleCoverageRawCte = @"idle_coverage AS (
-    SELECT server_id
-    FROM v_query_stats
-    WHERE collection_time >= $3
-    GROUP BY server_id
-    HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
+    SELECT d.server_id
+    FROM (
+        SELECT server_id
+        FROM v_query_stats
+        WHERE collection_time >= $3
+        AND   collection_time <  $5
+        GROUP BY server_id
+        HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
+    ) AS d
+    WHERE EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = d.server_id AND o.collection_time <= $2)
 ),";
 
     /// <summary>
-    /// The routed <c>idle_coverage</c>: the distinct UTC days that hold a rollup bucket from <paramref name="relationSql"/> (a bucket
-    /// exists only for an hour that held a query-stats sample), UNION the raw days at or after <paramref name="watermarkUtc"/> that
-    /// the aggregate has not materialized yet. The coverage start ($3) is today minus six days at 00:00, after the ceiling hour of the
-    /// 7-day activity cutoff, so no leading raw edge is needed.
+    /// The routed <c>idle_coverage</c>: the distinct complete UTC days ([$3, $5)) that hold a rollup bucket from <paramref name="relationSql"/>
+    /// (a bucket exists only for an hour that held a query-stats sample), UNION the raw days at or after <paramref name="watermarkUtc"/>
+    /// that the aggregate has not materialized yet. The oldest-sample check is a rollup bucket that starts before the hour of
+    /// <paramref name="idleCutoffUtc"/> (so a sample at or before the cutoff certainly exists), or a raw sample at or before the cutoff;
+    /// only the single hour that holds the cutoff itself is judged conservatively. $3 is D-7 at 00:00, after the ceiling hour of the
+    /// 7-day activity cutoff, so no leading raw edge is needed for the days.
     /// </summary>
-    private static string IdleCoverageForCagg(string relationSql, DateTime watermarkUtc)
+    private static string IdleCoverageForCagg(string relationSql, DateTime watermarkUtc, DateTime idleCutoffUtc)
     {
         var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        var floorHour = TimescaleSupport.AlignDown(idleCutoffUtc, TimescaleSupport.HourlyBucket);
+        var oldestBucketBefore = $"TIMESTAMP '{floorHour:yyyy-MM-dd HH:mm:ss.ffffff}'";
 
         return $@"idle_coverage AS (
-    SELECT server_id
+    SELECT d.server_id
     FROM (
-        SELECT server_id, CAST(bucket AS DATE) AS sample_day
-        FROM {relationSql}
-        WHERE bucket >= $3
+        SELECT server_id
+        FROM (
+            SELECT server_id, CAST(bucket AS DATE) AS sample_day
+            FROM {relationSql}
+            WHERE bucket >= $3
+            AND   bucket <  $5
 
-        UNION
+            UNION
 
-        SELECT server_id, CAST(collection_time AS DATE) AS sample_day
-        FROM v_query_stats
-        WHERE collection_time >= {watermark}
-        AND   collection_time >= $3
-    ) AS days
-    GROUP BY server_id
-    HAVING COUNT(DISTINCT sample_day) >= $4
+            SELECT server_id, CAST(collection_time AS DATE) AS sample_day
+            FROM v_query_stats
+            WHERE collection_time >= {watermark}
+            AND   collection_time >= $3
+            AND   collection_time <  $5
+        ) AS days
+        GROUP BY server_id
+        HAVING COUNT(DISTINCT sample_day) >= $4
+    ) AS d
+    WHERE EXISTS (SELECT 1 FROM {relationSql} WHERE server_id = d.server_id AND bucket < {oldestBucketBefore})
+       OR EXISTS (SELECT 1 FROM v_query_stats r WHERE r.server_id = d.server_id AND r.collection_time <= $2)
 ),";
     }
 
@@ -320,7 +342,7 @@ WHERE s.server_id <> 0";
         return FinOpsRollupRouting.RouteOrThrow(
             activeRouted,
             IdleCoverageRawCte,
-            IdleCoverageForCagg(relationSql, watermarkUtc),
+            IdleCoverageForCagg(relationSql, watermarkUtc, idleCutoffUtc),
             "server inventory idle coverage");
     }
 
@@ -361,6 +383,7 @@ WHERE s.server_id <> 0";
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(idleCutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now), DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DarlingFinOpsOptimizationReader.IdleCoverageDays });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now), DateTimeKind.Unspecified) });
 
         var results = new Dictionary<int, ServerMetricsDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

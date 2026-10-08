@@ -67,13 +67,35 @@ public class FinOpsClickThroughRulesTests
     }
 
     [Fact]
-    public void IdleCoverage_IsTheLastSevenUtcDays_TodayIncluded()
+    public void IdleCoverage_IsTheSevenCompleteUtcDaysBeforeToday_AndSevenDaysOfHistory()
     {
         var now = new DateTime(2026, 10, 7, 15, 30, 0, DateTimeKind.Utc);
-        Assert.Equal(new DateTime(2026, 10, 1), DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now));
+        Assert.Equal(new DateTime(2026, 9, 30), DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now));
+        Assert.Equal(new DateTime(2026, 10, 7), DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now));
         Assert.Equal(7, DarlingFinOpsOptimizationReader.IdleCoverageDays);
         Assert.Contains("COUNT(DISTINCT CAST(collection_time AS DATE))", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("MIN(collection_time)", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time)", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
+
+        var covered = now.AddDays(-7).AddMinutes(-1);
+        Assert.True(DarlingFinOpsOptimizationReader.IdleCoverageHolds(covered, 7, now));
+        Assert.False(DarlingFinOpsOptimizationReader.IdleCoverageHolds(now.AddDays(-6.5), 7, now));   // 6.5 days of history, however many UTC dates it touches
+        Assert.False(DarlingFinOpsOptimizationReader.IdleCoverageHolds(covered, 6, now));              // a missing complete day
+        Assert.False(DarlingFinOpsOptimizationReader.IdleCoverageHolds(null, 7, now));                 // no sample at all
+        // Just after 00:00 UTC with no sample today yet: today is not part of the days, so the claim stands.
+        var justAfterMidnight = new DateTime(2026, 10, 8, 0, 5, 0, DateTimeKind.Utc);
+        Assert.True(DarlingFinOpsOptimizationReader.IdleCoverageHolds(justAfterMidnight.AddDays(-7).AddMinutes(-1), 7, justAfterMidnight));
+    }
+
+    [Fact]
+    public void Cpu24HourRule_NeedsItsOldestSampleInsideTheWindowToBe23HoursOld()
+    {
+        var now = new DateTime(2026, 10, 7, 15, 30, 0, DateTimeKind.Utc);
+        Assert.False(FinOpsRecommendationFigures.Cpu24HourWindowWatched(null, now));
+        // Two days of samples last week and 60 minutes since a restart: the window holds one hour, however long the older span was.
+        Assert.False(FinOpsRecommendationFigures.Cpu24HourWindowWatched(now.AddMinutes(-60), now));
+        Assert.False(FinOpsRecommendationFigures.Cpu24HourWindowWatched(now.AddHours(-22.9), now));
+        Assert.True(FinOpsRecommendationFigures.Cpu24HourWindowWatched(now.AddHours(-23), now));
+        Assert.True(FinOpsRecommendationFigures.Cpu24HourWindowWatched(now.AddHours(-23.98), now));
     }
 
     [Fact]
@@ -89,6 +111,9 @@ public class FinOpsClickThroughRulesTests
         // The raw statement joins idle_dbs to idle_coverage (an inner join), so an uncovered server has no idle_dbs row and its count is NULL.
         Assert.Contains("JOIN idle_coverage ic ON ic.server_id = s.server_id", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
         Assert.Contains("HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
+        // The complete days only (before $5, today at 00:00), and the oldest sample at or before the 7-day cutoff ($2).
+        Assert.Contains("collection_time <  $5", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
+        Assert.Contains("o.collection_time <= $2", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
     }
 
     [Fact]

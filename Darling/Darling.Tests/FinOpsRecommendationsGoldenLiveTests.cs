@@ -156,7 +156,7 @@ public sealed class FinOpsRecommendationsGoldenLiveTests
         /* Feeds CPU right-sizing, the VM CPU advice and the reserved-capacity check: 30 samples about 45 minutes apart
            over the last 22 hours, mean just above 20% with a spread well under 15% of the mean. */
         int[] cpu = { 20, 22, 24, 21, 23, 22, 20, 24, 22, 21 };
-        for (var i = 0; i < 30; i++)
+        for (var i = 0; i < 31; i++)
         {
             var at = now.AddMinutes(-(60 + 45 * i));
             await Cpu(c, ct, ServerIdA, ServerNameA, at, cpu[i % cpu.Length]);
@@ -184,6 +184,10 @@ public sealed class FinOpsRecommendationsGoldenLiveTests
         await Size(c, ct, now.AddHours(-2), "ArchiveA", 2048m);
         await Query(c, ct, now.AddDays(-8), "SalesA", "0xA1");
         await Query(c, ct, now.AddHours(-5), "SalesA", "0xA2");
+        /* The idle coverage rule also wants a sample on each of the 7 complete UTC days before today (D-7 through D-1), so a
+           gap inside the window does not read as a week of silence. One noon sample per day. */
+        for (var day = 1; day <= 7; day++)
+            await Query(c, ct, now.Date.AddDays(-day).AddHours(12), "SalesA", "0xD" + day);
 
         /* Feeds the maintenance-window builder: one job that ran long five times and one three times, so the order
            is clear. The three-time job averages 100.67 seconds, which pins the integer conversion of a fractional

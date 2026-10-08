@@ -12,7 +12,8 @@
    em dash, and the finding and detail text comes from the service in invariant format (a percent reads "20 %"). */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { gatedEmptyStrip } from "./gate.js";
 
 const SEV = { High: "Critical", Medium: "Warning", Low: "Healthy" };
 
@@ -45,7 +46,7 @@ export const tab = {
         const res = await readTool("get_finops_recommendations", { server }, ctx && ctx.signal);
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         const rows = (data.recommendations || []).map(displayRow);
         const skipped = data.skipped_checks || [];
