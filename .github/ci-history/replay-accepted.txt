@@ -1,0 +1,34 @@
+# Corpus rows today's rules do not select a failing class for, and why that is not a selection gap.
+# A miss not listed here fails ci-select.py --replay. Format: <10-char head sha> <class>.
+
+# A Darling class failed on a run whose changed files (as last recorded for the pull request) are
+# documentation only. The failing attempt ran on an earlier head of the pull request that held code, so the
+# recorded list is not the list that run saw.
+cc29d98125 Darling.Tests.RepoFileAdoptionTests
+7b64070c98 Darling.Tests.DarlingDeployRollbackRetentionTests
+e6dbdbea94 Darling.Tests.IncidentAttachmentDeliveryTests
+
+# A Lite class failed on a Darling-only diff, before the Reads=Darling selection (build.yml, 2026-10-04)
+# existed or while the pull request still carried the older workflow. DarlingReadsTraitGuardTests derives the
+# Reads=Darling tag from the class source, so a class without it reads no Darling file: the diff did not cause
+# the failure.
+d0d482835c PerformanceMonitorLite.Tests.PerformanceCalendarDataTests
+cd34bbcb31 PerformanceMonitorLite.Tests.StatusBarSizeReadLockTests
+1792370ebd PerformanceMonitorLite.Tests.McpPageContractTests
+32239fd349 PerformanceMonitorLite.Tests.MemoryTrendGrantJoinToolTests
+ad89ad83a7 PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+08ca596e65 PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+d064b8ebc5 PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+1e9c8ce764 PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+95a42dab2d PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+5219f29479 PerformanceMonitorLite.Tests.AnomalyDetectorTileBehaviourTests
+e4cb4a3699 PerformanceMonitorLite.Tests.AnomalyDetectorTileBehaviourTests
+1c726d7f67 PerformanceMonitorLite.Tests.AnomalyDetectorTileBehaviourTests
+c0adc53226 PerformanceMonitorLite.Tests.ScenarioTests
+68ddf17466 PerformanceMonitorLite.Tests.ScenarioTests
+a75333e8e2 PerformanceMonitorLite.Tests.ScenarioTests
+801cb7c1d8 PerformanceMonitorLite.Tests.ScenarioTests
+63ba0d2893 PerformanceMonitorLite.Tests.DuckDbSentinelConnectionTests
+411d87afbe PerformanceMonitorLite.Tests.FinOpsTests
+eca647c2f4 PerformanceMonitorLite.Tests.QueryStoreRegressionsToolTests
+eca647c2f4 PerformanceMonitorLite.Tests.SignificantWaitsToolTests
