@@ -436,6 +436,10 @@ public sealed class QueryStoreBackgroundIndexesTests
         Assert.Contains("foreach (var spec in specs)", engine);
         Assert.Contains("catch (Exception ex) when (!cancellationToken.IsCancellationRequested)", engine);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(engine, @"Task\.Delay\("));
-        Assert.DoesNotContain("while (", engine, StringComparison.Ordinal);
+
+        /* No retry loop. The only loop construct allowed is the one that reads a result set's rows (#5571's partitioned
+           path lists the leaf partitions that way), which has no wait and no second attempt. */
+        Assert.DoesNotContain("while (true)", engine, StringComparison.Ordinal);
+        Assert.Empty(System.Text.RegularExpressions.Regex.Matches(engine, @"while \((?!await reader\.ReadAsync\()"));
     }
 }
