@@ -218,6 +218,10 @@ public class AnalysisService
         /* Filled once per pass at the one door every path goes through. */
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(context.ServerId);
 
+        /* #5558: the databases this node holds only as a secondary copy, at the window's end (so an AsOf pass
+           uses the role at that time). Fails open: any unknown leaves it empty. */
+        await SecondaryReplicaScope.EnsureAsync(_duckDb, context);
+
         IsAnalyzing = true;
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
@@ -572,6 +576,7 @@ public class AnalysisService
             CancellationToken = cancellationToken
         };
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
+        await SecondaryReplicaScope.EnsureAsync(_duckDb, context); /* #5558 */
 
         try
         {
@@ -673,6 +678,10 @@ public class AnalysisService
         };
         baselineContext.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         comparisonContext.SeparatelyMonitoredDatabases = baselineContext.SeparatelyMonitoredDatabases;
+        /* #5558: NOT copied across like the list above: the two windows can straddle a failover, and each window
+           uses the role at its own end. */
+        await SecondaryReplicaScope.EnsureAsync(_duckDb, baselineContext);
+        await SecondaryReplicaScope.EnsureAsync(_duckDb, comparisonContext);
 
         try
         {

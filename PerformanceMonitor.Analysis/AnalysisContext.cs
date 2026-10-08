@@ -25,6 +25,16 @@ public class AnalysisContext
     /// findings come from the databases' own targets. Null or empty changes nothing.
     /// </summary>
     public IReadOnlyList<string>? SeparatelyMonitoredDatabases { get; set; }
+
+    /// <summary>
+    /// The databases this node holds only as a SECONDARY copy in an Availability Group (#5558), resolved once per
+    /// pass at the same door as <see cref="SeparatelyMonitoredDatabases"/> from the store's own AG snapshots at or
+    /// before <see cref="TimeRangeEnd"/>. The facts whose data replicates from the primary
+    /// (<see cref="FactReplicaScope"/>) skip these databases, so the primary reports each finding once. Null or
+    /// empty changes nothing: every unknown (collector off, stale rows, standalone, Azure SQL Database) leaves it
+    /// null or empty, so the filter fails open.
+    /// </summary>
+    public IReadOnlySet<string>? SecondaryReplicaDatabases { get; set; }
     public string ServerName { get; set; } = string.Empty;
     public DateTime TimeRangeStart { get; set; }
     public DateTime TimeRangeEnd { get; set; }
