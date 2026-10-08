@@ -175,8 +175,10 @@ public sealed class DarlingSelfAlertClockStepTests
         return h;
     }
 
+    /* #5489: Collection Stopped is a state alert and no longer repeats per shared cooldown, so the shared-cooldown
+       gate is exercised through Capture Down, which still does. (The method keeps its name to keep the diff small.) */
     private static Task StoppedAsync(DarlingSelfAlertEvaluator e) =>
-        e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct);
+        e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Ct);
 
     private static int Fires(DarlingSelfAlertTests.Harness h, string metric) =>
         h.Deliverer.Outcomes.Count(o => o.MetricName == metric);
@@ -189,19 +191,19 @@ public sealed class DarlingSelfAlertClockStepTests
         var firedAt = h.Now;
 
         await StoppedAsync(e);
-        Assert.Equal(1, Fires(h, "Collection Stopped"));
+        Assert.Equal(1, Fires(h, "Capture Down"));
 
         h.Now = firedAt.AddMinutes(-10);
         await StoppedAsync(e);
-        Assert.Equal(1, Fires(h, "Collection Stopped"));
+        Assert.Equal(1, Fires(h, "Capture Down"));
 
         h.Now = firedAt.AddMinutes(-10) + Cooldown - TimeSpan.FromSeconds(1);
         await StoppedAsync(e);
-        Assert.Equal(1, Fires(h, "Collection Stopped"));
+        Assert.Equal(1, Fires(h, "Capture Down"));
 
         h.Now = firedAt.AddMinutes(-10) + Cooldown;
         await StoppedAsync(e);
-        Assert.Equal(2, Fires(h, "Collection Stopped"));
+        Assert.Equal(2, Fires(h, "Capture Down"));
     }
 
     [Fact]
@@ -214,15 +216,15 @@ public sealed class DarlingSelfAlertClockStepTests
         await StoppedAsync(e);
         h.Now = firedAt.AddMilliseconds(-50);
         await StoppedAsync(e);
-        Assert.Equal(1, Fires(h, "Collection Stopped"));
+        Assert.Equal(1, Fires(h, "Capture Down"));
 
         h.Now = firedAt.AddMilliseconds(-50) + Cooldown - TimeSpan.FromMilliseconds(1);
         await StoppedAsync(e);
-        Assert.Equal(1, Fires(h, "Collection Stopped"));
+        Assert.Equal(1, Fires(h, "Capture Down"));
 
         h.Now = firedAt.AddMilliseconds(-50) + Cooldown;
         await StoppedAsync(e);
-        Assert.Equal(2, Fires(h, "Collection Stopped"));
+        Assert.Equal(2, Fires(h, "Capture Down"));
     }
 
     [Fact]
@@ -235,11 +237,11 @@ public sealed class DarlingSelfAlertClockStepTests
         await StoppedAsync(e);
         h.Now = firedAt + Cooldown - TimeSpan.FromTicks(1);
         await StoppedAsync(e);
-        Assert.Equal(1, Fires(h, "Collection Stopped"));
+        Assert.Equal(1, Fires(h, "Capture Down"));
 
         h.Now = firedAt + Cooldown;
         await StoppedAsync(e);
-        Assert.Equal(2, Fires(h, "Collection Stopped"));
+        Assert.Equal(2, Fires(h, "Capture Down"));
     }
 
     [Fact]
@@ -249,7 +251,7 @@ public sealed class DarlingSelfAlertClockStepTests
         var e = h.Build();
         var firedAt = h.Now;
         var stamps = (ConcurrentDictionary<string, DateTime>)typeof(DarlingSelfAlertEvaluator)
-            .GetField("_lastCollectionStoppedAlert", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetField("_lastCaptureDownAlert", BindingFlags.NonPublic | BindingFlags.Instance)!
             .GetValue(e)!;
 
         await StoppedAsync(e);
