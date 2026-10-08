@@ -129,6 +129,8 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
+        ColumnFilterScope.SetServer(this, _server.ServerName);
 
         /* Per-server toolbar identity label: the display name is static (it also heads the tab), while the
            freshness readout to its right is filled on the first (and every) refresh from the shared

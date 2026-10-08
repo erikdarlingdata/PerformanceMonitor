@@ -178,6 +178,10 @@ public partial class FinOpsTab : UserControl
     /// drill, then reloads the active sub-tab.</summary>
     private async void ServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        /* #5565: the tab's grids keep their column filters per server, so the scope follows the selector - also while
+           the list repopulates, when the early return below skips the rest. */
+        ColumnFilterScope.SetServer(this, (ServerSelector.SelectedItem as DarlingServer)?.ServerName);
+
         if (_populatingServers)
         {
             return;
