@@ -313,8 +313,14 @@ public sealed class StatementFilterAlertTests
     [Fact]
     public void Apply_AQuerySetThatSlowsTheJudge_FinishesInsideTheBudget()
     {
-        /* Many long values built to make the judge work: nested gaps and unterminated comments. Past the 1.5 s
-           budget a value is withheld unjudged, so the call is bounded however many arrive. */
+        /* Many long values built to make the judge work: nested gaps and unterminated comments. Past the budget a value
+           is withheld unjudged, so the work is bounded however many arrive.
+
+           #5459: this asserted `took < 1950 ms` on the real clock, so a runner that stalled for a moment (a collection,
+           a descheduled thread) failed it though the budget logic was fine. The budget's clock is now a stepped one:
+           every judge call is charged 50 ms, so the budget (1.5 s, plus a little earned per value) is spent after a few
+           dozen of the 800 calls, on any machine. The real judge still runs on every value it is given. The wall-clock
+           bound is kept at 10x only to catch a hang. */
         var context = new AlertContext();
         for (var i = 0; i < 400; i++)
         {
@@ -324,12 +330,24 @@ public sealed class StatementFilterAlertTests
             context.Details.Add(item);
         }
 
+        var step = TimeSpan.FromMilliseconds(50);
+        var budget = SteppingBudget(step);
         var stopwatch = Stopwatch.StartNew();
-        var filtered = AlertStatementFilter.Apply(context)!;
+        AlertContext filtered;
+        using (AlertStatementFilter.UseBudget(() => budget))
+        {
+            filtered = AlertStatementFilter.Apply(context)!;
+        }
+
         stopwatch.Stop();
 
-        Assert.True(stopwatch.ElapsedMilliseconds < 1950, "took " + stopwatch.ElapsedMilliseconds + " ms");
+        Assert.True(stopwatch.ElapsedMilliseconds < 19_500, "took " + stopwatch.ElapsedMilliseconds + " ms");
         Assert.Equal(400, filtered.Details.Count);
+        Assert.True(budget.Spent, "the budget did not run out");
+        Assert.True(budget.Unjudged > 0, "nothing was withheld unjudged");
+        // The judge ran only while the budget was open: it is charged exactly one step per call, so the time charged
+        // can pass the limit by at most the one call that crossed the line. That is the bound, in the budget's own time.
+        Assert.True(budget.Elapsed < budget.Limit + step, $"charged {budget.Elapsed} against a limit of {budget.Limit}");
     }
 
     [Fact]
@@ -547,6 +565,37 @@ public sealed class StatementFilterAlertTests
         Assert.Equal(3, budget.DocumentPasses);
         Assert.Equal(3, pinned.DocumentPasses);
         // And the budget earned 0.5 s per MB of each of them (a little under 2.0 s each, so about 7.4 s), not 1.5 s in all.
+        Assert.InRange(budget.Limit, TimeSpan.FromSeconds(7.25), TimeSpan.FromSeconds(8.5));
+    }
+
+    /// <summary>A budget whose clock moves <paramref name="step"/> on every read, so each judge call is charged exactly
+    /// <paramref name="step"/> however fast or slow the machine is (#5459). The real judge still runs.</summary>
+    private static SensitiveStatements.JudgeBudget SteppingBudget(TimeSpan step)
+    {
+        var now = TimeSpan.Zero;
+        return new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget, clock: () => now += step);
+    }
+
+    [Fact]
+    public void ApplyCore_ThreeIncidents_ABudgetThatRunsOutMidway_WithholdsWholeAndKeepsTheAccounting()
+    {
+        // #5459: the cause of the old "expected 3, actual 2". The filter judges under a wall-clock budget, and a runner
+        // slow enough to spend it withholds a report whole. Here the clock charges 50 ms per judge call, so the budget
+        // (1.5 s plus about 2 s a report, against about 10,000 values a report) is spent part of the way in, on any
+        // machine. A report the budget was spent on comes back as the marker, nothing named leaks, and the numbers the
+        // test above reads (passes, limit) are the same whether the time ran out or not.
+        StatementFilterWarmUp.Ensure();
+        var h = ThreeIncidentHarness();
+        var context = AlertContextBuilders.BuildBlockingContext("SRV", h.Adapter.Blocking, Array.Empty<string>())!;
+
+        var budget = SteppingBudget(TimeSpan.FromMilliseconds(50));
+        var filtered = AlertStatementFilter.ApplyCore(context, budget)!;
+
+        Assert.True(budget.Spent, "the budget did not run out");
+        Assert.True(filtered.Incidents!.Count(i => i.Attachment!.Xml.Length > 4_000_000) < 3, "no report was withheld");
+        Assert.Contains(filtered.Incidents!, i => i.Attachment!.Xml == Marker);
+        AssertNoSecret(string.Join(Environment.NewLine, Everything(filtered)));
+        Assert.Equal(3, budget.DocumentPasses);
         Assert.InRange(budget.Limit, TimeSpan.FromSeconds(7.25), TimeSpan.FromSeconds(8.5));
     }
 }
