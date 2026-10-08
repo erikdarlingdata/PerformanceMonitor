@@ -1,6 +1,8 @@
 # The ONE Darling path gate. Both Darling jobs in .github/workflows/build.yml — `Darling PostgreSQL
 # tests` and `Darling Linux build` — read this file through dorny/paths-filter's documented
-# `filters: <relative path>` form, so the two jobs cannot disagree about what reaches Darling.
+# `filters: <relative path>` form, so the two jobs cannot disagree about what reaches Darling. The build
+# job reads it a third time to learn whether the PostgreSQL shards run (#5459 cut 3b), and
+# .github/scripts/ci-select.py reads it to replay the failure corpus.
 #
 # A FILE rather than a list per job (#3116). The PG job's own filter named `Darling/**` and the two
 # workflows and nothing else, while the Linux job in the same file already listed shared libraries;
