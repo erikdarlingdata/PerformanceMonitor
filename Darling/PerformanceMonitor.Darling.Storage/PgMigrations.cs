@@ -918,6 +918,20 @@ END $$;";
     private static readonly string V172Sql = BuildQueryStoreIntervalPartitionRungSql(wide: false);
 
     /// <summary>
+    /// V173 (#5582) — the exact stamp-grain rollup of <c>collect.query_store_interval_wide</c>: <c>collect.query_store_compose_stamp</c>,
+    /// its per-(server, hour) validity table <c>_built</c>, the fleet-level <c>_hours</c> table, and two row triggers on the partitioned
+    /// PARENT <c>collect.query_store_interval_wide</c> (INSERT, UPDATE) that mark a (server, hour) stale when a row lands in, or leaves,
+    /// an hour the builder may have done. The text, the column map and the reasoning are on <see cref="QueryStoreComposeStamp"/>, which
+    /// the rung embeds. <b>Catalog-only:</b> the tables are created empty, and <c>CREATE TRIGGER</c> on a partitioned table is a catalog
+    /// change that clones the trigger onto each existing leaf (the legacy table, DEFAULT, the day partitions) without scanning one. The
+    /// lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V171's, because the trigger needs a SHARE ROW EXCLUSIVE
+    /// lock on the parent and each leaf; no collector writes during a rung. Plain tables, no GRANT (the <c>collect</c> schema's blanket
+    /// SELECT covers them). The service's hourly tick fills the rollup (<see cref="QueryStoreComposeStamp.RunTickAsync(Npgsql.NpgsqlDataSource, DateTime, int, Microsoft.Extensions.Logging.ILogger, CancellationToken)"/>).
+    /// <b>No Lite twin:</b> Lite has no PostgreSQL store.
+    /// </summary>
+    private static readonly string V173Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.CreateSql;
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1201,6 +1215,7 @@ $rung$;";
         new Migration(170, "pg-io-stats-hourly", V170Sql),
         new Migration(171, "query-store-interval-wide-partitioned", V171Sql),
         new Migration(172, "query-store-interval-latest-partitioned", V172Sql),
+        new Migration(173, "query-store-compose-stamp", V173Sql),
     };
 
     /// <summary>

@@ -11652,6 +11652,13 @@ AND   j.hypertable_name = '{relation}'", connection))
             await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
         }
 
+        /* #5582: the ninth tenant, same contract - its own method, its own catch-all, one awaited statement. The exact stamp-grain
+           rollup of the wide Query Store table (V173) needs no TimescaleDB (its tables are plain and the wide table is a plain
+           partitioned table), so it sits outside the gate and runs on every store shape. It sits BEFORE the I/O rollup, not
+           after it: the pins keep the I/O rollup directly before the module-map refresh and the PLAN_REGRESSION builder, which
+           can run up to a 10-minute tick, as the last await. At most six hours a tick, so a fault or a slow build skips nothing. */
+        await BuildQueryStoreComposeStampAsync(stoppingToken);
+
         /* #5495: the eighth tenant, same contract — its own method, its own catch-all, one awaited statement. The hourly
            PostgreSQL I/O rollup needs no TimescaleDB (its tables are plain), so it sits outside the gate and runs on every
            store shape. It sits BEFORE the module-map refresh and the PLAN_REGRESSION builder, not after them: the pins keep
@@ -11723,6 +11730,25 @@ AND   j.hypertable_name = '{relation}'", connection))
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("PLAN_REGRESSION daily totals could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's ninth tenant (#5582): builds the exact stamp-grain rollup of the wide Query Store table that
+    /// the Query Store panels of the composer read for the hours before the last three, one failure-isolated pass (see
+    /// <see cref="QueryStoreComposeStamp.RunTickAsync(Npgsql.NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/>). At most
+    /// <see cref="QueryStoreComposeStamp.MaxBuildsPerTick"/> hours per tick, stale hours first. Its own catch-all: nothing here can fail the tick.
+    /// </summary>
+    private async Task BuildQueryStoreComposeStampAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await QueryStoreComposeStamp.RunTickAsync(
+                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Query Store compose rollup could not run; the next hourly tick retries: {Message}", ex.Message);
         }
     }
 
