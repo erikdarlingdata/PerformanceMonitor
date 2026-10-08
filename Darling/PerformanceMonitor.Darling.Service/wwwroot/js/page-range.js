@@ -53,17 +53,27 @@ export async function catalogEntryFor(read) {
 
 /** The catalog with the SERVER's own collector intervals (a per-server schedule row wins), cached per server. Null when it cannot be read. */
 export function serverCatalog(server) {
+  const held = serverCatalogs.get(server);
+  /* An entry expires when it is looked up after its time, not by a timer: a pending timer keeps a Node harness alive for the whole
+     TTL (the picker harness waited 300 s to exit before this). */
+  if (held && held.readAt !== null && Date.now() - held.readAt >= SERVER_CATALOG_TTL_MS) serverCatalogs.delete(server);
   if (!serverCatalogs.has(server)) {
     /* Only a catalog that was read is kept (#5562 review r1 L2): a failed fetch is not cached as null for the page's life, and a
        schedule edited in Settings is seen again after the entry expires. */
-    const fetched = apiGet("/api/catalog?server=" + encodeURIComponent(server)).then((r) => (r.kind === "data" && r.data ? r.data : null));
-    serverCatalogs.set(server, fetched);
-    fetched.then((catalog) => {
-      if (catalog === null) serverCatalogs.delete(server);
-      else setTimeout(() => serverCatalogs.delete(server), SERVER_CATALOG_TTL_MS);
-    }, () => serverCatalogs.delete(server));
+    const entry = { readAt: null, fetched: null };
+    entry.fetched = apiGet("/api/catalog?server=" + encodeURIComponent(server)).then((r) => (r.kind === "data" && r.data ? r.data : null));
+    serverCatalogs.set(server, entry);
+    entry.fetched.then((catalog) => {
+      if (catalog === null) {
+        if (serverCatalogs.get(server) === entry) serverCatalogs.delete(server);
+      } else {
+        entry.readAt = Date.now();
+      }
+    }, () => {
+      if (serverCatalogs.get(server) === entry) serverCatalogs.delete(server);
+    });
   }
-  return serverCatalogs.get(server);
+  return serverCatalogs.get(server).fetched;
 }
 
 /** The interval, in milliseconds, of one collector on this server as the catalog serves it: every read of a collector carries the same

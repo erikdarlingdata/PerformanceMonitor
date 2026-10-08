@@ -201,6 +201,19 @@ public sealed class WebPageRangeTests
         Assert.Equal(24, window.GetProperty("finished").GetProperty("hours").GetInt32());
         Assert.Equal("2026-10-08T10:00:00.000Z", window.GetProperty("finished").GetProperty("asOf").GetString());
 
+        // R9: Today two minutes after midnight is held (a calendar period is exempt from the floor); exactly midnight is refused; a typed span keeps the floor.
+        var floor = r.GetProperty("calendarFloor");
+        Assert.Equal(1, floor.GetProperty("twoMinutesIn").GetProperty("window").GetProperty("hours").GetInt32());
+        Assert.Contains("shortest range is 5 minutes", floor.GetProperty("atMidnight").GetProperty("error").GetString());
+        Assert.Equal("too_short", floor.GetProperty("typedUnderFloor").GetString());
+
+        // The per-server catalog is read once, kept for its time to live, then read again (and expires on lookup, not on a timer that holds Node open).
+        var ttl = r.GetProperty("catalogTtl");
+        Assert.Equal(1, ttl.GetProperty("afterTwoLookups").GetInt32());
+        Assert.Equal(1, ttl.GetProperty("afterFourMinutes").GetInt32());
+        Assert.Equal(2, ttl.GetProperty("afterSixMinutes").GetInt32());
+        Assert.DoesNotContain("setTimeout(() => serverCatalogs", Js("page-range.js"));
+
         // The sweep timeline and the job runs are cut at the range's start (newest first, so a row cap cannot hide a run in range).
         Assert.Equal(3, r.GetProperty("sweeps").GetProperty("kept").GetInt32());
         Assert.Equal(2, r.GetProperty("sweeps").GetProperty("all").GetInt32());

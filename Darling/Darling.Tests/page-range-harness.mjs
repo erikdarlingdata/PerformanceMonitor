@@ -71,6 +71,38 @@ try {
     finished: w(tr.fixedSpec(now - 26 * HOUR, now - 2 * HOUR)),
   };
 
+  /* R9: a calendar period is exempt from the 5 minute floor and refused only at zero length (exactly midnight). */
+  const today = (iso) => pageRange.windowResultOfSpec(tr.calendarSpec("today"), Date.parse(iso), "UTC");
+  out.calendarFloor = {
+    twoMinutesIn: today("2026-10-08T00:02:00Z"),
+    atMidnight: today("2026-10-08T00:00:00Z"),
+    typedUnderFloor: tr.resolveSpec(tr.relativeSpec(3 * MIN), now, "UTC").error.code,
+  };
+
+  /* A server's catalog is read once, kept until its time is up and then read again. The entry expires on lookup, not on a timer:
+     a pending timer would keep this process (and a test waiting on it) alive for the whole time to live. */
+  let catalogReads = 0;
+  let clock = now;
+  const realNow = Date.now;
+  Date.now = () => clock;
+  globalThis.fetch = async () => {
+    catalogReads++;
+    return { ok: true, status: 200, text: async () => JSON.stringify(catalog(1)) };
+  };
+  try {
+    await pageRange.serverCatalog("SRV1");
+    await pageRange.serverCatalog("SRV1");
+    const afterTwoLookups = catalogReads;
+    clock += 4 * MIN;
+    await pageRange.serverCatalog("SRV1");
+    const afterFourMinutes = catalogReads;
+    clock += 2 * MIN;
+    await pageRange.serverCatalog("SRV1");
+    out.catalogTtl = { afterTwoLookups, afterFourMinutes, afterSixMinutes: catalogReads };
+  } finally {
+    Date.now = realNow;
+  }
+
   const sweeps = await load("pages", "sweeps.js");
   const stamp = (minutesAgo) => ({ swept_at: new Date(now - minutesAgo * MIN).toISOString() });
   const trimmed = sweeps.timelineSweeps([stamp(5), stamp(20), stamp(50), { swept_at: "not a time" }], pageRange.windowOfSpec(tr.relativeSpec(30 * MIN), now, "UTC"));
