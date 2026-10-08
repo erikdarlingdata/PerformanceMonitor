@@ -258,7 +258,7 @@
                       SelectionChanged="ServerSelector_SelectionChanged">
                 <ComboBox.ItemTemplate>
                     <DataTemplate>
-                        <TextBlock Text="{Binding DisplayName}"/>
+                        <TextBlock Text="{Binding PickerLabel}"/>
                     </DataTemplate>
                 </ComboBox.ItemTemplate>
             </ComboBox>
@@ -268,6 +268,8 @@
         </StackPanel>
 
         <Grid Grid.Row="1">
+            <!-- The one line a PostgreSQL target gets in place of a single-server sub-tab (FinOpsServerChoice). It sits behind the sub-tab control, whose content is collapsed while it shows. -->
+            <TextBlock x:Name="FinOpsNotCollectedText" Style="{StaticResource EmptyHint}"/>
             <TabControl x:Name="FinOpsSubTabControl" Background="Transparent" BorderThickness="0"
                         ItemContainerStyle="{DynamicResource SubTabItemStyle}"
                         SelectionChanged="FinOpsSubTabs_SelectionChanged">
@@ -542,8 +544,8 @@
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding CurrentSizeMb, StringFormat=N2}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentSizeMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Current Size MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding Size7dAgoMb, StringFormat=N2}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Size7dAgoMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size 7d Ago MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding Size30dAgoMb, StringFormat=N2}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Size30dAgoMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size 30d Ago MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding Size7dAgoMb, StringFormat=N2, TargetNullValue='n/a'}" Width="120"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock" BasedOn="{StaticResource NumericCell}"><Setter Property="ToolTip" Value="{Binding Size7dAgoNote}"/></Style></DataGridTextColumn.ElementStyle><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Size7dAgoMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size 7d Ago MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding Size30dAgoMb, StringFormat=N2, TargetNullValue='n/a'}" Width="120"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock" BasedOn="{StaticResource NumericCell}"><Setter Property="ToolTip" Value="{Binding Size30dAgoNote}"/></Style></DataGridTextColumn.ElementStyle><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Size30dAgoMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size 30d Ago MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding Growth7dMb, StringFormat=N2, TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Growth7dMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Growth 7d MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding Growth30dMb, StringFormat=N2, TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Growth30dMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Growth 30d MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding DailyGrowthRateMb, StringFormat=N2, TargetNullValue='n/a'}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DailyGrowthRateMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Daily Rate MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -666,7 +668,7 @@
                     <Grid>
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
-                            <TextBlock Text="Database Sizes" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBlock Text="{Binding ElementName=ServerSelector, Path=SelectedItem.DisplayName, StringFormat='Database Sizes ({0})', FallbackValue='Database Sizes'}" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsRefreshDatabaseSizes_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                             <TextBlock x:Name="FinOpsDbSizeCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                         </StackPanel>
@@ -954,6 +956,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
                             <TextBlock Text="Server Inventory (All Servers)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsRefreshServerInventory_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                            <CheckBox x:Name="FinOpsShowRemovedCheck" Content="Show removed servers" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" ToolTip="Also list servers that were removed from the configuration" Checked="FinOpsShowRemoved_Changed" Unchecked="FinOpsShowRemoved_Changed"/>
                             <TextBlock x:Name="FinOpsServerInventoryCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="10,0,10,10">
@@ -1007,10 +1010,12 @@
                                     <DataGridTextColumn Header="Monitoring" Binding="{Binding MonitoringStatus}" Width="120"/>
                                     <DataGridTextColumn Header="Monthly ($)" Binding="{Binding MonthlyCost, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Health" Binding="{Binding HealthScore}" Width="60">
+                                    <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='-'}" Width="60">
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
                                                 <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/>
+                                                <Setter Property="ToolTip" Value="{Binding HealthScoreNote}"/>
+                                                <Setter Property="Foreground" Value="#7F8C8D"/>
                                                 <Style.Triggers>
                                                     <DataTrigger Binding="{Binding HealthScoreColor}" Value="#27AE60"><Setter Property="Foreground" Value="#27AE60"/></DataTrigger>
                                                     <DataTrigger Binding="{Binding HealthScoreColor}" Value="#F39C12"><Setter Property="Foreground" Value="#F39C12"/></DataTrigger>
@@ -1187,10 +1192,22 @@
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Finding" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Finding" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding Finding}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
+                                    <!-- Detail wraps instead of running off the column edge, with the full text in a tooltip. -->
                                     <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="560">
-                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding Detail}"/></Style></DataGridTextColumn.ElementStyle>
+                                        <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="ToolTip" Value="{Binding Detail}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Header="Est. Savings ($/mo)" Binding="{Binding EstMonthlySavingsDisplay}" Width="130" SortMemberPath="EstMonthlySavings" ElementStyle="{StaticResource NumericCell}"/>
+                                    <!-- No savings estimate (no monthly cost set for the server) reads as a dash with a tooltip naming the setting. -->
+                                    <DataGridTextColumn Header="Est. Savings ($/mo)" Binding="{Binding EstMonthlySavings, StringFormat='${0:N0}', TargetNullValue='-'}" Width="130" SortMemberPath="EstMonthlySavings">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource NumericCell}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding EstMonthlySavings}" Value="{x:Null}">
+                                                        <Setter Property="ToolTip" Value="No estimate: set this server's Monthly Cost ($) in its server settings to see estimated savings."/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
 

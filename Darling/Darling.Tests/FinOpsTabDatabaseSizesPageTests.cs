@@ -83,7 +83,8 @@ public sealed class FinOpsTabDatabaseSizesPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "./gate.js" }));
+        Assert.Contains("./gate.js", imports);
     }
 
     [Fact]

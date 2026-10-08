@@ -9,7 +9,6 @@
 using System;
 using System.Globalization;
 using System.Linq;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -156,7 +155,8 @@ public sealed class AwsPerServerRoleLiveTests
             Assert.Equal("3", await TextAsync(owner,
                 "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_monitored_servers' "
                 + "AND column_name IN ('aws_role_arn', 'aws_external_id', 'aws_external_id_set')", ct));
-            Assert.Equal(AwsPerServerRoleRungTests.RungVersion.ToString(CultureInfo.InvariantCulture),
+            /* The store's top rung, not this rung's: V170 (#5495) landed above it. */
+            Assert.Equal(StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture),
                 await TextAsync(owner, "SELECT max(version) FROM darling_schema_version", ct));
             Assert.Equal(1L.ToString(CultureInfo.InvariantCulture), await TextAsync(owner,
                 "SELECT count(*) FROM pg_constraint WHERE conname = 'config_monitored_servers_aws_role_check'", ct));
@@ -172,7 +172,7 @@ public sealed class AwsPerServerRoleLiveTests
 
             Assert.True(await ProbeSentinelAsync(owner, ct));
             Assert.Equal("<null> | <null> | false", await StoredAsync(owner, 8101, ct));
-            Assert.Equal("169", await TextAsync(owner, "SELECT max(version) FROM darling_schema_version", ct));
+            Assert.Equal(StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture), await TextAsync(owner, "SELECT max(version) FROM darling_schema_version", ct));
 
             /* Running the rung's text again changes nothing and raises nothing. */
             var rung = PgMigrations.Scripts.Single(s => s.Version == AwsPerServerRoleRungTests.RungVersion).Sql;
@@ -192,12 +192,11 @@ public sealed class AwsPerServerRoleLiveTests
 
     private static async Task<bool> ProbeSentinelAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var arity = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!
-            .GetParameters().Length;
+        /* This rung's own sentinel by ordinal: a newer rung's sentinel (V170's) is now the last one, and it stays true here. */
         await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
-        return reader.GetBoolean(arity - 1);
+        return reader.GetBoolean(AwsPerServerRoleRungTests.ProbeOrdinal);
     }
 
     /* ---- the check ------------------------------------------------------------------------------------- */

@@ -107,6 +107,8 @@ public sealed partial class DarlingMcpFinOpsTools
         growth_30d_mb = RoundGrowth(r.Growth30dMb, 2),
         daily_growth_rate_mb = RoundGrowth(r.DailyGrowthRateMb, 2),
         growth_pct_30d = RoundGrowth(r.GrowthPct30d, 1),
+        size_7d_ago_note = DarlingFinOpsStorageGrowthReader.NoBaselineNote(7, r.Size7dAgoMb),
+        size_30d_ago_note = DarlingFinOpsStorageGrowthReader.NoBaselineNote(30, r.Size30dAgoMb),
         has_sibling_row = r.HasSiblingRow,
         has_log_service_file = r.HasLogServiceFile,
         note = AzureSiblingDatabaseSize.StorageGrowthNote(r.HasLogServiceFile, r.HasSiblingRow),

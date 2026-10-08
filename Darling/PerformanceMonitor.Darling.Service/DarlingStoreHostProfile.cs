@@ -886,6 +886,21 @@ WHERE NOT is_compressed";
     internal static string FormatSettingValue(long value, string unit) =>
         unit.Length == 0 ? value.ToString(CultureInfo.InvariantCulture) : FormattableString.Invariant($"{value}{unit}");
 
+    /// <summary>#5459: <c>max_wal_size</c> is derived from the data volume's CURRENT free space, which moves
+    /// between the service start that wrote the block and any later check. When the stored value is a rung the
+    /// ladder would pick for a reading within <see cref="DarlingManagedPostgres.WalSizingVerdictToleranceDivisor"/>
+    /// of this one, the derived figure reported is the stored one (so it reads Matches); anything further away is
+    /// a real change in headroom and keeps the plain derivation.</summary>
+    internal static long ApplyWalDriftTolerance(string settingName, long derivedValueMb, long? currentValueMb, long freeDiskBytes)
+    {
+        if (!string.Equals(settingName, "max_wal_size", StringComparison.Ordinal) || currentValueMb is not { } current)
+        {
+            return derivedValueMb;
+        }
+
+        return DarlingManagedPostgres.IsWalSizeWithinDriftOf(freeDiskBytes, current) ? current : derivedValueMb;
+    }
+
     /// <summary>The eight settings ruling 4 names, each with its unit and the <c>Derive*</c>/constant that
     /// supplies "the value derived for this host" — never a second copy of a formula (ruling 1).</summary>
     private static (string Name, long DerivedValueMb, string Unit)[] BuildDerivedTargets(
@@ -974,8 +989,9 @@ WHERE NOT is_compressed";
         var isHandEdited = dataDirectory is not null && TryReadManagedConfIsHandEdited(dataDirectory);
         var results = new List<HostSettingProfile>(targets.Length);
 
-        foreach (var (name, derivedValue, unit) in targets)
+        foreach (var (name, rawDerivedValue, unit) in targets)
         {
+            var derivedValue = rawDerivedValue;
             var derivedDisplay = FormatSettingValue(derivedValue, unit);
 
             if (!live.TryGetValue(name, out var pgValue))
@@ -1000,6 +1016,8 @@ WHERE NOT is_compressed";
             }
 
             var attribution = AttributeManagedSetting(dataDirectory, name);
+            derivedValue = ApplyWalDriftTolerance(name, rawDerivedValue, currentValue, freeDiskBytesForDerivation);
+            derivedDisplay = FormatSettingValue(derivedValue, unit);
             var (sourceDescription, verdict) = ClassifyVerdict(attribution, currentValue ?? long.MinValue, derivedValue);
             (sourceDescription, verdict) = ApplyHandEditOverride(sourceDescription, verdict, isHandEdited);
             results.Add(new HostSettingProfile(
@@ -1437,7 +1455,7 @@ ORDER BY setting_name";
         var rejectedValueKeys = new List<string>();
         var overriddenKeys = new List<string>();
 
-        foreach (var (name, derivedValueMb, unit) in targets)
+        foreach (var (name, rawDerivedValueMb, unit) in targets)
         {
             if (!live.TryGetValue(name, out var pgValue))
             {
@@ -1446,6 +1464,7 @@ ORDER BY setting_name";
                              --check-settings' own table. */
             }
 
+            var derivedValueMb = rawDerivedValueMb;
             var derivedDisplay = FormatSettingValue(derivedValueMb, unit);
             var currentValue = NormalizePgSetting(pgValue.Setting, pgValue.Unit);
             var currentDisplay = currentValue.HasValue ? FormatSettingValue(currentValue.Value, unit) : pgValue.Setting;
@@ -1461,6 +1480,8 @@ ORDER BY setting_name";
             }
 
             var attribution = AttributeManagedSetting(dataDirectory, name);
+            derivedValueMb = ApplyWalDriftTolerance(name, rawDerivedValueMb, currentValue, freeDiskBytesForDerivation);
+            derivedDisplay = FormatSettingValue(derivedValueMb, unit);
             var (sourceDescription, verdict) = ClassifyVerdict(attribution, currentValue ?? long.MinValue, derivedValueMb);
             string? detail = null;
 

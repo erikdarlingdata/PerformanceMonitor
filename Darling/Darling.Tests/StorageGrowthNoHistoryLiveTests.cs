@@ -48,13 +48,15 @@ public sealed class StorageGrowthNoHistoryLiveTests
             var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* fresh: only the newest snapshot. weekold: also a snapshot 8 days back. full: snapshots 31 and 8 days back. */
+            /* fresh: only the newest snapshot. weekold: also a snapshot 7.5 days back. full: snapshots 30.5 and 7.5 days back. A baseline is
+               the snapshot nearest its 7 or 30 day mark within one day, so 7.5 and 30.5 sit inside the tolerance, and the daily rate
+               divides by the real span (7.5 and 30.5 days): a fixed 7 or 30 divisor would give a different figure. */
             await SeedAsync(connection, "fresh", now, 500m, ct);
             await SeedAsync(connection, "weekold", now, 500m, ct);
-            await SeedAsync(connection, "weekold", now.AddDays(-8), 400m, ct);
+            await SeedAsync(connection, "weekold", now.AddDays(-7.5), 400m, ct);
             await SeedAsync(connection, "full", now, 500m, ct);
-            await SeedAsync(connection, "full", now.AddDays(-8), 450m, ct);
-            await SeedAsync(connection, "full", now.AddDays(-31), 300m, ct);
+            await SeedAsync(connection, "full", now.AddDays(-7.5), 450m, ct);
+            await SeedAsync(connection, "full", now.AddDays(-30.5), 300m, ct);
 
             await using var viewer = new ViewerDataService(cs!);
             var rows = await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct);
@@ -69,13 +71,13 @@ public sealed class StorageGrowthNoHistoryLiveTests
             var weekOld = Assert.Single(rows, r => r.DatabaseName == "weekold");
             Assert.Equal(100m, (decimal?)weekOld.Growth7dMb);
             Assert.Null((object?)weekOld.Growth30dMb);
-            Assert.Equal(100m / 8m, weekOld.DailyGrowthRateMb!.Value, 4);
+            Assert.Equal(100m / 7.5m, weekOld.DailyGrowthRateMb!.Value, 4);
             Assert.Null((object?)weekOld.GrowthPct30d);
 
             var full = Assert.Single(rows, r => r.DatabaseName == "full");
             Assert.Equal(50m, (decimal?)full.Growth7dMb);
             Assert.Equal(200m, (decimal?)full.Growth30dMb);
-            Assert.Equal(200m / 31m, full.DailyGrowthRateMb!.Value, 4);
+            Assert.Equal(200m / 30.5m, full.DailyGrowthRateMb!.Value, 4);
             Assert.Equal(200m * 100m / 300m, full.GrowthPct30d!.Value, 4);
 
             /* Largest 30-day growth first; a database with no 30-day figure sorts after, by its 7-day growth. */
@@ -118,14 +120,25 @@ public sealed class StorageGrowthNoHistoryLiveTests
             Assert.Null(stale.DailyGrowthRateMb);
             Assert.Null(stale.GrowthPct30d);
 
-            /* The "7-day" past is really 12 days old after a collection gap: the rate is over those 12 days. */
+            /* The "7-day" past is really 12 days old after a collection gap: that is not within a day of the 7-day mark, so there is no
+               7-day baseline at all (unknown, never a 12-day figure labelled 7 days). */
             await DeleteRowsAsync(connection, ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             await SeedAsync(connection, "gap", now, 500m, ct);
             await SeedAsync(connection, "gap", now.AddDays(-12), 380m, ct);
             var gap = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct));
-            Assert.Equal(120m, gap.Growth7dMb!.Value);
-            Assert.Equal(120m / 12m, gap.DailyGrowthRateMb!.Value, 4);
+            Assert.Null(gap.Size7dAgoMb);
+            Assert.Null(gap.Growth7dMb);
+            Assert.Null(gap.DailyGrowthRateMb);
+
+            /* A past 7.5 days old (inside the tolerance) is the 7-day baseline, and the rate is over its real 7.5 days. */
+            await DeleteRowsAsync(connection, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await SeedAsync(connection, "near", now, 500m, ct);
+            await SeedAsync(connection, "near", now.AddDays(-7.5), 380m, ct);
+            var near = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct));
+            Assert.Equal(120m, near.Growth7dMb!.Value);
+            Assert.Equal(120m / 7.5m, near.DailyGrowthRateMb!.Value, 4);
 
             bodySucceeded = true;
         }

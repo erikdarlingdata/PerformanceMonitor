@@ -149,7 +149,10 @@ public sealed partial class DarlingMcpFinOpsTools
         var (textStart, _) = RetentionTierRouter.ClampToTextHorizon(now, now.AddHours(-hoursBack));
         var timeout = McpCommandDeadlines.ReadSeconds;
 
-        var idle = await DarlingFinOpsOptimizationReader.GetIdleDatabasesAsync(postgres, resolved.ServerId, now.AddDays(-IdleDatabaseWindowDays), timeout, ct);
+        /* The same 7-day coverage rule the recommendation row and the Server Inventory count use: an idle claim needs a query-stats
+           sample on each of the last 7 UTC days, else the list is empty and the section says why. */
+        var idleRead = await DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(postgres, resolved.ServerId, now.AddDays(-IdleDatabaseWindowDays), timeout, ct);
+        var idle = idleRead.Rows;
         var tempdb = await DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(postgres, resolved.ServerId, now.AddHours(-TempdbWindowHours), timeout, ct);
         var waits = await DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(postgres, resolved.ServerId, now.AddHours(-hoursBack), timeout, ct);
         var queries = await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(postgres, resolved.ServerId, textStart, limit, timeout, ct);
@@ -184,7 +187,8 @@ public sealed partial class DarlingMcpFinOpsTools
             idle_databases = new
             {
                 status = SectionStatus(idleGate, idle.Count),
-                message = idleGate == null ? null : NotCollectedMessage(idleGate),
+                message = idleGate != null ? NotCollectedMessage(idleGate) : idleRead.Covered ? null : DarlingFinOpsOptimizationReader.IdleDatabasesEmptyText(false),
+                coverage = idleRead.Covered,
                 window_days = IdleDatabaseWindowDays,
                 database_count = idleOrdered.Count,
                 truncated = idleOrdered.Count > MaxIdleDatabaseRows,

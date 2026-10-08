@@ -166,20 +166,78 @@ public static class DarlingPgIoReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
-        var rows = new List<PgIoRow>();
-        long windowTotalReads = 0;
-        double windowTotalReadTimeMs = 0;
-        await using var command = postgres.CreateCommand(PgIoSql);
-        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        /* #5495: a long window reads whole hours from collect.pg_io_stats_hourly and only its two edges from raw rows. One
+           REPEATABLE READ transaction holds the count guard and the stitched read on one snapshot. Any other outcome (a store below V170, a
+           window the rollup does not cover, a count that differs, any fault) reads the raw statement, whose result is identical. */
+        var start = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified);
+        var end = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified);
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        try
+        {
+            if (await TryReadFromRollupAsync(connection, serverId, start, end, limit, cancellationToken) is { } fromRollup)
+            {
+                return fromRollup;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Fall through to the raw statement below; the transaction was disposed (rolled back) with the failed attempt. */
+        }
+
+        await using var command = new NpgsqlCommand(PgIoSql, connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive
            timestamp columns by converting THEM at the store session's TimeZone - east of UTC every fresh
            row falls out of the window and the read silently returns nothing. Hidden by UTC-hosted test
            stores; found by the round-2 review. */
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(start);
+        command.Parameters.AddWithValue(end);
         command.Parameters.AddWithValue(limit);
+        return await ReadPageAsync(command, cancellationToken);
+    }
+
+    /// <summary>
+    /// The rollup route of <see cref="GetPgIoPageAsync"/>: the count guard and the stitched read in one REPEATABLE READ
+    /// transaction. Returns null when the guard returns no span (a window under 6 hours, one the rollup does not cover, or a count
+    /// that differs): an ordinary outcome that costs no exception. A store below V170 (no tables) or any other fault throws, and
+    /// the caller reads raw.
+    /// </summary>
+    private static async Task<PgIoPage?> TryReadFromRollupAsync(
+        NpgsqlConnection connection, int serverId, DateTime start, DateTime end, int limit, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+        DateTime h1, h2;
+        await using (var guard = new NpgsqlCommand(PgIoStatsHourly.GuardSql, connection, transaction) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds })
+        {
+            guard.Parameters.AddWithValue(serverId);
+            guard.Parameters.AddWithValue(start);
+            guard.Parameters.AddWithValue(end);
+            await using var span = await guard.ExecuteReaderAsync(cancellationToken);
+            if (!await span.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            h1 = span.GetDateTime(0);
+            h2 = span.GetDateTime(1);
+        }
+
+        await using var stitched = new NpgsqlCommand(PgIoStatsHourly.StitchedReadSql, connection, transaction) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
+        stitched.Parameters.AddWithValue(serverId);
+        stitched.Parameters.AddWithValue(start);
+        stitched.Parameters.AddWithValue(end);
+        stitched.Parameters.AddWithValue(limit);
+        stitched.Parameters.AddWithValue(DateTime.SpecifyKind(h1, DateTimeKind.Unspecified));
+        stitched.Parameters.AddWithValue(DateTime.SpecifyKind(h2, DateTimeKind.Unspecified));
+        return await ReadPageAsync(stitched, cancellationToken);
+    }
+
+    private static async Task<PgIoPage> ReadPageAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        var rows = new List<PgIoRow>();
+        long windowTotalReads = 0;
+        double windowTotalReadTimeMs = 0;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
