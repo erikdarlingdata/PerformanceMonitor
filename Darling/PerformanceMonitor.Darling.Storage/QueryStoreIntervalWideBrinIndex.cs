@@ -98,7 +98,8 @@ public static class QueryStoreIntervalWideBrinIndex
         CreateSql,
         DropSql,
         MinimumServerVersionNum,
-        "a BRIN index on collection_time would make the upsert non-HOT below PG 16");
+        "a BRIN index on collection_time would make the upsert non-HOT below PG 16",
+        "USING brin (collection_time) WITH (autosummarize = on)");
 
     /// <summary>What the ensure does about the index.</summary>
     public enum BrinAction
