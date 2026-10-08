@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
@@ -94,6 +95,65 @@ internal static class DarlingWebFailureLog
     private static string SqlState(Exception exception) =>
         (exception as PostgresException)?.SqlState ?? "(none)";
 
+    /// <summary>W12: why a timeout-shaped exception happened. A server-side <c>statement_timeout</c> carries SQLSTATE
+    /// 57014; anything else here is Npgsql giving up waiting on its own side: the command's client deadline, or the wait for
+    /// a free pooled connection. The driver words those two the same way, and the exception text is never read (#4283), so
+    /// the line names both rather than guessing one.</summary>
+    internal static string Cause(Exception exception)
+    {
+        return SqlState(exception) == "57014" ? "statement_timeout" : "client_timeout_or_pool_wait";
+    }
+
+    private static readonly System.Threading.AsyncLocal<StrongBox<bool>?> s_requestReported = new();
+
+    /// <summary>W12: starts tracking whether the current request's failure got a log line. The backstop calls it
+    /// before the route runs; <see cref="Report(ILogger,string,long,Exception)"/> and its sentence twin tick the
+    /// box, so a 5xx the route answered WITHOUT reporting is the one the backstop reports (<see cref="ReportUnlogged"/>).</summary>
+    internal static StrongBox<bool> BeginRequestTracking()
+    {
+        var box = new StrongBox<bool>(false);
+        s_requestReported.Value = box;
+        return box;
+    }
+
+    private static void MarkReported()
+    {
+        var box = s_requestReported.Value;
+        if (box is not null) box.Value = true;
+    }
+
+    /// <summary>
+    /// W12: the one log line for an /api answer of 500 or more that no failure report covered, so a 503 (or any 5xx) never
+    /// leaves the page with a red strip and the service log with nothing. Warning for 503, Error for the rest.
+    /// <paramref name="route"/> is <see cref="RouteOf"/>'s text: the path and the server the read named.
+    /// </summary>
+    internal static void ReportUnlogged(ILogger logger, string route, int status, long elapsedMs)
+    {
+        var safeRoute = DarlingHttpRefusalLog.Sanitize(route, 256);
+        if (status == StatusCodes.Status503ServiceUnavailable)
+        {
+            logger.LogWarning(
+                "Web dashboard read {Route} answered HTTP {Status} after {ElapsedMs} ms ({Kind}): the route gave no cause of its own",
+                safeRoute, status, elapsedMs, "unreported");
+            return;
+        }
+
+        logger.LogError(
+            "Web dashboard read {Route} answered HTTP {Status} after {ElapsedMs} ms ({Kind}): the route gave no cause of its own",
+            safeRoute, status, elapsedMs, "unreported");
+    }
+
+    /// <summary>W12: the request's path, plus the server the read named (<c>server</c> or <c>server_name</c>) so a
+    /// failed read's line says WHICH server it was for. The value is request text and is sanitized with the route.</summary>
+    internal static string RouteOf(HttpRequest request)
+    {
+        var path = request.Path.Value ?? "/";
+        var server = request.Query.TryGetValue("server", out var a) && a.Count > 0 && !string.IsNullOrEmpty(a[0]) ? a[0]
+            : request.Query.TryGetValue("server_name", out var b) && b.Count > 0 && !string.IsNullOrEmpty(b[0]) ? b[0]
+            : null;
+        return server is null ? path : path + " (server " + server + ")";
+    }
+
     /// <summary>
     /// The ONE log line for a failed request (#4276): a Warning for a timeout, an Error for anything else,
     /// naming the route, the elapsed milliseconds, the kind, the exception type and the SQLSTATE. No
@@ -106,13 +166,14 @@ internal static class DarlingWebFailureLog
     internal static void Report(ILogger logger, string route, long elapsedMs, Exception exception)
     {
         var safeRoute = DarlingHttpRefusalLog.Sanitize(route, 256);
+        MarkReported();
 
         if (IsStatementTimeout(exception))
         {
             logger.LogWarning(
                 exception,
-                "Web dashboard read {Route} timed out after {ElapsedMs} ms ({Kind}): {ExceptionType}, SQLSTATE {SqlState}",
-                safeRoute, elapsedMs, "timeout", exception.GetType().Name, SqlState(exception));
+                "Web dashboard read {Route} timed out after {ElapsedMs} ms ({Kind}, cause {Cause}): {ExceptionType}, SQLSTATE {SqlState}",
+                safeRoute, elapsedMs, "timeout", Cause(exception), exception.GetType().Name, SqlState(exception));
             return;
         }
 
@@ -132,6 +193,7 @@ internal static class DarlingWebFailureLog
     internal static void Report(ILogger logger, string route, long elapsedMs, string sentence)
     {
         var safeRoute = DarlingHttpRefusalLog.Sanitize(route, 256);
+        MarkReported();
 
         if (IsStatementTimeoutSentence(sentence))
         {

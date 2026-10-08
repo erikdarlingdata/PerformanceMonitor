@@ -182,7 +182,7 @@ public sealed class DarlingWebFailureHandlingTests
     /// middleware registered textually before it — the same nesting these test-only routes rely on. No live
     /// Postgres needed: every route here throws before ever opening the (unopened) pool.
     /// </summary>
-    private static async Task<(TestServer Server, CapturingTestLogger Logger)> BuildServer()
+    private static async Task<(TestServer Server, CapturingTestLogger Logger)> BuildServer(CollectorRuntimeState? collectorState = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -203,7 +203,7 @@ public sealed class DarlingWebFailureHandlingTests
         var host = new DarlingWebHostService(
             capturing,
             new WebRuntimeState(),
-            new CollectorRuntimeState(),
+            collectorState ?? new CollectorRuntimeState(),
             new WebTlsCertificateState(),
             new BaselineCache());
 
@@ -218,6 +218,9 @@ public sealed class DarlingWebFailureHandlingTests
 
         app.MapGet("/api/__test/timeout", (HttpContext _) =>
             throw new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014"));
+
+        /* W12: a route that answers 503 on its own, with no report of its own. */
+        app.MapGet("/api/__test/unreported-503", () => Results.Json(new { error = "busy" }, statusCode: StatusCodes.Status503ServiceUnavailable));
 
         app.MapGet("/api/__test/generic", (HttpContext _) =>
             throw new InvalidOperationException("super secret internal connection string detail"));
@@ -254,7 +257,9 @@ public sealed class DarlingWebFailureHandlingTests
         return server.SendAsync(ctx =>
         {
             ctx.Request.Method = "GET";
-            ctx.Request.Path = path;
+            var queryAt = path.IndexOf('?', StringComparison.Ordinal);
+            ctx.Request.Path = queryAt < 0 ? path : path[..queryAt];
+            if (queryAt >= 0) ctx.Request.QueryString = new QueryString(path[queryAt..]);
             ctx.Request.Headers.Host = "localhost";
             ctx.Connection.RemoteIpAddress = IPAddress.Loopback;
             if (requestAborted is { } token)
@@ -288,6 +293,76 @@ public sealed class DarlingWebFailureHandlingTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
         Assert.Contains("/api/__test/timeout", logger.Joined, StringComparison.Ordinal);
         Assert.Contains("57014", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A503TheRouteAnsweredWithoutReporting_StillWritesOneWarning_NamingTheEndpointAndTheServer()
+    {
+        var (server, logger) = await BuildServer();
+        using var _ = server;
+
+        var ctx = await Send(server, "/api/__test/unreported-503?server=example-sql-01");
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, ctx.Response.StatusCode);
+        /* The test server hands the response back once the body is complete; the backstop's line is written just after, so wait for it. */
+        for (var wait = 0; wait < 100 && logger.CountAtLevel(LogLevel.Warning) == 0; wait++)
+        {
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Contains("/api/__test/unreported-503", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("example-sql-01", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("503", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ThePingRoutesOwn503_IsNotReportedAsAFailedRead()
+    {
+        var stopped = new CollectorRuntimeState();
+        stopped.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
+        var (server, logger) = await BuildServer(stopped);
+        using var _ = server;
+
+        var ctx = await Send(server, "/api/ping");
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, ctx.Response.StatusCode);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public async Task AReportedTimeout_StillWritesOnlyOneLine_AndNowNamesTheCause()
+    {
+        var (server, logger) = await BuildServer();
+        using var _ = server;
+
+        var ctx = await Send(server, "/api/__test/timeout");
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, ctx.Response.StatusCode);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("statement_timeout", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cause_TellsAServerStatementTimeoutFromTheClientsOwnWait()
+    {
+        Assert.Equal("statement_timeout", DarlingWebFailureLog.Cause(new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014")));
+        Assert.Equal("client_timeout_or_pool_wait", DarlingWebFailureLog.Cause(new NpgsqlException("Exception while reading from stream", new TimeoutException())));
+    }
+
+    [Fact]
+    public void RouteOf_NamesTheServerTheReadAskedFor()
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Path = "/api/read/get_server_summary";
+        context.Request.QueryString = new QueryString("?server=example-sql-01&hours=24");
+        Assert.Equal("/api/read/get_server_summary (server example-sql-01)", DarlingWebFailureLog.RouteOf(context.Request));
+
+        context.Request.QueryString = new QueryString("?hours=24");
+        Assert.Equal("/api/read/get_server_summary", DarlingWebFailureLog.RouteOf(context.Request));
     }
 
     [Fact]

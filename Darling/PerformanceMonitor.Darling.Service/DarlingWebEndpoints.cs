@@ -426,7 +426,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        too, rather than falling through to ToHttpResult, keeps the ONE log line #4276 added:
                        routing this through FormatError first would make ToHttpResult's classifier re-derive
                        from text what this catch already knows structurally, and log it a second time. */
-                    DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
+                    DarlingWebFailureLog.Report(logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex);
                     var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
                     RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds);
                     OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
@@ -446,7 +446,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
                     resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
 
-                return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
+                return ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds);
             });
         }
 
@@ -2364,8 +2364,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// stay what they always were either way, so run_custom_view_panel's MCP answer never changes.
     /// <see cref="AuthorSqlState"/> (#4293 round 2) is set only on the author-actionable PostgresException arm,
     /// so the web log line can name the SQLSTATE without re-deriving it.</summary>
-    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null, string? AuthorSqlState = null)
+    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null, string? AuthorSqlState = null, bool IsNotFound = false)
     {
+        /// <summary>W13: the scoped server is not registered and nothing is stored under its name. The MCP tool answers <c>not_found</c>, the web route 404.</summary>
+        internal static ComposeRunOutcome NotFound(string error) => new(null, error, false, null, null, true);
+
         internal static ComposeRunOutcome Ok(JsonObject payload) => new(payload, null, false);
 
         internal static ComposeRunOutcome BadRequest(string error) => new(null, error, false);
@@ -2408,6 +2411,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// The MCP <c>run_custom_view_panel</c> caller passes no headroom and keeps its equal-deadline race; either
     /// side's timeout answers the same statement-timeout text there, because it passes the remap flag too.</summary>
     internal const int ComposeClientDeadlineHeadroomSeconds = 5;
+
+    /// <summary>W13: the plain message for a composed run whose scope names only unregistered servers and whose rows hold no value,
+    /// else null. <paramref name="unregistered"/> is <see cref="ComposeServerScope.FindUnregisteredAsync"/>'s answer.</summary>
+    internal static string? UnknownServerMessage(IReadOnlyList<string>? scope, IReadOnlyList<string>? unregistered, JsonNode? rows)
+    {
+        if (scope is null || scope.Count == 0 || unregistered is null) return null;
+        if (!scope.All(name => unregistered.Contains(name, StringComparer.Ordinal))) return null;
+        var hasValue = rows is JsonArray array
+            && array.Any(row => row is JsonObject o && o.Any(property => property.Value is not null));
+        if (hasValue) return null;
+        var names = string.Join(", ", scope.Select(n => "'" + DarlingHttpRefusalLog.Sanitize(n, 128) + "'"));
+        return scope.Count == 1
+            ? $"No server named {names} is registered, and nothing is stored under that name."
+            : $"No server named {names} is registered, and nothing is stored under those names.";
+    }
 
     /// <summary>The client <c>CommandTimeout</c> for a composed query whose server-side statement_timeout is
     /// <paramref name="serverSeconds"/>, with <paramref name="headroomSeconds"/> of headroom.</summary>
@@ -2910,6 +2928,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 await snapshot.DisposeAsync();
             }
 
+            /* W13: a scope naming only servers the registry does not know, over rows that hold nothing, is a server that does not exist, and
+               a null aggregate row was being returned as if it were an answer. Names that ARE stored (a removed server's history, #5525)
+               keep returning their rows, so this fires only when the run found nothing for them. */
+            if (UnknownServerMessage(serverScope, unregisteredServers, rows) is { } unknownServer)
+            {
+                return ComposeRunOutcome.NotFound(unknownServer);
+            }
+
             /* Event-annotation overlays (design D5): one bounded, catalog-only event query per requested
                source, on the SAME window + server scope, under the same statement_timeout. Additive —
                {sql, rows} are unchanged; a panel that requests no annotations returns an empty array. */
@@ -3124,6 +3150,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="ComposeRunOutcome"/>.</summary>
     internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs)
     {
+        /* W13: an unknown server is a plain 404 with its message, never a quiet empty answer. */
+        if (outcome.IsNotFound)
+        {
+            return ErrorResult(outcome.Error!, StatusCodes.Status404NotFound);
+        }
+
         if (outcome.Fault is not null)
         {
             DarlingWebFailureLog.Report(logger, route, elapsedMs, outcome.Fault);

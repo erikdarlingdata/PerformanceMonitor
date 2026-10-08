@@ -710,11 +710,10 @@ function serverCard(c) {
    that says only "Warning" is #2422 rebuilt on a new surface. These chips are the answer, and they are the
    SERVER's severities read off the card (R1), so the two surfaces cannot drift into different opinions the way
    a second derivation would. */
-/* An offline server whose newest collection is older than the fleet read's two-day window comes with no last_collection (the
-   read looks back 48 hours on purpose: DarlingFleetReader.LastCollectionWindow). The card used to say only "no recent
-   collection", which reads as if nothing is known; what is known is that it last collected more than two days ago, and the
-   page says so (release walk, W1). The exact age would need a scan of the whole collection log on every refresh, which that
-   window avoids. */
+/* An offline server's card shows when it last collected: the service reads that for a server the fleet read's 48-hour
+   window held nothing for (DarlingFleetReader.FleetOlderCollectionSql, one index descent per such server), so last_collection
+   carries the real age however long ago it was (release walk, W1b). Only when that read has no row to give (a server that never
+   wrote a collection, or the read failed) is there no date, and the page then says what is known: the window's bound. */
 export const DARK_PAST_WINDOW = "last collected more than 2 days ago";
 
 export function metricBands(c) {

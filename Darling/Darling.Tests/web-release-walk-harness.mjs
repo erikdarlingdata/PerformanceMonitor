@@ -63,10 +63,12 @@ const agView = (name, server) => ({
 });
 let cards = [];
 let agBody = null;
+let failReads = false;
 globalThis.fetch = async (url) => {
   if (url === "/api/session") return reply(200, { can_edit: true });
   if (url === "/api/fleet") return reply(200, { total_servers: cards.length, critical_count: 0, warning_count: 0, offline_count: cards.length, tags: [], cards });
   if (url === "/api/ag") return reply(200, agBody);
+  if (failReads && String(url).startsWith("/api/read/")) return reply(503, { error: "The store took too long to answer this read. Try again in a moment." });
   return reply(200, {});
 };
 
@@ -88,6 +90,15 @@ try {
       await page.renderFleet(main);
       await settle();
       return { dark: texts(main).filter((x) => x.includes("no recent collection") || x.includes("last collected")) };
+    },
+    /* W1b: the service now sends the real last collection for a server dark past the window, so the card shows its age. */
+    fleetDarkRealAge: async () => {
+      cards = [offlineCard({ last_collection: new Date(Date.now() - 12 * 86400000).toISOString() })];
+      const page = await imp("pages/fleet.js");
+      const main = new FakeNode("main");
+      await page.renderFleet(main);
+      await settle();
+      return { dark: texts(main).filter((x) => x.includes("no recent collection") || x.includes("last collect")) };
     },
     /* The same card with a last collection inside the window keeps its exact age. */
     fleetInWindow: async () => {
@@ -121,6 +132,30 @@ try {
       await page.renderAg(main);
       await settle();
       return { labels: byClass(main, "lbl"), notes: byClass(main, "meta") };
+    },
+    /* W12: a problem list that could not be read (the service answered 503) stays on the page with the read's error. It was
+       hidden as if the server had no problems. */
+    serverTabReadFails: async () => {
+      failReads = true;
+      const mod = await imp("pages/server-tabs.js");
+      const wanted = "Analysis could not read these data families";
+      for (const tab of mod.SERVER_TABS) {
+        let built;
+        try {
+          built = tab.build("srv-a", { hours: 24, label: "last 24 hours" });
+        } catch {
+          continue;
+        }
+        const nodes = Array.isArray(built) ? built : [built];
+        const root = new FakeNode("div");
+        for (const n of nodes) if (n && n.children) root.appendChild(n);
+        const panels = all(root, (n) => String(n.className).split(" ").includes("card") && n.textContent.includes(wanted));
+        if (panels.length === 0) continue;
+        await settle();
+        const panel = panels[0];
+        return { found: true, display: panel.style.display ?? "", text: panel.textContent };
+      }
+      return { found: false };
     },
     /* W7 and W11: the page's words for server answers. */
     plain: async () => {

@@ -182,6 +182,12 @@ function panelMemoryKey(read, params, spec) {
 }
 function hidesPanel(spec, res, shell, key) {
   if (!spec.hideWhenNoRows) return false;
+  /* A failed read is not "no rows": hiding the card would leave a problem list that could not load looking like a clean server.
+     The card stays (or comes back) and shows the read's error (release walk, W12). */
+  if (res.kind === "error") {
+    shell.panel.style.display = "";
+    return false;
+  }
   const hasRows = res.kind === "data" && (getPath(res.data, spec.rowsKey) || []).length > 0;
   panelHadRows.set(key, hasRows);
   if (hasRows) {

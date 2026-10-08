@@ -1245,8 +1245,9 @@ public sealed class DarlingWebHostService : BackgroundService
            never sees it, and nothing is written to a caller who is gone. */
         app.Use(async (context, next) =>
         {
-            var route = context.Request.Path.Value ?? "/";
+            var route = DarlingWebFailureLog.RouteOf(context.Request);
             var stopwatch = Stopwatch.StartNew();
+            var reported = DarlingWebFailureLog.BeginRequestTracking();
             try
             {
                 await next(context);
@@ -1294,6 +1295,17 @@ public sealed class DarlingWebHostService : BackgroundService
                     context.Response.ContentType = "application/json; charset=utf-8";
                     await context.Response.WriteAsync(DarlingWebFailureLog.Body(ex).ToJsonString());
                 }
+            }
+
+            /* W12: a read that answered 5xx (a 503 above all) with no failure report of its own still leaves one line, naming
+               the endpoint and the server, so the page's red strip always has a service-log line behind it. /api/ping answers
+               503 on purpose for a stopped collector and has its own contract. */
+            if (!reported.Value
+                && context.Response.StatusCode >= StatusCodes.Status500InternalServerError
+                && context.Request.Path.StartsWithSegments("/api")
+                && !context.Request.Path.StartsWithSegments("/api/ping"))
+            {
+                DarlingWebFailureLog.ReportUnlogged(_logger, route, context.Response.StatusCode, stopwatch.ElapsedMilliseconds);
             }
         });
 

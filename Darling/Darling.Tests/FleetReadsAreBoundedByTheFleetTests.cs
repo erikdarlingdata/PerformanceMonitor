@@ -544,12 +544,14 @@ GROUP BY server_id";
 
             /* #3935: dark for five days, registered nine days ago — Offline, the viewer's word for it, and not
                "Awaiting first collection". Its last collection is outside the kept window, so the card carries
-               none; status is what tells this null from the never-collected one below. */
+               none in the windowed read. Release walk W1b: the card still shows its real last collection, read for it alone from
+               before the window (an index descent, FleetOlderCollectionSql), so the page can say how long it has been dark. */
             Assert.False(dark.IsOnline);
             Assert.Equal(FleetHealthBand.Offline, dark.Band);
             Assert.Equal(ServerCollectionStatus.Offline.Word(), dark.Status);
             Assert.False(dark.AwaitingFirstCollection);
-            Assert.Null(dark.LastCollectionTime);
+            Assert.NotNull(dark.LastCollectionTime);
+            Assert.InRange((DateTime.UtcNow - dark.LastCollectionTime!.Value).TotalDays, 4.5, 5.5);
 
             var never = cards[NeverCollected];
             Assert.Null(never.CpuPercent);

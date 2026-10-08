@@ -578,6 +578,27 @@ LEFT JOIN LATERAL
 WHERE s.is_enabled
 AND   s.server_id <> 0";
 
+    /// <summary>W1b: the real last collection of the servers <see cref="FleetLastCollectionSql"/> found nothing for, so an
+    /// offline card shows how long it has been dark instead of "more than 2 days". $1 the server ids (those the window held
+    /// none for), $2 the window start. The shape of the Viewer's <c>ServerFreshnessSql</c> (a per-server LATERAL ...
+    /// ORDER BY collection_time DESC LIMIT 1, an index descent on (server_id, collection_time)), bounded ABOVE by the window
+    /// start because everything newer is already known to be empty, which also lets TimescaleDB leave the newest chunks out.</summary>
+    public const string FleetOlderCollectionSql = @"
+SELECT
+    s.server_id,
+    latest.collection_time
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT collection_time
+    FROM v_collection_log
+    WHERE server_id = s.server_id
+    AND   collection_time < $2
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS latest
+WHERE s.server_id = ANY($1)";
+
     /// <summary>How far back <see cref="FleetLastCollectionSql"/> looks for a server's newest collection: two
     /// days, deliberately far wider than <see cref="ServerHealthThresholds.OfflineThreshold"/> (the statement
     /// says why).</summary>
@@ -850,7 +871,7 @@ GROUP BY server_id, collector_name";
             await ScopeAzureMasterRowsAsync(
                 postgres, servers, blocking, deadlocks, windowStartUtc, windowEndUtc, separatelyMonitored, logger, cancellationToken);
         }
-        var lastCollection = await ReadLastCollectionAsync(postgres, now, cancellationToken);
+        var lastCollection = await ReadLastCollectionAsync(postgres, now, logger, cancellationToken);
         /* #3735: the ONE read in this fan-out that does not depend on the caller's window — the 7-day
            collection-health aggregate is the same statement whatever hours_back was — and therefore the one
            that is single-flighted and memoized. Every other read above and below stays a per-call read: each
@@ -900,7 +921,7 @@ GROUP BY server_id, collector_name";
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds);
@@ -945,7 +966,8 @@ GROUP BY server_id, collector_name";
         DateTime now,
         TimeSpan deadlockWindow,
         DeadlockRateThresholds deadlockTiers,
-        DateTime? registeredAt = null)
+        DateTime? registeredAt = null,
+        DateTime? olderCollection = null)
     {
 
         /* Lite's XE-preferred / DMV-fallback, per server: XE when it has any row this window, else the DMV
@@ -1082,7 +1104,8 @@ GROUP BY server_id, collector_name";
             IsOnline = isOnline,
             AwaitingFirstCollection = awaitingFirstCollection,
             CollectionStale = collectionStale,
-            LastCollectionTime = lastCollection,
+            /* W1b: the windowed read's newest collection, else (offline past the window) the real last one, display only. */
+            LastCollectionTime = lastCollection ?? olderCollection,
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherCpu,
             TotalCpuPercent = totalCpu,
@@ -1753,7 +1776,7 @@ GROUP BY server_id, collector_name";
     /// <summary>One <see cref="LastCollectionRow"/> per enabled registry server, INCLUDING the ones whose
     /// window holds nothing (#3935): their row is the read's positive report that it looked and found none,
     /// which is what <see cref="ClassifyWindowedFreshness"/> needs before it may call a server Offline.</summary>
-    private static async Task<Dictionary<int, LastCollectionRow>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
+    private static async Task<Dictionary<int, LastCollectionRow>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, ILogger? logger, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, LastCollectionRow>();
         await using var command = postgres.CreateCommand(FleetLastCollectionSql);
@@ -1765,6 +1788,32 @@ GROUP BY server_id, collector_name";
             map[reader.GetInt32(0)] = new LastCollectionRow(
                 reader.IsDBNull(1) ? null : reader.GetDateTime(1),
                 reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+        }
+
+        /* W1b: a server the window held nothing for gets its real last collection from one more, index-backed read, run
+           only when there is such a server. A failed read leaves the card as it was: the bound text, never a wrong age. */
+        var dark = map.Where(kv => kv.Value.LastCollection is null).Select(kv => kv.Key).ToArray();
+        if (dark.Length > 0)
+        {
+            try
+            {
+                await using var older = postgres.CreateCommand(FleetOlderCollectionSql);
+                older.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                older.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = dark });
+                AddTimestamp(older, LastCollectionWindowStart(now));
+                await using var olderReader = await older.ExecuteReaderAsync(cancellationToken);
+                while (await olderReader.ReadAsync(cancellationToken))
+                {
+                    var id = olderReader.GetInt32(0);
+                    if (olderReader.IsDBNull(1) || !map.TryGetValue(id, out var row)) continue;
+                    map[id] = row with { OlderCollection = olderReader.GetDateTime(1) };
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* Display only: the card falls back to the bound sentence. */
+                logger?.LogWarning(ex, "Fleet overview: the last collection of {Count} offline server(s) could not be read; their cards keep the two-day bound", dark.Length);
+            }
         }
 
         return map;
@@ -1950,7 +1999,9 @@ GROUP BY server_id, collector_name";
     /// <param name="LastCollection">The newest collection at or after <see cref="LastCollectionWindowStart"/>,
     /// or null when the window holds none.</param>
     /// <param name="RegisteredAt">The server's first successful connect, as the registry recorded it.</param>
-    internal readonly record struct LastCollectionRow(DateTime? LastCollection, DateTime? RegisteredAt);
+    /// <param name="OlderCollection">W1b: the newest collection BEFORE the window, read only for a server the window held
+    /// none for, so an offline card can show its real age. Never an input to the freshness rule.</param>
+    internal readonly record struct LastCollectionRow(DateTime? LastCollection, DateTime? RegisteredAt, DateTime? OlderCollection = null);
     /// <summary>The PostgreSQL deadlock reading (#3539): the summed counter differences, the sample that
     /// showed the newest step, and <paramref name="Intervals"/> — how many differences the sum was taken
     /// over. Its <c>default</c> is zero intervals, which <see cref="BuildCard"/> reads as unmeasured: a

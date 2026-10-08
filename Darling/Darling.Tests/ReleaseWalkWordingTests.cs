@@ -76,6 +76,25 @@ public sealed class ReleaseWalkWordingTests
     }
 
     [Fact]
+    public void ADarkCardThePageGetsALastCollectionFor_ShowsTheRealAge_NotTheTwoDayBound()
+    {
+        using var doc = JsonDocument.Parse(Scenario("fleetDarkRealAge"));
+        var texts = Strings(doc.RootElement.GetProperty("dark"));
+        Assert.Contains("Offline · last collect 12d ago", texts);
+        Assert.Contains("last collected 12d ago", texts);
+        Assert.DoesNotContain(texts, t => t.Contains("more than 2 days", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AProblemListThatCouldNotBeRead_StaysOnThePageAndShowsTheError_NotHiddenAsIfThereWereNoProblems()
+    {
+        using var doc = JsonDocument.Parse(Scenario("serverTabReadFails"));
+        Assert.True(doc.RootElement.GetProperty("found").GetBoolean(), "the Analysis could not read these data families panel was not found");
+        Assert.NotEqual("none", doc.RootElement.GetProperty("display").GetString());
+        Assert.Contains("The store took too long to answer this read", doc.RootElement.GetProperty("text").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AnOfflineCardWithALastCollection_KeepsItsExactAge()
     {
         using var doc = JsonDocument.Parse(Scenario("fleetInWindow"));
