@@ -5945,6 +5945,38 @@ WHERE c.is_enabled";
     /// resolves.</summary>
     internal static readonly TimeSpan FleetGateQuietHold = TimeSpan.FromHours(1);
 
+    /// <summary>#5597: the minutes right after the sweep loop starts, or comes back from a sleep, a stall or a pause, that the
+    /// alert leaves out. Every collector comes due at once then, the gate is a few slots wide, and the first bodies run long
+    /// (connects, on-load snapshots, catch-up reads), so slots are skipped on a store that is not behind. Chosen from a
+    /// large store's service log: the 6 short-window hits were all inside the first minutes after a start, "skipping
+    /// relaunch" peaked in the first two 5-minute windows, and the only full hour over 5% (5.9%) began 4 minutes after a
+    /// start, where the other 87 full hours were under 1%.</summary>
+    internal const int FleetGateStartupMinutes = 15;
+
+    /// <summary>#5597: the fewest minutes after <see cref="FleetGateStartupMinutes"/> the alert needs before it judges at all.
+    /// Shorter than that is a handful of ticks, where one slow body decides the share. A store that is behind from its start
+    /// fires at most <c>FleetGateStartupMinutes + FleetGateMinJudgedMinutes</c> (30) minutes after it.</summary>
+    internal const int FleetGateMinJudgedMinutes = 15;
+
+    /// <summary>
+    /// #5597: how many whole minutes (at most the 60 the gate keeps) the alert judges, given the instant the sweep loop last
+    /// started or came back (<see cref="SkipCreditFloor.Since"/>): the minutes from <see cref="FleetGateStartupMinutes"/>
+    /// after it, rounded up to a whole minute, to now. 0 before the loop has ticked. One method for the alert and the
+    /// Warning level of the hourly log line, so they cannot disagree.
+    /// </summary>
+    internal static int FleetGateJudgedMinutes(DateTime nowUtc, DateTime? loopSinceUtc)
+    {
+        if (loopSinceUtc is not { } since)
+        {
+            return 0;
+        }
+
+        var ticks = (since + TimeSpan.FromMinutes(FleetGateStartupMinutes)).Ticks;
+        var from = (ticks + TimeSpan.TicksPerMinute - 1) / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute;
+        var whole = (nowUtc.Ticks - from) / TimeSpan.TicksPerMinute;
+        return (int)Math.Clamp(whole, 0, FleetGateStats.WindowMinutes);
+    }
+
     /// <summary>
     /// What the fleet collection gate did over the last hour, carried out to the alert sweep (#4732): the collector
     /// slots that ran, the slots that came due and were skipped, how long collection bodies queued for a gate slot,
@@ -5958,8 +5990,14 @@ WHERE c.is_enabled";
         TimeSpan QueueWaitTotal,
         TimeSpan QueueWaitMax,
         int GateWidth,
-        DateTime WindowEndUtc)
+        DateTime WindowEndUtc,
+        int JudgedMinutes = FleetGateStats.WindowMinutes)
     {
+        /// <summary>#5597: whether the window the counts cover is long enough to judge: it leaves out the minutes right after
+        /// a start (<see cref="FleetGateStartupMinutes"/>) and needs <see cref="FleetGateMinJudgedMinutes"/> after them. While
+        /// it is not, the alert neither fires nor resolves.</summary>
+        public bool IsJudged => JudgedMinutes >= FleetGateMinJudgedMinutes;
+
         /// <summary>Slots that came due in the hour: the ones that ran plus the ones skipped.</summary>
         public long Due => Run + Skipped;
 
@@ -5969,7 +6007,7 @@ WHERE c.is_enabled";
         /// <summary>The fire test: at least <see cref="FleetGateBehindMinSkipped"/> skipped AND at least
         /// <see cref="FleetGateBehindPercent"/> of the due slots. Integer arithmetic, so 5.0% exactly counts and 4.99%
         /// does not.</summary>
-        public bool IsBehind => Skipped >= FleetGateBehindMinSkipped && Skipped * 100 >= Due * FleetGateBehindPercent;
+        public bool IsBehind => IsJudged && Skipped >= FleetGateBehindMinSkipped && Skipped * 100 >= Due * FleetGateBehindPercent;
 
         /// <summary>The caught-up test: nothing skipped, or under <see cref="FleetGateQuietPercent"/> of the due slots.</summary>
         public bool IsQuiet => Skipped == 0 || Skipped * 100 < Due * FleetGateQuietPercent;
@@ -6018,7 +6056,11 @@ WHERE c.is_enabled";
     /// that is the only symptom: gaps in the collected series and one Info line, with no count and no alert. This
     /// counts the skipped slots against the slots that ran and warns when the schedule is losing them.</para>
     ///
-    /// <para><b>Fires</b> when, over the last hour, at least <see cref="FleetGateBehindMinSkipped"/> slots were skipped
+    /// <para><b>Judges</b> (#5597) only slots counted after the first <see cref="FleetGateStartupMinutes"/> minutes since the sweep
+    /// loop started or came back from a sleep, a stall or a pause, over at most the last hour; while that window is shorter than
+    /// <see cref="FleetGateMinJudgedMinutes"/> it neither fires nor resolves.</para>
+    ///
+    /// <para><b>Fires</b> when, over the window it judges (the last hour once the start is old enough), at least <see cref="FleetGateBehindMinSkipped"/> slots were skipped
     /// AND they are at least <see cref="FleetGateBehindPercent"/> of the slots that came due. <b>Resolves</b> once the
     /// last-hour share has stayed under <see cref="FleetGateQuietPercent"/> for a full <see cref="FleetGateQuietHold"/>;
     /// a share in between neither re-fires nor resolves, so a fleet hovering near the threshold does not flap.
@@ -6031,6 +6073,13 @@ WHERE c.is_enabled";
     internal async Task ApplyFleetGateAsync(FleetGateReport report, CancellationToken cancellationToken)
     {
         if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        /* #5597: right after a start the window is too short to judge. Not firing, and not resolving either: a standing alert
+           keeps standing, and its quiet clock keeps its place, until there is a window to read. */
+        if (!report.IsJudged)
         {
             return;
         }
@@ -6108,10 +6157,17 @@ WHERE c.is_enabled";
     {
         var inv = CultureInfo.InvariantCulture;
         var percent = report.SkippedPercent.ToString("0.#", inv);
-        var shortMessage = string.Create(inv,
-            $"collection skipped {report.Skipped:N0} of {report.Due:N0} due slots in the last hour ({percent}%)");
+        /* #5597: a window shorter than the hour names itself: its minutes and its slots, and that the minutes right after the
+           start were left out. */
+        var shortHour = report.JudgedMinutes < FleetGateStats.WindowMinutes;
+        var shortMessage = shortHour
+            ? string.Create(inv, $"collection skipped {report.Skipped:N0} of {report.Due:N0} due slots in the last {report.JudgedMinutes} minutes ({percent}%)")
+            : string.Create(inv, $"collection skipped {report.Skipped:N0} of {report.Due:N0} due slots in the last hour ({percent}%)");
+        var windowText = shortHour
+            ? string.Create(inv, $"In the {report.JudgedMinutes} minutes to {report.WindowEndUtc:yyyy-MM-dd HH:mm} UTC (the first {FleetGateStartupMinutes} minutes after the service started or resumed collecting are left out, since every collector comes due at once then)")
+            : string.Create(inv, $"In the hour to {report.WindowEndUtc:yyyy-MM-dd HH:mm} UTC");
         var detail =
-            string.Create(inv, $"In the hour to {report.WindowEndUtc:yyyy-MM-dd HH:mm} UTC the fleet collection gate (width {report.GateWidth}) ran {report.Run:N0} collector slots and skipped {report.Skipped:N0} ({percent}% of the {report.Due:N0} that came due). ")
+            windowText + string.Create(inv, $" the fleet collection gate (width {report.GateWidth}) ran {report.Run:N0} collector slots and skipped {report.Skipped:N0} ({percent}% of the {report.Due:N0} that came due). ")
             + "A slot that comes due while its server's previous collection body is still running, or while every gate slot is taken, "
             + "is skipped rather than replayed, so those samples were never collected. "
             + string.Create(inv, $"{report.QueueWaits:N0} collection bodies waited for a gate slot, {report.QueueWaitAverage.TotalMilliseconds:N0} ms on average and {report.QueueWaitMax.TotalMilliseconds:N0} ms at the longest. ")

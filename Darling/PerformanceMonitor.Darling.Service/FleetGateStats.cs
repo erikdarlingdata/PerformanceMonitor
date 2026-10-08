@@ -142,6 +142,40 @@ internal sealed class FleetGateStats
         }
     }
 
+    /// <summary>
+    /// The counts over the current minute and the <c>minutes - 1</c> before it (#5597): <see cref="Snapshot"/> over a
+    /// shorter window, so the "Collection Falling Behind" alert can leave the minutes right after a start out of what it
+    /// judges while the hourly log line keeps the full hour. Capped at <see cref="WindowMinutes"/>; 0 or less reads nothing.
+    /// </summary>
+    public FleetGateSnapshot SnapshotLastMinutes(int minutes)
+    {
+        if (minutes <= 0)
+        {
+            return default;
+        }
+
+        minutes = Math.Min(minutes, WindowMinutes);
+        lock (_lock)
+        {
+            var minute = MinuteOf(_utcNow());
+            FoldBucketsAheadOf(minute);
+            long run = 0, skipped = 0, waits = 0, waitTicks = 0, waitMaxTicks = 0;
+            foreach (var bucket in _buckets)
+            {
+                if (bucket.Minute > minute - minutes)
+                {
+                    run += bucket.Run;
+                    skipped += bucket.Skipped;
+                    waits += bucket.QueueWaits;
+                    waitTicks += bucket.QueueWaitTicks;
+                    waitMaxTicks = Math.Max(waitMaxTicks, bucket.QueueWaitMaxTicks);
+                }
+            }
+
+            return new FleetGateSnapshot(run, skipped, waits, TimeSpan.FromTicks(waitTicks), TimeSpan.FromTicks(waitMaxTicks));
+        }
+    }
+
     private ref Bucket BucketFor(DateTime now)
     {
         var minute = MinuteOf(now);
@@ -229,9 +263,26 @@ internal sealed class FleetGateStats
 /// <summary>The one-line summary the worker logs (#4732): the last hour's counts and the gate's width.</summary>
 internal static class FleetGateLine
 {
-    internal static string Describe(FleetGateSnapshot snapshot, int gateWidth) => string.Create(
+    /// <summary>
+    /// #5597: how many minutes the counts of the line cover: the hour, or the minutes since the service started while it has
+    /// run for less than an hour (rounded up to a whole minute, at least 1). The first line after a start came 4.5 to 6.9
+    /// minutes in and still said "last 60 minutes". 60 when the loop has not ticked yet.
+    /// </summary>
+    internal static int SpanMinutes(DateTime nowUtc, DateTime? serviceStartedUtc)
+    {
+        if (serviceStartedUtc is not { } started)
+        {
+            return FleetGateStats.WindowMinutes;
+        }
+
+        var minutes = (nowUtc - started).Ticks;
+        var whole = (minutes + TimeSpan.TicksPerMinute - 1) / TimeSpan.TicksPerMinute;
+        return (int)Math.Clamp(whole, 1, FleetGateStats.WindowMinutes);
+    }
+
+    internal static string Describe(FleetGateSnapshot snapshot, int gateWidth, int spanMinutes = FleetGateStats.WindowMinutes) => string.Create(
         CultureInfo.InvariantCulture,
-        $"fleet collection gate, last {FleetGateStats.WindowMinutes} minutes: {snapshot.Run:N0} collector slots ran, {snapshot.Skipped:N0} skipped ({snapshot.SkippedPercent:0.#}%); {snapshot.QueueWaits:N0} bodies queued for a gate slot (average {snapshot.QueueWaitAverage.TotalMilliseconds:N0} ms, longest {snapshot.QueueWaitMax.TotalMilliseconds:N0} ms); gate width {gateWidth}");
+        $"fleet collection gate, last {spanMinutes} minutes{(spanMinutes < FleetGateStats.WindowMinutes ? ", since the service started" : string.Empty)}: {snapshot.Run:N0} collector slots ran, {snapshot.Skipped:N0} skipped ({snapshot.SkippedPercent:0.#}%); {snapshot.QueueWaits:N0} bodies queued for a gate slot (average {snapshot.QueueWaitAverage.TotalMilliseconds:N0} ms, longest {snapshot.QueueWaitMax.TotalMilliseconds:N0} ms); gate width {gateWidth}");
 }
 
 /// <summary>
@@ -295,6 +346,7 @@ internal sealed class SkipCreditFloor
 
     private long _floorTicks;
     private long _lastTickTicks;
+    private long _firstTickTicks;
     private bool _ticked;
 
     /// <summary>The instant before which no slot counts as skipped: <see cref="DateTime.MinValue"/> until the loop
@@ -316,6 +368,7 @@ internal sealed class SkipCreditFloor
 
         if (!hadPrevious)
         {
+            Interlocked.Exchange(ref _firstTickTicks, nowUtc.Ticks);
             return;
         }
 
@@ -323,6 +376,37 @@ internal sealed class SkipCreditFloor
         if (gap > MaxTickGap.Ticks || gap < 0)
         {
             Interlocked.Exchange(ref _floorTicks, nowUtc.Ticks);
+        }
+    }
+
+    /// <summary>#5597: the instant of the loop's first tick (the service start, as far as collection goes); null before it.</summary>
+    public DateTime? FirstTick
+    {
+        get
+        {
+            var first = Interlocked.Read(ref _firstTickTicks);
+            return first == 0 ? null : new DateTime(first, DateTimeKind.Utc);
+        }
+    }
+
+    /// <summary>
+    /// #5597: the instant the sweep loop last STARTED collecting everything at once: the later of its first tick and
+    /// <see cref="Floor"/> (raised by a sleep, a stall, a clock step, a pause or a launch-guard hold that just released). Every
+    /// collector's slot comes due together at those instants, the gate is a few slots wide, and the first bodies run
+    /// long (connects, on-load snapshots, catch-up reads), so the slots skipped in the minutes after are start-up
+    /// strain and not a store that cannot keep its schedule. Null until the loop has ticked once.
+    /// </summary>
+    public DateTime? Since
+    {
+        get
+        {
+            var first = Interlocked.Read(ref _firstTickTicks);
+            if (first == 0)
+            {
+                return null;
+            }
+
+            return new DateTime(Math.Max(first, Interlocked.Read(ref _floorTicks)), DateTimeKind.Utc);
         }
     }
 
@@ -335,9 +419,22 @@ internal sealed class SkipCreditFloor
     /// <paramref name="nowUtc"/>, counting only the slots that came due at or after the floor. 0 when the floor is at or
     /// after <paramref name="nowUtc"/>.
     /// </summary>
-    public long Skipped(DateTime due, DateTime nowUtc, TimeSpan interval)
+    public long Skipped(DateTime due, DateTime nowUtc, TimeSpan interval) => Skipped(due, nowUtc, interval, default);
+
+    /// <summary>
+    /// #5597: the same count with a floor of the caller's own. A server's connect body seeds its collectors' first due
+    /// stamps from a clock read BEFORE it runs its on-load snapshots, and that body is the server's only body: the slots
+    /// that came due while it ran could not have run, so the pass counts from the instant the seeding finished
+    /// (<paramref name="notBefore"/>) when that is later than <see cref="Floor"/>.
+    /// </summary>
+    public long Skipped(DateTime due, DateTime nowUtc, TimeSpan interval, DateTime notBefore)
     {
         var floor = Floor;
+        if (notBefore > floor)
+        {
+            floor = notBefore;
+        }
+
         return CollectorCadence.SkippedSlots(due < floor ? floor : due, nowUtc, interval);
     }
 }
