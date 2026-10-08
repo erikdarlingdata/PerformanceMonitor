@@ -121,7 +121,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     /// so a step that never touched it cannot pass as "no note".
     /// </summary>
     private static (bool Visible, string Text) NoteFor(CollectionLogWindow.DrillRead load, ServerClock? clock = null) =>
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
             var banner = new System.Windows.Controls.TextBlock
@@ -400,26 +400,4 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     private static string WindowFile(string name, [CallerFilePath] string thisFile = "") =>
         File.ReadAllText(Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Windows", name)));
 
-    /// <summary>WPF objects require STA; same shape as the other banner tests.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 }

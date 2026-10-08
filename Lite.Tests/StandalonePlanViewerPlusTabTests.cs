@@ -56,7 +56,7 @@ public sealed class StandalonePlanViewerPlusTabTests
     [Fact]
     public void UiaSelectOnPlus_FocusThenSelect_AddsExactlyOneSubTab_AndSelectsIt()
     {
-        OnStaThread(rig =>
+        OnRig(rig =>
         {
             var before = rig.SubTabCount;
 
@@ -75,7 +75,7 @@ public sealed class StandalonePlanViewerPlusTabTests
     [Fact]
     public void UiaSelectOnPlus_SelectThenFocus_AddsExactlyOneSubTab()
     {
-        OnStaThread(rig =>
+        OnRig(rig =>
         {
             var before = rig.SubTabCount;
 
@@ -93,7 +93,7 @@ public sealed class StandalonePlanViewerPlusTabTests
     [Fact]
     public void UiaSelectAlone_AddsExactlyOneSubTab_AndSelectsIt()
     {
-        OnStaThread(rig =>
+        OnRig(rig =>
         {
             var before = rig.SubTabCount;
 
@@ -112,7 +112,7 @@ public sealed class StandalonePlanViewerPlusTabTests
     [InlineData("SelectedItem")]
     public void MouseStyleSelectionOfPlus_AddsExactlyOneSubTab(string how)
     {
-        OnStaThread(rig =>
+        OnRig(rig =>
         {
             var before = rig.SubTabCount;
 
@@ -139,7 +139,7 @@ public sealed class StandalonePlanViewerPlusTabTests
     [InlineData("uia")]
     public void TwoSeparateSelectionsOfPlus_AddTwoSubTabs(string how)
     {
-        OnStaThread(rig =>
+        OnRig(rig =>
         {
             var before = rig.SubTabCount;
 
@@ -169,7 +169,7 @@ public sealed class StandalonePlanViewerPlusTabTests
     [Fact]
     public void SelectingPlusAfterTheJustAddedTabWasClosed_NeverSelectsTheClosedTab()
     {
-        OnStaThread(rig =>
+        OnRig(rig =>
         {
             var before = rig.SubTabCount;
 
@@ -282,36 +282,7 @@ public sealed class StandalonePlanViewerPlusTabTests
         }
     }
 
-    /// <summary>WPF objects need STA and a dispatcher. Bounded, so a wedged frame fails the test instead of
-    /// hanging the suite; the dispatcher is shut down so nothing leaks between tests.</summary>
-    private static void OnStaThread(Action<Rig> body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                body(Rig.Create());
-            }
-            catch (Exception ex)
-            {
-                error = ex;
-            }
-            finally
-            {
-                Dispatcher.CurrentDispatcher.InvokeShutdown();
-            }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.IsBackground = true;
-        thread.Start();
-
-        Assert.True(thread.Join(TimeSpan.FromSeconds(60)), "the STA thread did not finish within 60 s.");
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
+    /// <summary>WPF objects need STA and a dispatcher: the body runs on the shared STA test thread (#5602), which bounds a wedged frame
+    /// and drains the dispatcher afterwards, so nothing leaks between tests. The rig is built on that thread.</summary>
+    private static void OnRig(Action<Rig> body) => StaTestThread.Run(() => body(Rig.Create()));
 }

@@ -70,7 +70,7 @@ public sealed class PlanViewer4632FallbackTests
     [Fact]
     public void DashboardScope_MissingCriticalTextBrush_ConstructsCleanly_AndFallsBackToOrangeRed()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dict = LoadThemeDictionary(DashboardLightTheme);
             Assert.False(dict.Contains("CriticalTextBrush"),
@@ -98,7 +98,7 @@ public sealed class PlanViewer4632FallbackTests
     [Fact]
     public void LiteScope_WithCriticalTextBrush_ConstructsCleanly_AndResolvesThemeHex()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dict = LoadThemeDictionary(LiteLightTheme);
             Assert.True(dict.Contains("CriticalTextBrush"),
@@ -160,23 +160,4 @@ public sealed class PlanViewer4632FallbackTests
         return (SolidColorBrush)property!.GetValue(control)!;
     }
 
-    /// <summary>WPF objects require STA; same shape as <c>MainWindowAccessKeyTests</c>/<c>ThemeColorOverrideTests</c>/<c>QueryWindowTruncationTests</c>.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

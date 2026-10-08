@@ -220,7 +220,7 @@ public sealed class ViewerCollectionLogDataStartLiveTests : IClassFixture<Collec
         await probe.WaitAsync(ct);
 
         string? text = null;
-        DataStartBannerReadout.OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             /* Seeded visible, so a no-op cannot pass as a hidden banner. */
@@ -243,39 +243,13 @@ public sealed class ViewerCollectionLogDataStartLiveTests : IClassFixture<Collec
 
         var viewer = _store.Viewer!;
         DrillAnswer? answer = null;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
+        StaTestThread.Run(async () =>
         {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            dispatcher.BeginInvoke(new Action(async () =>
-            {
-                try
-                {
-                    ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-                    var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
-                    var rows = await CollectionLogWindow.ReadDrillAsync(viewer, serverId, collector, banner, asOfUtc);
-                    answer = new DrillAnswer(rows, banner.Visibility == Visibility.Visible ? banner.Text : null);
-                }
-                catch (Exception ex)
-                {
-                    error = ex;
-                }
-                finally
-                {
-                    dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
-                }
-            }));
-            Dispatcher.Run();
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+            var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
+            var rows = await CollectionLogWindow.ReadDrillAsync(viewer, serverId, collector, banner, asOfUtc);
+            answer = new DrillAnswer(rows, banner.Visibility == Visibility.Visible ? banner.Text : null);
         });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
 
         return answer!;
     }

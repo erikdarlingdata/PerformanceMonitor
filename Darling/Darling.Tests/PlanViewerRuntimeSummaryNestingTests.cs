@@ -43,7 +43,7 @@ public sealed class PlanViewerRuntimeSummaryNestingTests
     [Fact]
     public void RuntimeSummary_EarlyAbortUnderOptimization_IndentsItsLabelOnly()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var control = new PlanViewerControl();
             try
@@ -85,7 +85,7 @@ public sealed class PlanViewerRuntimeSummaryNestingTests
     [Fact]
     public void RuntimeSummary_EarlyAbortWithNoOptimizationRow_IsNotIndented()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var control = new PlanViewerControl();
             try
@@ -125,23 +125,4 @@ public sealed class PlanViewerRuntimeSummaryNestingTests
         return (labelText, valueText);
     }
 
-    /// <summary>WPF objects require STA; same shape as the other WPF tests here.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }
