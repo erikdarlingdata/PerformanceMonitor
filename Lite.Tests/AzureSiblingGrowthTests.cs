@@ -142,6 +142,20 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
     }
 
     [Fact]
+    public async Task StorageGrowth_WithOnlyASevenDayBaseline_TheDailyRateUsesTheRealElapsedDays()
+    {
+        /* No 30-day snapshot yet: the daily rate falls back to the 7-day one, over the 7.5 real days (not a whole-day count). */
+        await SeedSiblingAsync("sibdb", 10_000, 100, Collected.AddDays(-7.5));
+        await SeedSiblingAsync("sibdb", 10_150, 119);
+
+        var sib = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "sibdb");
+
+        Assert.Null(sib.Size30dAgoMb);
+        Assert.Equal(150m, sib.Growth7dMb);
+        Assert.Equal(Math.Round(150m / 7.5m, 4), Math.Round(sib.DailyGrowthRateMb!.Value, 4));
+    }
+
+    [Fact]
     public async Task StorageGrowth_BeforeTheFirstCollectionAfterTheUpgrade_TheSiblingIsNotListedYet()
     {
         /* The newest snapshot is still in the old shape, so the sibling has no row to show until the next
