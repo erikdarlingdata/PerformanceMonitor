@@ -611,9 +611,10 @@ jobs:
   # nightly never runs this. It answers one question for the class-to-file map the PR test selection
   # would read: can AltCover (--callContext on [Fact]/[Theory]) give a per-test-class list of product
   # source files for the Darling xUnit v3 project on .NET 10, at what overhead, and with what holes?
-  # It runs about 100 classes (plain, TestHost/web, live PostgreSQL) once plain and once instrumented,
-  # and uploads the raw OpenCover report plus a summary and the schema-1 `classes` map for those
-  # classes. Nothing here publishes or gates, and no job lists it in `needs`.
+  # It runs about 100 Darling classes (plain, TestHost/web, live PostgreSQL) and about 60 Lite classes
+  # (plain, DuckDB-backed, collector-starting) once plain and once instrumented, and uploads the raw
+  # OpenCover reports plus a summary and the schema-1 `classes` map for each suite. Nothing here
+  # publishes or gates, and no job lists it in `needs`.
   # Dispatch on a branch with:
   #   gh workflow run nightly.yml --ref <branch> -f altcover_probe=true -f publish=false
   altcover-probe:
@@ -625,6 +626,7 @@ jobs:
       # Pinned: a probe whose tool floats cannot be compared run to run.
       ALTCOVER_VERSION: '9.0.145'
       PROBE_BIN: ${{ github.workspace }}\Darling\Darling.Tests\bin\Release\net10.0-windows
+      PROBE_BIN_LITE: ${{ github.workspace }}\Lite.Tests\bin\Release\net10.0-windows
       # PROBE_OUT (the scratch folder under the runner's temp directory) is exported by the install step:
       # the `runner` context is not available in a job-level env block.
     steps:
@@ -667,6 +669,14 @@ jobs:
       - name: Build Darling.Tests
         run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
 
+      # Lite.Tests is built up front too, but probed after the Darling pass (its own bin folder, so the in-place
+      # instrumentation of the two suites never touches the same files).
+      - name: Restore Lite.Tests
+        run: dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build Lite.Tests
+        run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
       # The same throwaway cluster the darling-pg job stands up (CiClusterWorkerSizingTests compares the
       # appended settings of both jobs), so the live classes in the sample behave as they do there.
       - name: Initialize and start throwaway PostgreSQL
@@ -708,7 +718,7 @@ jobs:
           $json = @($lines | Where-Object { $_ -match '^\s*\[' })
           if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count)" }
           Set-Content -Path "$env:PROBE_OUT\all-classes.json" -Value $json[0]
-          python .github/scripts/altcover-probe.py select --list "$env:PROBE_OUT\all-classes.json" --tests-dir Darling/Darling.Tests --root . --total 100 --web 25 --live 12 --out "$env:PROBE_OUT\classes.txt" --manifest "$env:PROBE_OUT\manifest.json"
+          python .github/scripts/altcover-probe.py select --list "$env:PROBE_OUT\all-classes.json" --tests-dir Darling/Darling.Tests --root . --total 100 --want web=25 --want live=12 --out "$env:PROBE_OUT\classes.txt" --manifest "$env:PROBE_OUT\manifest.json"
           if ($LASTEXITCODE -ne 0) { throw "class selection failed ($LASTEXITCODE)" }
 
       # Baseline: the same classes, un-instrumented. Failures here are recorded, not fatal: this is a
@@ -807,6 +817,12 @@ jobs:
             if (Test-Path $file) { (Get-Content $file -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $timing[$_.Name] = $_.Value } }
           }
           $timing | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing.json"
+          # AltCover makes an instrumented async test wait on its own task, so a dynamic skip arrives wrapped in an
+          # AggregateException and xunit reports a failure. Put those back to skips, but only where the plain run
+          # skipped the same test.
+          if ((Test-Path "$env:PROBE_OUT\plain.xml") -and (Test-Path "$env:PROBE_OUT\instrumented.xml")) {
+            python .github/scripts/altcover-probe.py unwrap-skips --plain "$env:PROBE_OUT\plain.xml" --instr "$env:PROBE_OUT\instrumented.xml" | Select-Object -First 30
+          }
           $report = "$env:PROBE_OUT\coverage.xml"
           if (-not (Test-Path $report)) { Write-Host "::warning::no coverage report was produced"; exit 0 }
           $item = Get-Item $report
@@ -816,6 +832,124 @@ jobs:
             "### AltCover probe" | Add-Content $env:GITHUB_STEP_SUMMARY
             '```json' | Add-Content $env:GITHUB_STEP_SUMMARY
             Get-Content "$env:PROBE_OUT\summary.json" -TotalCount 120 | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+          exit 0
+
+      # ── Lite.Tests: the same measurement, in its own scratch folder ──────────────────────────────────
+      # About 60 classes: collector-starting (they mention RemoteCollectorService), DuckDB-backed, and plain.
+      - name: Choose the Lite sample classes
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "$env:PROBE_OUT\lite"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $lines = @(& "$env:PROBE_BIN_LITE\Lite.Tests.exe" -list classes/json -trait- Stage=Guard)
+          if ($LASTEXITCODE -ne 0) { throw "Lite class listing failed with exit code $LASTEXITCODE" }
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the Lite class listing, got $($json.Count)" }
+          Set-Content -Path "$out\all-classes.json" -Value $json[0]
+          python .github/scripts/altcover-probe.py select --profile lite --list "$out\all-classes.json" --tests-dir Lite.Tests --root . --total 60 --want collector=8 --want duckdb=20 --out "$out\classes.txt" --manifest "$out\manifest.json"
+          if ($LASTEXITCODE -ne 0) { throw "Lite class selection failed ($LASTEXITCODE)" }
+
+      - name: Run the Lite sample classes (plain)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          $classes = @(Get-Content "$out\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:PROBE_BIN_LITE\Lite.Tests.exe" @classArgs -xml "$out\plain.xml"
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "Lite plain run: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s for $($classes.Count) classes"
+          @{ plain_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); plain_exit = $code; classes = $classes.Count } | ConvertTo-Json | Set-Content "$out\timing-plain.json"
+          exit 0
+
+      - name: Instrument the Lite assemblies (AltCover, callContext on Fact and Theory)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" --inplace --inputDirectory $env:PROBE_BIN_LITE --outputDirectory "$out\saved" `
+            --report "$out\coverage.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" --methodpoint `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Tee-Object -FilePath "$out\altcover-instrument.log" | Select-Object -Last 15
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "Lite instrument: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+          @{ instrument_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrument_exit = $code } | ConvertTo-Json | Set-Content "$out\timing-instrument.json"
+          if ($code -ne 0) { throw "Lite altcover instrumentation failed ($code)" }
+
+      - name: Run the Lite sample classes (instrumented, AltCover runner)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          $classes = @(Get-Content "$out\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" Runner --recorderDirectory $env:PROBE_BIN_LITE --workingDirectory $env:PROBE_BIN_LITE --executable "$env:PROBE_BIN_LITE\Lite.Tests.exe" -- @classArgs -xml "$out\instrumented.xml" 2>&1 | Tee-Object -FilePath "$out\altcover-run.log" | Select-Object -Last 25
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "Lite instrumented run: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+          @{ instrumented_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrumented_exit = $code } | ConvertTo-Json | Set-Content "$out\timing-instrumented.json"
+          exit 0
+
+      - name: Lite overhead comparison (default line and branch recording)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          Copy-Item -Path "$out\saved\*" -Destination $env:PROBE_BIN_LITE -Recurse -Force
+          $altcover = "$env:RUNNER_TEMP\altcover-tool\altcover.exe"
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & $altcover --inplace --inputDirectory $env:PROBE_BIN_LITE --outputDirectory "$out\saved-line" `
+            --report "$out\coverage-line.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Out-Null
+          $instrument = $LASTEXITCODE
+          $instrumentSeconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+          if ($instrument -ne 0) { Write-Host "Lite line instrumentation failed ($instrument)"; exit 0 }
+          $classes = @(Get-Content "$out\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch.Restart()
+          & $altcover Runner --recorderDirectory $env:PROBE_BIN_LITE --workingDirectory $env:PROBE_BIN_LITE --executable "$env:PROBE_BIN_LITE\Lite.Tests.exe" -- @classArgs -xml "$out\instrumented-line.xml" 2>&1 | Out-Null
+          $code = $LASTEXITCODE
+          $runSeconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+          $bytes = if (Test-Path "$out\coverage-line.xml") { (Get-Item "$out\coverage-line.xml").Length } else { 0 }
+          Write-Host "Lite line and branch recording: instrument $instrumentSeconds s, run $runSeconds s (exit $code), report $bytes bytes"
+          @{ line_instrument_seconds = $instrumentSeconds; line_run_seconds = $runSeconds; line_run_exit = $code; line_report_bytes = $bytes } | ConvertTo-Json | Set-Content "$out\timing-line.json"
+          Remove-Item "$out\coverage-line.xml" -Force -ErrorAction SilentlyContinue
+          exit 0
+
+      - name: Summarize the Lite coverage
+        if: always()
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          $timing = @{}
+          foreach ($name in 'plain', 'instrument', 'instrumented', 'line') {
+            $file = "$out\timing-$name.json"
+            if (Test-Path $file) { (Get-Content $file -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $timing[$_.Name] = $_.Value } }
+          }
+          $timing | ConvertTo-Json | Set-Content "$out\timing.json"
+          if ((Test-Path "$out\plain.xml") -and (Test-Path "$out\instrumented.xml")) {
+            python .github/scripts/altcover-probe.py unwrap-skips --plain "$out\plain.xml" --instr "$out\instrumented.xml" | Select-Object -First 30
+          }
+          $report = "$out\coverage.xml"
+          if (-not (Test-Path $report)) { Write-Host "::warning::no Lite coverage report was produced"; exit 0 }
+          Write-Host "Lite coverage.xml: $((Get-Item $report).Length) bytes"
+          python .github/scripts/altcover-probe.py summarize --suite Lite.Tests --report $report --root $env:GITHUB_WORKSPACE --manifest "$out\manifest.json" --plain-xml "$out\plain.xml" --instr-xml "$out\instrumented.xml" --timing "$out\timing.json" --tool "altcover $env:ALTCOVER_VERSION" --summary-out "$out\summary.json" --map-out "$out\test-map-probe.json" | Select-Object -First 80
+          if (Test-Path "$out\summary.json") {
+            "### AltCover probe (Lite.Tests)" | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```json' | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content "$out\summary.json" -TotalCount 120 | Add-Content $env:GITHUB_STEP_SUMMARY
             '```' | Add-Content $env:GITHUB_STEP_SUMMARY
           }
           exit 0
@@ -843,7 +977,18 @@ jobs:
             ${{ runner.temp }}/altcover-probe/timing.json
             ${{ runner.temp }}/altcover-probe/plain.xml
             ${{ runner.temp }}/altcover-probe/instrumented.xml
+            ${{ runner.temp }}/altcover-probe/instrumented.raw.xml
             ${{ runner.temp }}/altcover-probe/altcover-*.log
+            ${{ runner.temp }}/altcover-probe/lite/coverage.xml
+            ${{ runner.temp }}/altcover-probe/lite/summary.json
+            ${{ runner.temp }}/altcover-probe/lite/test-map-probe.json
+            ${{ runner.temp }}/altcover-probe/lite/manifest.json
+            ${{ runner.temp }}/altcover-probe/lite/classes.txt
+            ${{ runner.temp }}/altcover-probe/lite/timing.json
+            ${{ runner.temp }}/altcover-probe/lite/plain.xml
+            ${{ runner.temp }}/altcover-probe/lite/instrumented.xml
+            ${{ runner.temp }}/altcover-probe/lite/instrumented.raw.xml
+            ${{ runner.temp }}/altcover-probe/lite/altcover-*.log
           retention-days: 7
           if-no-files-found: ignore
           overwrite: true

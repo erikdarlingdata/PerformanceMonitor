@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """AltCover per-test coverage probe helper (#5459 change 4, slice 2).  Standard library only.
 
-The nightly workflow's dispatch-only `altcover-probe` job uses two subcommands:
+The nightly workflow's dispatch-only `altcover-probe` job uses three subcommands:
 
-  select     Pick about 100 test classes from a runner class listing (`-list classes/json`), spread over
-             three kinds: plain unit classes, TestHost / web classes, and live PostgreSQL classes.  The kind
-             comes from the class's source text (a TestServer / WebApplicationFactory mention is web, a
-             DARLING_TEST_PG mention is live; Stage=Guard classes are skipped because they read source text
-             and never run product code).  Deterministic: the sorted candidates are sampled at even steps.
+  select     Pick test classes from a runner class listing (`-list classes/json`), spread over kinds that
+             come from the class's source text.  Profile `darling`: plain unit classes, TestHost / web classes
+             (a TestServer / WebApplicationFactory mention) and live PostgreSQL classes (a DARLING_TEST_PG
+             mention).  Profile `lite`: plain classes, DuckDB-backed classes and classes that start collectors
+             (a RemoteCollectorService mention).  Stage=Guard classes are skipped because they read source text
+             and never run product code.  Deterministic: the sorted candidates are sampled at even steps.
+
+  unwrap-skips  An instrumented run reports a dynamic skip as an AggregateException failure (see the function).
+             This rewrites the instrumented xunit report so those tests are skips again, but only for tests
+             the plain run also skipped.
 
   summarize  Turn an AltCover OpenCover report (`--callContext=[Fact] --callContext=[Theory]`) into
              (a) a summary of the probe: overhead, share of visits that carry a test context, holes, and
@@ -34,6 +39,13 @@ CLASS_DECL = re.compile(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)")
 WEB_MARKERS = ("WebApplicationFactory", "UseTestServer", "TestServer", "Microsoft.AspNetCore.TestHost")
 LIVE_MARKER = "DARLING_TEST_PG"
 RUNTIME_MARKER = "DARLING_TEST_PGRUNTIME"
+LITE_COLLECTOR_MARKERS = ("RemoteCollectorService",)
+LITE_DUCKDB_MARKERS = ("DuckDB", "DuckDb", "LocalDataService")
+# Default per-kind sample counts (the rest of --total is plain).
+PROFILE_WANTS = {"darling": {"web": 25, "live": 12}, "lite": {"collector": 8, "duckdb": 20}}
+SKIP_TOKEN = "$XunitDynamicSkip$"
+TEXT_READ = re.compile(r"File\.ReadAll|RepoRoot|ReadAllText|ReadLines\(")
+REFLECTION = re.compile(r"GetCustomAttribute|GetMethod\(|GetTypes\(|GetProperties\(|GetFields\(|typeof\(")
 GUARD_MARKER = re.compile(r"Trait\(\s*\"Stage\"\s*,\s*\"Guard\"\s*\)")
 
 
@@ -45,7 +57,23 @@ def simple_name(full: str) -> str:
     return re.split(r"[.+/]", full)[-1]
 
 
-def scan_sources(dirs, root):
+def classify(text, profile):
+    if GUARD_MARKER.search(text):
+        return "guard"
+    if profile == "lite":
+        if any(marker in text for marker in LITE_COLLECTOR_MARKERS):
+            return "collector"
+        if any(marker in text for marker in LITE_DUCKDB_MARKERS):
+            return "duckdb"
+        return "plain"
+    if any(marker in text for marker in WEB_MARKERS):
+        return "web"
+    if LIVE_MARKER in text and RUNTIME_MARKER not in text:
+        return "live"
+    return "plain"
+
+
+def scan_sources(dirs, root, profile="darling"):
     """Map simple class name -> {file, kind} for every test source file under `dirs`."""
     found = {}
     for base in dirs:
@@ -60,14 +88,7 @@ def scan_sources(dirs, root):
                         text = handle.read()
                 except OSError:
                     continue
-                if GUARD_MARKER.search(text):
-                    kind = "guard"
-                elif any(marker in text for marker in WEB_MARKERS):
-                    kind = "web"
-                elif LIVE_MARKER in text and RUNTIME_MARKER not in text:
-                    kind = "live"
-                else:
-                    kind = "plain"
+                kind = classify(text, profile)
                 rel = norm(os.path.relpath(path, root))
                 for cls in CLASS_DECL.findall(text):
                     found.setdefault(cls, {"file": rel, "kind": kind})
@@ -89,20 +110,20 @@ def cmd_select(args):
         text = handle.read()
     start = text.index("[")
     listed = json.loads(text[start:text.rindex("]") + 1])
-    sources = scan_sources(args.tests_dir, args.root)
-    buckets = {"plain": [], "web": [], "live": []}
+    sources = scan_sources(args.tests_dir, args.root, args.profile)
+    wants = dict(PROFILE_WANTS[args.profile])
+    for item in args.want:
+        name, _, number = item.partition("=")
+        wants[name] = int(number)
+    buckets = {"plain": []}
+    buckets.update({kind: [] for kind in wants})
     for full in listed:
         info = sources.get(simple_name(full))
         if info and info["kind"] in buckets:
             buckets[info["kind"]].append(full)
-    want_web = min(args.web, len(buckets["web"]))
-    want_live = min(args.live, len(buckets["live"]))
-    want_plain = max(args.total - want_web - want_live, 0)
-    chosen = {
-        "plain": spread(buckets["plain"], want_plain),
-        "web": spread(buckets["web"], want_web),
-        "live": spread(buckets["live"], want_live),
-    }
+    counts = {kind: min(number, len(buckets[kind])) for kind, number in wants.items()}
+    counts["plain"] = max(args.total - sum(counts.values()), 0)
+    chosen = {kind: spread(buckets[kind], counts[kind]) for kind in buckets}
     manifest = {}
     lines = []
     for kind, names in chosen.items():
@@ -113,10 +134,78 @@ def cmd_select(args):
         handle.write("\n".join(lines) + "\n")
     with open(args.manifest, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(manifest, handle, indent=1, sort_keys=True)
-    print("listed %d classes; candidates plain=%d web=%d live=%d; chose plain=%d web=%d live=%d (%d total)" % (
-        len(listed), len(buckets["plain"]), len(buckets["web"]), len(buckets["live"]),
-        len(chosen["plain"]), len(chosen["web"]), len(chosen["live"]), len(lines)))
+    print("%s: listed %d classes; candidates %s; chose %s (%d total)" % (
+        args.profile, len(listed), " ".join("%s=%d" % (k, len(v)) for k, v in sorted(buckets.items())),
+        " ".join("%s=%d" % (k, len(v)) for k, v in sorted(chosen.items())), len(lines)))
     return 0 if lines else 1
+
+
+def failure_message(test):
+    failure = test.find("failure")
+    if failure is None:
+        return ""
+    message = failure.find("message")
+    return (message.text or "") if message is not None else ""
+
+
+def cmd_unwrap_skips(args):
+    """Turn an instrumented run's wrapped dynamic skips back into skips.
+
+    AltCover rewrites an instrumented async [Fact] so that the method waits on its own task (the failure's stack
+    is `Task.Wait` called from the test method itself).  A dynamic skip (`Assert.Skip*`) thrown inside the async
+    body therefore surfaces as an AggregateException whose message does not start with the skip token, and
+    xunit v3 reports a failure instead of a skip.  The wrap is in the rewritten test method, not in product or test
+    source, and 760 Darling test files use dynamic skips, so the report is repaired here instead.
+
+    Guards: a test is converted only when its failure text carries the skip token AND the plain run of the same
+    test was a skip.  A test the plain run did not skip, or any other failure, stays a failure.  Nothing is
+    ever converted to a pass.  The original report is kept next to the result as `<name>.raw.xml`."""
+    plain_skips = set()
+    for _, el in ET.iterparse(args.plain, events=("end",)):
+        if el.tag == "test":
+            if (el.get("result") or "").lower() == "skip":
+                plain_skips.add(el.get("name"))
+            el.clear()
+    tree = ET.parse(args.instr)
+    converted = []
+    kept = []
+    for test in tree.getroot().iter("test"):
+        if (test.get("result") or "").lower() != "fail":
+            continue
+        message = failure_message(test)
+        if SKIP_TOKEN not in message:
+            continue
+        if test.get("name") not in plain_skips:
+            kept.append(test.get("name"))
+            continue
+        reason = message[message.index(SKIP_TOKEN) + len(SKIP_TOKEN):].split("\n", 1)[0].strip().rstrip(")")
+        failure = test.find("failure")
+        if failure is not None:
+            test.remove(failure)
+        test.set("result", "Skip")
+        ET.SubElement(test, "reason").text = reason
+        converted.append(test.get("name"))
+    if converted:
+        # Counts live on the collection and assembly elements; move each converted test from failed to skipped.
+        moved_names = set(converted)
+        for parent in tree.getroot().iter():
+            if parent.tag not in ("collection", "assembly"):
+                continue
+            moved = sum(1 for test in parent.iter("test") if test.get("name") in moved_names)
+            if moved and parent.get("failed") is not None and parent.get("skipped") is not None:
+                parent.set("failed", str(max(int(parent.get("failed")) - moved, 0)))
+                parent.set("skipped", str(int(parent.get("skipped")) + moved))
+        raw = os.path.splitext(args.instr)[0] + ".raw.xml"
+        if not os.path.exists(raw):
+            os.replace(args.instr, raw)
+        tree.write(args.instr, encoding="utf-8", xml_declaration=True)
+    print("unwrap-skips: %d converted back to skips, %d left failing (skip token, but the plain run did not skip)" % (
+        len(converted), len(kept)))
+    for name in converted[:12]:
+        print("  skip restored: " + name)
+    for name in kept[:12]:
+        print("  still failing: " + name)
+    return 0
 
 
 def class_of_tracked(name: str) -> str:
@@ -251,6 +340,21 @@ def xunit_times(path):
     return seconds, counts
 
 
+def hole_detail(info, visited, root):
+    """Why a class has no product file: what it did visit, and what its own source text suggests."""
+    detail = {"kind": info.get("kind"), "test_files_visited": sorted(visited)[:6]}
+    path = os.path.join(root, info.get("file") or "")
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return detail
+    detail["reads_source_text"] = bool(TEXT_READ.search(text))
+    detail["uses_reflection_or_typeof"] = bool(REFLECTION.search(text))
+    detail["needs_pg_runtime"] = RUNTIME_MARKER in text
+    return detail
+
+
 def cmd_summarize(args):
     ctx_files, file_stats, totals, root_prefix = parse_report(args.report, args.root)
     with open(args.manifest, encoding="utf-8") as handle:
@@ -272,7 +376,7 @@ def cmd_summarize(args):
     index = {f: i for i, f in enumerate(universe)}
     selected = {cls.replace("/", "+"): info for cls, info in manifest.items()}
     classes = {}
-    holes = {"no_context": [], "no_product_files": []}
+    holes = {"no_context": [], "no_product_files": [], "detail": {}}
     per_kind = {}
     for cls, info in sorted(selected.items()):
         got = ctx_files.get(cls)
@@ -282,6 +386,7 @@ def cmd_summarize(args):
         product = sorted(index[f] for f in got if f in index)
         if not product:
             holes["no_product_files"].append(cls)
+            holes["detail"][cls] = hole_detail(info, got, args.root)
         classes[cls] = {"own": info.get("file"), "files": product,
                         "seconds": round(instr_seconds.get(cls, plain_seconds.get(cls, 0.0)), 3)}
         per_kind.setdefault(info["kind"], []).append(len(product))
@@ -368,15 +473,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sel = sub.add_parser("select")
+    sel.add_argument("--profile", choices=sorted(PROFILE_WANTS), default="darling")
+    sel.add_argument("--want", action="append", default=[], help="kind=count, overrides the profile default")
     sel.add_argument("--list", required=True)
     sel.add_argument("--tests-dir", action="append", required=True)
     sel.add_argument("--root", required=True)
     sel.add_argument("--total", type=int, default=100)
-    sel.add_argument("--web", type=int, default=25)
-    sel.add_argument("--live", type=int, default=12)
     sel.add_argument("--out", required=True)
     sel.add_argument("--manifest", required=True)
     sel.set_defaults(func=cmd_select)
+    unwrap = sub.add_parser("unwrap-skips")
+    unwrap.add_argument("--plain", required=True)
+    unwrap.add_argument("--instr", required=True)
+    unwrap.set_defaults(func=cmd_unwrap_skips)
     summ = sub.add_parser("summarize")
     summ.add_argument("--report", required=True)
     summ.add_argument("--root", required=True)
