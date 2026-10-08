@@ -1377,10 +1377,16 @@ public partial class RemoteCollectorService
 
         if (fallback.Count == 0)
         {
+            /* #5498: the firewall comes first. 40615 means the server's firewall did not allow the client's IP
+               address, which a server-level block causes; a missing Database setting never does. The
+               set-a-Database advice is only the fix for the master-only case (a login allowed into a user
+               database but not master). Text only: the fallback itself is unchanged. */
             throw new InvalidOperationException(
                 $"{reason}, and this connection has no target database to fall back to " +
-                $"(it resolves to master). Set a Database for '{server.DisplayName}' so database-scoped " +
-                $"collectors have something to read.");
+                $"(it resolves to master). If the error is 40615, the Azure firewall did not allow this " +
+                $"client's IP address: add a firewall rule for it, at the server level or on the database. " +
+                $"If this login can open a user database but not master, set a Database for " +
+                $"'{server.DisplayName}' so database-scoped collectors have something to read.");
         }
 
         if (quiet)

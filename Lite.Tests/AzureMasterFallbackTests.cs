@@ -156,8 +156,18 @@ public class AzureMasterFallbackTests
         var ex = Assert.Throws<InvalidOperationException>(
             () => RemoteCollectorService.FallbackDatabaseList(Server(), targetDb, reason: "master DB inaccessible"));
 
-        /* The message has to tell them what to actually do about it. */
-        Assert.Contains("Set a Database", ex.Message);
+        /* The message has to tell them what to actually do about it. #5498: the firewall comes first (40615 means
+           the client's IP address was not allowed, which a server-level block causes too); setting a Database is
+           only the master-only case's fix. */
+        var firewall = ex.Message.IndexOf("firewall did not allow this client's IP address", StringComparison.Ordinal);
+        var rule = ex.Message.IndexOf("add a firewall rule", StringComparison.Ordinal);
+        var setDatabase = ex.Message.IndexOf("set a Database for", StringComparison.Ordinal);
+
+        Assert.True(firewall > 0, ex.Message);
+        Assert.True(rule > firewall, ex.Message);
+        Assert.Contains("at the server level or on the database", ex.Message, StringComparison.Ordinal);
+        Assert.True(setDatabase > rule, ex.Message);
+        Assert.Contains("can open a user database but not master", ex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
