@@ -466,16 +466,25 @@ AND   hypertable_name = 'query_store_stats';";
 
     /* ---- helpers ------------------------------------------------------------------------------------------ */
 
-    /// <summary>Runs the real retention delete for the interval table, slice by slice, until it deletes nothing.</summary>
+    /// <summary>
+    /// Runs the real retention delete for the interval table (#5569: the row-capped cursor form, batch by
+    /// batch, carrying the cursor the way <c>DarlingRetention.PurgeOneAsync</c> does) until it deletes nothing.
+    /// </summary>
     internal static async Task PurgeTableAsync(NpgsqlConnection connection, DateTime cutoff, CancellationToken ct)
     {
-        var sql = DarlingRetention.TimeSlicedDeleteSql("collect.query_store_interval_wide", "first_execution_time");
+        var unspecified = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified);
+        DateTime? cursor = null;
         int deleted;
         do
         {
-            await using var command = new NpgsqlCommand(sql, connection);
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-            deleted = await command.ExecuteNonQueryAsync(ct);
+            var (rows, maxDeleted) = await DarlingRetention.ExecuteCursoredBatchAsync(
+                connection, "collect.query_store_interval_wide", "first_execution_time", 5_000, unspecified,
+                cursor, ct);
+            deleted = rows;
+            if (maxDeleted is not null)
+            {
+                cursor = maxDeleted;
+            }
         }
         while (deleted > 0);
     }
