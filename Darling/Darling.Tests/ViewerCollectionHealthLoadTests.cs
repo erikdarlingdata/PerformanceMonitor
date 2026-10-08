@@ -77,6 +77,7 @@ public sealed class ViewerCollectionHealthLoadTests : IDisposable
     private static void OnDispatcher(Func<Task> body)
     {
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             var dispatcher = Dispatcher.CurrentDispatcher;

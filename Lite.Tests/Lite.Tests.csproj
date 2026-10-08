@@ -50,6 +50,8 @@
     <Compile Include="..\Darling\Darling.Tests\StatementScrubCanary.cs" Link="StatementScrubCanary.cs" />
     <!-- #5459: the guard-stage scanner, so both suites tag their guard classes by one detector. -->
     <Compile Include="..\Darling\Darling.Tests\GuardStageScanner.cs" Link="GuardStageScanner.cs" />
+    <!-- #5559: the one gate every STA test helper takes, so no two test classes touch WPF's shared descriptor caches at once. -->
+    <Compile Include="..\Darling\Darling.Tests\WpfStaGate.cs" Link="WpfStaGate.cs" />
   </ItemGroup>
 
   <ItemGroup>

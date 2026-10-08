@@ -547,6 +547,7 @@ internal static class QueryGridSeed
     {
         string? text = null;
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             var savedMode = ViewerTimeHelper.CurrentDisplayMode;

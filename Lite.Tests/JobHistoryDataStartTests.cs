@@ -639,6 +639,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
     {
         T result = default!;
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try { result = body(); }
