@@ -949,7 +949,7 @@ public sealed class DarlingWorker : BackgroundService
     /* #4732: the fleet collection gate's counts over the last hour (slots run, slots skipped, queue waits), the
        cadence the worker reads them on, and when it writes their log line. Nullable because a test that builds a
        worker without running its constructor never sets it, and the recording sites tolerate that. */
-    private readonly FleetGateStats? _fleetGateStats = new(static () => DateTime.UtcNow);
+    private readonly FleetGateStats? _fleetGateStats;
     private readonly FleetGateLogCadence? _fleetGateLog = new();
     private DateTime _nextFleetGateCheckUtc = DateTime.MinValue;
 
@@ -1416,6 +1416,10 @@ LIMIT 1";
         _baselineCache = baselineCache;
         _readLatency = readLatency;
         _launchMemoryGuard = LaunchMemoryGuard.CreateDefault(logger);
+
+        /* #5597: the gate's counts read the floor's monotonic uptime when each slot is recorded, so which slots the alert leaves out
+           is decided then, not by the wall-clock minute they were stamped in. */
+        _fleetGateStats = new FleetGateStats(static () => DateTime.UtcNow, () => _skipCreditFloor.Uptime);
     }
 
     /// <summary>
@@ -2413,19 +2417,18 @@ LIMIT 1";
         alertStanding || report.IsBehind;
 
     /// <summary>
-    /// #5597: reads the fleet gate twice: the full last hour (what the hourly log line reports, truthfully), and the window the
-    /// "Collection Falling Behind" alert judges, which leaves out the slots counted in the first <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/>
-    /// minutes after the service started (<paramref name="loopSince"/>, <see cref="SkipCreditFloor.SinceAt"/>; a start, never a stall,
-    /// a pause or a launch-guard release).
-    /// The one place that decides, so the alert and the Warning level of the line cannot disagree.
+    /// #5597: reads the fleet gate twice: the full last hour (what the hourly log line reports, truthfully), and the counts the
+    /// "Collection Falling Behind" alert judges, which leave out the slots recorded in the first
+    /// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/> minutes after the service started (<paramref name="uptime"/>,
+    /// <see cref="SkipCreditFloor.Uptime"/>; a start, never a stall, a pause or a launch-guard release). The one place that decides,
+    /// so the alert and the Warning level of the line cannot disagree.
     /// </summary>
     internal static (FleetGateSnapshot Full, DarlingSelfAlertEvaluator.FleetGateReport Report) ReadFleetGate(
-        FleetGateStats stats, DateTime? loopSince, int gateWidth, DateTime nowUtc)
+        FleetGateStats stats, TimeSpan? uptime, int gateWidth, DateTime nowUtc)
     {
         var full = stats.Snapshot();
-        var judgedMinutes = DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(nowUtc, loopSince);
-        var judged = judgedMinutes >= FleetGateStats.WindowMinutes ? full : stats.SnapshotLastMinutes(judgedMinutes + 1);
-        return (full, BuildFleetGateReport(judged, gateWidth, nowUtc, judgedMinutes));
+        var judgedMinutes = DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(uptime);
+        return (full, BuildFleetGateReport(stats.SnapshotJudged(), gateWidth, nowUtc, judgedMinutes));
     }
 
     /// <summary>
@@ -2443,7 +2446,7 @@ LIMIT 1";
         }
 
         var now = DateTime.UtcNow;
-        var (snapshot, report) = ReadFleetGate(_fleetGateStats, _skipCreditFloor.SinceAt(now), EffectiveSweepWidth, now);
+        var (snapshot, report) = ReadFleetGate(_fleetGateStats, _skipCreditFloor.Uptime, EffectiveSweepWidth, now);
 
         var standing = _selfAlerts is not null
             && await _selfAlerts.EvaluateFleetGateAsync(report, cancellationToken);

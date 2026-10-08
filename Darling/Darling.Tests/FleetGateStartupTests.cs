@@ -57,8 +57,8 @@ public sealed class FleetGateStartupTests
 
         public Clock()
         {
-            Stats = new FleetGateStats(() => Now);
             Floor = new SkipCreditFloor(() => _mono);
+            Stats = new FleetGateStats(() => Now, () => Floor.Uptime);
             Floor.Tick(T0);
         }
 
@@ -76,7 +76,7 @@ public sealed class FleetGateStartupTests
         }
 
         public DarlingSelfAlertEvaluator.FleetGateReport Read() =>
-            DarlingWorker.ReadFleetGate(Stats, Floor.SinceAt(Now), 4, Now).Report;
+            DarlingWorker.ReadFleetGate(Stats, Floor.Uptime, 4, Now).Report;
     }
 
     /// <summary>
@@ -230,7 +230,7 @@ public sealed class FleetGateStartupTests
 
         /* The minutes after the start-up window are clean, and the alert never fires. */
         Assert.Equal(T0.AddMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes + DarlingSelfAlertEvaluator.FleetGateMinJudgedMinutes), firstJudged);
-        Assert.Equal(0, clock.Stats.SnapshotLastMinutes(60).Skipped);
+        Assert.Equal(0, clock.Stats.Snapshot().Skipped);
         Assert.Empty(h.Deliverer.Outcomes);
         await Task.CompletedTask;
     }
@@ -245,7 +245,7 @@ public sealed class FleetGateStartupTests
             var clock = new Clock();
             var model = new FleetModel(clock, _ => TimeSpan.FromMilliseconds(100), fromSeedFinish);
             model.Run(T0.AddMinutes(12), _ => { });
-            return clock.Stats.SnapshotLastMinutes(60).Skipped;
+            return clock.Stats.Snapshot().Skipped;
         }
 
         Assert.True(CountedWith(true) < CountedWith(false));
@@ -406,17 +406,17 @@ public sealed class FleetGateStartupTests
     [InlineData(600, 60)]
     public void TheJudgedWindow_StartsAfterTheStartUpMinutes_AndNeverExceedsTheHour(int minutesSinceLoopStart, int expected)
     {
-        Assert.Equal(expected, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(T0.AddMinutes(minutesSinceLoopStart), T0));
+        Assert.Equal(expected, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(TimeSpan.FromMinutes(minutesSinceLoopStart)));
     }
 
     [Fact]
-    public void TheJudgedWindow_RoundsItsStartUpToAWholeMinute_AndIsEmptyBeforeTheLoopHasTicked()
+    public void TheJudgedWindow_RoundsDownToAWholeMinute_AndIsEmptyBeforeTheLoopHasTicked()
     {
-        /* 13:37:20 + 15 minutes is 13:52:20, so the first whole minute is 13:53:00. */
-        var since = T0.AddSeconds(20);
-        Assert.Equal(0, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(T0.AddMinutes(16).AddSeconds(59), since));
-        Assert.Equal(1, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(T0.AddMinutes(17), since));
-        Assert.Equal(0, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(T0.AddHours(5), null));
+        /* 15 minutes 59 seconds of uptime is not yet a whole judged minute; 16 minutes is. */
+        Assert.Equal(0, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(TimeSpan.FromSeconds(15 * 60 + 59)));
+        Assert.Equal(1, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(TimeSpan.FromMinutes(16)));
+        Assert.Equal(14, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(TimeSpan.FromSeconds(30 * 60 - 1)));
+        Assert.Equal(0, DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(null));
     }
 
     [Fact]
@@ -425,30 +425,28 @@ public sealed class FleetGateStartupTests
         var mono = TimeSpan.Zero;
         var floor = new SkipCreditFloor(() => mono);
         Assert.Null(floor.Uptime);
-        Assert.Null(floor.SinceAt(T0));
 
         floor.Tick(T0);
         Assert.Equal(TimeSpan.Zero, floor.Uptime);
-        Assert.Equal(T0, floor.SinceAt(T0));
 
         /* Ticks on time leave it alone. */
         mono = TimeSpan.FromSeconds(15);
         floor.Tick(T0.AddSeconds(15));
-        Assert.Equal(T0, floor.SinceAt(T0.AddSeconds(15)));
+        Assert.Equal(TimeSpan.FromSeconds(15), floor.Uptime);
 
         /* A stall (a gap over MaxTickGap) raises the floor and does not restart the start-up minutes. */
         mono = TimeSpan.FromHours(2);
         var back = T0.AddHours(2);
         floor.Tick(back);
         Assert.Equal(back, floor.Floor);
-        Assert.Equal(T0, floor.SinceAt(back));
+        Assert.Equal(TimeSpan.FromHours(2), floor.Uptime);
 
         /* Neither does a pause's resume or the launch guard's release (both are Resume). */
         mono += TimeSpan.FromMinutes(10);
         var resumed = back.AddMinutes(10);
         floor.Resume(resumed);
         Assert.Equal(resumed, floor.Floor);
-        Assert.Equal(T0, floor.SinceAt(resumed));
+        Assert.Equal(TimeSpan.FromHours(2) + TimeSpan.FromMinutes(10), floor.Uptime);
     }
 
     [Theory]
@@ -565,8 +563,21 @@ public sealed class FleetGateStartupTests
         Assert.Equal(0, early.Read().Skipped);
     }
 
+    /// <summary>The relaunch bunch of the field case: the first seven minutes skip about 22% of their slots, then it is clean.</summary>
+    private static void RecordUnevenMinute(Clock clock, int uptimeMinute)
+    {
+        if (uptimeMinute <= 6)
+        {
+            clock.Record(1300, 290);
+        }
+        else
+        {
+            clock.Record(940, uptimeMinute < DarlingSelfAlertEvaluator.FleetGateStartupMinutes ? 0 : 60);
+        }
+    }
+
     [Fact]
-    public async Task ABackwardClockStepDuringTheStartUpMinutes_AddsNoBlindTime()
+    public async Task ABackwardClockStepDuringTheStartUpMinutes_AddsNoBlindTime_AndLeaksNothingIntoTheJudgedCounts()
     {
         var clock = new Clock();
         var h = new DarlingSelfAlertTests.Harness();
@@ -584,11 +595,15 @@ public sealed class FleetGateStartupTests
 
             h.Now = clock.Now;
             clock.Floor.Tick(clock.Now);
-            clock.Record(940, 60);
+            RecordUnevenMinute(clock, uptime);
             var report = clock.Read();
             if (report.IsJudged && firstJudgedUptime is null)
             {
                 firstJudgedUptime = T0.AddMinutes(uptime);
+
+                /* Judged from the first minute at 15 on: 16 minutes of 940 run and 60 skipped, none of the bunch. */
+                Assert.Equal(16 * 60, report.Skipped);
+                Assert.Equal(16 * 940, report.Run);
             }
 
             var before = h.Deliverer.Outcomes.Count;
@@ -611,27 +626,160 @@ public sealed class FleetGateStartupTests
     }
 
     [Fact]
-    public void ABackwardClockStepAfterTheStartUpMinutes_KeepsTheWindowJudged()
+    public void ABackwardClockStepAfterTheStartUpMinutes_KeepsTheWindowJudged_AndTheBunchOutOfIt()
     {
         var clock = new Clock();
         for (var uptime = 1; uptime <= 40; uptime++)
         {
             clock.Now = clock.Now.AddMinutes(1);
             clock.Floor.Tick(clock.Now);
-            clock.Record(940, 60);
+            RecordUnevenMinute(clock, uptime);
         }
 
-        Assert.Equal(25, clock.Read().JudgedMinutes);
+        var before = clock.Read();
+        Assert.Equal(25, before.JudgedMinutes);
+        Assert.Equal(26 * 60, before.Skipped);
 
-        /* A 30 minute step back, then one more minute: the window is as long as the service has run past its start-up minutes. */
+        /* A 30 minute step back, then one more minute: the window is as long as the service has run past its start-up minutes,
+           and holds the same counts plus the new minute, nothing from the bunch. */
         clock.StepWall(TimeSpan.FromMinutes(-30));
         clock.Floor.Tick(clock.Now);
         clock.Now = clock.Now.AddMinutes(1);
         clock.Floor.Tick(clock.Now);
-        clock.Record(940, 60);
-        Assert.Equal(26, clock.Read().JudgedMinutes);
-        Assert.True(clock.Read().IsJudged);
+        RecordUnevenMinute(clock, 41);
+        var after = clock.Read();
+        Assert.Equal(26, after.JudgedMinutes);
+        Assert.True(after.IsJudged);
+        Assert.Equal(27 * 60, after.Skipped);
+        Assert.Equal(27 * 940, after.Run);
         Assert.Equal(41, FleetGateLine.SpanMinutes(clock.Floor.Uptime));
+    }
+
+    [Fact]
+    public async Task AHeavyBunchInTheFirstSevenMinutes_AndA30MinuteStepBackAtUptime20_NeverFires()
+    {
+        var clock = new Clock();
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+
+        for (var uptime = 1; uptime <= 60; uptime++)
+        {
+            clock.Now = clock.Now.AddMinutes(1);
+            if (uptime == 20)
+            {
+                clock.StepWall(TimeSpan.FromMinutes(-30));
+            }
+
+            h.Now = clock.Now;
+            clock.Floor.Tick(clock.Now);
+
+            /* About 2,000 skipped of the 9,100 due in the bunch; every minute after it is clean. */
+            if (uptime <= 6)
+            {
+                clock.Record(1300, 290);
+            }
+            else
+            {
+                clock.Record(1000, 0);
+            }
+
+            var report = clock.Read();
+            if (uptime >= 30)
+            {
+                Assert.True(report.IsJudged);
+                Assert.Equal(0, report.Skipped);
+            }
+
+            await e.ApplyFleetGateAsync(report, Ct);
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task A30MinuteStepForwardAtUptime40_JudgesAllTheJudgedMinutes_NotOnlyTheOnesAfterTheStep()
+    {
+        var clock = new Clock();
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+
+        /* 25 judged minutes (uptime 15 to 40) at 6% skipped: recorded, nobody has looked yet. */
+        for (var uptime = 1; uptime <= 40; uptime++)
+        {
+            clock.Now = clock.Now.AddMinutes(1);
+            clock.Floor.Tick(clock.Now);
+            var judgedMinute = uptime >= DarlingSelfAlertEvaluator.FleetGateStartupMinutes;
+            clock.Record(judgedMinute ? 940 : 1000, judgedMinute ? 60 : 0);
+        }
+
+        /* The clock steps 30 minutes forward, and the first minute after it is clean. */
+        clock.Now = clock.Now.AddMinutes(1);
+        clock.StepWall(TimeSpan.FromMinutes(30));
+        clock.Floor.Tick(clock.Now);
+        clock.Record(1000, 0);
+        h.Now = clock.Now;
+
+        var report = clock.Read();
+        Assert.Equal(26, report.JudgedMinutes);
+        Assert.Equal(26 * 60, report.Skipped);
+        Assert.Equal(26 * 940 + 1000, report.Run);
+
+        Assert.True(await e.EvaluateFleetGateAsync(report, Ct));
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("in the last 26 minutes", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("1,560 of 27,000 due slots", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A2MinuteStepBackAtUptime20_LeaksNothingFromMinutes13And14()
+    {
+        var clock = new Clock();
+        for (var uptime = 1; uptime <= 31; uptime++)
+        {
+            clock.Now = clock.Now.AddMinutes(1);
+            if (uptime == 20)
+            {
+                clock.StepWall(TimeSpan.FromMinutes(-2));
+            }
+
+            clock.Floor.Tick(clock.Now);
+
+            /* Minutes 13 and 14 carry the skips; the minutes from 15 on are clean. */
+            clock.Record(uptime is 13 or 14 ? 500 : 1000, uptime is 13 or 14 ? 500 : 0);
+            if (uptime >= 30)
+            {
+                var report = clock.Read();
+                Assert.True(report.IsJudged);
+                Assert.Equal(0, report.Skipped);
+                Assert.Equal((uptime - DarlingSelfAlertEvaluator.FleetGateStartupMinutes + 1) * 1000L, report.Run);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ARealBacklogFromTheFirstMinute_StillFiresAtUptime30()
+    {
+        var clock = new Clock();
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        DateTime? firedAt = null;
+
+        for (var uptime = 0; uptime <= 60; uptime++)
+        {
+            clock.Now = T0.AddMinutes(uptime);
+            h.Now = clock.Now;
+            clock.Floor.Tick(clock.Now);
+            clock.Record(940, 60);
+            var before = h.Deliverer.Outcomes.Count;
+            await e.ApplyFleetGateAsync(clock.Read(), Ct);
+            if (h.Deliverer.Outcomes.Count > before)
+            {
+                firedAt ??= clock.Now;
+            }
+        }
+
+        Assert.Equal(T0.AddMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes + DarlingSelfAlertEvaluator.FleetGateMinJudgedMinutes), firedAt);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -656,29 +804,41 @@ public sealed class FleetGateStartupTests
         var due = steppedBack;
         var later = steppedBack.AddMinutes(3);
         Assert.Equal(3, floor.Skipped(due, later, Minute, new DateTime(clamped, DateTimeKind.Utc)));
-
-        /* A stamp still ahead of the clock never counts from an instant that has not happened. */
-        Assert.Equal(0, floor.Skipped(due, later, Minute, new DateTime(stamp, DateTimeKind.Utc)));
     }
 
     [Fact]
-    public void ALastMinutesRead_CountsOnlyTheNewestBuckets_AndTheFullWindowEqualsTheHourSnapshot()
+    public void TheJudgedCounts_AreChosenWhenASlotIsRecorded_AndFoldWithAClockStepLikeTheOthers()
     {
         var clock = new Clock();
         for (var m = 0; m < 30; m++)
         {
             clock.Now = T0.AddMinutes(m);
-            clock.Record(10, m < 10 ? 5 : 0);
+            clock.Record(10, m < 20 ? 5 : 0);
+            clock.Stats.RecordQueueWait(TimeSpan.FromSeconds(m + 1));
         }
 
-        Assert.Equal(clock.Stats.Snapshot(), clock.Stats.SnapshotLastMinutes(60));
-        Assert.Equal(clock.Stats.Snapshot(), clock.Stats.SnapshotLastMinutes(500));
+        /* The shared counts hold all 30 minutes; the judged ones hold the 15 recorded at uptime 15 or later. */
+        var full = clock.Stats.Snapshot();
+        var judged = clock.Stats.SnapshotJudged();
+        Assert.Equal(300, full.Run);
+        Assert.Equal(100, full.Skipped);
+        Assert.Equal(30, full.QueueWaits);
+        Assert.Equal(150, judged.Run);
+        Assert.Equal(25, judged.Skipped);
+        Assert.Equal(15, judged.QueueWaits);
+        Assert.Equal(TimeSpan.FromSeconds(30), judged.QueueWaitMax);
 
-        var last20 = clock.Stats.SnapshotLastMinutes(20);
-        Assert.Equal(200, last20.Run);
-        Assert.Equal(0, last20.Skipped);
-        Assert.Equal(50, clock.Stats.SnapshotLastMinutes(30).Skipped);
-        Assert.Equal(default, clock.Stats.SnapshotLastMinutes(0));
+        /* A step back folds the buckets ahead of the clock into the current minute and keeps both pairs. */
+        clock.StepWall(TimeSpan.FromMinutes(-100));
+        Assert.Equal(full, clock.Stats.Snapshot());
+        Assert.Equal(judged, clock.Stats.SnapshotJudged());
+
+        /* Without an uptime clock nothing is judged. */
+        var untimed = new FleetGateStats(() => T0);
+        untimed.RecordSlot(3);
+        untimed.RecordSkippedSlots(2);
+        Assert.Equal(5, untimed.Snapshot().Skipped);
+        Assert.Equal(default, untimed.SnapshotJudged());
     }
 
     [Fact]
@@ -762,7 +922,7 @@ public sealed class FleetGateStartupTests
         var late = clock.Read();
         Assert.True(late.IsJudged);
         Assert.True(DarlingWorker.FleetGateLogIsBehind(false, late));
-        var (full, _) = DarlingWorker.ReadFleetGate(clock.Stats, clock.Floor.SinceAt(clock.Now), 4, clock.Now);
+        var (full, _) = DarlingWorker.ReadFleetGate(clock.Stats, clock.Floor.Uptime, 4, clock.Now);
         Assert.Contains("last 31 minutes, since the service started", FleetGateLine.Describe(full, 4, FleetGateLine.SpanMinutes(clock.Floor.Uptime)), StringComparison.Ordinal);
     }
 

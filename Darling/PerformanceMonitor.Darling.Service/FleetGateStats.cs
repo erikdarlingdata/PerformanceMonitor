@@ -54,6 +54,11 @@ internal readonly record struct FleetGateSnapshot(
 /// wall-clock minute, is reset when its slot is reused for a later minute, and a read only counts the current
 /// minute and the 59 before it, so a bucket older than the window drops out on its own. A bucket stamped ahead of
 /// the clock (the wall clock stepped backwards) is folded into the current minute.</para>
+///
+/// <para>#5597: every count is kept twice, in full and as the "judged" count that leaves out what was recorded in the first
+/// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/> minutes after the service started. Which count a record
+/// belongs to is decided when it is recorded, on the monotonic uptime, so a wall-clock step in either direction cannot move
+/// a start-up count into the judged window or a judged one out of it.</para>
 /// </summary>
 internal sealed class FleetGateStats
 {
@@ -61,14 +66,28 @@ internal sealed class FleetGateStats
     internal const int WindowMinutes = 60;
 
     private readonly Func<DateTime> _utcNow;
+    private readonly Func<TimeSpan?>? _uptime;
     private readonly object _lock = new();
     private readonly Bucket[] _buckets = new Bucket[WindowMinutes];
 
-    public FleetGateStats(Func<DateTime> utcNow)
+    /// <param name="utcNow">The wall clock the minute buckets are stamped on.</param>
+    /// <param name="uptime">#5597: how long the service has run, on a monotonic clock (<see cref="SkipCreditFloor.Uptime"/>); null
+    /// before the first tick. A slot recorded while it is under <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/>
+    /// (or null, or no clock given) is left out of the judged counts (<see cref="SnapshotJudged"/>) and stays in the shared ones.</param>
+    public FleetGateStats(Func<DateTime> utcNow, Func<TimeSpan?>? uptime = null)
     {
         ArgumentNullException.ThrowIfNull(utcNow);
         _utcNow = utcNow;
+        _uptime = uptime;
     }
+
+    /// <summary>
+    /// #5597: whether a slot recorded now belongs in the judged counts: the monotonic uptime is at least
+    /// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/>. Decided when the slot is recorded, so a wall-clock step
+    /// afterwards cannot bring a start-up count into the judged window, or take a judged one out of it.
+    /// </summary>
+    private bool IsJudgedNow() =>
+        _uptime?.Invoke() is { } uptime && uptime >= TimeSpan.FromMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes);
 
     /// <summary>
     /// Records one collector slot that ran (#4732), and how many slots it stepped over on the way. Called where a
@@ -77,11 +96,18 @@ internal sealed class FleetGateStats
     /// </summary>
     public void RecordSlot(long skipped)
     {
+        var judged = IsJudgedNow();
         lock (_lock)
         {
             ref var bucket = ref BucketFor(_utcNow());
+            var counted = Math.Max(0, skipped);
             bucket.Run++;
-            bucket.Skipped += Math.Max(0, skipped);
+            bucket.Skipped += counted;
+            if (judged)
+            {
+                bucket.JudgedRun++;
+                bucket.JudgedSkipped += counted;
+            }
         }
     }
 
@@ -98,10 +124,15 @@ internal sealed class FleetGateStats
             return;
         }
 
+        var judged = IsJudgedNow();
         lock (_lock)
         {
             ref var bucket = ref BucketFor(_utcNow());
             bucket.Skipped += skipped;
+            if (judged)
+            {
+                bucket.JudgedSkipped += skipped;
+            }
         }
     }
 
@@ -109,17 +140,35 @@ internal sealed class FleetGateStats
     public void RecordQueueWait(TimeSpan wait)
     {
         var ticks = Math.Max(0, wait.Ticks);
+        var judged = IsJudgedNow();
         lock (_lock)
         {
             ref var bucket = ref BucketFor(_utcNow());
             bucket.QueueWaits++;
             bucket.QueueWaitTicks += ticks;
             bucket.QueueWaitMaxTicks = Math.Max(bucket.QueueWaitMaxTicks, ticks);
+            if (judged)
+            {
+                bucket.JudgedQueueWaits++;
+                bucket.JudgedQueueWaitTicks += ticks;
+                bucket.JudgedQueueWaitMaxTicks = Math.Max(bucket.JudgedQueueWaitMaxTicks, ticks);
+            }
         }
     }
 
     /// <summary>The counts over the current minute and the 59 before it.</summary>
-    public FleetGateSnapshot Snapshot()
+    public FleetGateSnapshot Snapshot() => Read(judged: false);
+
+    /// <summary>
+    /// The counts over the current minute and the 59 before it, limited to what was recorded once the service had run
+    /// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/> minutes (#5597): the slots that ran, the slots skipped and
+    /// the queue waits. The "Collection Falling Behind" alert judges this; the hourly log line keeps <see cref="Snapshot"/>. The
+    /// window is the same 60 buckets as <see cref="Snapshot"/>, so a wall-clock step moves the same counts either way, and the
+    /// start-up counts cannot come back into it.
+    /// </summary>
+    public FleetGateSnapshot SnapshotJudged() => Read(judged: true);
+
+    private FleetGateSnapshot Read(bool judged)
     {
         lock (_lock)
         {
@@ -131,45 +180,11 @@ internal sealed class FleetGateStats
                 /* No bucket is ahead of the clock here: FoldBucketsAheadOf moved each into the current minute. */
                 if (bucket.Minute > minute - WindowMinutes)
                 {
-                    run += bucket.Run;
-                    skipped += bucket.Skipped;
-                    waits += bucket.QueueWaits;
-                    waitTicks += bucket.QueueWaitTicks;
-                    waitMaxTicks = Math.Max(waitMaxTicks, bucket.QueueWaitMaxTicks);
-                }
-            }
-
-            return new FleetGateSnapshot(run, skipped, waits, TimeSpan.FromTicks(waitTicks), TimeSpan.FromTicks(waitMaxTicks));
-        }
-    }
-
-    /// <summary>
-    /// The counts over the current minute and the <c>minutes - 1</c> before it (#5597): <see cref="Snapshot"/> over a
-    /// shorter window, so the "Collection Falling Behind" alert can leave the minutes right after a start out of what it
-    /// judges while the hourly log line keeps the full hour. Capped at <see cref="WindowMinutes"/>; 0 or less reads nothing.
-    /// </summary>
-    public FleetGateSnapshot SnapshotLastMinutes(int minutes)
-    {
-        if (minutes <= 0)
-        {
-            return default;
-        }
-
-        minutes = Math.Min(minutes, WindowMinutes);
-        lock (_lock)
-        {
-            var minute = MinuteOf(_utcNow());
-            FoldBucketsAheadOf(minute);
-            long run = 0, skipped = 0, waits = 0, waitTicks = 0, waitMaxTicks = 0;
-            foreach (var bucket in _buckets)
-            {
-                if (bucket.Minute > minute - minutes)
-                {
-                    run += bucket.Run;
-                    skipped += bucket.Skipped;
-                    waits += bucket.QueueWaits;
-                    waitTicks += bucket.QueueWaitTicks;
-                    waitMaxTicks = Math.Max(waitMaxTicks, bucket.QueueWaitMaxTicks);
+                    run += judged ? bucket.JudgedRun : bucket.Run;
+                    skipped += judged ? bucket.JudgedSkipped : bucket.Skipped;
+                    waits += judged ? bucket.JudgedQueueWaits : bucket.QueueWaits;
+                    waitTicks += judged ? bucket.JudgedQueueWaitTicks : bucket.QueueWaitTicks;
+                    waitMaxTicks = Math.Max(waitMaxTicks, judged ? bucket.JudgedQueueWaitMaxTicks : bucket.QueueWaitMaxTicks);
                 }
             }
 
@@ -245,18 +260,28 @@ internal sealed class FleetGateStats
         public long Minute;
         public long Run;
         public long Skipped;
+        public long JudgedRun;
+        public long JudgedSkipped;
         public long QueueWaits;
         public long QueueWaitTicks;
         public long QueueWaitMaxTicks;
+        public long JudgedQueueWaits;
+        public long JudgedQueueWaitTicks;
+        public long JudgedQueueWaitMaxTicks;
 
         /// <summary>Adds another bucket's counts to this one; the minute is left alone.</summary>
         public void Add(in Bucket other)
         {
             Run += other.Run;
             Skipped += other.Skipped;
+            JudgedRun += other.JudgedRun;
+            JudgedSkipped += other.JudgedSkipped;
             QueueWaits += other.QueueWaits;
             QueueWaitTicks += other.QueueWaitTicks;
             QueueWaitMaxTicks = Math.Max(QueueWaitMaxTicks, other.QueueWaitMaxTicks);
+            JudgedQueueWaits += other.JudgedQueueWaits;
+            JudgedQueueWaitTicks += other.JudgedQueueWaitTicks;
+            JudgedQueueWaitMaxTicks = Math.Max(JudgedQueueWaitMaxTicks, other.JudgedQueueWaitMaxTicks);
         }
     }
 }
@@ -409,22 +434,6 @@ internal sealed class SkipCreditFloor
     }
 
     /// <summary>
-    /// #5597: the service start as a point on the wall clock <paramref name="nowUtc"/> reads: now less <see cref="Uptime"/>. It is
-    /// derived on every read, so a clock step moves it with the clock instead of leaving a stamp ahead of the clock (a stamp that
-    /// the clock had to catch up to blinded the alert for as long as the step). Null until the loop has ticked once.
-    /// </summary>
-    public DateTime? SinceAt(DateTime nowUtc)
-    {
-        var uptime = Uptime;
-        if (uptime is null)
-        {
-            return null;
-        }
-
-        return nowUtc - uptime.Value;
-    }
-
-    /// <summary>
     /// #5597: a per-server seed stamp (the wall-clock instant a connect body finished seeding) that is ahead of
     /// <paramref name="nowUtc"/> because the clock stepped back after it was written, brought down to now. Counting from an
     /// instant that has not happened leaves no slot due, so every slot of every server that connected inside the step went
@@ -465,14 +474,6 @@ internal sealed class SkipCreditFloor
     public long Skipped(DateTime due, DateTime nowUtc, TimeSpan interval, DateTime notBefore)
     {
         var floor = Floor;
-
-        /* A seed stamp ahead of the clock (the clock stepped back after the connect body stamped it) counts from now, never
-           from an instant that has not happened: from there no slot is due and every slot of the server would go uncounted
-           until the clock caught up. */
-        if (notBefore > nowUtc)
-        {
-            notBefore = nowUtc;
-        }
 
         if (notBefore > floor)
         {

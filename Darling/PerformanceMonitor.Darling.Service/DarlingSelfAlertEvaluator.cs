@@ -5958,27 +5958,26 @@ WHERE c.is_enabled";
 
     /// <summary>#5597: the fewest minutes after <see cref="FleetGateStartupMinutes"/> the alert needs before it judges at all.
     /// Shorter than that is a handful of ticks, where one slow body decides the share. A store that is behind from its start
-    /// fires about <c>FleetGateStartupMinutes + FleetGateMinJudgedMinutes</c> (30) minutes after it, up to about 32: the judged
-    /// window starts at the next whole minute after start + 15 (up to 1 minute more), the alert is evaluated once a minute (up
-    /// to 1 more), and the start is the sweep loop's first tick, which comes after the host's "Application started".</summary>
+    /// fires about <c>FleetGateStartupMinutes + FleetGateMinJudgedMinutes</c> (30) minutes after it, up to about 31: the alert is
+    /// evaluated once a minute (up to 1 more), and the start is the sweep loop's first tick, which comes after the host's
+    /// "Application started".</summary>
     internal const int FleetGateMinJudgedMinutes = 15;
 
     /// <summary>
-    /// #5597: how many whole minutes (at most the 60 the gate keeps) the alert judges, given the instant the service started
-    /// (<see cref="SkipCreditFloor.SinceAt"/>, now less the monotonic uptime): the minutes from <see cref="FleetGateStartupMinutes"/>
-    /// after it, rounded up to a whole minute, to now. 0 before the loop has ticked. One method for the alert and the
-    /// Warning level of the hourly log line, so they cannot disagree.
+    /// #5597: how many whole minutes (at most the 60 the gate keeps) the alert judges, given how long the service has run
+    /// (<see cref="SkipCreditFloor.Uptime"/>, a monotonic clock): the uptime less <see cref="FleetGateStartupMinutes"/>, rounded
+    /// down. 0 before the loop has ticked. The text of the alert and the hourly log line name this. The counts it describes are
+    /// the ones <see cref="FleetGateStats.SnapshotJudged"/> keeps, which were chosen when they were recorded. One method for the
+    /// alert and the Warning level of the hourly log line, so they cannot disagree.
     /// </summary>
-    internal static int FleetGateJudgedMinutes(DateTime nowUtc, DateTime? loopSinceUtc)
+    internal static int FleetGateJudgedMinutes(TimeSpan? uptime)
     {
-        if (loopSinceUtc is not { } since)
+        if (uptime is not { } ran)
         {
             return 0;
         }
 
-        var ticks = (since + TimeSpan.FromMinutes(FleetGateStartupMinutes)).Ticks;
-        var from = (ticks + TimeSpan.TicksPerMinute - 1) / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute;
-        var whole = (nowUtc.Ticks - from) / TimeSpan.TicksPerMinute;
+        var whole = (ran - TimeSpan.FromMinutes(FleetGateStartupMinutes)).Ticks / TimeSpan.TicksPerMinute;
         return (int)Math.Clamp(whole, 0, FleetGateStats.WindowMinutes);
     }
 
@@ -6063,8 +6062,10 @@ WHERE c.is_enabled";
     ///
     /// <para><b>Judges</b> (#5597) only slots counted at or after start + <see cref="FleetGateStartupMinutes"/> minutes, where the
     /// start is the service's own (once per process, never a stall, a clock step, a pause ending or a launch-guard release), over
-    /// at most the last hour; while that window is shorter than <see cref="FleetGateMinJudgedMinutes"/> it neither fires nor
-    /// resolves. A slot is counted in the minute the run that stepped over it lands; counting it there is the safe side (a slot
+    /// at most the last hour; while that is shorter than <see cref="FleetGateMinJudgedMinutes"/> it neither fires nor
+    /// resolves. Which counts are left out is decided when each slot is recorded, on the monotonic uptime
+    /// (<see cref="FleetGateStats.SnapshotJudged"/>), so a wall-clock step in either direction changes neither the counts it
+    /// judges nor the minutes it names. A slot is counted in the minute the run that stepped over it lands; counting it there is the safe side (a slot
     /// due at minute 14 that a run steps over at minute 16 is judged).</para>
     ///
     /// <para><b>Fires</b> when, over the window it judges (the last hour once the start is old enough), at least <see cref="FleetGateBehindMinSkipped"/> slots were skipped
