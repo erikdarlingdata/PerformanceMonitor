@@ -129,8 +129,8 @@ public class FinOpsClickThroughRulesTests
     [Fact]
     public void HealthScore_IsADash_WithoutACpuSample()
     {
-        Assert.Null(FinOpsInventoryFigures.HealthScoreOrNull(null));
-        Assert.NotNull(FinOpsInventoryFigures.HealthScoreOrNull(0m));
+        /* The fleet read gives a server with no CPU sample no score at all (the figure the grid and the tool read). */
+        Assert.Null(new ServerMetricsDto(null, null, null, null).HealthScore);
         Assert.Contains("no CPU sample", FinOpsHealthCalculator.NoScoreNote, StringComparison.Ordinal);
     }
 

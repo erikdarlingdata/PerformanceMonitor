@@ -603,7 +603,7 @@ public sealed class ServerPropertyRow
     public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
     /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
-    /// not a score built from the memory and storage defaults (<see cref="FinOpsInventoryFigures.HealthScoreOrNull"/>).</summary>
+    /// not a score built from the memory and storage defaults (<see cref="FinOpsUtilizationFigures.HealthScore(bool, decimal, int, int, decimal)"/>).</summary>
     public int? HealthScore { get; set; }
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
