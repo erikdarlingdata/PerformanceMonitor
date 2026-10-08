@@ -426,8 +426,15 @@ public sealed class QueryStoreBackgroundIndexesTests
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
 
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(source, @"QueryStoreBackgroundIndexes\.RunDelayedAsync\("));
+        /* #5571: the worker's one launch is QueryStoreIntervalPartitions.RunDelayedAsync, which runs Phase A of the day
+           partitions and then hands the same specs to QueryStoreBackgroundIndexes.RunDelayedAsync with no second wait.
+           The worker never calls the index engine itself, so the two ensures still run inside ONE delayed task. */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(source, @"QueryStoreIntervalPartitions\.RunDelayedAsync\("));
+        Assert.DoesNotContain("QueryStoreBackgroundIndexes.RunDelayedAsync", source, StringComparison.Ordinal);
         Assert.Contains("QueryStoreBackgroundIndexes.All", source);
+
+        var partitions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalPartitions.cs").Replace("\r\n", "\n");
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(partitions, @"QueryStoreBackgroundIndexes\.RunDelayedAsync\(postgres, logger, TimeSpan\.Zero, specs"));
         Assert.DoesNotContain("QueryStoreIntervalWideBrinIndex.RunDelayedAsync", source);
 
         /* The loop is sequential and each failure is isolated: a failed index warns and the next one still runs. One
