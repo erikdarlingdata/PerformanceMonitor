@@ -624,7 +624,9 @@ jobs:
   #   gh workflow run nightly.yml --ref <branch> -f altcover_probe=true -f publish=false
   altcover-probe:
     name: AltCover per-test coverage probe
-    if: github.event_name == 'workflow_dispatch' && inputs.altcover_probe == true
+    # Waits for build and darling-pg so it does not take their runners (#5459); always() keeps it running after a failed one.
+    needs: [check, build, darling-pg]
+    if: always() && needs.check.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.altcover_probe == true
     runs-on: windows-latest
     timeout-minutes: 150
     env:
@@ -1012,8 +1014,10 @@ jobs:
   #   gh workflow run nightly.yml --ref <branch> -f publish=false
   test-map-shard:
     name: Test map shard (${{ matrix.suite }} ${{ matrix.shard }})
-    needs: check
-    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.test_map != false
+    # Waits for build and darling-pg so the 10 windows legs do not take their runners (#5459); always() keeps the map
+    # running after a failed one.
+    needs: [check, build, darling-pg]
+    if: always() && needs.check.result == 'success' && (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.test_map != false
     continue-on-error: true
     runs-on: windows-latest
     timeout-minutes: 120

@@ -41,8 +41,12 @@ permissions:
 # cancelled push run is never read. With no such run the cut is the plain class-name hash, and
 # timings the packer cannot use (none readable, all zero, or covering under 80% of this commit's
 # classes) send every shard to that same hash. So cancelling can cost shard balance but never a
-# test class or a verdict. No other cross-run consumer (a download-artifact with run-id, a gh
-# run download, or a workflow_run trigger) exists (CrossAppGuardCiGateTests pins both halves),
+# test class or a verdict. The one other reader of another run's artifacts is the shadow-mode
+# test map (#5459): it reads the NIGHTLY's `test-map` artifact (nightly.yml runs are never in this
+# workflow's concurrency group, so nothing here cancels them), selects nothing from it, and a
+# missing map only means the shadow selection is FULL. No other cross-run consumer (a
+# download-artifact with run-id, a gh run download, or a workflow_run trigger) exists
+# (CrossAppGuardCiGateTests pins both halves),
 # nightly.yml builds its own tree from its own checkout, and a release compiles fresh on the
 # release event. The accepted
 # trade: push builds are diff-scoped, so a
@@ -80,13 +84,17 @@ jobs:
     name: Decide whether CI runs
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # actions: read is for the timing-source step below and nothing else: it lists runs and artifacts.
+    # actions: read is for the timing-source and test-map steps below: they list runs and artifacts.
+    # contents: read is for the test-map step's ancestry check (the compare API on the base).
     permissions:
       actions: read
+      contents: read
     outputs:
       run: ${{ steps.decide.outputs.run }}
       lite_timing_run: ${{ steps.timing.outputs.run_id }}
       lite_timing_artifacts: ${{ steps.timing.outputs.artifacts }}
+      test_map_run: ${{ steps.testmap.outputs.run_id }}
+      test_map_sha: ${{ steps.testmap.outputs.sha }}
     steps:
       - name: Decide
         id: decide
@@ -205,6 +213,59 @@ jobs:
             echo "::notice title=Lite timing source::The run listing gave no current page in ${tries} tries (${stale_tries} returned no push run that finished in the last ${stale_days} days, a stale API page or no push run that recent, and ${failed_tries} failed), so every Lite shard cuts by class-name hash."
           else
             echo "::notice title=Lite timing source::No successful dev push run has unexpired Lite timings (or the lookup failed), so every Lite shard cuts by class-name hash."
+          fi
+
+      # #5459 change 4, shadow mode: the ONE test map this run's shadow job reads, picked here once for the
+      # same reason as the Lite timing source above (two readers must not see two maps). It is the newest
+      # successful nightly run whose `test-map` artifact has not expired (two days of margin) and whose
+      # commit is an ancestor of the pull request's base, so a map built from code the base does not contain
+      # is never used. Pull requests only; a push, a merge group and a release never read a map. Every failure
+      # here means "no map", which the shadow job reads as FULL. The step cannot fail the gate, and the shadow
+      # work never skips or narrows anything: every shard still runs every class.
+      - name: Pin the test map (shadow mode)
+        id: testmap
+        if: github.event_name == 'pull_request' && steps.decide.outputs.run == 'true'
+        continue-on-error: true
+        # A hang in one of the gh api calls must end this step (a step failure, which continue-on-error absorbs), not
+        # run into the gate job's own 5-minute timeout, which continue-on-error does not cover and which would red the PR.
+        timeout-minutes: 2
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+
+          export KEEP_UNTIL
+          KEEP_UNTIL=$(date -u -d '+2 days' +%Y-%m-%dT%H:%M:%SZ)
+          map_run=""
+          map_sha=""
+          seen=0
+          if runs=$(gh api "repos/${GH_REPO}/actions/workflows/nightly.yml/runs?status=success&per_page=20" --jq '.workflow_runs[] | select(.event == "schedule" or .event == "workflow_dispatch") | "\(.id) \(.head_sha)"'); then
+            while read -r id sha; do
+              [ -n "${id}" ] || continue
+              seen=$((seen + 1))
+              [ "${seen}" -le 10 ] || break
+              has=$(gh api "repos/${GH_REPO}/actions/runs/${id}/artifacts?per_page=100" --jq '[.artifacts[] | select(.name == "test-map" and (.expired | not) and .expires_at > env.KEEP_UNTIL)] | length') || has=0
+              [ "${has}" = "1" ] || continue
+              rel=$(gh api "repos/${GH_REPO}/compare/${sha}...${BASE_SHA}" --jq '.status') || rel=""
+              case "${rel}" in
+                ahead|identical)
+                  map_run="${id}"
+                  map_sha="${sha}"
+                  break
+                  ;;
+              esac
+            done <<< "${runs}"
+          fi
+
+          echo "run_id=${map_run}" >> "$GITHUB_OUTPUT"
+          echo "sha=${map_sha}" >> "$GITHUB_OUTPUT"
+          if [ -n "${map_run}" ]; then
+            echo "::notice title=Test map::Shadow mode reads the map of nightly run ${map_run} (commit ${map_sha:0:10}), the newest one built from an ancestor of this base."
+          else
+            echo "::notice title=Test map::No successful nightly has an unexpired test map built from an ancestor of this base (${seen} runs looked at), so the shadow selection is FULL."
           fi
 
   # #5459: the guard classes of BOTH test suites, first, so a source pin, a census or a hygiene scan that a
@@ -1915,8 +1976,9 @@ jobs:
       # #5459 change 4: per-test durations of this shard, kept a week like the Lite shards' lite-tests-timing-N.
       # Informational: a failed upload never turns the shard red.
       - name: Upload Darling test timings
-        if: success() && steps.filter.outputs.darling == 'true'
+        if: always() && steps.filter.outputs.darling == 'true'
         continue-on-error: true
+        timeout-minutes: 5
         uses: actions/upload-artifact@v6
         with:
           name: darling-tests-timing-${{ matrix.shard }}
@@ -2844,6 +2906,139 @@ jobs:
             TestResults/lite-timing-*.xml
             TestResults/lite-timing-*.xml.cpu.json
           retention-days: 7
+          if-no-files-found: ignore
+
+  # #5459 change 4, shadow mode (slice 4). Computes which classes the test map WOULD run for this pull request and
+  # prints them in the step summary. It narrows nothing: every shard above and below still runs every class, so the
+  # classes run on a pull request are the ones that ran before this job existed. NOT a required check, and nothing
+  # lists it in `needs` but the shadow-check job below, which is also optional: both are continue-on-error, so their
+  # own failure is a notice at most. A missing, unreadable, old or wrong-schema map, a failed download and a failed
+  # diff all mean FULL (never an error, never a skip). Pull requests only.
+  test-map-shadow:
+    name: Test map shadow
+    needs: [gate]
+    if: github.event_name == 'pull_request' && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+
+      - name: Select from the pinned map
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MAP_RUN: ${{ needs.gate.outputs.test_map_run }}
+          MAP_SHA: ${{ needs.gate.outputs.test_map_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+
+          mkdir -p shadow
+          full() {
+            echo "::notice title=Test map shadow::The selection is FULL: $1"
+            printf '### Test map shadow (#5459): nothing was skipped, every shard ran everything\n\nSelection: FULL (%s).\n' "$1" > shadow/summary.md
+          }
+          if [ -z "${MAP_RUN}" ]; then
+            full "no test map is pinned for this run"
+          else
+            ok=0
+            for attempt in 1 2 3; do
+              rm -rf shadow/map
+              if gh run download "${MAP_RUN}" -n test-map -D shadow/map; then ok=1; break; fi
+              sleep 5
+            done
+            if [ "${ok}" != "1" ]; then
+              full "the pinned map could not be downloaded"
+            elif ! git diff --no-renames --name-only "${BASE_SHA}" HEAD > shadow/changed.txt; then
+              full "the changed files could not be listed"
+            elif ! timeout 120 python .github/scripts/ci-select.py map-select --map shadow/map/test-map.json.gz --event pull_request --base "${BASE_SHA}" --files-from shadow/changed.txt --out shadow/selection.json --summary shadow/summary.md; then
+              rm -f shadow/selection.json
+              full "the selection script failed"
+            else
+              echo "Map: nightly run ${MAP_RUN}, commit ${MAP_SHA:0:10}." >> shadow/summary.md
+            fi
+          fi
+          cat shadow/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          exit 0
+
+      - name: Upload the shadow selection
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-map-shadow-selection
+          path: shadow/selection.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The second half of shadow mode: after every shard has finished, list each class that FAILED although the map
+  # would not have run it (a shadow miss), and keep one JSONL row per run (artifact test-map-shadow-row, 30 days).
+  # Failed classes come from the shards' xunit reports (darling-tests-timing-N, lite-tests-timing-N). A shard that
+  # wrote no readable report shows up as a lower report count in the row, never as an error. Optional and
+  # continue-on-error like the job above: it can lengthen the run by its own thirty seconds and cannot redden it.
+  shadow-check:
+    name: Test map shadow check
+    needs: [gate, test-map-shadow, darling-pg, lite-tests]
+    if: always() && github.event_name == 'pull_request' && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        continue-on-error: true
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Download the shadow selection
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: test-map-shadow-selection
+          path: shadow/selection
+
+      - name: Download the shard reports
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          pattern: '*-tests-timing-*'
+          path: shadow/reports
+
+      - name: List the shadow misses
+        shell: bash
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAP_SHA: ${{ needs.gate.outputs.test_map_sha }}
+        run: |
+          set -uo pipefail
+
+          meta=$(printf '{"run":"%s","attempt":"%s","pr":"%s","head":"%s","map_sha":"%s"}' "${RUN_ID}" "${RUN_ATTEMPT}" "${PR_NUMBER}" "${HEAD_SHA}" "${MAP_SHA}")
+          mkdir -p shadow
+          if timeout 120 python .github/scripts/ci-select.py shadow-check --selection shadow/selection/selection.json --reports shadow/reports --out shadow/row.jsonl --meta "${meta}"; then
+            { echo "### Test map shadow check (#5459)"; echo; echo '```json'; cat shadow/row.jsonl; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+          else
+            echo "::notice title=Test map shadow check::The check script failed, so this run has no shadow row."
+          fi
+          exit 0
+
+      - name: Upload the shadow row
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-map-shadow-row
+          path: shadow/row.jsonl
+          retention-days: 30
           if-no-files-found: ignore
 
   # The one result branch protection can require. Four matrix legs cannot each be a required check
