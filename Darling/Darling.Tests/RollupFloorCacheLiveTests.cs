@@ -483,7 +483,8 @@ WHERE view_schema = 'collect' AND view_name = '{HourlyView}'", connection);
 
     private static async Task RecreateDatabaseAsync(string baseConnectionString, string databaseName, CancellationToken ct)
     {
-        await using var admin = new NpgsqlConnection(baseConnectionString);
+        /* #5549: unpooled, because this connection runs the drop and the create after it. */
+        await using var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString));
         await admin.OpenAsync(ct);
         /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
         await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString, databaseName);

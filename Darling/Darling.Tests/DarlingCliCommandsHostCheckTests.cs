@@ -151,7 +151,9 @@ public sealed class DarlingCliCommandsHostCheckTests
            fails at StoreUnreachable before it ever reaches a settings verdict — the defect this rewrite fixes
            (it used to point straight at DARLING_TEST_PGRUNTIME's own data directory and assume "darling"
            already existed there, which is true of a bootstrapped product install and false of a bare rig). */
-        var adminBuilder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
+        /* #5549: unpooled, because this connection runs the create and the drop of "darling". A pooled one would hand the
+           backend that ran the DROP DATABASE to the next test, and a TimescaleDB job run on that backend crashed it. */
+        var adminBuilder = new NpgsqlConnectionStringBuilder(ScratchPostgres.UnpooledAdminConnectionString(connectionString)) { Database = "postgres" };
         var createdDarlingDatabase = false;
         await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
         {
@@ -227,6 +229,9 @@ public sealed class DarlingCliCommandsHostCheckTests
 
             if (createdDarlingDatabase)
             {
+                /* "darling" was migrated above, so it carries TimescaleDB jobs: no job worker is left running in it when the
+                   drop below goes ahead (#5480). The rig's own admin string names a database, and the helper swaps in "darling". */
+                await ScratchPostgres.QuiesceTimescaleJobsAsync(adminBuilder.ConnectionString, "darling");
                 await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
                 await admin.OpenAsync(ct);
                 await using var terminate = new NpgsqlCommand(
