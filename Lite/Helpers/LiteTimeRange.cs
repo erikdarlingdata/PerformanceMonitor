@@ -7,8 +7,10 @@
  */
 
 using System;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Helpers;
 
@@ -172,6 +174,77 @@ internal static class LiteTimeRange
     /// </summary>
     internal static DateTime DataStartFor(DateTime? probedFloorUtc, DateTime utcNow) =>
         probedFloorUtc ?? RetentionService.OldestRetainedInstant(utcNow);
+
+    /// <summary>
+    /// The collector behind the data a server-tab page shows (#5562 R3): the page's MAIN collector, by the header of the top
+    /// tab and of the sub-tab on screen. <c>null</c> for a page with no single sampled source (Overview, Plan Viewer, the
+    /// on-load configuration pages, Daily Summary, Collection Health), where the picker shows no sample note.
+    /// </summary>
+    internal static string? MainCollectorFor(string? tab, string? subTab) => tab switch
+    {
+        "Wait Stats" => "wait_stats",
+        "Queries" => subTab switch
+        {
+            "Performance Trends" => "query_stats",
+            "Active Queries" => "query_snapshots",
+            "Top Queries by Duration" => "query_stats",
+            "Top Procedures by Duration" => "procedure_stats",
+            "Query Store by Duration" => "query_store",
+            "Plan Corrections" => "plan_correction",
+            "Query Heatmap" => "query_stats",
+            _ => null
+        },
+        "CPU" => "cpu_utilization",
+        "Memory" => subTab switch
+        {
+            "Overview" => "memory_stats",
+            "Memory Clerks" => "memory_clerks",
+            "Memory Grants" => "memory_grant_stats",
+            "Memory Pressure Events" => "memory_pressure_events",
+            _ => null
+        },
+        "File I/O" => "file_io_stats",
+        "tempdb" => "tempdb_stats",
+        "Blocking" => subTab switch
+        {
+            "Trends" => "dmv_blocking_snapshot",
+            "Current Waits" => "waiting_tasks",
+            "Blocked Process Reports" => "blocked_process_report",
+            "Deadlocks" => "deadlocks",
+            "Blocking Stats" => "dmv_blocking_snapshot",
+            _ => null
+        },
+        "Perfmon" => "perfmon_stats",
+        "Running Jobs" => "running_jobs",
+        "Latches & Spinlocks" => "latch_stats",
+        "CPU Scheduler" => "cpu_scheduler_stats",
+        "Plan Cache" => "plan_cache_stats",
+        "Session Stats" => "session_stats",
+        "System Events" => subTab == "Default Trace" ? "default_trace_events" : "system_health_events",
+        _ => null
+    };
+
+    /// <summary>
+    /// A collector's actual cadence for the sample note: its schedule on this server when it has one (a disabled collector
+    /// samples nothing, so no note), else the shipped default (<see cref="CollectorScheduleDefaults"/>). <c>null</c> for no
+    /// collector, an on-load one, or one that ships off and was never scheduled.
+    /// </summary>
+    internal static TimeSpan? SampleIntervalForCollector(string? collector, CollectorSchedule? schedule)
+    {
+        if (collector is null)
+        {
+            return null;
+        }
+
+        if (schedule is not null)
+        {
+            return schedule.Enabled ? SampleIntervalFor(schedule.FrequencyMinutes) : null;
+        }
+
+        return CollectorScheduleDefaults.All.TryGetValue(collector, out var entry) && entry.DefaultEnabled
+            ? SampleIntervalFor(entry.FrequencyMinutes)
+            : null;
+    }
 
     /// <summary>A collector's actual cadence as the picker's sample interval; null for a collector that does not run on a schedule (0 = on load).</summary>
     internal static TimeSpan? SampleIntervalFor(int? frequencyMinutes) =>

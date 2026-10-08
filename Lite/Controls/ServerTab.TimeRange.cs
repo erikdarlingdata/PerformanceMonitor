@@ -62,26 +62,77 @@ public partial class ServerTab : UserControl
     private ResolvedTimeRange? _lastResolvedRange;
 
     /// <summary>
-    /// How often this tab's main collector samples, read from the schedule when asked (#5562, ruling R3): the picker shows
-    /// 'Data here is collected every N minutes.' when a span holds fewer than 3 samples. Set by MainWindow, which owns the
-    /// schedule; a tab opened without one (a test) shows no note.
+    /// How often the main collector of the page on screen samples, read from the schedule when asked (#5562, ruling R3): the
+    /// picker shows 'Data here is collected every N minutes.' when a span holds fewer than 3 samples. The argument is the
+    /// collector's name (<see cref="CurrentMainCollector"/>) and the answer its ACTUAL interval on this server. Set by
+    /// MainWindow, which owns the schedule; a tab opened without one (a test) shows no note.
     /// </summary>
-    private Func<TimeSpan?>? _sampleIntervalProvider;
+    private Func<string, TimeSpan?>? _sampleIntervalProvider;
+    private bool _sampleNoteWired;
 
-    /// <summary>The collector whose cadence the picker's note names: the 1-minute wait stats sample behind the tab's charts.</summary>
-    internal const string MainCollectorName = "wait_stats";
-
-    /// <summary>Hands the tab the way to read its main collector's actual interval (<see cref="MainCollectorName"/>).</summary>
-    public void SetSampleIntervalSource(Func<TimeSpan?> provider)
+    /// <summary>Hands the tab the way to read a collector's actual interval on this server.</summary>
+    public void SetSampleIntervalSource(Func<string, TimeSpan?> provider)
     {
         _sampleIntervalProvider = provider;
+        if (!_sampleNoteWired)
+        {
+            _sampleNoteWired = true;
+
+            /* A tab or sub-tab change moves the page on screen, so the note names that page's collector. */
+            AddHandler(System.Windows.Controls.Primitives.Selector.SelectionChangedEvent, new SelectionChangedEventHandler((_, e) =>
+            {
+                if (e.OriginalSource is TabControl)
+                {
+                    RefreshRangeNotes();
+                }
+            }));
+        }
+
         RefreshRangeNotes();
+    }
+
+    /// <summary>
+    /// The main collector of the sub-tab on screen (<see cref="LiteTimeRange.MainCollectorFor"/>): the top tab's header and,
+    /// when that tab holds a sub-tab control, the selected sub-tab's. Never widens the range; <c>null</c> shows no note.
+    /// </summary>
+    internal string? CurrentMainCollector()
+    {
+        if (MainTabControl.SelectedItem is not TabItem top)
+        {
+            return null;
+        }
+
+        string? sub = null;
+        if (top.Content is DependencyObject content && FindFirstTabControl(content) is { SelectedItem: TabItem selected })
+        {
+            sub = selected.Header as string;
+        }
+
+        return LiteTimeRange.MainCollectorFor(top.Header as string, sub);
+    }
+
+    private static TabControl? FindFirstTabControl(DependencyObject parent)
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(parent))
+        {
+            if (child is TabControl tabs)
+            {
+                return tabs;
+            }
+
+            if (child is DependencyObject next && FindFirstTabControl(next) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Redraws the picker's resolved text and its sample-interval note (a live range slides; the schedule can be edited).</summary>
     private void RefreshRangeNotes()
     {
-        RangePicker.SampleInterval = _sampleIntervalProvider?.Invoke();
+        RangePicker.SampleInterval = CurrentMainCollector() is { } collector ? _sampleIntervalProvider?.Invoke(collector) : null;
         RangePicker.Refresh();
     }
 

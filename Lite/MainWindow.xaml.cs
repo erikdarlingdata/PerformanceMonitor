@@ -1220,12 +1220,11 @@ public partial class MainWindow : Window
 
         serverTab.AlertCountsChanged += alertHandler;
         serverTab.ApplyTimeRangeRequested += timeRangeHandler;
-        /* #5562: the picker's 'collected every N minutes' note names this server's ACTUAL cadence for the tab's main
-           collector, read from the schedule each time (it can be edited while the tab is open). */
-        serverTab.SetSampleIntervalSource(() => PerformanceMonitorLite.Helpers.LiteTimeRange.SampleIntervalFor(
-            _scheduleManager.GetScheduleForServer(server.Id, ServerTab.MainCollectorName) is { Enabled: true } schedule
-                ? schedule.FrequencyMinutes
-                : null));
+        /* #5562: the picker's 'collected every N minutes' note names this server's ACTUAL cadence for the main collector of the
+           page on screen (ServerTab.CurrentMainCollector), read from the schedule each time (it can be edited while the tab is
+           open) and falling back to the shipped default when the schedule has no entry for it. */
+        serverTab.SetSampleIntervalSource(collector => PerformanceMonitorLite.Helpers.LiteTimeRange.SampleIntervalForCollector(
+            collector, _scheduleManager.GetScheduleForServer(server.Id, collector)));
         serverTab.ManualRefreshRequested += refreshHandler;
         /* #1319: persist the per-server view database filter (no credential side effects). The handler
            captures only the long-lived _serverManager, so it needs no explicit unsubscribe. */
