@@ -46,7 +46,7 @@ public sealed class QueryStoreWideReadGuardTests
         var message = QueryStoreWideReadGuard.Refusal(new QueryStoreWideReadGuard.Estimate(12_000_000, 43), Start, Start.AddDays(1));
 
         Assert.Equal(
-            "This panel would read about 12 million Query Store rows (43 servers, 1 day). Choose fewer servers or a shorter window.",
+            "This panel needs about 12 million Query Store rows (43 servers, 1 day), over the limit of 9.4 million. Choose fewer servers or a shorter window.",
             message);
     }
 
@@ -57,7 +57,7 @@ public sealed class QueryStoreWideReadGuardTests
 
         Assert.Null(QueryStoreWideReadGuard.Refusal(estimate, Start, Start.AddDays(2)));
         Assert.Equal(
-            "This panel would read about 12 million Query Store rows (10 servers, 3 days). Choose fewer servers or a shorter window.",
+            "This panel needs about 12 million Query Store rows (10 servers, 3 days), over the limit of 9.4 million. Choose fewer servers or a shorter window.",
             QueryStoreWideReadGuard.Refusal(estimate, Start, Start.AddDays(3)));
 
         /* The same window with the counted range cut to the newest day: under the limit, so no refusal. */
@@ -104,14 +104,27 @@ public sealed class QueryStoreWideReadGuardTests
     }
 
     [Fact]
-    public void TheEstimateSql_TakesEachServersMostRecentBuiltDay_OfTheEnabledServersInScope()
+    public void TheEstimateSql_TakesEachServersMostRecentBuiltDay_OfTheServersInScope_DisabledOnesIncluded()
     {
         var sql = QueryStoreWideReadGuard.PerServerRowsSql;
         Assert.Contains("collect.query_store_top_daily_built", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY d.day DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
-        Assert.Contains("s.is_enabled", sql, StringComparison.Ordinal);
+        /* The compiled wide read joins collect.servers with no is_enabled predicate, so the estimate counts a disabled server too. */
+        Assert.DoesNotContain("is_enabled", sql, StringComparison.Ordinal);
         Assert.Contains("s.server_name = ANY($1)", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARankedTimeSeriesPanelThatScansTwice_GetsHalfTheLimit_AndTheMessageNamesIt()
+    {
+        Assert.Equal(ComposeLimits.MaxQueryStoreWideRows, QueryStoreWideReadGuard.LimitFor(false));
+        Assert.Equal(ComposeLimits.MaxQueryStoreWideRows / 2, QueryStoreWideReadGuard.LimitFor(true));
+        var estimate = new QueryStoreWideReadGuard.Estimate(6_000_000, 43);
+        Assert.Null(QueryStoreWideReadGuard.Refusal(estimate, Start, Start.AddDays(1), QueryStoreWideReadGuard.LimitFor(false)));
+        Assert.Equal(
+            "This panel needs about 6 million Query Store rows (43 servers, 1 day), over the limit of 4.7 million. Choose fewer servers or a shorter window.",
+            QueryStoreWideReadGuard.Refusal(estimate, Start, Start.AddDays(1), QueryStoreWideReadGuard.LimitFor(true)));
     }
 
     [Fact]
@@ -170,15 +183,15 @@ public sealed class QueryStoreWideReadRefusalLiveTests
         await DarlingMcpTestData.RegisterServerAsync(connection, disabledId, "qsiw-refusal-disabled", ct);
         await ExecAsync(connection, $"UPDATE collect.servers SET is_enabled = FALSE WHERE server_id = {disabledId}", ct);
 
-        /* Two built days for the first server: only the newest counts. A server with no built day adds nothing, and neither
-           does a disabled one. */
+        /* Two built days for the first server: only the newest counts. A server with no built day adds nothing. A disabled
+           server with one counts, as the compiled wide read takes its retained rows too. */
         await InsertBuiltAsync(connection, ServerId, S.Date.AddDays(1), 1_000, ct);
         await InsertBuiltAsync(connection, ServerId, S.Date.AddDays(3), 700, ct);
         await InsertBuiltAsync(connection, OtherServerId, S.Date.AddDays(2), 50, ct);
         await InsertBuiltAsync(connection, disabledId, S.Date.AddDays(2), 9_999_999, ct);
 
         var fleet = await QueryStoreWideReadGuard.EstimateAsync(postgres, null, null, ct);
-        Assert.Equal(new QueryStoreWideReadGuard.Estimate(750, 2), fleet);
+        Assert.Equal(new QueryStoreWideReadGuard.Estimate(750 + 9_999_999, 3), fleet);
 
         var scoped = await QueryStoreWideReadGuard.EstimateAsync(postgres, new[] { ServerName }, null, ct);
         Assert.Equal(new QueryStoreWideReadGuard.Estimate(700, 1), scoped);
@@ -242,20 +255,20 @@ public sealed class QueryStoreWideReadRefusalLiveTests
         Assert.True(outcome.Payload is null, "the oversized read must be refused; the panel ran: " + outcome.Payload?["sql"]);
         Assert.False(outcome.IsServerError);
         Assert.NotNull(outcome.Error);
-        Assert.StartsWith("This panel would read about ", outcome.Error, StringComparison.Ordinal);
+        Assert.StartsWith("This panel needs about ", outcome.Error, StringComparison.Ordinal);
         Assert.Contains("Query Store rows (1 server, ", outcome.Error, StringComparison.Ordinal);
         Assert.EndsWith("Choose fewer servers or a shorter window.", outcome.Error, StringComparison.Ordinal);
 
         var tool = await DarlingMcpCustomViewTools.RunCustomViewPanel(postgres, spec.ToJsonString());
         Assert.Contains("\"status\":\"invalid\"", tool.Replace(" ", string.Empty), StringComparison.Ordinal);
-        Assert.Contains("This panel would read about ", tool, StringComparison.Ordinal);
+        Assert.Contains("This panel needs about ", tool, StringComparison.Ordinal);
         Assert.Contains("Choose fewer servers or a shorter window.", tool, StringComparison.Ordinal);
 
         /* A scope that leaves out the oversized server is not refused. */
         var scoped = (JsonObject)spec.DeepClone();
         scoped["server"] = "no-such-server-5582";
         var scopedOutcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, scoped, ct);
-        Assert.True(scopedOutcome.Error is null || !scopedOutcome.Error.StartsWith("This panel would read about ", StringComparison.Ordinal), "a scope with no built day must not be refused");
+        Assert.True(scopedOutcome.Error is null || !scopedOutcome.Error.StartsWith("This panel needs about ", StringComparison.Ordinal), "a scope with no built day must not be refused");
 
     }
 
@@ -265,7 +278,7 @@ public sealed class QueryStoreWideReadRefusalLiveTests
         Assert.True(outcome.Payload is not null, "the panel must run: " + outcome.Error);
 
         var tool = await DarlingMcpCustomViewTools.RunCustomViewPanel(postgres, spec.ToJsonString());
-        Assert.DoesNotContain("This panel would read about", tool, StringComparison.Ordinal);
+        Assert.DoesNotContain("This panel needs about", tool, StringComparison.Ordinal);
     }
 
     private static Task InsertBuiltAsync(NpgsqlConnection connection, int serverId, DateTime day, long sourceRows, CancellationToken ct) =>

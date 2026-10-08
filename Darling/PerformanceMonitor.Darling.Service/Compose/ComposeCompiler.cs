@@ -623,6 +623,9 @@ public static class ComposeCompiler
         /* The #2734 rank pass: RankedTimeSeries prepends a CTE that IS the Ranked query minus the time
            column — the same fact rows, filters, and value expression, grouped by the dims alone, ordered
            by the window-total aggregate, LIMIT topN. The outer query then buckets ONLY those members.
+           Since #5582 a Query Store wide-route panel whose base CTE is bounded (PlanTakesSingleScan) reads the fact rows once:
+           the rank re-aggregates the one-row-per-(bucket, group) rank_base CTE over the groups alone and the series
+           re-aggregates the same CTE over (bucket, group). Every other panel scans the fact rows twice, as before.
            Ranking by the WINDOW TOTAL is the decided semantic (#2734 option 1): membership is stable
            across the window, so the chart reads as N lines. Per-bucket re-ranking is a non-goal — see the
            PanelMode doc. */

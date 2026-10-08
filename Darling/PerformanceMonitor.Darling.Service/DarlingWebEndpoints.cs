@@ -2871,7 +2871,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         if (queryStoreWideEligible)
         {
             var countedStart = wideResolution.WideStart is { } wideReadStart && wideReadStart > start ? wideReadStart : start;
-            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken) is { } tooBig)
+            var limit = QueryStoreWideReadGuard.LimitFor(ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(plan!, start, end));
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken, limit) is { } tooBig)
             {
                 return ComposeRunOutcome.BadRequest(tooBig);
             }

@@ -36,8 +36,10 @@ namespace PerformanceMonitor.Darling.Service;
 internal static class QueryStoreWideReadGuard
 {
     /// <summary>
-    /// The enabled servers in scope ($1 the scoped names, or NULL for the fleet) that have a built day, each with its most recent
-    /// built day's <c>source_rows</c>. Returns the sum and the number of servers that contributed.
+    /// The servers in scope ($1 the scoped names, or NULL for the fleet) that have a built day, each with its most recent
+    /// built day's <c>source_rows</c>. Returns the sum and the number of servers that contributed. No <c>is_enabled</c> predicate: the
+    /// compiled wide read (ComposeCompiler.BuildFactRelation) joins <c>collect.servers</c> on <c>server_id</c> with none, so it reads a
+    /// disabled server's retained rows too, and the estimate counts the servers the read takes.
     /// </summary>
     internal const string PerServerRowsSql = @"
 SELECT COALESCE(SUM(b.source_rows), 0)::bigint, COUNT(*)::integer
@@ -50,8 +52,7 @@ CROSS JOIN LATERAL
     ORDER BY d.day DESC
     LIMIT 1
 ) AS b
-WHERE s.is_enabled
-  AND ($1::text[] IS NULL OR s.server_name = ANY($1));";
+WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
 
     /// <summary>The rows one day of the servers in scope holds on the wide table, and how many servers that sums.</summary>
     internal readonly record struct Estimate(long DailyRows, int Servers)
@@ -115,15 +116,24 @@ WHERE s.is_enabled
         }
 
         var million = (rows / 1_000_000d).ToString("0.#", CultureInfo.InvariantCulture);
-        return $"This panel would read about {million} million Query Store rows ({Servers(found.Servers)}, {Window(countedEnd - countedStart)}). "
-            + "Choose fewer servers or a shorter window.";
+        var limitMillion = (limit / 1_000_000d).ToString("0.#", CultureInfo.InvariantCulture);
+        return $"This panel needs about {million} million Query Store rows ({Servers(found.Servers)}, {Window(countedEnd - countedStart)}), "
+            + $"over the limit of {limitMillion} million. Choose fewer servers or a shorter window.";
     }
 
     /// <summary>The guard end to end: estimate, then refuse. Null means the panel runs.</summary>
     internal static async Task<string?> CheckAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedStart, DateTime countedEnd,
-        ILogger? logger, CancellationToken cancellationToken) =>
-        Refusal(await EstimateAsync(postgres, serverScope, logger, cancellationToken), countedStart, countedEnd);
+        ILogger? logger, CancellationToken cancellationToken, long limit = ComposeLimits.MaxQueryStoreWideRows) =>
+        Refusal(await EstimateAsync(postgres, serverScope, logger, cancellationToken), countedStart, countedEnd, limit);
+
+    /// <summary>
+    /// The limit for a panel (#5582): <see cref="ComposeLimits.MaxQueryStoreWideRows"/> is the rows ONE scan of the wide table can read
+    /// inside the statement timeout, so a RankedTimeSeries panel that still scans the fact rows twice (a <c>query_hash</c> group, or a
+    /// series past <see cref="ComposeLimits.MaxSingleScanBuckets"/> buckets) gets half of it.
+    /// </summary>
+    internal static long LimitFor(bool scansFactRowsTwice) =>
+        scansFactRowsTwice ? ComposeLimits.MaxQueryStoreWideRows / 2 : ComposeLimits.MaxQueryStoreWideRows;
 
     private static string Servers(int count) => count == 1 ? "1 server" : $"{count.ToString(CultureInfo.InvariantCulture)} servers";
 
