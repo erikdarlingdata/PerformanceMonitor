@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// bump round-trip (probe stubbed to success) is gated below.
 /// </summary>
 [Collection("darling-owned-secrets")]
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpServerAdminToolsSurfaceTests
 {
     /// <summary>A dead data source (unroutable port) — proves the validate-before-write path bails on a bad request
@@ -1117,6 +1118,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 /// (remove sql2016, re-add via MCP).
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpServerAdminToolsLivePostgresTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

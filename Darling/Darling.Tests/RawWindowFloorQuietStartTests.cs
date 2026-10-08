@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to
    CREATE and DROP its own database through ScratchPostgres, then works entirely inside it. */
+[Trait("Reads", "Lite")]
 public sealed class RawWindowFloorQuietStartLiveTests
 {
     private const int QuietServerId = -497201;
@@ -168,6 +169,7 @@ FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t",
 /// The served window never starts before the one asked for. A floor older than the window's start means the rows
 /// reach back past it, so the window was served whole.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class RawWindowFloorEffectiveStartTests
 {
     private static readonly DateTime s_start = new(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);

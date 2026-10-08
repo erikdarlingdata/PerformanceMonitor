@@ -35,6 +35,7 @@ namespace Darling.Tests;
 ///
 /// <para>Every fact here was verified red-first by mutating the shipped behaviour it describes.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class OversizedPlanBacklogPins
 {
     private const string SweepSource = "Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs";

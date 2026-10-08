@@ -93,6 +93,7 @@ namespace Darling.Tests;
 /// allowance: the force-plan bot is not this campaign's to census.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class McpPayloadContractCensusTests
 {
     /* ───────────────────────── the population ───────────────────────── */

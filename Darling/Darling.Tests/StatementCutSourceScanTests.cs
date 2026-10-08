@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// and so is a raw re-assignment after a judge. Also not seen: SQL built by concatenation (<c>"LEFT(" + col + ", 500)"</c>)
 /// and a JSON-generic local.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class StatementCutSourceScanTests
 {
     /// <summary>Folders scanned, repo-root relative. Lite MCP, services and analysis; the shared alerting, notification and analysis projects; Darling service and analysis.</summary>

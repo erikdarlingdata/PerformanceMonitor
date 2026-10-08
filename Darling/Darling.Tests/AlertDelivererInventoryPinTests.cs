@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// row, so a new path that skips the deliverer fails here until someone has put the filter on it.
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class AlertDelivererInventoryPinTests
 {
     private static readonly string[] SourceRoots =

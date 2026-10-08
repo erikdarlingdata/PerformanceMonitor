@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// A table with no row at the database's earliest snapshot in the window was created inside it, so it counts its
 /// whole size as growth. The grid's summary and the heatmap's series must agree on that, and cut the same top-N.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class StorageGrowthNewTableCutLiveTests
 {
     private const string ServerName = "darling-sg-newtable-cut";
