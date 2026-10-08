@@ -18,7 +18,7 @@ namespace PerformanceMonitorLite.Tests;
 /// saw a tab hang without "Not Responding". <c>ReaderWriterLockSlim</c> is thread-affine, so the call also has to
 /// enter and leave the lock on one pool thread: <c>Task.Run(() =&gt; _dataService.XAsync())</c> does, because the
 /// lambda's thread runs the read to its end. Job History, Alerts and every ServerTab refresh already read this way;
-/// this census holds the rest of <c>Lite/Controls</c> to it.
+/// this census holds the rest of <c>Lite/Controls</c>, and the main window's Overview tag read, to it.
 /// </summary>
 public class TabLoadsOffUiThreadTests
 {
@@ -31,6 +31,15 @@ public class TabLoadsOffUiThreadTests
         ("Lite/Controls/ServerTab.Refresh.cs", "GetBaselineDiscontinuitiesAsync", "SafeDiscontinuitiesAsync"),
     };
 
+    /* The tag writes the window itself starts (a click). They take OpenWriteConnectionAsync, which waits for the write lock
+       for WriteLockBudget (5 s in the shipped app) and then throws, so they cannot park the dispatcher behind the store lock
+       the way the untimed read lock can. */
+    private static readonly HashSet<string> BudgetedWrites = new(StringComparer.Ordinal)
+    {
+        "CreateServerTagAsync", "RenameServerTagAsync", "DeleteServerTagAsync",
+        "AssignServerTagAsync", "UnassignServerTagAsync", "ClearServerTagsForServerAsync",
+    };
+
     private static readonly Regex DataServiceCall = new(
         @"\b_?dataService\s*\.\s*(?<method>[A-Za-z]+Async)\s*\(", RegexOptions.Compiled);
 
@@ -41,7 +50,9 @@ public class TabLoadsOffUiThreadTests
         var violations = new List<string>();
         var seen = 0;
 
-        foreach (var path in Directory.EnumerateFiles(Path.Combine(root, "Lite", "Controls"), "*.cs", SearchOption.AllDirectories)
+        var litePath = Path.Combine(root, "Lite");
+        foreach (var path in Directory.EnumerateFiles(Path.Combine(litePath, "Controls"), "*.cs", SearchOption.AllDirectories)
+                     .Concat(Directory.EnumerateFiles(litePath, "MainWindow*.cs", SearchOption.TopDirectoryOnly))
                      .Where(p => !IsBuildOutput(p))
                      .OrderBy(p => p, StringComparer.Ordinal))
         {
@@ -49,6 +60,11 @@ public class TabLoadsOffUiThreadTests
             var code = Strip(File.ReadAllText(path));
             foreach (var violation in FindCallsOutsideTaskRun(code))
             {
+                if (BudgetedWrites.Contains(violation.Method))
+                {
+                    continue;
+                }
+
                 seen++;
                 if (HelpersOnlyCalledOffTheUiThread.Any(h => h.File == relative && h.Call == violation.Method))
                 {
@@ -60,7 +76,7 @@ public class TabLoadsOffUiThreadTests
         }
 
         Assert.True(violations.Count == 0,
-            "These Lite/Controls data calls are awaited on the UI thread, where they wait on the store read lock (and "
+            "These Lite/Controls and MainWindow data calls are awaited on the UI thread, where they wait on the store read lock (and "
             + "run the whole synchronous DuckDB query) on the dispatcher (#5457). Wrap each in Task.Run(() => ...), "
             + "reading any control value first on the UI thread:\n" + string.Join("\n", violations));
 
