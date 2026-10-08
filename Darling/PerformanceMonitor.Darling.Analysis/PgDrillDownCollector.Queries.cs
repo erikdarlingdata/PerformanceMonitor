@@ -819,6 +819,7 @@ psp_signature AS
     -- matched independently, which admits every pairing of the listed databases and query ids: a superset
     -- of the offenders, never a subset.
     AND   ($5::text[] IS NULL OR (database_name = ANY($5::text[]) AND query_id = ANY($6::bigint[])))
+    /*SEC*/
 ),
 plan_dedup AS
 (
@@ -877,6 +878,7 @@ plan_dedup AS
     AND   collection_time >= $7
     AND   first_execution_time >= $7
     AND   ($5::text[] IS NULL OR (database_name = ANY($5::text[]) AND query_id = ANY($6::bigint[])))
+    /*SEC*/
     GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execution_count) >= 25
 ),
@@ -1042,6 +1044,12 @@ LIMIT 5";
                the table's partitioning column are compared against a parameter (#2387). */
             cmd.Parameters.AddWithValue(windowStart.AddDays(-1));
         }
+
+        /* #5558: the same databases the PLAN_REGRESSION fact skipped, for the pass where the fact did not run and the
+           offender list above is NULL. The predicate sits in the source CTE, ahead of the LIMIT 5, so the five rows are
+           the worst five of the databases this node reports (Lite's twin does the same); a filter after the LIMIT could
+           leave fewer. Bound last, so its parameter number follows every parameter above. */
+        PgSecondaryReplicaScope.Apply(cmd, context, "PLAN_REGRESSION", "database_name");
 
         ServerClock? clock = null;
         var items = new List<object>();

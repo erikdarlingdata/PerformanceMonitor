@@ -1316,6 +1316,7 @@
                     <Grid Margin="0,8,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
 
@@ -1349,8 +1350,14 @@
                                        FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
 
+                        <!-- #5558: the node holds a secondary copy of some availability group databases, so their
+                             per-database findings are left to the primary. Shown only with a list or the all-clear. -->
+                        <TextBlock x:Name="RecommendationsReplicaNoteText" Grid.Row="1" Visibility="Collapsed"
+                                   TextWrapping="Wrap" Margin="2,6,2,0" FontStyle="Italic"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
                         <!-- Content: exactly one region is visible per state. -->
-                        <Grid Grid.Row="1">
+                        <Grid Grid.Row="2">
                             <ScrollViewer x:Name="RecommendationsScroll" VerticalScrollBarVisibility="Auto"
                                           Padding="10" Visibility="Collapsed">
                                 <ItemsControl x:Name="RecommendationsSectionsList"

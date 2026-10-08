@@ -222,6 +222,15 @@ public sealed class DarlingAnalysisService
     public int? LastFactsScored { get; private set; }
 
     /// <summary>
+    /// #5558: the one-sentence note naming how many databases the last pass left to the primary replica because this
+    /// node holds only a secondary copy of them in an availability group, or null when none were skipped (and when
+    /// the pass never reached the set). Carried out like <see cref="LastWindowCoverage"/>, because a short or empty
+    /// findings list cannot say it: without the note, "nothing found" reads as a clean bill of health for databases
+    /// the pass never looked at.
+    /// </summary>
+    public string? LastSecondaryReplicaNote { get; private set; }
+
+    /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
     /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
     /// catch and the classifier said it was not an abandonment.
@@ -263,6 +272,26 @@ public sealed class DarlingAnalysisService
         {
             _logger?.LogWarning(ex, "Could not resolve the separately monitored databases for server {ServerId}; analysing unscoped", serverId);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// #5558: the databases this node holds only as a secondary Availability Group copy, as of the pass's window end,
+    /// so the replicated facts skip them. Every context this service builds goes through here. Fails open: any unknown
+    /// returns an empty set.
+    /// </summary>
+    internal async Task<IReadOnlySet<string>> SecondaryScopeForAsync(int serverId, DateTime windowEndUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await PgSecondaryReplicaScope.ReadAsync(_postgres, serverId, windowEndUtc, _logger, cancellationToken);
+        }
+        catch (Exception ex) when (AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
+        {
+            /* This runs in the context initializer, ahead of the pass's own try. An abandoned budget must not escape the
+               wrapper from here: an empty set lets the pass reach its first checkpoint and take the normal abandon
+               path (and the read-only wrappers fail on their next store read, as #4203 requires). */
+            return PgSecondaryReplicaScope.NoneSkipped;
         }
     }
 
@@ -342,6 +371,7 @@ public sealed class DarlingAnalysisService
         {
             ServerId = serverId,
             SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
+            SecondaryReplicaDatabases = await SecondaryScopeForAsync(serverId, timeRangeEnd, cancellationToken), /* #5558 */
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -377,6 +407,7 @@ public sealed class DarlingAnalysisService
         LastFactCount = null;
         LastFactsScored = null;
         EndedEarlyAs = null;
+        LastSecondaryReplicaNote = AgReplicaScope.SkippedNote(context.SecondaryReplicaDatabases); /* #5558 */
 
         try
         {
@@ -766,6 +797,7 @@ public sealed class DarlingAnalysisService
         {
             ServerId = serverId,
             SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
+            SecondaryReplicaDatabases = await SecondaryScopeForAsync(serverId, timeRangeEnd, cancellationToken), /* #5558 */
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -824,6 +856,8 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
+            /* #5558: audit_config reads server settings only, all node-local, so nothing is skipped and no AG read is paid for. */
+            SecondaryReplicaDatabases = PgSecondaryReplicaScope.NoneSkipped,
             ServerName = serverName,
             TimeRangeStart = timeRangeEnd.AddHours(-1),
             TimeRangeEnd = timeRangeEnd,
@@ -876,8 +910,13 @@ public sealed class DarlingAnalysisService
     /// that fails must not cost the caller the comparison it was only meant to refine, so it degrades
     /// to an empty map and every key takes the absolute rule — the never-blind fallback the anomaly
     /// gate follows.</para>
+    ///
+    /// <para>#5558: the last two elements are the secondary-replica sets the two windows' contexts filtered with (null
+    /// when collection threw), each as of its own window end. <c>compare_analysis</c> builds its per-window
+    /// <c>secondary_replica_note</c> from them rather than reading the role a second time, so a note cannot name a skip
+    /// the facts did not make.</para>
     /// </summary>
-    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(
+    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion, IReadOnlySet<string>? BaselineSecondaries, IReadOnlySet<string>? ComparisonSecondaries)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd,
@@ -888,6 +927,8 @@ public sealed class DarlingAnalysisService
         {
             ServerId = serverId,
             SeparatelyMonitoredDatabases = separatelyMonitored,
+            /* #5558: per window, not shared: the windows can straddle a failover and each uses the role at its own end. */
+            SecondaryReplicaDatabases = await SecondaryScopeForAsync(serverId, baselineEnd, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
@@ -898,6 +939,7 @@ public sealed class DarlingAnalysisService
         {
             ServerId = serverId,
             SeparatelyMonitoredDatabases = separatelyMonitored,
+            SecondaryReplicaDatabases = await SecondaryScopeForAsync(serverId, comparisonEnd, cancellationToken), /* #5558 */
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,
@@ -915,7 +957,8 @@ public sealed class DarlingAnalysisService
 
             var dispersion = await LookUpDispersionAsync(engine, serverId, serverName, baselineFacts, comparisonFacts, comparisonStart);
 
-            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
+            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion,
+                baselineContext.SecondaryReplicaDatabases, comparisonContext.SecondaryReplicaDatabases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -925,7 +968,7 @@ public sealed class DarlingAnalysisService
                caller's own token, the same reasoning CollectConfigAuditFactsAsync's catch already states (#4203). */
             _logger?.LogError("[DarlingAnalysisService] Period comparison failed for {Server}: {Message}",
                 serverName, ex.Message);
-            return ([], [], null, null, new Dictionary<string, BaselineBucket>());
+            return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
     }
 
@@ -1299,7 +1342,7 @@ ORDER BY event_time_local";
             var windows = ConfigChangeAttribution.WindowsFor(anchorTime, context.TimeRangeEnd);
 
             context.CancellationToken.ThrowIfCancellationRequested();
-            var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
+            var (before, after, beforeCoverage, afterCoverage, dispersion, _, _) = await ComparePeriodsAsync(
                 context.ServerId, context.ServerName,
                 windows.BeforeStart, windows.BeforeEnd,
                 windows.AfterStart, windows.AfterEnd);

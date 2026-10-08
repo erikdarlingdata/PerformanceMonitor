@@ -2305,7 +2305,7 @@ public sealed class McpPayloadContractCensusTests
     [
         ("DarlingFinOpsRecommendationsReader.cs", "(file scope)", 10),
         ("LocalDataService.Blocking.cs", "GetBlockingPairRowsAsync", 5000),
-        ("LocalDataService.FinOps.Recommendations.cs", "GetRecommendationsAsync", 10),
+        ("LocalDataService.FinOps.Recommendations.cs", "GetRecommendationsWithNoteAsync", 10),
         ("LocalDataService.PlanCache.cs", "GetPlanCacheSnapshotAsync", 30),
         ("LocalDataService.RunningJobs.cs", "GetAnomalousJobsAsync", 5),
         ("LocalDataService.WaitStats.cs", "GetAllQuerySnapshotsInRangeAsync", 2000),

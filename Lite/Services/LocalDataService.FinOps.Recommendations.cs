@@ -14,6 +14,7 @@ using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -118,9 +119,26 @@ SELECT @count;";
     /// Runs all Phase 1 recommendation checks and returns a consolidated list.
     /// Uses DuckDB for collected data and live SQL queries for server-specific checks.
     /// </summary>
-    public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, string connectionString, string utilityConnectionString, decimal monthlyCost)
+    public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, string connectionString, string utilityConnectionString, decimal monthlyCost) =>
+        (await GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, monthlyCost)).Rows;
+
+    /// <summary>
+    /// The recommendations plus the note for databases the per-database rules skipped (#5558). A database this node holds only as a
+    /// secondary copy in an Availability Group is judged on the primary: its settings and contents replicate, so each node would raise
+    /// the same idle, dev/test, TDE and compression finding for it. The set comes from the stored Availability Group snapshots and fails
+    /// open (no rows, stale rows, NULL or RESOLVING roles, a standalone server, Azure SQL Database: nothing is skipped). The low IO
+    /// latency rule keeps every database, because each replica's own storage is that replica's own cost. Live SQL results are filtered here
+    /// in C#, so no Availability Group query is added.
+    /// <para>Instance-level role: the Enterprise edition note still keys on <c>GetAgReplicaRoleAsync</c>, because an edition is one
+    /// decision for the whole group and is not a finding about any single database. The per-database set replaces it only for the
+    /// TDE blocker list, where an instance that is primary for one group and secondary for another still lists the databases it
+    /// holds as primary.</para>
+    /// </summary>
+    public async Task<(List<RecommendationRow> Rows, string? SkippedNote)> GetRecommendationsWithNoteAsync(
+        int serverId, string connectionString, string utilityConnectionString, decimal monthlyCost)
     {
         var recommendations = new List<RecommendationRow>();
+        var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, DateTime.UtcNow, System.Threading.CancellationToken.None);
 
         // 1. Enterprise feature usage audit (live SQL query)
         try
@@ -231,15 +249,23 @@ BEGIN
 END;", sqlConn);
                     featCmd.CommandTimeout = 30;
 
-                    var tdeDbNames = new List<string>();
+                    var tdeAllNames = new List<string>();
                     using var featReader = await featCmd.ExecuteReaderAsync();
                     while (await featReader.ReadAsync())
                     {
                         if (!featReader.IsDBNull(0))
-                            tdeDbNames.Add(featReader.GetString(0));
+                            tdeAllNames.Add(featReader.GetString(0));
                     }
 
-                    if (tdeDbNames.Count == 0)
+                    /* #5558: a secondary copy's TDE is the primary's to report. */
+                    var tdeDbNames = AgReplicaScope.WithoutSecondaries(tdeAllNames, secondary);
+
+                    if (tdeAllNames.Count > 0 && tdeDbNames.Count == 0)
+                    {
+                        /* Every TDE database here is a secondary copy: the blocker (and the licensing estimate that follows it) is
+                           the primary's finding. "No Enterprise-only features" would be false, so nothing is said. */
+                    }
+                    else if (tdeDbNames.Count == 0)
                     {
                         recommendations.Add(new RecommendationRow
                         {
@@ -443,6 +469,8 @@ AND   collection_time >= $2";
             using var sqlConn = new SqlConnection(connectionString);
             await sqlConn.OpenAsync();
 
+            /* The query reads the database the connection opens in; when that is a secondary copy here, the primary reports it (#5558). */
+            var compressionSkipped = AgReplicaScope.IsSkipped(secondary, sqlConn.Database);
             using var compCmd = new SqlCommand(@"
 SELECT
     s.name AS schema_name,
@@ -470,16 +498,19 @@ ORDER BY
             compCmd.CommandTimeout = 60;
 
             var candidates = new List<(string Schema, string Table, string Index, string Type, decimal SizeMb)>();
-            using var compReader = await compCmd.ExecuteReaderAsync();
-            while (await compReader.ReadAsync())
+            if (!compressionSkipped)
             {
-                candidates.Add((
-                    compReader.IsDBNull(0) ? "" : compReader.GetString(0),
-                    compReader.IsDBNull(1) ? "" : compReader.GetString(1),
-                    compReader.IsDBNull(2) ? "" : compReader.GetString(2),
-                    compReader.IsDBNull(3) ? "" : compReader.GetString(3),
-                    compReader.IsDBNull(5) ? 0m : Convert.ToDecimal(compReader.GetValue(5))
-                ));
+                using var compReader = await compCmd.ExecuteReaderAsync();
+                while (await compReader.ReadAsync())
+                {
+                    candidates.Add((
+                        compReader.IsDBNull(0) ? "" : compReader.GetString(0),
+                        compReader.IsDBNull(1) ? "" : compReader.GetString(1),
+                        compReader.IsDBNull(2) ? "" : compReader.GetString(2),
+                        compReader.IsDBNull(3) ? "" : compReader.GetString(3),
+                        compReader.IsDBNull(5) ? 0m : Convert.ToDecimal(compReader.GetValue(5))
+                    ));
+                }
             }
 
             if (candidates.Count > 0)
@@ -513,6 +544,8 @@ ORDER BY
             var idleDbs = await HasQueryStatsCoverageAsync(serverId)
                 ? await GetIdleDatabasesAsync(serverId)
                 : new List<IdleDatabaseRow>();
+            /* #5558: zero reads on a secondary copy is not idleness (its readers may be elsewhere). */
+            idleDbs = idleDbs.Where(d => !AgReplicaScope.IsSkipped(secondary, d.DatabaseName)).ToList();
             if (idleDbs.Count > 0)
             {
                 var totalSizeGb = idleDbs.Sum(d => d.TotalSizeMb) / 1024m;
@@ -564,6 +597,7 @@ AND   database_id > 4", sqlConn);
                 if (!devReader.IsDBNull(0))
                     devDbs.Add(devReader.GetString(0));
             }
+            devDbs = AgReplicaScope.WithoutSecondaries(devDbs, secondary);
 
             if (devDbs.Count > 0)
             {
@@ -896,7 +930,7 @@ HAVING COUNT(*) >= 24";
             AppLogger.Error("FinOps", $"Recommendation check failed (Reserved capacity): {ex.Message}");
         }
 
-        return recommendations.OrderBy(r => r.SeveritySort).ToList();
+        return (recommendations.OrderBy(r => r.SeveritySort).ToList(), AgReplicaScope.SkippedNote(secondary));
     }
 
     /// <summary>The window the samples a rule read cover: their count and the oldest-to-newest span, in the right-sizing wording. Columns <paramref name="firstOrdinal"/> and the next are MIN and MAX of collection_time; <paramref name="countOrdinal"/> is the count of the value rows the rule's percentile read.</summary>
