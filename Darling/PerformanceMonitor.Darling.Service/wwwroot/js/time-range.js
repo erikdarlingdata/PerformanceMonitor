@@ -20,7 +20,7 @@
  * wall-clock midnights, weeks start Monday, and a boundary is the earliest instant labelled at or after the wall midnight
  * so neighbouring periods tile; typed wall times take the widest instants they can mean (a start the earliest, an end the
  * latest; a repeated hour widens, a skipped time maps to the change instant); nothing shorter than 5 minutes is accepted
- * and nothing is widened; there is no upper cap here (a page decides what its reads reach).
+ * (a calendar period is exempt, once it has started) and nothing is widened; there is no upper cap here (a page decides what its reads reach).
  *
  * A spec is a plain object: { kind: "relative", spanMs }, { kind: "calendar", period }, { kind: "fixed", startMs, endMs } or
  * { kind: "since", startMs }. resolveSpec turns it into a range for a now and a zone; parseRange turns text into one.
@@ -401,7 +401,7 @@ function buildRange(spec, startMs, endMs, live, zone, nowMs) {
 
 /**
  * The instants a spec means at `nowMs` in `zone`: `{ ok: true, range }` or `{ ok: false, error: { code, message } }` (shorter than
- * 5 minutes, ends before it starts, reaches back too far). The range carries startMs, endMs, live (the end slides with now),
+ * 5 minutes unless it is a calendar period, ends before it starts, reaches back too far). The range carries startMs, endMs, live (the end slides with now),
  * spanMs, length, startText, endText, zoneText and label ("3d  Oct 5, 12:00 am - Oct 8, 7:01 am (UTC-04:00)").
  */
 export function resolveSpec(spec, nowMs, zone) {
@@ -436,11 +436,14 @@ export function resolveSpec(spec, nowMs, zone) {
       ? fail("start_in_future", "That start has not happened yet.")
       : fail("end_before_start", "The end is before the start.");
   }
-  if (end - start < MINIMUM_SPAN_MS) return fail("too_short", shortMessage(end - start));
+  /* A calendar period is exempt from the 5-minute floor (#5562): "Today" at 00:02 reads 00:00 to now and the "collected every N min" note
+     explains a sparse chart; no other range is ever substituted. Typed spans, "since" and custom start/end keep the floor. A period that
+     has not started (zero length, exactly midnight) is still refused. */
+  if (spec.kind === "calendar" ? end <= start : end - start < MINIMUM_SPAN_MS) return fail("too_short", shortMessage(end - start));
   return { ok: true, range: buildRange(spec, start, end, live, zone, nowMs) };
 }
 
-/** The current length of a spec ("7h 1m" for Today), or null when it cannot be used right now (a calendar period under 5 minutes). */
+/** The current length of a spec ("7h 1m" for Today, "2m" just after midnight), or null when it cannot be used right now (a calendar period at exactly its start, zero length). */
 export function currentLength(spec, nowMs, zone) {
   const r = resolveSpec(spec, nowMs, zone);
   return r.ok ? r.range.length : null;

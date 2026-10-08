@@ -94,7 +94,7 @@ export function timeRangePicker(opts = {}) {
   const popupSlot = el("div", { class: "trp-popup-slot" });
   const node = el("div", { class: "time-range-picker" + (opts.compact ? " trp-compact" : "") }, [button, detail, note, popupSlot]);
 
-  /* The range as it resolves right now, or the error that stops it (a calendar period under 5 minutes old, say). */
+  /* The range as it resolves right now, or the error that stops it (a calendar period at exactly its start, say). */
   function current() {
     return resolveSpec(spec, now(), zone);
   }

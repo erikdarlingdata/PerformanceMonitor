@@ -31,7 +31,7 @@ const SERVER_CATALOG_TTL_MS = 5 * 60000;
 const serverCatalogs = new Map();
 
 /** The window a read takes for a held spec as of now: `{ hours, asOf, live, startMs, endMs }`, or null when the spec cannot be resolved
- *  (a calendar period under five minutes old). A page that keeps its choice at module scope (so a 60 s poll or a visit elsewhere keeps
+ *  (a calendar period at exactly its start, zero length). A page that keeps its choice at module scope (so a 60 s poll or a visit elsewhere keeps
  *  it) calls this on every read, so a live range slides with the clock. */
 export function windowOfSpec(spec, nowMs = Date.now(), zone = browserZone()) {
   const r = resolveSpec(spec, nowMs, zone);
@@ -39,7 +39,7 @@ export function windowOfSpec(spec, nowMs = Date.now(), zone = browserZone()) {
 }
 
 /** Like windowOfSpec, but says why a spec cannot be read: `{ window }` or `{ error: message }`. A page shows the message (a Today range
- *  in its first five minutes) instead of quietly reading a different window (#5562 review r1 L3). */
+ *  at exactly midnight) instead of quietly reading a different window (#5562 review r1 L3). */
 export function windowResultOfSpec(spec, nowMs = Date.now(), zone = browserZone()) {
   const r = resolveSpec(spec, nowMs, zone);
   return r.ok ? { window: readWindow(r.range, nowMs) } : { error: r.error.message };

@@ -420,7 +420,7 @@ const LIMIT_CHOICES = [200, 500, 1000];
 const choices = { spec: relativeSpec(DEFAULT_HOURS * 3600000), limit: 200, server: "", dismissed: false };
 
 /* The get_alert_history request the current choices ask for: `{ params, startMs }`, or `{ error }` when the range cannot be read right now
- * (Today in its first five minutes) - the page shows that reason, never a different window (#5562 review r1 L3). server_name and
+ * (Today at exactly midnight, zero length) - the page shows that reason, never a different window (#5562 review r1 L3). server_name and
  * include_dismissed are left out (buildQuery drops empty values) when they are at their defaults, and as_of when the range ends now.
  * The read takes whole hours, so `startMs` is the range's exact start: the page trims the reply to it (review r1 H2). */
 function readRequest() {
