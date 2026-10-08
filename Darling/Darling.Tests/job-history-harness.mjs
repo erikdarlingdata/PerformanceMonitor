@@ -260,6 +260,32 @@ try {
     absent: await agentLine(run),
   };
 
+  // W2: a long message is clamped in its cell and a row click opens the whole text in a detail pane, which Close empties
+  // and which survives the 60 s rebuild.
+  const longMessage = "Executed as user: NT SERVICE\\SQLSERVERAGENT. " + "The step failed because the target was unreachable. ".repeat(40);
+  historyBody = JSON.stringify({ ...run, runs: [{ ...run.runs[0], message: longMessage }, { ...run.runs[1], message: null }] });
+  const detail = new FakeNode("div");
+  detail.isRoot = true;
+  renderJobHistory(detail);
+  await settle();
+  const msgCells = () => all(detail, "div").filter((d) => d.className === "jh-message");
+  const paneText = () => all(detail, "div").filter((d) => d.className === "jh-detail").map((d) => d.textContent).join("");
+  const rowsOf = (root) => all(root, "tbody").flatMap((t) => t.children);
+  const before = { cellTexts: msgCells().map((c) => c.textContent), pane: paneText(), clickable: rowsOf(detail).map((tr) => typeof tr.handlers.click === "function") };
+  rowsOf(detail)[0].handlers.click({ type: "click" });
+  const opened = paneText();
+  const preText = all(detail, "pre").map((p) => p.textContent);
+  const rebuilt2 = new FakeNode("div");
+  rebuilt2.isRoot = true;
+  renderJobHistory(rebuilt2);
+  await settle();
+  const reopened = all(rebuilt2, "div").filter((d) => d.className === "jh-detail").map((d) => d.textContent).join("");
+  rowsOf(rebuilt2)[1].handlers.click({ type: "click" });
+  const noMessagePre = all(rebuilt2, "pre").map((p) => p.textContent);
+  all(rebuilt2, "button").find((b) => b.textContent === "Close").handlers.click();
+  const closed = all(rebuilt2, "div").filter((d) => d.className === "jh-detail").map((d) => d.textContent).join("");
+  out.detail = { longMessage, before, opened, preText, reopened, noMessagePre, closed };
+
   out.columns = JOB_HISTORY_COLUMNS.map((c) => c.label);
   console.log(JSON.stringify(out));
 } finally {

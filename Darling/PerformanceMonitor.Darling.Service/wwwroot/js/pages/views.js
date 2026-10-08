@@ -440,12 +440,31 @@ function importPanel() {
    view's declared default. */
 const viewScopeMemory = new Map();
 
-function seedState(id, defaultHours, variables) {
+/* The server scope a view is saved with (the morning walk, W4): its server-dimension variable's default, the same
+   variable the editor greys measures by. The control opened on "All servers (fleet)" whatever the view saved, and the
+   run body's explicit server "All" beat the variable on the service side, so a view saved for one server read the
+   whole fleet. Only a concrete name that is in the fleet counts; "All", blank, a "$other" reference, several
+   variables, or a name the fleet does not list keep the whole fleet. A comma or semicolon list is several servers. */
+function savedServerScope(variables, fleet) {
+  const serverVars = (variables || []).filter((v) => v && v.dimension === "server" && String(v.default || "").trim());
+  if (serverVars.length !== 1) return "All";
+  const raw = String(serverVars[0].default).trim();
+  if (raw.charAt(0) === "$" || raw.toLowerCase() === "all") return "All";
+  const names = [];
+  for (const part of raw.split(/[,;]/)) {
+    const want = part.trim();
+    const o = want ? (fleet || []).find((x) => x.value === want || x.label === want) : null;
+    if (o && !names.includes(o.value)) names.push(o.value);
+  }
+  return names.length ? names : "All";
+}
+
+function seedState(id, defaultHours, variables, fleet) {
   const cached = viewScopeMemory.get(String(id));
   if (cached) {
     return { server: cached.server, hours: cached.hours, values: { ...cached.values } };
   }
-  const state = { server: "All", hours: defaultHours, values: {} };
+  const state = { server: savedServerScope(variables, fleet), hours: defaultHours, values: {} };
   for (const v of variables) {
     if (v.dimension !== "server" && v.default) state.values[v.name] = v.default;
   }
@@ -515,7 +534,7 @@ export async function renderView(main, id) {
   const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
   const hasComposed = panels.some((p) => p && p.source != null);
 
-  const state = seedState(id, defaultHours, variables);
+  const state = seedState(id, defaultHours, variables, fleet);
 
   function currentScope() {
     return {
@@ -642,7 +661,7 @@ export async function renderNotebookDoc(main, opts) {
     const variables = Array.isArray(def.variables) ? def.variables.filter((v) => v && v.name) : [];
     const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
     const hasPanels = cells.some((c) => c && c.type === "panel" && c.source != null);
-    const state = seedState(opts.view.id, defaultHours, variables);
+    const state = seedState(opts.view.id, defaultHours, variables, fleet);
     currentScope = () => ({
       server: state.server,
       hours: state.hours,
