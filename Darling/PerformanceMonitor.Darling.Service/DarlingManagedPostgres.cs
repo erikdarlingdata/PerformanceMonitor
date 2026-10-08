@@ -2579,6 +2579,29 @@ public sealed class DarlingManagedPostgres
     /// for the soft limit's overshoot, the store's own growth, and the disk-pressure self-alert.</summary>
     internal const int WalSizingFreeDiskDivisor = 8;
 
+    /// <summary>The verdict's drift tolerance on the WAL ladder (#5459): the share of the data volume's free
+    /// space (one eighth) the reading may have moved since the block was written before the stored
+    /// <c>max_wal_size</c> reads as stale. See <see cref="IsWalSizeWithinDriftOf"/>.</summary>
+    internal const int WalSizingVerdictToleranceDivisor = 8;
+
+    /// <summary>
+    /// Whether <paramref name="currentMaxWalSizeMb"/> is a rung the ladder would pick for ANY free-space reading
+    /// within one eighth of <paramref name="freeDiskBytesOnDataVolume"/> either way (#5459). The writer re-derives
+    /// a rung at each service start, but the host profile and the stored verdicts re-derive from a LATER reading
+    /// of a volume that other work keeps filling and emptying; a volume sitting within a few hundred MB of a rung
+    /// edge (16, 32, 64 or 128 GB free) therefore read "stale after a hardware change" on a store nobody had
+    /// touched. A real hardware change halves or doubles the headroom, which moves the rung by far more than this
+    /// band, so it still reads stale. The ladder is monotonic, so the two ends bound every rung in between.
+    /// </summary>
+    internal static bool IsWalSizeWithinDriftOf(long freeDiskBytesOnDataVolume, long currentMaxWalSizeMb)
+    {
+        var free = Math.Max(0L, freeDiskBytesOnDataVolume);
+        var slack = free / WalSizingVerdictToleranceDivisor;
+        var low = DeriveWalSettings(free - slack).MaxWalSizeMb;
+        var high = DeriveWalSettings(free + slack).MaxWalSizeMb;
+        return currentMaxWalSizeMb >= low && currentMaxWalSizeMb <= high;
+    }
+
     /// <summary>
     /// The PostgreSQL major whose release notes moved <c>checkpoint_completion_target</c>'s default from 0.5 to
     /// 0.9 (PostgreSQL 14, E.25.3.1.9: <i>"Change checkpoint_completion_target default to 0.9 (Stephen Frost).
