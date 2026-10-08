@@ -51,11 +51,22 @@ public sealed class FinOpsTabServerInventoryPageTests
     public void TheTabReadsTheFleetInventoryWithTheMaxLimit()
     {
         var tab = Tab();
-        Assert.Contains("readTool(\"get_finops_inventory\", { view: \"server_inventory\", limit: LIMIT }, ctx && ctx.signal)", tab);
+        Assert.Contains("readTool(\"get_finops_inventory\", { view: \"server_inventory\", limit: LIMIT, include_removed: showRemoved ? \"true\" : null }, ctx && ctx.signal)", tab);
         var limit = Regex.Match(tab, "(?m)^const LIMIT = (\\d+);$");
         Assert.True(limit.Success);
         Assert.Equal(DarlingMcpFinOpsInventoryTools.MaxLimit, int.Parse(limit.Groups[1].Value));
         Assert.DoesNotContain("{ server,", tab);
+    }
+
+    [Fact]
+    public void TheShowRemovedServersCheckboxIsOffByDefaultAndSendsIncludeRemoved()
+    {
+        var tab = Tab();
+        // Off by default, labelled, and the tool/route declare the same flag with a false default (Web 11).
+        Assert.Contains("let showRemoved = false;", tab);
+        Assert.Contains("\"Show removed servers\"", tab);
+        Assert.Contains("bool include_removed = false", ToolSource());
+        Assert.Contains("PBool(\"include_removed\", false)", ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
     }
 
     [Fact]
@@ -65,8 +76,8 @@ public sealed class FinOpsTabServerInventoryPageTests
         var row = RowSlice();
         foreach (var key in keys)
             Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", row);
-        // engine_edition is emitted but not shown, as on the desktop.
-        Assert.Equal(26, Regex.Matches(row, "(?m)^\\s+[a-z_]+ = ").Count);
+        // engine_edition is emitted but not shown, as on the desktop; so is health_score_note (the words for a dash in place of a score).
+        Assert.Equal(27, Regex.Matches(row, "(?m)^\\s+[a-z_]+ = ").Count);
         Assert.Equal(25, keys.Count);
     }
 

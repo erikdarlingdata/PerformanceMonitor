@@ -67,7 +67,11 @@ public sealed partial class ViewerDataService
     /// <summary>Latest collected properties per server joined to the registry; the text lives in Storage.</summary>
     public const string ServerInventorySql = DarlingFinOpsInventoryReader.ServerInventorySql;
 
-    public async Task<List<ServerPropertyRow>> GetServerInventoryAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// <paramref name="includeRemoved"/> is the reader's <c>include_removed</c>: off lists only the configured servers (the
+    /// default), on also lists the ones removed from the configuration, which the "Show removed servers" checkbox asks for.
+    /// </summary>
+    public async Task<List<ServerPropertyRow>> GetServerInventoryAsync(bool includeRemoved = false, CancellationToken cancellationToken = default)
     {
         /* #4766: Server Inventory is one row per server, so each row reads its times on ITS server's clock (the
            collected one, else the viewer machine's offset, the rule every list row uses) and not on the active server
@@ -76,7 +80,7 @@ public sealed partial class ViewerDataService
         var nowUtc = DateTime.UtcNow;
 
         var dtos = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(
-            _dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            _dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, includeRemoved: includeRemoved, cancellationToken: cancellationToken);
 
         var items = new List<ServerPropertyRow>(dtos.Count);
         foreach (var dto in dtos)

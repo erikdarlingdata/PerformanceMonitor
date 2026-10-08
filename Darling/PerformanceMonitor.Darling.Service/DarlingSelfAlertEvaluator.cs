@@ -169,6 +169,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// online.</summary>
     private readonly FailedSendRetryTracker _connectionRetries = new();
 
+    /// <summary>#5489: the same for a "Collection Stopped" alert no channel delivered.</summary>
+    private readonly FailedSendRetryTracker _collectionStoppedRetries = new();
+
     /// <summary>The same for the availability group alerts (#4795), keyed by metric and AG grain: a disconnect
     /// that reached no channel is due again with re-fire off or on; a failover and a data-movement-suspended
     /// edge, whose "already reported" markers are put back, are due again after the same delay. Held in a tracker
@@ -572,6 +575,10 @@ internal sealed class DarlingSelfAlertEvaluator
        rule list. */
     private readonly ConcurrentDictionary<string, bool> _activeCustomRuleHealth = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCustomRuleHealthAlert = new();
+
+    /// <summary>#5493: the ids of the unhealthy rules the last check saw while the alert stood, so a rule that joins
+    /// the set is a new entry. A replaced snapshot, never changed in place; cleared when every rule is healthy.</summary>
+    private readonly ConcurrentDictionary<string, HashSet<long>> _customRuleHealthIds = new();
 
     /// <summary>The fixed key for the fleet-level custom-alert-rule-health edge (not a real server); non-numeric
     /// so the deliverer's #1236 int.TryParse override no-ops on it exactly like <see cref="DiskKey"/>.</summary>
@@ -1513,7 +1520,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// threshold; the constant overload keeps the shipped defaults for the tests pinning them.</summary>
     internal static bool IsCollectionStopped(
         DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, DateTime nowUtc,
-        TimeSpan staleWindow, int consecutiveFailureThreshold, out string reason)
+        TimeSpan staleWindow, int consecutiveFailureThreshold, out string reason,
+        DateTime? reportedLastSuccessUtc = null)
     {
         /* Fast path: the most-recent N runs all failed. */
         if (recentRunCount >= consecutiveFailureThreshold && recentSuccessCount == 0)
@@ -1525,13 +1533,46 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Backstop: a server that HAS collected before but hasn't succeeded within the staleness window. */
         if (lastSuccessUtc.HasValue && nowUtc - lastSuccessUtc.Value >= staleWindow)
         {
-            int minutes = (int)(nowUtc - lastSuccessUtc.Value).TotalMinutes;
-            reason = $"No successful collection in {minutes.ToString(CultureInfo.InvariantCulture)} minutes — the collectors are failing or the server is unreachable.";
+            /* The firing basis (lastSuccessUtc) may be the service's watch start rather than the store's last
+               success (#4757); the TEXT counts from the store's own last success when the caller has one, so a
+               restart does not reset "how long" to zero for a server that has been dark for days (#5489). */
+            var silent = nowUtc - (reportedLastSuccessUtc ?? lastSuccessUtc.Value);
+            reason = $"No successful collection in {FormatSilence(silent)} — the collectors are failing or the server is unreachable.";
             return true;
         }
 
         reason = "";
         return false;
+    }
+
+    /// <summary>
+    /// How long a server has gone without a successful collection, as the Collection Stopped text says it:
+    /// minutes up to two hours ("47 minutes"), whole hours up to two days ("5 hours"), then days with the
+    /// leftover hours ("12 days", "12 days 3 hours"). A 12-day gap used to read "17805 minutes".
+    /// </summary>
+    internal static string FormatSilence(TimeSpan silent)
+    {
+        if (silent < TimeSpan.Zero)
+        {
+            silent = TimeSpan.Zero;
+        }
+
+        static string Unit(long n, string one) =>
+            n.ToString(CultureInfo.InvariantCulture) + " " + one + (n == 1 ? "" : "s");
+
+        if (silent < TimeSpan.FromHours(2))
+        {
+            return Unit((long)silent.TotalMinutes, "minute");
+        }
+
+        if (silent < TimeSpan.FromDays(2))
+        {
+            return Unit((long)silent.TotalHours, "hour");
+        }
+
+        var days = (long)silent.TotalDays;
+        var hours = silent.Hours;
+        return hours == 0 ? Unit(days, "day") : Unit(days, "day") + " " + Unit(hours, "hour");
     }
 
     /// <summary>
@@ -1564,7 +1605,8 @@ internal sealed class DarlingSelfAlertEvaluator
             : int.MaxValue;
 
         return IsCollectionStopped(
-            staleBasis, recentRunCount, recentSuccessCount, now, SettingsStaleWindow, failureThreshold, out reason);
+            staleBasis, recentRunCount, recentSuccessCount, now, SettingsStaleWindow, failureThreshold, out reason,
+            reportedLastSuccessUtc: lastSuccessUtc);
     }
 
     /// <summary>
@@ -1586,8 +1628,9 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// Edge-applies the collection-stopped decision (mirrors the Dashboard's
-    /// <c>_activeCollectionStoppedAlert</c>/<c>_lastCollectionStoppedAlert</c>): fire once on entry, re-fire
-    /// only after the alert cooldown while it persists, and write ONE "Collection Resumed" history row on
+    /// <c>_activeCollectionStoppedAlert</c>/<c>_lastCollectionStoppedAlert</c>): a state alert (#5489). It fires
+    /// once on entry, repeats only when <c>connection_refire_minutes</c> is above 0 (every that many minutes) or
+    /// to send again an alert no channel took (#4795), and writes ONE "Collection Resumed" history row on
     /// recovery. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
     /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started
@@ -1609,13 +1652,35 @@ internal sealed class DarlingSelfAlertEvaluator
 
         if (stopped)
         {
+            /* #5489: a state alert, decided by the same shared policy "Server Unreachable" uses. A server never
+               seen stopped counts as running, so the first stopped sweep (also the first one after a restart,
+               which loses this in-memory state) is the entry and sends ONE alert. While the outage stands it
+               repeats only when connection_refire_minutes > 0 and that interval passed, or to send again an
+               alert that reached no channel (#4795). It no longer repeats every cooldown. */
+            var wasStopped = _activeCollectionStopped.TryGetValue(key, out var standing) && standing;
             _activeCollectionStopped[key] = true;
-            if (CooldownElapsed(_lastCollectionStoppedAlert, key, now))
+            var refire = _connectionRefireMinutes();
+            var decision = ConnectionAlertPolicy.Decide(
+                previousOnline: !wasStopped,
+                online: false,
+                alertWhenAlreadyDownAtFirstSight: false,
+                refireInterval: refire > 0 ? TimeSpan.FromMinutes(refire) : null,
+                /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this reading. */
+                lastDownAlertUtc: LastFiredStamp.TryGet(_lastCollectionStoppedAlert, key, now, out var lastStopped)
+                    ? lastStopped : null,
+                nowUtc: now,
+                retryDueUtc: _collectionStoppedRetries.DueUtc(key, now));
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastCollectionStoppedAlert[key] = now;
+                var repeatNote = decision == ConnectionAlertDecision.Lost
+                    ? string.Empty
+                    : refire > 0
+                        ? $"Still stopped (re-alerting every {refire} min). "
+                        : "Still stopped (the previous alert reached no channel, so it is sent again). ";
                 var delivery = await FireAsync(
                     key, serverName, "Collection Stopped", reason, "collecting",
-                    detail: reason + " A headless service has no dashboard to watch, so this is the primary " +
+                    detail: repeatNote + reason + " A headless service has no dashboard to watch, so this is the primary " +
                         "signal that a server's data has gone stale. Check the service log and the server's " +
                         "reachability, credentials, and collector permissions.",
                     severity: AlertSeverityLevel.Critical,
@@ -1624,11 +1689,23 @@ internal sealed class DarlingSelfAlertEvaluator
                        with different units (a run count, or minutes). See AlertMetricClassifier.IsStateOnly. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
-                AfterSelfFire("Collection Stopped", _lastCollectionStoppedAlert, key, now, SharedCooldown, delivery);
+                /* #4795: the server was forgotten while this was sending; Forget cleared the stamp and the
+                   retry, so writing the answer now would hand them to the next registration. */
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                /* #4795: every channel failed -> due again after the failed-send back-off (a minute, doubling,
+                   never more than the shared cooldown), with re-fire off too. Any other answer clears it. */
+                NoteRetrySend(_collectionStoppedRetries, key, "Collection Stopped", delivery);
             }
         }
         else if (_activeCollectionStopped.TryRemove(key, out var was) && was)
         {
+            /* #5489: the outage is over; the next one is a new entry with its own alert. */
+            _lastCollectionStoppedAlert.TryRemove(key, out _);
+            _collectionStoppedRetries.Clear(key);
             await RecordResolutionAsync(new AlertResolution(
                 key, serverName, "Collection Stopped",
                 "Collection Resumed", $"{serverName}: Data collection is running again"), cancellationToken);
@@ -1638,8 +1715,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Edge-applies capture-down (mirrors the Dashboard's <c>_activeCaptureDownAlert</c>): gated on
     /// blocking OR deadlock alerts being enabled (the alerts this protects — if the operator wants those,
-    /// they need to know when the data feeding them stops existing). Fire once on entry, re-fire only after
-    /// the cooldown, write ONE "Capture Restored" row on recovery.
+    /// they need to know when the data feeding them stops existing). A state alert (#5493): fire once on entry,
+    /// repeat only per <c>connection_refire_minutes</c> (or to send again an alert no channel took), write ONE
+    /// "Capture Restored" row on recovery.
     /// </summary>
     /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
     /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
@@ -1664,13 +1742,16 @@ internal sealed class DarlingSelfAlertEvaluator
         if (missing.Count > 0)
         {
             _activeCaptureDown[key] = true;
-            if (CooldownElapsed(_lastCaptureDownAlert, key, now))
+            /* #5493: a state alert, the same policy as "Collection Stopped" (#5489): one alert on entry, a repeat
+               only per connection_refire_minutes, a send again only for an alert no channel took (#4795). */
+            var decision = DecideStateAlert(_lastCaptureDownAlert, key, CaptureDownMetric, key, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastCaptureDownAlert[key] = now;
                 var list = string.Join(" and ", missing);
                 var delivery = await FireAsync(
-                    key, serverName, "Capture Down", list, "session running",
-                    detail: $"The {list} Extended Events session(s) are missing and could not be created. " +
+                    key, serverName, CaptureDownMetric, list, "session running",
+                    detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events session(s) are missing and could not be created. " +
                         "Blocking/deadlock data is NOT being captured, so those alerts can never fire. Check the " +
                         "collection log for the SESSION_MISSING detail (usually a permissions problem: " +
                         "ALTER ANY EVENT SESSION on-prem, CREATE ANY DATABASE EVENT SESSION on Azure SQL DB).",
@@ -1679,13 +1760,20 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* Which capture is missing ("Blocking and Deadlock") against "session running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
-                AfterSelfFire("Capture Down", _lastCaptureDownAlert, key, now, SharedCooldown, delivery);
+                /* #4795: the server was forgotten while this was sending; Forget cleared the stamp and the retry. */
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                NoteStateSend(CaptureDownMetric, key, delivery);
             }
         }
         else if (_activeCaptureDown.TryRemove(key, out var was) && was)
         {
+            EndStateAlert(_lastCaptureDownAlert, key, CaptureDownMetric, key);
             await RecordResolutionAsync(new AlertResolution(
-                key, serverName, "Capture Down",
+                key, serverName, CaptureDownMetric,
                 "Capture Restored", $"{serverName}: Blocking/deadlock capture is running again"), cancellationToken);
         }
     }
@@ -4025,12 +4113,14 @@ internal sealed class DarlingSelfAlertEvaluator
         if (!running)
         {
             _activeAgentDown[key] = true;
-            if (CooldownElapsed(_lastAgentDownAlert, key, now))
+            /* #5493: a state alert (see ApplyCaptureDownAsync). */
+            var decision = DecideStateAlert(_lastAgentDownAlert, key, AgentDownMetric, key, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastAgentDownAlert[key] = now;
                 var delivery = await FireAsync(
-                    key, serverName, "Agent Not Running", "Stopped", "Running",
-                    detail: "The SQL Server Agent service on this server is stopped. Scheduled jobs — backups, " +
+                    key, serverName, AgentDownMetric, "Stopped", "Running",
+                    detail: StateRepeatNote(decision, refire) + "The SQL Server Agent service on this server is stopped. Scheduled jobs — backups, " +
                         "index and statistics maintenance, integrity checks, log shipping — will NOT run until it " +
                         "is restarted, and a headless service has no dashboard to warn you. Start the SQL Server " +
                         "Agent service and set its startup type to Automatic so it survives a host reboot.",
@@ -4039,13 +4129,19 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* "Stopped" against "Running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
-                AfterSelfFire("Agent Not Running", _lastAgentDownAlert, key, now, SharedCooldown, delivery);
+                if (IsStaleSweep(serverId, sweepGeneration))
+                {
+                    return;
+                }
+
+                NoteStateSend(AgentDownMetric, key, delivery);
             }
         }
         else if (_activeAgentDown.TryRemove(key, out var was) && was)
         {
+            EndStateAlert(_lastAgentDownAlert, key, AgentDownMetric, key);
             await RecordResolutionAsync(new AlertResolution(
-                key, serverName, "Agent Not Running",
+                key, serverName, AgentDownMetric,
                 "Agent Restarted", $"{serverName}: SQL Server Agent service is running again"), cancellationToken);
         }
     }
@@ -4554,12 +4650,14 @@ internal sealed class DarlingSelfAlertEvaluator
             else if (judgement == AgSyncJudgement.Behind)
             {
                 _activeAgSyncBehind[key] = true;
-                if (CooldownElapsed(_lastAgSyncBehindAlert, key, now))
+                /* #5493: a state alert (see ApplyCaptureDownAsync); the grain's stamp is the AG database's key. */
+                var syncDecision = DecideStateAlert(_lastAgSyncBehindAlert, key, AgSyncFellBehindMetric, key, now, out var syncRefire);
+                if (syncDecision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastAgSyncBehindAlert[key] = now;
                     var delivery = await FireAsync(
                         Key(serverId), serverName, AgSyncFellBehindMetric, behindReason, "caught up",
-                        detail: behindReason + " A secondary that trails the primary is a data-loss window: an " +
+                        detail: StateRepeatNote(syncDecision, syncRefire) + behindReason + " A secondary that trails the primary is a data-loss window: an " +
                             "automatic failover cannot complete until it catches up, and a forced failover throws away " +
                             "everything still queued. Look at the network throughput between the replicas, the " +
                             "secondary's redo thread (it is single-threaded per database on older versions and is " +
@@ -4580,7 +4678,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken,
                         context: AgDatabaseContext(database));
-                    AfterSelfFire(AgSyncFellBehindMetric, _lastAgSyncBehindAlert, key, now, SharedCooldown, delivery);
+                    NoteStateSend(AgSyncFellBehindMetric, key, delivery);
                 }
             }
         }
@@ -4593,7 +4691,7 @@ internal sealed class DarlingSelfAlertEvaluator
            every key in it came from THIS server's snapshot — rather than something a prefix check has to catch. */
         foreach (var key in measuredCaughtUp)
         {
-            _lastAgSyncBehindAlert.TryRemove(key, out _);
+            EndStateAlert(_lastAgSyncBehindAlert, key, AgSyncFellBehindMetric, key);
             if (_activeAgSyncBehind.TryRemove(key, out _))
             {
                 await RecordResolutionAsync(new AlertResolution(
@@ -4784,7 +4882,8 @@ internal sealed class DarlingSelfAlertEvaluator
                (still cooldown-limited), one resolution on recovery. This is THE self-alert with a
                real measurement, which is what makes the gate fit here and deliberately NOT on the
                state-only siblings (Collection Stopped / Agent Not Running / Capture Down) — those
-               have no level to worsen, and their per-cooldown "still broken" reminder is wanted. */
+               have no level to worsen, and since #5489/#5493 they are state alerts that send one alert per
+               occurrence (ConnectionAlertPolicy), not a per-cooldown reminder. */
             double? lastAlertedPercent =
                 _lastAlertedDiskPressurePercent.TryGetValue(DiskKey, out var lastPct) ? lastPct : (double?)null;
             if (LowDiskAlertGate.ShouldAlert(percentFree, lastAlertedPercent)
@@ -4872,8 +4971,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Edge-applies the fleet-level "some custom alert rules are broken or never firing" condition from the
     /// <see cref="CustomAlertHealthReport"/> the <see cref="CustomAlertEvaluator"/> builds: fire once on entry,
-    /// re-fire only after the alert cooldown while any rule stays unhealthy, and write ONE resolution row when
-    /// every rule is healthy again (the Collection-Stopped standing-condition edge shape). ONE alert aggregates
+    /// again when a rule joins the unhealthy set (naming the new ones, #5493), repeat only per
+    /// <c>connection_refire_minutes</c>, and write ONE resolution row when every rule is healthy again (the Collection-Stopped standing-condition edge shape). ONE alert aggregates
     /// ALL unhealthy rules — a <c>pg_*</c> rename can break many at once, and one-alert-per-rule would be an
     /// alert storm. Gated on the master alerts switch. The rule names/errors in the report are ALREADY
     /// newline-stripped + length-capped by the evaluator, and the detail NEVER contains the compiled SQL — only
@@ -4892,17 +4991,43 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _activeCustomRuleHealth[CustomRuleHealthKey] = true;
 
-            /* Standing condition: fire on entry, re-fire only per cooldown while unhealthy. The CURRENT report
-               is rendered each time, so a rule that breaks later shows up on the next re-fire. */
-            if (CooldownElapsed(_lastCustomRuleHealthAlert, CustomRuleHealthKey, now))
+            /* #5493: a state alert (see ApplyCaptureDownAsync): one alert on entry, a repeat only per
+               connection_refire_minutes. The CURRENT report is rendered each time it is sent, so a rule that breaks
+               later shows up in the next repeat. */
+            /* A rule that JOINS the unhealthy set while the alert stands is news: one alert that names the current
+               set and says which rules are new. A rule that leaves sends nothing. */
+            var currentIds = new HashSet<long>(
+                report.BrokenRules.Select(r => r.RuleId).Concat(report.NeverFiringRules.Select(r => r.RuleId)));
+            var newRules = new List<CustomAlertRuleHealthIssue>();
+            if (_customRuleHealthIds.TryGetValue(CustomRuleHealthKey, out var previousIds)
+                && LastFiredStamp.TryGet(_lastCustomRuleHealthAlert, CustomRuleHealthKey, now, out _))
+            {
+                newRules.AddRange(report.BrokenRules.Concat(report.NeverFiringRules)
+                    .Where(r => !previousIds.Contains(r.RuleId)).OrderBy(r => r.RuleId));
+                if (newRules.Count > 0)
+                {
+                    _lastCustomRuleHealthAlert.TryRemove(CustomRuleHealthKey, out _);
+                    _stateRetries.Clear(StateRetryKey(CustomRuleHealthMetric, CustomRuleHealthKey));
+                }
+            }
+
+            _customRuleHealthIds[CustomRuleHealthKey] = currentIds;
+            var decision = DecideStateAlert(_lastCustomRuleHealthAlert, CustomRuleHealthKey, CustomRuleHealthMetric, CustomRuleHealthKey, now, out var refire);
+            if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastCustomRuleHealthAlert[CustomRuleHealthKey] = now;
                 var (shortMessage, detail) = RenderCustomRuleHealth(report);
+                if (newRules.Count > 0)
+                {
+                    detail = "New since the previous alert were " + string.Join(", ", newRules.Select(r =>
+                        string.Create(CultureInfo.InvariantCulture, $"rule {r.RuleId} \"{r.RuleName}\""))) + ". " + detail;
+                }
+
                 var delivery = await FireAsync(
                     StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                     currentValue: report.TotalIssues.ToString(CultureInfo.InvariantCulture),
                     thresholdValue: "0",
-                    detail: detail,
+                    detail: StateRepeatNote(decision, refire) + detail,
                     severity: AlertSeverityLevel.Warning,
                     shortMessage: shortMessage,
                     /* The count of unhealthy rules is a genuine whole number (AlertMetricClassifier renders it
@@ -4910,12 +5035,13 @@ internal sealed class DarlingSelfAlertEvaluator
                     numericCurrentValue: report.TotalIssues,
                     numericThresholdValue: 0,
                     cancellationToken);
-                AfterSelfFire(CustomRuleHealthMetric, _lastCustomRuleHealthAlert, CustomRuleHealthKey, now, SharedCooldown, delivery);
+                NoteStateSend(CustomRuleHealthMetric, CustomRuleHealthKey, delivery);
             }
         }
         else if (_activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
         {
-            _lastCustomRuleHealthAlert.TryRemove(CustomRuleHealthKey, out _);
+            EndStateAlert(_lastCustomRuleHealthAlert, CustomRuleHealthKey, CustomRuleHealthMetric, CustomRuleHealthKey);
+            _customRuleHealthIds.TryRemove(CustomRuleHealthKey, out _);
             await RecordResolutionAsync(new AlertResolution(
                 StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                 CustomRuleHealthResolvedMetric,
@@ -5934,7 +6060,7 @@ WHERE c.is_enabled";
 
             _activeFleetGate.TryRemove(FleetGateKey, out _);
             _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
-            _lastFleetGateAlert.TryRemove(FleetGateKey, out _);
+            EndStateAlert(_lastFleetGateAlert, FleetGateKey, FleetGateMetric, FleetGateKey);
             await RecordResolutionAsync(new AlertResolution(
                 StoreKey(FleetGateKey), _storeLabel, FleetGateMetric, FleetGateClearedMetric,
                 $"Collection has kept up with its schedule: under {FleetGateQuietPercent}% of the slots that came due were skipped for the last hour"),
@@ -5952,9 +6078,10 @@ WHERE c.is_enabled";
             }
         }
 
-        /* Standing condition: fire on entry, re-state only per the shared cooldown while it holds. */
-        if (LastFiredStamp.TryGet(_lastFleetGateAlert, FleetGateKey, now, out var lastFired)
-            && now - lastFired < SharedCooldown)
+        /* #5493: a state alert (see ApplyCaptureDownAsync): one alert on entry, a repeat only per
+           connection_refire_minutes. */
+        var decision = DecideStateAlert(_lastFleetGateAlert, FleetGateKey, FleetGateMetric, FleetGateKey, now, out var refire);
+        if (decision is not (ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown))
         {
             return;
         }
@@ -5966,13 +6093,13 @@ WHERE c.is_enabled";
             StoreKey(FleetGateKey), _storeLabel, FleetGateMetric,
             currentValue: currentValue,
             thresholdValue: string.Create(CultureInfo.InvariantCulture, $"{FleetGateBehindPercent}% and at least {FleetGateBehindMinSkipped} slots"),
-            detail: detail,
+            detail: StateRepeatNote(decision, refire) + detail,
             severity: AlertSeverityLevel.Warning,
             shortMessage: shortMessage,
             /* A real measurement: the share of due slots skipped, against the share that fires. */
             numericCurrentValue: Math.Round(report.SkippedPercent, 1), numericThresholdValue: FleetGateBehindPercent,
             cancellationToken);
-        AfterSelfFire(FleetGateMetric, _lastFleetGateAlert, FleetGateKey, now, SharedCooldown, delivery);
+        NoteStateSend(FleetGateMetric, FleetGateKey, delivery);
     }
 
     /// <summary>Renders the (shortMessage, detail, currentValue) for the "Collection Falling Behind" alert: the counts,
@@ -6412,14 +6539,17 @@ WHERE c.is_enabled";
             if (percent >= warnPercent)
             {
                 _activeJobOverCadence[key] = true;
-                if (CooldownElapsed(_lastJobOverCadenceAlert, key, now))
+                /* #5493: a state alert (see ApplyCaptureDownAsync). */
+                var decision = DecideStateAlert(_lastJobOverCadenceAlert, key, JobCadenceMetric, key, now, out var refire,
+                    severityRank: percent >= 100.0 ? 2 : 1);
+                if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastJobOverCadenceAlert[key] = now;
                     bool critical = percent >= 100.0;
                     var delivery = await FireAsync(
                         StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                         $"{percent:F0}% of schedule interval", $"{warnPercent}%",
-                        detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
+                        detail: StateRepeatNote(decision, refire) + $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
                             $"{job.ScheduleIntervalMs / 1000.0:F0}s schedule interval ({percent:F0}%). " +
                             (critical
                                 ? "The job now takes at least as long as its own cadence, so runs back up behind each " +
@@ -6443,11 +6573,12 @@ WHERE c.is_enabled";
                         numericCurrentValue: Math.Round(percent, 1),
                         numericThresholdValue: critical ? 100 : warnPercent,
                         cancellationToken);
-                    AfterSelfFire(JobCadenceMetric, _lastJobOverCadenceAlert, key, now, SharedCooldown, delivery);
+                    NoteStateSend(JobCadenceMetric, key, delivery);
                 }
             }
             else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
             {
+                EndStateAlert(_lastJobOverCadenceAlert, key, JobCadenceMetric, key);
                 await RecordResolutionAsync(new AlertResolution(
                     StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                     "Store Job Cadence Recovered",
@@ -6562,7 +6693,10 @@ WHERE c.is_enabled";
             if (!policy.Armed && ratio >= warnRatio)
             {
                 _activeRetentionHold[key] = true;
-                if (CooldownElapsed(_lastRetentionHoldAlert, key, now))
+                /* #5493: a state alert (see ApplyCaptureDownAsync). */
+                var decision = DecideStateAlert(_lastRetentionHoldAlert, key, RetentionHoldMetric, key, now, out var refire,
+                    severityRank: ratio >= criticalRatio ? 2 : 1);
+                if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastRetentionHoldAlert[key] = now;
                     bool critical = ratio >= criticalRatio;
@@ -6570,7 +6704,7 @@ WHERE c.is_enabled";
                     var delivery = await FireAsync(
                         StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
                         $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
-                        detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
+                        detail: StateRepeatNote(decision, refire) + $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
                             $"holds {spanDays:F1} days across {policy.ChunkCount} chunk(s) against a configured " +
                             $"{policy.DropAfter} horizon ({ratio:F1}x). " +
                             (critical
@@ -6595,7 +6729,7 @@ WHERE c.is_enabled";
                         numericCurrentValue: Math.Round(ratio, 2),
                         numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
-                    AfterSelfFire(RetentionHoldMetric, _lastRetentionHoldAlert, key, now, SharedCooldown, delivery);
+                    NoteStateSend(RetentionHoldMetric, key, delivery);
                 }
             }
             else
@@ -6619,6 +6753,8 @@ WHERE c.is_enabled";
         {
             return;
         }
+
+        EndStateAlert(_lastRetentionHoldAlert, key, RetentionHoldMetric, key);
 
         var label = string.IsNullOrEmpty(policy.HypertableName)
             ? $"retention job {key}"
@@ -6717,7 +6853,10 @@ WHERE c.is_enabled";
             if (overHorizon && (!lastRan || recordStale))
             {
                 _activeRawPurgeOverHorizon[key] = true;
-                if (CooldownElapsed(_lastRawPurgeOverHorizonAlert, key, now))
+                /* #5493: a state alert (see ApplyCaptureDownAsync). */
+                var decision = DecideStateAlert(_lastRawPurgeOverHorizonAlert, key, RawPurgeOverHorizonMetric, key, now, out var refire,
+                    severityRank: reading.OverHorizonRatio!.Value >= criticalRatio ? 2 : 1);
+                if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastRawPurgeOverHorizonAlert[key] = now;
                     var ratioValue = reading.OverHorizonRatio!.Value;
@@ -6728,7 +6867,7 @@ WHERE c.is_enabled";
                     var delivery = await FireAsync(
                         StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
                         $"{ratioValue:F1}x its {reading.DropAfter} horizon", $"{warnRatio:F1}x",
-                        detail: $"Store {label} is {ratioValue:F1}x its configured {reading.DropAfter} horizon, " +
+                        detail: StateRepeatNote(decision, refire) + $"Store {label} is {ratioValue:F1}x its configured {reading.DropAfter} horizon, " +
                             $"and the last recorded purge-trigger pass did not run it — {reasonText}. " +
                             (critical
                                 ? "The tier is now several times its intended depth and still growing. "
@@ -6743,11 +6882,12 @@ WHERE c.is_enabled";
                         numericCurrentValue: Math.Round(ratioValue, 2),
                         numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
-                    AfterSelfFire(RawPurgeOverHorizonMetric, _lastRawPurgeOverHorizonAlert, key, now, SharedCooldown, delivery);
+                    NoteStateSend(RawPurgeOverHorizonMetric, key, delivery);
                 }
             }
             else if (_activeRawPurgeOverHorizon.TryRemove(key, out var was) && was)
             {
+                EndStateAlert(_lastRawPurgeOverHorizonAlert, key, RawPurgeOverHorizonMetric, key);
                 await RecordResolutionAsync(new AlertResolution(
                     StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
                     RawPurgeOverHorizonClearedMetric,
@@ -7450,7 +7590,7 @@ WHERE c.is_enabled";
                         shortMessage: $"{label} stuck — auto-re-arm FAILED",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
-                    AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
+                    NoteStateSend(band.Metric, key, delivery);
                 }
             }
             else if (episode.State == PolicyJobHealth.AwaitingSchedulerRetry)
@@ -7458,7 +7598,7 @@ WHERE c.is_enabled";
                 /* #3591: an hour on and the scheduler's own retry has not cleared it. Either the jittered backoff
                    landed just past this check, or the job crashed AGAIN and its backoff doubled — both are worth a
                    human reading the PostgreSQL log, and neither is helped by alter_job (which would reset the
-                   backoff once more). Escalate: page once now, re-fire on the cooldown, never re-arm. */
+                   backoff once more). Escalate: page once now (#5493: a repeat only per connection_refire_minutes), never re-arm. */
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
                 _lastPolicyJobAlert[key] = now;
                 fired++;
@@ -7476,7 +7616,7 @@ WHERE c.is_enabled";
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
-                AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
+                NoteStateSend(band.Metric, key, delivery);
             }
             else if (episode.State == PolicyJobHealth.ReArmed)
             {
@@ -7496,25 +7636,28 @@ WHERE c.is_enabled";
                     shortMessage: $"{label} re-hung after self-heal — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
-                AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
+                NoteStateSend(band.Metric, key, delivery);
             }
             else
             {
-                /* Already escalated: never re-arm again; keep paging on the cooldown while it stays stuck. */
-                if (CooldownElapsed(_lastPolicyJobAlert, key, now))
+                /* Already escalated: never re-arm again. #5493: the page for the escalation was the alert for this
+                   occurrence, so a job that stays stuck is not paged again per cooldown; it repeats only per
+                   connection_refire_minutes, or to send again an alert no channel took (#4795). */
+                var decision = DecideStateAlert(_lastPolicyJobAlert, key, band.Metric, key, now, out var refire);
+                if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastPolicyJobAlert[key] = now;
                     fired++;
                     var delivery = await FireAsync(
                         StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
-                        detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation. {band.Stalled} " +
+                        detail: StateRepeatNote(decision, refire) + $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation. {band.Stalled} " +
                             "Manual intervention is required; the service will not auto-re-arm it.",
                         severity: band.Severity,
                         shortMessage: $"{label} still stuck after escalation",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
-                    AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
+                    NoteStateSend(band.Metric, key, delivery);
                 }
             }
         }
@@ -7538,6 +7681,7 @@ WHERE c.is_enabled";
                why we are here at all — and a resolution under the wrong metric name resolves nothing and
                leaves the real alert row open. */
             var band = PolicyJobBand.For(was.Family);
+            _stateRetries.Clear(StateRetryKey(band.Metric, key));
             if (was.State == PolicyJobHealth.AwaitingSchedulerRetry)
             {
                 /* #3591: the scheduler's own retry cleared it and nothing was paged, so there is nothing to
@@ -7844,6 +7988,8 @@ WHERE c.is_enabled";
         _lastCaptureDownAlert.TryRemove(key, out _);
         _activeAgentDown.TryRemove(key, out _);
         _lastAgentDownAlert.TryRemove(key, out _);
+        _stateRetries.Clear(StateRetryKey(CaptureDownMetric, key));
+        _stateRetries.Clear(StateRetryKey(AgentDownMetric, key));
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
         _collectionWatchStart[key] = Unstamped;
@@ -7852,6 +7998,7 @@ WHERE c.is_enabled";
            state dropped above. Left behind, a re-add that is still down would pass its silent first pass and then
            be paged on the second, as "the previous alert reached no channel", for an outage the removed server had. */
         _connectionRetries.Clear(key);
+        _collectionStoppedRetries.Clear(key);
 
         /* #4795: and so does its re-fire clock, the stamp of the last down alert delivered. Left behind, a re-add
            that is still down would find a down alert on record for an outage the removed server had, and the clock
@@ -8455,6 +8602,84 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         }
 
         return failed;
+    }
+
+    internal const string CaptureDownMetric = "Capture Down";
+    internal const string AgentDownMetric = "Agent Not Running";
+
+    /// <summary>
+    /// #5493: retries of the lasting-state self-alerts, keyed by <see cref="StateRetryKey"/>. Collection Stopped and
+    /// the connection and AG alerts keep their own trackers; every other state alert shares this one.
+    /// </summary>
+    private readonly FailedSendRetryTracker _stateRetries = new();
+
+    private static string StateRetryKey(string metric, string grainKey) => metric + "|" + grainKey;
+
+    /// <summary>
+    /// #5493: the highest severity rank (1 warning, 2 critical) an alert with severity bands has sent in its current
+    /// occurrence, keyed by <see cref="StateRetryKey"/>. <see cref="DecideStateAlert"/> sends a new entry when the
+    /// condition rises past it; <see cref="EndStateAlert"/> forgets it on recovery.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, int> _stateSeverityRank = new();
+
+    /// <summary>
+    /// #5493: the decision for a lasting-state self-alert, the shape "Collection Stopped" took in #5489. The alert
+    /// is a state: <paramref name="stamps"/> holds when it was last sent, and a grain with no stamp is the entry, so
+    /// the first check that sees the condition (also the first after a restart, which loses the stamps) sends ONE
+    /// alert. While the condition stands it repeats only when <c>connection_refire_minutes</c> is above 0 and that
+    /// interval passed, or to send again an alert no channel took (#4795). It never repeats per cooldown. A stamp
+    /// ahead of the clock is replaced by this reading (#4732, in <see cref="LastFiredStamp.TryGet"/>).
+    /// </summary>
+    private ConnectionAlertDecision DecideStateAlert(
+        ConcurrentDictionary<string, DateTime> stamps, string key, string metric, string grainKey, DateTime now,
+        out int refireMinutes, int severityRank = 0)
+    {
+        refireMinutes = _connectionRefireMinutes();
+        var known = LastFiredStamp.TryGet(stamps, key, now, out var last);
+        var rankKey = StateRetryKey(metric, grainKey);
+        if (!known)
+        {
+            _stateSeverityRank[rankKey] = severityRank;
+        }
+        else if (severityRank > _stateSeverityRank.GetValueOrDefault(rankKey))
+        {
+            /* A rise to a higher severity inside one occurrence is news: one alert at the new severity, a new entry
+               (its stamp and retry start over). A fall sends nothing, and the highest rank stays remembered until
+               recovery so a flap between the two bands sends one alert per rise only. */
+            _stateSeverityRank[rankKey] = severityRank;
+            _stateRetries.Clear(rankKey);
+            known = false;
+        }
+
+        return ConnectionAlertPolicy.Decide(
+            previousOnline: !known,
+            online: false,
+            alertWhenAlreadyDownAtFirstSight: false,
+            refireInterval: refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
+            lastDownAlertUtc: known ? last : null,
+            nowUtc: now,
+            retryDueUtc: _stateRetries.DueUtc(StateRetryKey(metric, grainKey), now));
+    }
+
+    /// <summary>The sentence a repeated state alert leads its detail with; empty for the entry.</summary>
+    private static string StateRepeatNote(ConnectionAlertDecision decision, int refireMinutes) =>
+        decision == ConnectionAlertDecision.Lost
+            ? string.Empty
+            : refireMinutes > 0
+                ? $"Still the case (re-alerting every {refireMinutes} min). "
+                : "Still the case (the previous alert reached no channel, so it is sent again). ";
+
+    /// <summary>#5493: the answer to a state alert's send (#4795); true when every channel failed.</summary>
+    private bool NoteStateSend(string metric, string grainKey, AlertDelivery? delivery) =>
+        NoteRetrySend(_stateRetries, StateRetryKey(metric, grainKey), metric, delivery);
+
+    /// <summary>#5493: the condition ended; the next occurrence is a new entry with its own alert.</summary>
+    private void EndStateAlert(
+        ConcurrentDictionary<string, DateTime> stamps, string key, string metric, string grainKey)
+    {
+        stamps.TryRemove(key, out _);
+        _stateRetries.Clear(StateRetryKey(metric, grainKey));
+        _stateSeverityRank.TryRemove(StateRetryKey(metric, grainKey), out _);
     }
 
     /// <summary>The key an availability group alert is tracked under in <c>_agRetries</c>: the metric and the AG

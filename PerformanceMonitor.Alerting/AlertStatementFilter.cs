@@ -12,6 +12,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -89,7 +90,7 @@ public static class AlertStatementFilter
         SensitiveStatements.WaitForWarmUp(() => JudgedChars(outcome));
         try
         {
-            var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
+            var budget = NewBudget();
             var context = ApplyCore(outcome.Context, budget);
 
             var detailText = outcome.DetailText;
@@ -150,6 +151,31 @@ public static class AlertStatementFilter
     private static readonly ConditionalWeakTable<AlertOutcome, object> Judged = new();
     private static readonly object Mark = new();
 
+    /* #5459: a test seam for the wall-clock judge budget. The default is exactly what production always did: one
+       JudgeBudget at ReadBudget per call. A test that asserts what a clean document comes back as pins a budget that
+       cannot run out on a starved runner, and one that asserts the over-budget path hands in a budget that is already
+       spent. AsyncLocal, so a test's override reaches only its own call chain (the engine's awaited delivery too),
+       never another test running beside it. */
+    private static readonly AsyncLocal<Func<SensitiveStatements.JudgeBudget>?> BudgetOverride = new();
+
+    /// <summary>Test seam (#5459): every call on this logical flow builds its budget with <paramref name="make"/>
+    /// until the returned scope is disposed.</summary>
+    internal static IDisposable UseBudget(Func<SensitiveStatements.JudgeBudget> make)
+    {
+        ArgumentNullException.ThrowIfNull(make);
+        var previous = BudgetOverride.Value;
+        BudgetOverride.Value = make;
+        return new BudgetScope(previous);
+    }
+
+    private static SensitiveStatements.JudgeBudget NewBudget() =>
+        BudgetOverride.Value?.Invoke() ?? new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
+
+    private sealed class BudgetScope(Func<SensitiveStatements.JudgeBudget>? previous) : IDisposable
+    {
+        public void Dispose() => BudgetOverride.Value = previous;
+    }
+
     private static AlertOutcome Remember(AlertOutcome outcome)
     {
         Judged.TryAdd(outcome, Mark);
@@ -170,7 +196,7 @@ public static class AlertStatementFilter
         SensitiveStatements.WaitForWarmUp(() => JudgedChars(context));
         try
         {
-            return ApplyCore(context, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
+            return ApplyCore(context, NewBudget());
         }
 #pragma warning disable CA1031 // fail closed
         catch (Exception)
@@ -188,7 +214,7 @@ public static class AlertStatementFilter
     {
         ArgumentNullException.ThrowIfNull(alert);
         SensitiveStatements.WaitForWarmUp(() => JudgedChars(alert));
-        return ApplyFinding(alert, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
+        return ApplyFinding(alert, NewBudget());
     }
 
     /// <summary>The finding alerts of one summary message, judged under ONE budget.</summary>
@@ -206,7 +232,7 @@ public static class AlertStatementFilter
 
             return judgedChars;
         });
-        var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
+        var budget = NewBudget();
         List<FindingAlert>? result = null;
         for (var i = 0; i < alerts.Count; i++)
         {

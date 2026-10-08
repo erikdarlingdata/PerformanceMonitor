@@ -300,7 +300,7 @@ END;
 
     /// <summary>The live version probe deciding the 2017+/2022+ column gates (see class remarks).</summary>
     public const string ProductVersionProbeText =
-        "SELECT CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4))";
+        "SELECT /* PerformanceMonitorLite */ CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4))";
 
     /// <summary>PRODUCTVERSION assumed when the probe fails or returns NULL (SQL Server 2016).</summary>
     public const int DefaultProductVersion = 13;

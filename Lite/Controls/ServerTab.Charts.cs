@@ -268,6 +268,9 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
+        EmptyState.Show(MemoryGrantSizingChart, data.Count == 0, "No memory grants in the selected time window.");
+        EmptyState.Show(MemoryGrantActivityChart, data.Count == 0, "No memory grants in the selected time window.");
+
         if (data.Count == 0)
         {
             foreach (var c in new[] { MemoryGrantSizingChart, MemoryGrantActivityChart })
@@ -468,7 +471,7 @@ public partial class ServerTab : UserControl
         }
 
         MemoryPressureEventsChart.Refresh();
-        ShowEngineGap(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureRows.Count);
+        ShowEngineGap(MemoryPressureEventsNoDataMessage, "memory_pressure_events", pressureRows.Count, keepsOwnEmptyText: true);
     }
 
     private void UpdateTempDbChart(List<TempDbRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -894,6 +897,7 @@ public partial class ServerTab : UserControl
         }
 
         _blockingTrendHover?.Clear();
+        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No blocking in the selected time window.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */
@@ -972,6 +976,7 @@ public partial class ServerTab : UserControl
         }
 
         _deadlockTrendHover?.Clear();
+        EmptyState.Show(DeadlockTrendChart, data.Count == 0, "No deadlocks in the selected time window.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No deadlocks — show a flat line at zero so the chart looks active */

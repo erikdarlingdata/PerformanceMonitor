@@ -2095,8 +2095,12 @@ internal sealed class SlowInsertMuteRuleStore : IMuteRuleStore
 /// </summary>
 public sealed class RepeatedCreateMuteRuleTests
 {
+    /* #5496: one clock reading for the whole class. Expiry(30) is called twice in one test and the two spellings must be
+       the SAME instant; reading the date at each call made them differ when a run crossed midnight UTC. */
+    private static readonly DateTime Today = DateTime.UtcNow.Date;
+
     private static string Expiry(int daysFromNow) =>
-        DateTime.UtcNow.Date.AddDays(daysFromNow).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+        Today.AddDays(daysFromNow).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
     private static Task<string> ViaMcp(
         IMuteRuleStore store,

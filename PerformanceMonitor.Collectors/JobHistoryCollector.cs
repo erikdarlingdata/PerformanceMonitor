@@ -152,7 +152,7 @@ public sealed class JobHistoryCollector : CollectorDefinitionBase<JobHistoryColl
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     instance_id = jh.instance_id,
     job_id = CONVERT(varchar(36), jh.job_id),
     job_name = j.name,

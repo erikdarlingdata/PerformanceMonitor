@@ -47,6 +47,7 @@ namespace Darling.Tests;
 /// counts as SEPARATE pins, because a distinctness check over the combined message would pass on the
 /// numbers rather than on the verdicts.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public class CollectorMeasurementSeamTests
 {
     /* A rendered note may contain NOTHING but label=value tokens separated by single spaces. Anchored at

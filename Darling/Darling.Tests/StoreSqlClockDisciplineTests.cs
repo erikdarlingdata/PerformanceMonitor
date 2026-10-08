@@ -45,6 +45,7 @@ namespace Darling.Tests;
 /// columns back. Widening this to the write side is a separate change with a data-migration question
 /// attached, so it is deliberately out of scope here rather than silently allowlisted.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class StoreSqlClockDisciplineTests
 {
     /* Floors, so the scan cannot pass by finding nothing. Measured on dev: 602 files, 20,843 string literal

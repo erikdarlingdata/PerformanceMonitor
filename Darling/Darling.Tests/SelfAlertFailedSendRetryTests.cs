@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
@@ -51,6 +52,15 @@ public sealed class SelfAlertFailedSendRetryTests
     public static TheoryData<Arm> Arms => new()
     {
         Arm.CollectionStopped, Arm.CaptureDown, Arm.AgentDown, Arm.CostRegression,
+    };
+
+    /* #5489: Collection Stopped is a state alert now, so a delivered fire is NOT repeated after the cooldown (see
+       CollectionStoppedStateAlertTests). #5493 did the same for Capture Down and Agent Not Running (see
+       StateSelfAlertTests). The two tests below that pin "a delivered fire waits the whole cooldown and then fires
+       again" run for the one arm left that repeats per cooldown: the cost regression, a threshold alert. */
+    public static TheoryData<Arm> CooldownRepeatArms => new()
+    {
+        Arm.CostRegression,
     };
 
     /* The delivery shapes the channels really produce, as PgAlertFailedSendRetryTests and AlertEngineTests build
@@ -103,9 +113,15 @@ public sealed class SelfAlertFailedSendRetryTests
         public Rig()
         {
             Evaluator = new DarlingSelfAlertEvaluator(
-                Settings, Deliverer, new DarlingSelfAlertTests.FakeHistoryStore(), _ => false,
-                logger: new DarlingSelfAlertTests.CapturingLogger(), utcNow: () => Now);
+                Settings, Deliverer, History, _ => false,
+                logger: new DarlingSelfAlertTests.CapturingLogger(), utcNow: () => Now,
+                connectionRefireMinutes: () => ConnectionRefireMinutes);
         }
+
+        public DarlingSelfAlertTests.FakeHistoryStore History { get; } = new();
+
+        /// <summary>#5489: connection_refire_minutes, read live per sweep like the shipped seam. 0 = off.</summary>
+        public int ConnectionRefireMinutes { get; set; }
 
         public DarlingSelfAlertTests.FakeSettings Settings { get; } = new() { CooldownMinutes = 5 };
 
@@ -183,7 +199,7 @@ public sealed class SelfAlertFailedSendRetryTests
     }
 
     [Theory]
-    [MemberData(nameof(Arms))]
+    [MemberData(nameof(CooldownRepeatArms))]
     public async Task ADeliveredFire_WaitsTheFullCooldown(Arm arm)
     {
         var rig = new Rig { Deliverer = { Answer = DeliveredByWebhook() } };
@@ -202,7 +218,7 @@ public sealed class SelfAlertFailedSendRetryTests
     }
 
     [Theory]
-    [MemberData(nameof(Arms))]
+    [MemberData(nameof(CooldownRepeatArms))]
     public async Task ARetryThatIsDelivered_WaitsTheFullCooldown_AndTheNextFailureStartsAtAMinute(Arm arm)
     {
         var rig = new Rig { Deliverer = { Answer = FailedByWebhook() } };
@@ -280,5 +296,121 @@ public sealed class SelfAlertFailedSendRetryTests
         rig.Now = Start + Cooldown + TimeSpan.FromMinutes(1) + Cooldown;
         await rig.SweepAsync(Arm.CostRegression, FirstDataPoint);
         Assert.Equal(3, rig.Fires);
+    }
+
+    /* ---------------- #5489: Collection Stopped is a state alert ---------------- */
+
+    [Fact]
+    public async Task CollectionStopped_StoppedAcrossManyCooldowns_WithRefireOff_AlertsExactlyOnce()
+    {
+        var rig = new Rig { Deliverer = { Answer = DeliveredByWebhook() } };
+
+        /* 12 cooldowns (an hour) of a standing outage, one sweep a minute. */
+        for (var minute = 0; minute <= 60; minute++)
+        {
+            rig.Now = Start.AddMinutes(minute);
+            await rig.SweepAsync(Arm.CollectionStopped);
+        }
+
+        Assert.Equal(1, rig.Fires);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_WithRefireOn_RepeatsOnTheRefireInterval_NotTheCooldown()
+    {
+        var rig = new Rig { Deliverer = { Answer = DeliveredByWebhook() }, ConnectionRefireMinutes = 30 };
+
+        /* 95 minutes stopped, swept every minute, cooldown 5: alerts at 0, 30, 60 and 90, not one per cooldown. */
+        var firedAtMinute = new List<int>();
+        for (var minute = 0; minute <= 95; minute++)
+        {
+            rig.Now = Start.AddMinutes(minute);
+            var before = rig.Fires;
+            await rig.SweepAsync(Arm.CollectionStopped);
+            if (rig.Fires > before)
+            {
+                firedAtMinute.Add(minute);
+            }
+        }
+
+        Assert.Equal(new[] { 0, 30, 60, 90 }, firedAtMinute.ToArray());
+    }
+
+    [Fact]
+    public async Task CollectionStopped_RecoverThenStoppedAgain_IsANewOutageWithItsOwnAlert()
+    {
+        var rig = new Rig { Deliverer = { Answer = DeliveredByWebhook() } };
+
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(1, rig.Fires);
+
+        /* Recovery: one "Collection Resumed" row. */
+        rig.Now = Start.AddMinutes(1);
+        await rig.Evaluator.ApplyCollectionStoppedAsync(ServerId, Name, stopped: false, "", Ct);
+        Assert.Equal("Collection Resumed", Assert.Single(rig.History.Records).MetricName);
+
+        /* Stopped again a minute later, inside the cooldown: a new outage, a new alert. */
+        rig.Now = Start.AddMinutes(2);
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(2, rig.Fires);
+
+        /* And that outage is a state alert too. */
+        rig.Now = Start.AddMinutes(60);
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(2, rig.Fires);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_AnAlertNoChannelTook_IsSentAgainAfterTheBackOff_ThenStopsOnceDelivered_WithRefireOff()
+    {
+        var rig = new Rig { Deliverer = { Answer = FailedByWebhook() } };
+
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(1, rig.Fires);
+
+        rig.Now = Start.AddSeconds(59);
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(1, rig.Fires);
+
+        /* The retry, a minute on, is delivered. */
+        rig.Deliverer.Answer = DeliveredByWebhook();
+        rig.Now = Start.AddSeconds(60);
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(2, rig.Fires);
+
+        /* Delivered: nothing more for the rest of the outage. */
+        for (var minute = 2; minute <= 60; minute++)
+        {
+            rig.Now = Start.AddMinutes(minute);
+            await rig.SweepAsync(Arm.CollectionStopped);
+        }
+
+        Assert.Equal(2, rig.Fires);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_RefireIsReadLive_ChangedWhileTheOutageStands()
+    {
+        var rig = new Rig { Deliverer = { Answer = DeliveredByWebhook() } };
+
+        await rig.SweepAsync(Arm.CollectionStopped);
+        rig.Now = Start.AddMinutes(45);
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(1, rig.Fires);
+
+        /* Turned on to 30 minutes at run time: the 45 minutes since the alert are already past the interval. */
+        rig.ConnectionRefireMinutes = 30;
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(2, rig.Fires);
+
+        rig.Now = Start.AddMinutes(60);
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(2, rig.Fires);
+
+        /* Turned off again: the standing outage stops repeating. */
+        rig.ConnectionRefireMinutes = 0;
+        rig.Now = Start.AddMinutes(240);
+        await rig.SweepAsync(Arm.CollectionStopped);
+        Assert.Equal(2, rig.Fires);
     }
 }

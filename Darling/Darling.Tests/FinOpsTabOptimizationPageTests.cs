@@ -180,7 +180,7 @@ public sealed class FinOpsTabOptimizationPageTests
     {
         var tab = Tab();
         Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"aborted\" \\|\\| res\\.kind === \"auth\"\\) return;$", tab);
-        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return mount\\(body, emptyStrip\\(res\\.message\\)\\);$", tab);
+        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return mount\\(body, gatedEmptyStrip\\(res, ctx\\)\\);$", tab);
     }
 
     [Fact]
@@ -188,7 +188,8 @@ public sealed class FinOpsTabOptimizationPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "../plan-viewer.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "../plan-viewer.js", "./gate.js" }));
+        Assert.Contains("./gate.js", imports);
     }
 
     [Fact]

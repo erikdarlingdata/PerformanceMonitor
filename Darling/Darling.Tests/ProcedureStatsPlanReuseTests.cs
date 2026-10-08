@@ -157,10 +157,10 @@ public sealed class ProcedureStatsPlanReuseTests
     }
 
     [Fact]
-    public void TheShippedKnobValue_IsOff()
+    public void TheShippedKnobValue_IsOn()
     {
-        Assert.Equal("off", new DarlingConfig().ProcedureStatsDeferredPlanFetch);
-        Assert.Equal("off", ProcedureStatsPlanFetchModes.DefaultValue);
+        Assert.Equal("on", new DarlingConfig().ProcedureStatsDeferredPlanFetch);
+        Assert.Equal("on", ProcedureStatsPlanFetchModes.DefaultValue);
     }
 
     private static (DarlingCollectorRunner Runner, CapturingTestLogger Log) RunnerWith(string? knob, bool capturePlans = true)
@@ -184,6 +184,19 @@ public sealed class ProcedureStatsPlanReuseTests
         Assert.Equal(expected, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", target));
         Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("query_stats", target));
         Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("query_store", target));
+    }
+
+    [Fact]
+    public void ARunnerBuiltWithoutTheKnob_DefersTheFetch_ExceptOnAzureSqlDatabaseOrWithoutPlanCapture()
+    {
+        /* #5158: the deferred fetch is on unless the file says otherwise (3.10), and the guards still win. */
+        var runner = new DarlingCollectorRunner(
+            NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Password=x;Database=x"), new CollectorDeltaCalculator(), null,
+            capturePlans: () => true);
+
+        Assert.Equal(ProcedureStatsPlanFetchMode.On, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo()));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo { IsAzureSqlDb = true }));
+        Assert.Equal(ProcedureStatsPlanFetchMode.Off, RunnerWith("on", capturePlans: false).Runner.ProcedureStatsPlanFetchModeFor("procedure_stats", new CollectorTargetInfo()));
     }
 
     [Theory]

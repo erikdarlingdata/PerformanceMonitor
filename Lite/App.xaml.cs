@@ -453,6 +453,9 @@ public partial class App : Application
            harmless no-op (the window is about to show regardless). */
         _instanceSignal = new SingleInstanceSignal(ShowWindowEventName, OnSurfaceWindowRequested);
 
+        /* F17: tabs and column headers made of panels get an accessible name equal to their visible text. */
+        PerformanceMonitor.Ui.AccessibleNames.Register();
+
         base.OnStartup(e);
 
         /* #5320 N1: the statement filter's judge takes 250-900 ms to build, and the first connection or AG alert

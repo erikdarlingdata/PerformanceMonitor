@@ -30,7 +30,7 @@ public sealed class AdminPageBehaviourTests
     [Theory]
     [InlineData("servers", "Alpha", "GET /api/admin/servers")]
     [InlineData("routes", "Blocking Detected", "GET /api/read/get_notification_routes")]
-    [InlineData("settings", "cpu.threshold_percent", "GET /api/read/get_alert_settings")]
+    [InlineData("settings", "CPU: threshold (%)", "GET /api/read/get_alert_settings")]
     public void EachTab_ReadsItsTool_AndDrawsTheRow(string tab, string expectedText, string read)
     {
         var page = Tab("tab:" + tab);
@@ -84,7 +84,8 @@ public sealed class AdminPageBehaviourTests
     {
         var texts = Texts(Tab("tab:settings"));
 
-        Assert.Contains("cpu.threshold_percent", texts);
+        // The Setting column shows a readable label (click-through 4d); the key rides in its tooltip.
+        Assert.Contains("CPU: threshold (%)", texts);
         Assert.DoesNotContain(texts, t => t.Contains("UNLISTED", StringComparison.Ordinal));
         Assert.DoesNotContain(texts, t => t.Contains("future_knob", StringComparison.Ordinal));
         Assert.DoesNotContain(texts, t => t.Contains("slack_url", StringComparison.Ordinal) || t.Contains("pagerduty_routing_key", StringComparison.Ordinal));
@@ -97,10 +98,10 @@ public sealed class AdminPageBehaviourTests
 
         Assert.Contains("Alert thresholds", texts);
         Assert.Contains("Long Running Query Filters", texts);
-        Assert.Contains("long_running_query.exclude_backups", texts);
-        Assert.Contains("long_running_query.threshold_minutes", texts);
-        Assert.True(Array.IndexOf(texts, "Long Running Query Filters") < Array.IndexOf(texts, "long_running_query.exclude_backups"));
-        Assert.True(Array.IndexOf(texts, "long_running_query.threshold_minutes") < Array.IndexOf(texts, "Long Running Query Filters"));
+        Assert.Contains("Long-running query: exclude backups", texts);
+        Assert.Contains("Long-running query: threshold (minutes)", texts);
+        Assert.True(Array.IndexOf(texts, "Long Running Query Filters") < Array.IndexOf(texts, "Long-running query: exclude backups"));
+        Assert.True(Array.IndexOf(texts, "Long-running query: threshold (minutes)") < Array.IndexOf(texts, "Long Running Query Filters"));
     }
 
     [Theory]

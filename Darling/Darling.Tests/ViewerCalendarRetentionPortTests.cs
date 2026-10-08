@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// the viewer's row makes the MCP row's decision from the same facts, that the horizon it judges against is the
 /// horizon the MCP publishes and the purge enforces, and that a grey cell now says why it is grey.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerCalendarRetentionPortTests
 {
     private static readonly DateTime Today = new(2026, 8, 19, 0, 0, 0, DateTimeKind.Utc);
@@ -284,6 +285,7 @@ public sealed class ViewerCalendarRetentionPortTests
 /// wrong state), and the fixture's rows for these servers are removed either way.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class ViewerCalendarRetentionLivePostgresTests
 {
     private const int ServerId = -936537;
@@ -314,7 +316,8 @@ public sealed class ViewerCalendarRetentionLivePostgresTests
 
             var purgedDay = viewerHorizon.AddDays(-10);
             var pastHorizonDay = viewerHorizon.AddDays(-5);
-            var collectedDay = DateTime.UtcNow.Date.AddDays(-2);
+            var today = DateTime.UtcNow.Date; // #5496: one reading, so the collected day and the absent day below cannot land on the same date
+            var collectedDay = today.AddDays(-2);
 
             /* The purged shape: a run record and nothing else. The past-horizon shape: a run record plus one
                surviving signal (a deadlock). The collected shape: a run record inside retention. */
@@ -357,7 +360,7 @@ public sealed class ViewerCalendarRetentionLivePostgresTests
             var absentBefore = await viewer.GetDailySummaryAsync(ServerId, viewerHorizon.AddDays(-15), ct);
             Assert.Equal(DailySummaryDataState.Purged, absentBefore!.DataState);
             Assert.False(absentBefore.HasData);
-            var absentInside = await viewer.GetDailySummaryAsync(ServerId, DateTime.UtcNow.Date.AddDays(-3), ct);
+            var absentInside = await viewer.GetDailySummaryAsync(ServerId, today.AddDays(-3), ct);
             Assert.Equal(DailySummaryDataState.NoRunRecord, absentInside!.DataState);
 
             bodySucceeded = true;

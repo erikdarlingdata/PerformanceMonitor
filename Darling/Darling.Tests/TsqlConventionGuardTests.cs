@@ -95,6 +95,7 @@ namespace Darling.Tests;
 /// references which do not resolve on disk, so a made-up filename is a red-proof that proves nothing.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class TsqlConventionGuardTests
 {
     /* Rule identifiers. Covered ones are what Findings can emit; uncovered ones exist so the disposition map

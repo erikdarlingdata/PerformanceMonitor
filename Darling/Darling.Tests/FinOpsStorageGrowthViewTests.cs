@@ -331,11 +331,13 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         await PgTargetFactCollectorTests.RegisterServerAsync(c, PostgresServerId, PostgresServerName, MonitoredEngineKind.Postgres, 16, ct);
         var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
 
-        /* Sizes: Alpha has all three points, Beta has no 30-day point, Sib is an Azure sibling row. */
-        await Size(c, ct, now.AddDays(-30).AddMinutes(-5), "Alpha", 1000m, 1);
-        await Size(c, ct, now.AddDays(-7).AddMinutes(-5), "Alpha", 1400m, 1);
+        /* Sizes: Alpha has all three points, Beta has no 30-day point, Sib is an Azure sibling row. The baselines sit 30.5 and 7.5
+           days back (inside the one-day tolerance of the 30 and 7 day marks), so the daily rate is only right when it divides by the
+           real span between the two snapshots: a fixed 30 or 7 would give 16.68 and 8.57 where the spans give 16.40 and 8.00. */
+        await Size(c, ct, now.AddDays(-30.5), "Alpha", 1000m, 1);
+        await Size(c, ct, now.AddDays(-7.5), "Alpha", 1400m, 1);
         await Size(c, ct, now.AddMinutes(-5), "Alpha", 1500.255m, 1);
-        await Size(c, ct, now.AddDays(-7).AddMinutes(-5), "Beta", 200m, 1);
+        await Size(c, ct, now.AddDays(-7.5), "Beta", 200m, 1);
         await Size(c, ct, now.AddMinutes(-5), "Beta", 260m, 1);
         await Size(c, ct, now.AddMinutes(-5), "Sib", 50m, 1, sibling: true);
 
@@ -377,12 +379,16 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         Assert.Equal(100.26m, alpha.GetProperty("growth_7d_mb").GetDecimal());
         Assert.Equal(500.26m, alpha.GetProperty("growth_30d_mb").GetDecimal());
         Assert.Equal(50.0m, alpha.GetProperty("growth_pct_30d").GetDecimal());
+        // 500.255 MB over the 30.4965 days between the two snapshots (30.5 days less the 5 minutes the newest sits back).
+        Assert.Equal(16.40m, alpha.GetProperty("daily_growth_rate_mb").GetDecimal());
         Assert.False(alpha.GetProperty("has_sibling_row").GetBoolean());
         Assert.Equal(JsonValueKind.Null, alpha.GetProperty("note").ValueKind);
         var beta = rows[1];
         Assert.Equal(JsonValueKind.Null, beta.GetProperty("size_30d_ago_mb").ValueKind);
         Assert.Equal(JsonValueKind.Null, beta.GetProperty("growth_30d_mb").ValueKind);
         Assert.Equal(60m, beta.GetProperty("growth_7d_mb").GetDecimal());
+        // No 30-day point: the rate falls back to the 7-day baseline over its real 7.4965-day span.
+        Assert.Equal(8.00m, beta.GetProperty("daily_growth_rate_mb").GetDecimal());
         Assert.True(rows[2].GetProperty("has_sibling_row").GetBoolean());
         Assert.Equal(AzureSiblingDatabaseSize.LogNote, rows[2].GetProperty("note").GetString());
     }

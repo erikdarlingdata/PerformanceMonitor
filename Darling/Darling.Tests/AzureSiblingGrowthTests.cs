@@ -61,16 +61,30 @@ public sealed class AzureSiblingGrowthTests
     }
 
     [Fact]
-    public void ViewerStorageGrowth_LeavesTheOldShapeRowsOutOfTheLatestAnd7dAnd30dSums()
+    public void ViewerStorageGrowth_LeavesTheOldShapeRowsOutOfTheLatestSum_AndEverySiblingRowOutOfThe7dAnd30dSums()
     {
         var sql = ViewerDataService.StorageGrowthSql;
 
-        foreach (var sum in new[] { "latest", "past_7d", "past_30d" })
+        Assert.True(
+            Squash(CteBody(sql, "latest")).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
+            "The latest sum does not leave the old-shape sibling rows out.");
+
+        // #5498: the newest side holds data plus log per database now, so a past side that kept the old data-only
+        // sibling rows would read the log as growth.
+        foreach (var sum in new[] { "past_7d", "past_30d" })
         {
             Assert.True(
-                Squash(CteBody(sql, sum)).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
-                $"The {sum} sum does not leave the old-shape sibling rows out.");
+                Squash(CteBody(sql, sum)).Contains(AzureSiblingDatabaseSize.ExcludeAllSiblingRows, StringComparison.Ordinal),
+                $"The {sum} sum does not leave every sibling row out.");
         }
+    }
+
+    [Fact]
+    public void ExcludeAllSiblingRows_IsTheRowTestWithoutTheUsedSpaceCondition()
+    {
+        Assert.Equal(
+            "NOT (file_id IS NULL AND COALESCE(file_name, '') = '(whole database)')",
+            AzureSiblingDatabaseSize.ExcludeAllSiblingRows);
     }
 
     /// <summary>

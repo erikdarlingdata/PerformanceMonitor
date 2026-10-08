@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// shutdown loop, say) is not flagged. There is no exemption list: none was needed.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class TestsNoSilentPassGuardTests
 {
     private static readonly Regex TestAttribute = new(@"\[\s*(?:Fact|Theory)\b", RegexOptions.Compiled);

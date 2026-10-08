@@ -123,11 +123,14 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
         await DarlingMcpTestData.RegisterServerAsync(c, ServerIdC, ServerNameC, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, ServerIdD, ServerNameD, ct);
 
-        /* Server A, latest snapshot at today's midnight. The 7-day point is the newest snapshot at or before now-7d (anchor-8d);
-           anchor-6d is a decoy that is newer than that cutoff and must be ignored. The 30-day point is anchor-31d, decoy anchor-29d. */
+        /* Server A, latest snapshot at today's midnight. A baseline is the snapshot NEAREST its mark (now-7d, now-30d) and within a day
+           of it. The marks sit at anchor-7d and anchor-30d plus the time of day, so anchor-7d and anchor-30d are the only offsets within
+           that day at every hour (the live Storage Growth view tests seed 7.5 and 30.5 days back relative to the real clock and assert
+           the exact rate over the real span). The decoys, anchor-5d and anchor-27d, are more than a day from either mark at every hour
+           and must be ignored. */
         var latest = anchor;
-        var p7 = anchor.AddDays(-8);
-        var p30 = anchor.AddDays(-31);
+        var p7 = anchor.AddDays(-7);
+        var p30 = anchor.AddDays(-30);
         await Size(c, ct, ServerIdA, ServerNameA, latest, "GrowAlpha", 1, 1000.5m);
         await Size(c, ct, ServerIdA, ServerNameA, latest, "GrowAlpha", 2, 250m);
         await Size(c, ct, ServerIdA, ServerNameA, latest, "GrowBeta", 1, 800m);
@@ -146,20 +149,29 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
         await Size(c, ct, ServerIdA, ServerNameA, p30, "GrowAlpha", 2, 100m);
         await Size(c, ct, ServerIdA, ServerNameA, p30, "TieDelta", 1, 300m);
         await Size(c, ct, ServerIdA, ServerNameA, p30, "TieEpsilon", 1, 300m);
-        await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-6), "GrowAlpha", 1, 99999m);
-        await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-29), "GrowAlpha", 1, 88888m);
+        await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-5), "GrowAlpha", 1, 99999m);
+        await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-27), "GrowAlpha", 1, 88888m);
 
         /* Azure sibling database on server A: one whole-database row per snapshot (file_id NULL, file_name = the sibling name),
-           so HasSiblingRow is true. The p30 row is an old-shape row (no used_size_mb); ExcludePreFixRows drops it, so the
-           30-day point and growth are blank. Were it counted, they would be 100 MB and 500 MB. */
+           so HasSiblingRow is true. The latest side drops only the old-shape row (no used_size_mb); the 7-day and 30-day sides
+           (#5498) drop EVERY whole-database row, so both past points and both growth figures are blank. Were the p7 and p30
+           rows counted, they would be 560 MB and 100 MB. */
         await Sibling(c, ct, ServerIdA, ServerNameA, latest, "SiblingOmega", 600m, 500m);
         await Sibling(c, ct, ServerIdA, ServerNameA, p7, "SiblingOmega", 560m, 450m);
         await Sibling(c, ct, ServerIdA, ServerNameA, p30, "SiblingOmega", 100m, null);
 
+        /* #5498: an Azure database upgraded to the per-file collector. Its older rows are the whole-database shape (data space
+           only, used space present), its newest rows are the real data file and log file. The log must not read as growth: the
+           past points and growth are blank. Were the 7-day sibling row counted, growth would be 120 MB. */
+        await Sibling(c, ct, ServerIdA, ServerNameA, p7, "SiblingZeta", 380m, 350m);
+        await Size(c, ct, ServerIdA, ServerNameA, latest, "SiblingZeta", 1, 380m);
+        await Size(c, ct, ServerIdA, ServerNameA, latest, "SiblingZeta", 2, 120m);
+
         /* Server B: one snapshot, so the latest probe's two-day window is empty and the fallback finds it. */
         await Size(c, ct, ServerIdB, ServerNameB, anchor.AddDays(-5), "OnlyBeta", 1, 123.75m);
 
-        /* Server C: both at-or-before probes take the fallback; the 7-day point is the latest itself and is dropped. */
+        /* Server C: a baseline is the sample nearest each mark within one day, and neither snapshot (-10d, -40d) is within a day of
+           the 7-day or the 30-day mark, so both growth figures are null. */
         await Size(c, ct, ServerIdC, ServerNameC, anchor.AddDays(-10), "StaleGamma", 1, 600m);
         await Size(c, ct, ServerIdC, ServerNameC, anchor.AddDays(-40), "StaleGamma", 1, 450m);
 

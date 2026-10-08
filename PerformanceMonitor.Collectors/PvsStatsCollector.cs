@@ -191,7 +191,7 @@ public sealed class PvsStatsCollector : CollectorDefinitionBase<PvsStatsCollecto
     private const string OnPremQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name =
         d.name,
     database_id =
@@ -260,7 +260,7 @@ OPTION(RECOMPILE);";
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name =
         DB_NAME(),
     database_id =

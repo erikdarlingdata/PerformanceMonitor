@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// for the host.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class DeadlockStoredIdentityTests
 {
     private static readonly DateTime T = new(2026, 9, 30, 12, 0, 0, DateTimeKind.Unspecified);
