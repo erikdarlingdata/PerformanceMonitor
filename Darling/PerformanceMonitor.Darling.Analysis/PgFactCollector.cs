@@ -304,6 +304,7 @@ public sealed partial class PgFactCollector : IFactCollector
         ServerConfigSql,
         MemoryStatsSql,
         DatabaseSizeSql,
+        DatabaseSizeNewestSql,
         ServerMetadataSql,
         CpuUtilizationSql,
         RunnableTaskStatsSql,

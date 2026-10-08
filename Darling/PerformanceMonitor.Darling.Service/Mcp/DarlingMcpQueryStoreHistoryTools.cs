@@ -99,7 +99,11 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     /// <c>query_store_interval_wide</c> already holds ONE row per interval identity, its latest snapshot (the dedupe above,
     /// kept as the table is written), so this reads it directly. $4 is the gate's <c>ReadStart</c>. The
     /// <c>first_execution_time</c> floor is the grid's own (#4605): it filters index entries before the heap and drops
-    /// no row. A static readonly because the interval literal is derived from a TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.
+    /// no row. Its upper twin (#5523), <c>first_execution_time &lt;= $5 + </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>,
+    /// closes the range <c>ix_query_store_interval_wide_server_first_exec</c> scans, so a window that ended days ago does not
+    /// walk the server's newer rows; it drops a row only for a monitored-server clock more than the slack (twelve hours)
+    /// ahead of the service's, or a collection cycle longer than that
+    /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary). A static readonly because the interval literal is derived from a TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.
     /// </summary>
     internal static readonly string HistoryTableSql = $$"""
         SELECT plan_id, collection_time, execution_count,
@@ -110,6 +114,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         WHERE server_id = $1 AND database_name = $2 AND query_id = $3
         AND collection_time >= $4 AND collection_time <= $5
         AND first_execution_time >= $4 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+        AND first_execution_time <= $5 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
         """ + " " + HistoryOrder;
 
     private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";

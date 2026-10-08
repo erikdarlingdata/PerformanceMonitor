@@ -31,6 +31,7 @@ namespace PerformanceMonitorLite.Tests;
 /// anchored at a fixed <c>as_of</c>, never the clock. Own <see cref="DuckDbInitializer"/> per test, like
 /// <see cref="McpWindowNoticeToolTests"/>.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class McpWindowNoticeEventToolTests : IDisposable
 {
     private const string ServerName = "EventNoticeServer";

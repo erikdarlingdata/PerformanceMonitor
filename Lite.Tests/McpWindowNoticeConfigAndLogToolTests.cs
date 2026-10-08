@@ -34,6 +34,7 @@ namespace PerformanceMonitorLite.Tests;
 /// shown can never be older than the probe's floor. Every window is anchored at a fixed <c>as_of</c>, never the clock. Own
 /// <see cref="DuckDbInitializer"/> per test, like <see cref="McpWindowNoticeEventToolTests"/>.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
 {
     private const string ServerName = "ConfigLogNoticeServer";
