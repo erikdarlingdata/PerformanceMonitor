@@ -3420,7 +3420,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines.ReadSeconds, cancellationToken);
 
             long mismatches;
-            await using (var guard = new NpgsqlCommand(IntervalRollupCountGuard.SqlFor(unregisteredServers is { Count: > 0 }), connection) { CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds })
+            /* Bound to a local so the construction reads `new NpgsqlCommand(<identifier>, connection)`, the shape McpReadCommandTimeoutTests'
+               store-receiver census recognises; a method call as the first argument is an unclassifiable receiver there (#5525). */
+            var guardSql = IntervalRollupCountGuard.SqlFor(unregisteredServers is { Count: > 0 });
+            await using (var guard = new NpgsqlCommand(guardSql, connection) { CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds })
             {
                 guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourStartUtc, DateTimeKind.Unspecified) });
                 guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourEndUtc, DateTimeKind.Unspecified) });
