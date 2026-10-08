@@ -649,8 +649,10 @@ FROM pg_stat_bgwriter AS b";
     /// <summary>
     /// The size of a day-partitioned interval parent (#5571): the sum of <c>pg_total_relation_size</c> over its LEAF
     /// partitions (heap, indexes and TOAST of the legacy table, every day and DEFAULT), because the partitioned parent
-    /// itself has no storage and reads 0. A table that is not partitioned (a store that has not run its rung yet) has
-    /// no partition tree, so the sum is NULL and the plain size is used.
+    /// itself has no storage and reads 0. <c>pg_partition_tree</c> returns NO row for a plain table (it is not the
+    /// table's own single leaf), so for a table that is not partitioned (a store that has not run its rung yet) the sum
+    /// is NULL and the COALESCE falls back to the plain size. Both arms are live: the first for every migrated store,
+    /// the second for a store below the rung.
     /// </summary>
     private const string IntervalLatestPartitionBytesSql =
         $"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('collect.{QueryStoreIntervalLatest.TableName}'))::bigint";
@@ -663,7 +665,8 @@ FROM pg_stat_bgwriter AS b";
     /// The row count of a day-partitioned interval parent (#5571): the sum of the leaf partitions' planner estimates
     /// (<c>reltuples</c>, as every other row of this kind), NULL where none has been vacuumed or analysed yet. The
     /// parent's own <c>reltuples</c> is only set by an ANALYZE of the parent, so it would lag the partitions. For a table
-    /// that is not partitioned the table itself is the one leaf.
+    /// that is not partitioned <c>pg_partition_tree</c> returns no row (not the table itself as a leaf), so the
+    /// <c>NOT EXISTS</c> arm counts the table's own estimate instead.
     /// </summary>
     private const string IntervalLatestPartitionRowsSql =
         $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass)))))";
