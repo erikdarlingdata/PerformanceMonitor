@@ -124,6 +124,12 @@ public static class ComposeCompiler
     /// <summary>The rank CTE's name in a <see cref="PanelMode.RankedTimeSeries"/> statement (#2734).</summary>
     private const string RankCte = "topn";
 
+    /// <summary>The CTE that holds the fact rows aggregated once to one row per (bucket, group) in a single-scan
+    /// <see cref="PanelMode.RankedTimeSeries"/> statement (#5582), and the alias its readers use.</summary>
+    private const string RankBaseCte = "rank_base";
+
+    private const char RankBaseAlias = 'b';
+
     /// <summary>
     /// The relation the panel aggregates: the routed CAGG, or the raw source table — except
     /// <c>query_store_stats</c> on the RAW route, which is wrapped in a per-interval dedup first (#1841).
@@ -340,7 +346,17 @@ public static class ComposeCompiler
     /// Compiles <paramref name="plan"/> against <paramref name="context"/>. Returns the parameterized SQL,
     /// or a caller-facing error for the one runtime-only check (the window×resolution bucket ceiling).
     /// </summary>
-    public static (ComposeCompiled? Compiled, string? Error) Compile(PanelPlan plan, ComposeRunContext context)
+    public static (ComposeCompiled? Compiled, string? Error) Compile(PanelPlan plan, ComposeRunContext context) =>
+        CompileCore(plan, context, singleScanRankedTimeSeries: true);
+
+    /// <summary>
+    /// <see cref="Compile"/> with the #5582 single-scan RankedTimeSeries shape switchable. <c>false</c> compiles exactly the
+    /// text every route emitted before that change (the rank CTE and the outer query each scan the fact rows). It is the
+    /// live exactness oracle in <c>ComposeQueryStoreRankedSingleScanLiveTests</c> and the plan test's two-scan baseline;
+    /// no product path passes <c>false</c>.
+    /// </summary>
+    internal static (ComposeCompiled? Compiled, string? Error) CompileCore(
+        PanelPlan plan, ComposeRunContext context, bool singleScanRankedTimeSeries)
     {
         if (plan is null)
         {
@@ -472,9 +488,27 @@ public static class ComposeCompiler
         var timeColumn = route.IsCagg ? ComposeRoute.CaggTimeColumn : s_timeColumnByTable[plan.Measure.SourceTable];
         var sql = new StringBuilder();
 
+        /* #5582: the single-scan RankedTimeSeries shape. The rank and the series used to each scan the fact rows (a
+           one-day, 43-server read of the Query Store wide table is 8.5 million rows, so a RankedTimeSeries panel read
+           them twice and timed out). Here the fact body runs ONCE, into a CTE of one row per (bucket, group) that holds
+           the partial sums, counts and extremes the panel's aggregate needs; the rank is a re-aggregation of that CTE over
+           the groups alone, and the series a re-aggregation over (bucket, group). Only the Query Store wide route takes
+           it: every other route, and an aggregate that does not decompose (percentile_cont), compiles today's text. */
+        PartialColumns? partials = null;
+        string? partialValue = null;
+        if (singleScanRankedTimeSeries && plan.Mode == PanelMode.RankedTimeSeries && CanSingleScan(plan, route, context))
+        {
+            partials = new PartialColumns();
+            partialValue = TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, partials);
+        }
+
+        var singleScan = partialValue is not null;
+
         /* The fact FROM + (optional) module join + WHERE window/scope/filters — one emitter because the
            RankedTimeSeries rank CTE and the outer query must aggregate the SAME fact rows; two hand-kept
-           copies would drift into ranking one population and charting another. `indent` nests the text
+           copies would drift into ranking one population and charting another (#2734). Since #5582 a
+           single-scan RankedTimeSeries calls it once, into the base CTE, and the rank and the series both read that
+           CTE: they still aggregate the same fact rows, by construction. `indent` nests the text
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
@@ -590,19 +624,50 @@ public static class ComposeCompiler
            Ranking by the WINDOW TOTAL is the decided semantic (#2734 option 1): membership is stable
            across the window, so the chart reads as N lines. Per-bucket re-ranking is a non-goal — see the
            PanelMode doc. */
+        string BucketOfFact() => $"date_trunc('{MeasureCatalog.DateTruncField(effectiveBucket)}', {FactAlias}.{timeColumn})";
+
+        /* A single-scan statement reads the group columns of the base CTE by name; every other statement reads the
+           fact column. */
+        string DimRef(ComposeDimension dim) => singleScan ? $"{RankBaseAlias}.{dim.Name}" : GroupRef(dim);
+
+        if (singleScan)
+        {
+            /* The base CTE: the fact body, once, to one row per (bucket, group). The group columns are named as the rank CTE
+               names them; the partials are the sums, counts and extremes the aggregate re-combines (exactly: integer sums
+               and counts, min and max, never a double). The bucket and the group are the SAME expressions the series groups
+               on, so a series row is the combination of the base rows of its (bucket, group), and the rank row of its
+               group. Never the raw fact rows: at millions of them those would not fit the store's temp-file limit. */
+            sql.Append(sql.Length == 0 ? "WITH " : ", ").Append(RankBaseCte).Append(" AS (\n");
+            var baseSelects = new List<string> { BucketOfFact() + " AS bucket" };
+            baseSelects.AddRange(plan.GroupBy.Select(dim => GroupRef(dim) + " AS " + dim.Name));
+            baseSelects.AddRange(partials!.Columns.Select(column => column.Expression + " AS " + column.Name));
+            sql.Append("    SELECT ").Append(string.Join(", ", baseSelects)).Append('\n');
+            AppendFactBody("    ");
+            sql.Append("    GROUP BY ").Append(string.Join(", ", new[] { BucketOfFact() }.Concat(plan.GroupBy.Select(GroupRef)))).Append('\n');
+            sql.Append(")\n");
+        }
+
         if (plan.Mode == PanelMode.RankedTimeSeries)
         {
             sql.Append(sql.Length == 0 ? "WITH " : ", ").Append(RankCte).Append(" AS (\n");
             var rankSelects = new List<string>();
             foreach (var dim in plan.GroupBy)
             {
-                rankSelects.Add(GroupRef(dim) + " AS " + dim.Name);
+                rankSelects.Add(DimRef(dim) + " AS " + dim.Name);
             }
 
-            rankSelects.Add(BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route) + " AS value");
+            rankSelects.Add((singleScan ? partialValue! : BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route)) + " AS value");
             sql.Append("    SELECT ").Append(string.Join(", ", rankSelects)).Append('\n');
-            AppendFactBody("    ");
-            sql.Append("    GROUP BY ").Append(string.Join(", ", plan.GroupBy.Select(GroupRef))).Append('\n');
+            if (singleScan)
+            {
+                sql.Append("    FROM ").Append(RankBaseCte).Append(" AS ").Append(RankBaseAlias).Append('\n');
+            }
+            else
+            {
+                AppendFactBody("    ");
+            }
+
+            sql.Append("    GROUP BY ").Append(string.Join(", ", plan.GroupBy.Select(DimRef))).Append('\n');
             /* NULLS LAST, because Postgres's DESC default is NULLS FIRST: a group whose aggregate is NULL
                (every in-window row's delta column NULL — a counter's first-ever collection, say) would
                otherwise outrank every REAL winner and silently occupy a series slot. Worse here than in
@@ -625,7 +690,7 @@ public static class ComposeCompiler
         string? memberOfTopN = null;
         if (plan.Mode == PanelMode.RankedTimeSeries)
         {
-            var comparisons = plan.GroupBy.Select(d => $"t.{d.Name} IS NOT DISTINCT FROM {GroupRef(d)}");
+            var comparisons = plan.GroupBy.Select(d => $"t.{d.Name} IS NOT DISTINCT FROM {DimRef(d)}");
             memberOfTopN = $"EXISTS (SELECT 1 FROM {RankCte} AS t WHERE {string.Join(" AND ", comparisons)})";
         }
 
@@ -635,7 +700,9 @@ public static class ComposeCompiler
 
         if (plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries)
         {
-            var bucketExpr = $"date_trunc('{MeasureCatalog.DateTruncField(effectiveBucket)}', {FactAlias}.{timeColumn})";
+            /* The base CTE already holds the bucket (and groups on the fact column it truncates), so a single-scan
+               statement reads it by name. */
+            var bucketExpr = singleScan ? $"{RankBaseAlias}.bucket" : BucketOfFact();
             selectExprs.Add(bucketExpr + " AS bucket");
             groupExprs.Add(bucketExpr);
         }
@@ -646,13 +713,13 @@ public static class ComposeCompiler
                into the one "(other)" series (all its dim columns take the label), so the chart's buckets
                still sum to the window total. Without it, non-members are filtered out below instead. */
             var expr = plan.Mode == PanelMode.RankedTimeSeries && plan.IncludeOther
-                ? $"CASE WHEN {memberOfTopN} THEN {GroupRef(dim)} ELSE '{OtherSeriesLabel}' END"
-                : GroupRef(dim);
+                ? $"CASE WHEN {memberOfTopN} THEN {DimRef(dim)} ELSE '{OtherSeriesLabel}' END"
+                : DimRef(dim);
             selectExprs.Add(expr + " AS " + dim.Name);
             groupExprs.Add(expr);
         }
 
-        selectExprs.Add(BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route) + " AS value");
+        selectExprs.Add((singleScan ? partialValue! : BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route)) + " AS value");
         if (plan.Overlay is ComposeOverlay overlay)
         {
             /* The second measure (#1606): one more select expression over the SAME fact rows — never a join,
@@ -661,13 +728,21 @@ public static class ComposeCompiler
         }
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
-        AppendFactBody(string.Empty);
+        if (singleScan)
+        {
+            sql.Append("FROM ").Append(RankBaseCte).Append(" AS ").Append(RankBaseAlias).Append('\n');
+        }
+        else
+        {
+            AppendFactBody(string.Empty);
+        }
 
         if (plan.Mode == PanelMode.RankedTimeSeries && !plan.IncludeOther)
         {
             /* No residual requested: non-top-N rows are filtered out entirely (the chart under-reports the
-               window total by exactly what they did — the includeOther fold is the honest-total option). */
-            sql.Append("  AND ").Append(memberOfTopN).Append('\n');
+               window total by exactly what they did — the includeOther fold is the honest-total option). The
+               single-scan statement has no WHERE of its own (the window, scope and filters are in the base CTE). */
+            sql.Append(singleScan ? "WHERE " : "  AND ").Append(memberOfTopN).Append('\n');
         }
 
         if (groupExprs.Count > 0)
@@ -1201,6 +1276,129 @@ public static class ComposeCompiler
         return aggregatesADelta && CollectorDeltaCalculator.IsDeltaFamily(measure.SourceTable)
             ? $" FILTER (WHERE {FactAlias}.{MeasuredDeltaPredicate})"
             : "";
+    }
+
+    /// <summary>The partial aggregates a single-scan RankedTimeSeries base CTE computes (#5582): each is an aggregate
+    /// over fact columns (<c>SUM(f.execution_count)</c>) under a generated name (<c>p0</c>, <c>p1</c>, ...) the rank and the
+    /// series re-combine with <c>SUM</c>, <c>MIN</c> or <c>MAX</c>. An expression asked for twice is computed once.</summary>
+    private sealed class PartialColumns
+    {
+        private readonly Dictionary<string, string> _nameByExpression = new(StringComparer.Ordinal);
+
+        public List<(string Name, string Expression)> Columns { get; } = new();
+
+        /// <summary>The generated name of <paramref name="expression"/>, added to the base CTE on first use.</summary>
+        public string Add(string expression)
+        {
+            if (!_nameByExpression.TryGetValue(expression, out var name))
+            {
+                name = "p" + Columns.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                _nameByExpression[expression] = name;
+                Columns.Add((name, expression));
+            }
+
+            return name;
+        }
+    }
+
+    /// <summary>
+    /// Whether this RankedTimeSeries compile may use the single-scan shape (#5582): the Query Store WIDE route, a plain
+    /// raw-tier FROM item (no CAGG, no hourly-raw-edges arms), every group a plain fact column (no module join, no trimmed
+    /// history spelling), and no overlay (a RankedTimeSeries panel never carries one; this is a guard, not a feature).
+    /// Everything else compiles today's two-scan text. The aggregate is checked by <see cref="TryBuildPartialValueExpr"/>.
+    /// </summary>
+    private static bool CanSingleScan(PanelPlan plan, ComposeRoute route, ComposeRunContext context) =>
+        context.QueryStoreWideEligible
+        && !route.IsCagg
+        && route.Tier != ComposeSourceTier.HourlyRawEdges
+        && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal)
+        && plan.Overlay is null
+        && !plan.UsesModuleJoin
+        && plan.GroupBy.All(dim => !dim.ViaModuleJoin && !dim.TrailingSpaceHistory);
+
+    /// <summary>
+    /// <see cref="BuildValueExpr"/> over the base CTE's partial columns (#5582): the same <c>value</c>, built from partials
+    /// that combine exactly, or null when the aggregate does not decompose (the caller then compiles today's two-scan text).
+    /// The partials are computed over the fact rows of one (bucket, group); this expression re-combines them over any
+    /// set of those rows, so the rank (all buckets of a group) and the series (the rows of a bucket) read the same numbers
+    /// the fact-row aggregates did. Exactness, aggregate by aggregate:
+    /// <list type="bullet">
+    /// <item><c>SUM(bigint)</c> is numeric: a sum of numeric partial sums is the same numeric.</item>
+    /// <item><c>AVG(bigint)</c> is numeric division of the numeric sum by the non-null count. The partials are that sum and
+    /// <c>COUNT(col)</c> (not <c>COUNT(*)</c>: a NULL is not averaged); the combination divides the summed partials in numeric,
+    /// by the same division, and casts to double only at the end. A slice whose column is all NULL has a NULL sum and a zero
+    /// count and drops out; a group with no non-null value is NULL, as <c>AVG</c> is (the <c>NULLIF</c> keeps the zero
+    /// count from dividing).</item>
+    /// <item><c>MIN</c> and <c>MAX</c> of the partial minima and maxima; a NULL partial (every value NULL) is ignored.</item>
+    /// <item>The execution-weighted ratio and total: the per-row product <c>avg * execution_count</c> is summed (numeric) in
+    /// the partial exactly as the fact-row aggregate sums it, then summed again; the cast to double is at the same place.</item>
+    /// <item><c>COUNT(*)</c> is summed. <c>percentile_cont</c> has no partial: null.</item>
+    /// </list>
+    /// </summary>
+    private static string? TryBuildPartialValueExpr(ComposeMeasure measure, ComposeAggregate aggregate, string unit, PartialColumns partials)
+    {
+        string P(string name) => $"{RankBaseAlias}.{name}";
+
+        if (measure.Kind == MeasureKind.Ratio)
+        {
+            if (measure.RatioMode is not (MeasureRatioMode.Weighted or MeasureRatioMode.WeightedSum))
+            {
+                return null;
+            }
+
+            var product = partials.Add($"SUM({FactAlias}.{measure.WeightedValueColumn} * {FactAlias}.{measure.WeightColumn})");
+            string ratio;
+            if (measure.RatioMode == MeasureRatioMode.Weighted)
+            {
+                var weight = partials.Add($"SUM({FactAlias}.{measure.WeightColumn})");
+                ratio = $"(CAST(SUM({P(product)}) AS double precision) / NULLIF(SUM({P(weight)}), 0))";
+            }
+            else
+            {
+                ratio = $"CAST(SUM({P(product)}) AS double precision)";
+            }
+
+            return ApplyUnitConversion(ratio, measure.UnitFamily, measure.NativeUnit, unit);
+        }
+
+        if (aggregate == ComposeAggregate.Count)
+        {
+            return $"CAST(SUM({P(partials.Add("COUNT(*)"))}) AS double precision)";
+        }
+
+        /* A delta-family filter would have to ride on the partial; Query Store has none, so refuse the shape rather than
+           guess (MeasuredDeltaFilter is empty for it). */
+        if (MeasuredDeltaFilter(measure).Length > 0)
+        {
+            return null;
+        }
+
+        var column = $"{FactAlias}.{(measure.Archetype == MeasureArchetype.Cumulative ? measure.DeltaColumn! : measure.Column!)}";
+        string native;
+        switch (aggregate)
+        {
+            case ComposeAggregate.Sum:
+                native = $"CAST(SUM({P(partials.Add($"SUM({column})"))}) AS double precision)";
+                break;
+            case ComposeAggregate.Avg:
+                {
+                    var sum = partials.Add($"SUM({column})");
+                    var count = partials.Add($"COUNT({column})");
+                    native = $"CAST(SUM({P(sum)}) / NULLIF(SUM({P(count)}), 0) AS double precision)";
+                    break;
+                }
+
+            case ComposeAggregate.Min:
+                native = $"CAST(MIN({P(partials.Add($"MIN({column})"))}) AS double precision)";
+                break;
+            case ComposeAggregate.Max:
+                native = $"CAST(MAX({P(partials.Add($"MAX({column})"))}) AS double precision)";
+                break;
+            default:
+                return null;
+        }
+
+        return ApplyUnitConversion(native, measure.UnitFamily, measure.NativeUnit, unit);
     }
 
     /// <summary>Scales <paramref name="expr"/> (already a double) from <paramref name="nativeUnit"/> to
