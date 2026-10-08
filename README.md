@@ -350,7 +350,7 @@ The **Lite** app and the **Darling** viewer share the same tab layout (the viewe
 | **Blocking** | Blocking/deadlock trends, blocked process reports, deadlock history, visual block-chain & deadlock-graph viewers |
 | **Perfmon** | Selectable SQL Server performance counters over time |
 | **Configuration** | Server configuration, database configuration, scoped configuration, trace flags |
-| **FinOps** | Twelve sub-tabs. Utilization, Database Resources, Storage Growth, Locking & Contention, Database Sizes, and Version Store (PVS). Optimization, High Impact, Application Connections, and Server Inventory. Index Analysis (runs sp_IndexCleanup) and Recommendations. Column-level filtering on all grids |
+| **FinOps** | Twelve sub-tabs. Utilization, Database Resources, Storage Growth, Locking & Contention, Database Sizes, and Version Store (PVS). Optimization, High Impact, Application Connections, and Server Inventory. Index Analysis (runs sp_IndexCleanup) and Recommendations. Column-level filtering on most grids |
 | **Recommendations** | Prioritized findings drawn from collected metrics, grouped into incidents, each card showing the affected database, the recommendation, the reasoning behind it, and a copyable MCP investigation prompt |
 | **Alert History** | Logged alerts with a time range, details, dismiss, and mute actions |
 | **Job History** | SQL Agent job runs retained from `msdb` |
@@ -440,6 +440,7 @@ Alert emails include:
 ### Alert Behavior
 
 - **Resolved notifications** — when a condition clears (e.g., blocking ends), a "Cleared" notification fires
+- **Lasting problems alert once** — a problem that lasts, such as an unreachable server, an Availability Group secondary that fell behind, or (Darling) Collection Stopped, sends one alert when it starts and one when it ends. It sends another only if the setting **Re-alert while a problem lasts every** (`connection_refire_minutes`) is above 0 minutes. The default is 0, which means never.
 - **Server silencing** — right-click a server to acknowledge alerts, silence all alerts, or unsilence
 - **Always-on** — the alert engine runs independently of which tab is active, including when minimized to the system tray
 - **Alert history** — Lite logs alerts to DuckDB (`config_alert_log`); Darling logs to its Postgres store; both are accessible via MCP
@@ -573,7 +574,7 @@ Common issues:
 1. **No data after connecting** — Wait for the first collection cycle (1–5 minutes). Check logs for connection errors.
 2. **Query Store tab empty** — Query Store must be enabled on the target database (`ALTER DATABASE [YourDB] SET QUERY_STORE = ON`).
 3. **Blocked process reports empty** — Lite attempts to auto-configure the blocked process threshold to 5 seconds via `sp_configure`. On **AWS RDS**, `sp_configure` is not available — set `blocked process threshold (s)` through an RDS Parameter Group (see [Platform Notes](#platform-notes) below). On **Azure SQL Database**, the threshold is fixed at 20 seconds and cannot be changed. If you still see no data on other platforms, verify the login has `ALTER SETTINGS` permission.
-4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has the required [permissions](#permissions). For Azure SQL Database, use a contained database user with `VIEW DATABASE STATE`.
+4. **Connection failures** — Verify network connectivity, firewall rules, and that the login has the required [permissions](#permissions). For Azure SQL Database, use a contained database user with `VIEW DATABASE STATE`. Error 40615 means the server firewall did not allow the client's IP address. Add a server-level rule, or a database-level rule in master.
 5. **FinOps Index Analysis hangs, times out, or returns `Msg 229` on `sql_expression_dependencies`** — see [FinOps Index Analysis](#finops-index-analysis-per-database-grants) below for the full per-database grant set that fixes both failure modes.
 
 ### Darling
