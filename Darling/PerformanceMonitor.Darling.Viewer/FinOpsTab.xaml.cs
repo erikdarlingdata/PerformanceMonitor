@@ -106,9 +106,10 @@ public partial class FinOpsTab : UserControl
 
         _populatingServers = true;
         ServerSelector.ItemsSource = servers;
-        ServerSelector.SelectedItem = ViewerServerSetSync.PickerSelectionAfterReload(
+        ServerSelector.SelectedItem = FinOpsServerChoice.Selection(
             servers, keepSelection ? previousId : null, sidebarServerId);
         _populatingServers = false;
+        ApplyServerGate();
 
         /* The selection changed with SelectionChanged suppressed: the previously selected server is gone
            (removed elsewhere), or a load that does not keep the selection moved it. Reset the drills and column
@@ -148,6 +149,28 @@ public partial class FinOpsTab : UserControl
         _populatingServers = true;
         ServerSelector.SelectedItem = match;
         _populatingServers = false;
+        ApplyServerGate();
+    }
+
+    /// <summary>
+    /// A PostgreSQL target answers none of the single-server FinOps panels (they read SQL Server data), so its sub-tabs
+    /// collapse and the tab says <see cref="FinOpsServerChoice.PostgresNotCollected"/> once, where the grids would have sat
+    /// empty or still holding the previous server's rows. Server Inventory lists the whole fleet and stays. Called wherever
+    /// the selected server or the active sub-tab changes; the loaders ask the same helper before they read.
+    /// </summary>
+    private void ApplyServerGate()
+    {
+        var line = FinOpsServerChoice.NotCollectedLine(ServerSelector.SelectedItem as DarlingServer, crossServer: false);
+        for (var i = 0; i < FinOpsSubTabControl.Items.Count; i++)
+        {
+            if (i != FinOpsServerInventorySubTabIndex && FinOpsSubTabControl.Items[i] is TabItem { Content: UIElement content })
+            {
+                content.Visibility = line is null ? Visibility.Visible : Visibility.Collapsed;
+            }
+        }
+
+        FinOpsNotCollectedText.Text = line ?? "";
+        FinOpsNotCollectedText.Visibility = line is not null && !SelectedSubTabIsCrossServer ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>The tab's own server selector drives it; single-clicking a sidebar server syncs it here (and
@@ -159,6 +182,8 @@ public partial class FinOpsTab : UserControl
         {
             return;
         }
+
+        ApplyServerGate();
 
         /* A new server invalidates any open Storage Growth / Locking drill (their breadcrumbs + detail views
            belong to the previous server), so reset both to their parent view before reloading. */

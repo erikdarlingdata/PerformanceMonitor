@@ -133,6 +133,7 @@ public partial class FinOpsTab
             return;
         }
 
+        ApplyServerGate();
         await RefreshActiveSubTabAsync();
     }
 
@@ -142,6 +143,13 @@ public partial class FinOpsTab
     /// </summary>
     private async Task LoadFinOpsAsync()
     {
+        /* A PostgreSQL target has no SQL Server data for any single-server panel: run none of their reads (ApplyServerGate
+           shows the one line). Server Inventory lists the fleet and always runs. */
+        if (FinOpsServerChoice.NotCollectedLine(ServerSelector.SelectedItem as DarlingServer, crossServer: SelectedSubTabIsCrossServer) is not null)
+        {
+            return;
+        }
+
         switch (FinOpsSubTabControl.SelectedIndex)
         {
             case FinOpsDatabaseResourcesSubTabIndex:
@@ -183,6 +191,9 @@ public partial class FinOpsTab
                 break;
         }
     }
+
+    /// <summary>True while Server Inventory, the one sub-tab that reads the whole fleet rather than the picker's server, is the active sub-tab.</summary>
+    private bool SelectedSubTabIsCrossServer => FinOpsSubTabControl.SelectedIndex == FinOpsServerInventorySubTabIndex;
 
     // ── Utilization ──
 
@@ -575,7 +586,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsServerInventoryAsync()
     {
-        var servers = await _dataService.GetServerInventoryAsync();
+        var servers = await _dataService.GetServerInventoryAsync(FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked));
 
         /* Overlay each server's collected metrics + compute the health score (mirrors Lite's
            LoadServerInventoryAsync minus the live query). memScore/storScore use Lite's inventory-path
@@ -613,6 +624,13 @@ public partial class FinOpsTab
     private async void FinOpsRefreshApplicationConnections_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsApplicationConnectionsAsync);
     private async void FinOpsRefreshHighImpact_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsHighImpactAsync);
     private async void FinOpsRefreshServerInventory_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsServerInventoryAsync);
+
+    /// <summary>Ticking or clearing "Show removed servers" reloads the list, and its "N server(s)" count follows the list it shows. Ignored until the tab is loaded, so the XAML's own initial state does not read.</summary>
+    private async void FinOpsShowRemoved_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        await RunFinOpsLoad(LoadFinOpsServerInventoryAsync);
+    }
     private async void FinOpsOptimizationRefresh_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsOptimizationAsync);
 
     private async void FinOpsResourceUsageTimeRange_Changed(object sender, SelectionChangedEventArgs e)

@@ -258,7 +258,7 @@
                       SelectionChanged="ServerSelector_SelectionChanged">
                 <ComboBox.ItemTemplate>
                     <DataTemplate>
-                        <TextBlock Text="{Binding DisplayName}"/>
+                        <TextBlock Text="{Binding PickerLabel}"/>
                     </DataTemplate>
                 </ComboBox.ItemTemplate>
             </ComboBox>
@@ -268,6 +268,8 @@
         </StackPanel>
 
         <Grid Grid.Row="1">
+            <!-- The one line a PostgreSQL target gets in place of a single-server sub-tab (FinOpsServerChoice). It sits behind the sub-tab control, whose content is collapsed while it shows. -->
+            <TextBlock x:Name="FinOpsNotCollectedText" Style="{StaticResource EmptyHint}"/>
             <TabControl x:Name="FinOpsSubTabControl" Background="Transparent" BorderThickness="0"
                         ItemContainerStyle="{DynamicResource SubTabItemStyle}"
                         SelectionChanged="FinOpsSubTabs_SelectionChanged">
@@ -954,6 +956,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
                             <TextBlock Text="Server Inventory (All Servers)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsRefreshServerInventory_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
+                            <CheckBox x:Name="FinOpsShowRemovedCheck" Content="Show removed servers" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" ToolTip="Also list servers that were removed from the configuration" Checked="FinOpsShowRemoved_Changed" Unchecked="FinOpsShowRemoved_Changed"/>
                             <TextBlock x:Name="FinOpsServerInventoryCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="10,0,10,10">

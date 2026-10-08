@@ -63,7 +63,7 @@ public sealed class FinOpsInventoryGoldenLiveTests
             await using var viewer = new ViewerDataService(connectionString);
             var metrics = (await viewer.GetServerMetricsAsync(ct)).Where(kv => Ids.Contains(kv.Key))
                 .OrderBy(kv => NameOf(kv.Key)).Select(kv => new MetricsEntry { Server = NameOf(kv.Key), Metrics = kv.Value }).ToList();
-            var inventory = (await viewer.GetServerInventoryAsync(ct)).Where(r => Ids.Contains(r.ServerId)).ToList();
+            var inventory = (await viewer.GetServerInventoryAsync(cancellationToken: ct)).Where(r => Ids.Contains(r.ServerId)).ToList();
             return Serialize(anchor, metrics, inventory);
         });
 
