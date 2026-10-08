@@ -636,7 +636,7 @@ public sealed class DarlingFleetDeadlockCoverageTests
         Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
         /* Only the pairs that moved are ordered (#5526): the LAG partitions by database inside a
            server_id = s.server_id filter, which is the old (server_id, database_name) series, and the previous
-           single window over the whole fleet's rows (27 s for 30 days on a 50-server store) must not come back. */
+           single window over the whole fleet's rows must not come back. */
         Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("PARTITION BY server_id", sql, StringComparison.Ordinal);
         Assert.Equal(1, CountOf(sql, "OVER ("));
@@ -656,6 +656,9 @@ public sealed class DarlingFleetDeadlockCoverageTests
         Assert.DoesNotContain("WITH servers AS", sql, StringComparison.Ordinal);
         Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
         Assert.Contains("AND   server_id = s.server_id", sql, StringComparison.Ordinal);
+        /* The one-time gate: a server with no ordered pair (every pair flat) must skip the per-server read
+           entirely. Dropping it changes no answer, so the live test cannot see it. */
+        Assert.Contains("WHERE (cardinality(s.ordered_names) > 0 OR s.ordered_null_name)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(sampled.collection_time) FILTER (WHERE sampled.raw_delta > 0)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
