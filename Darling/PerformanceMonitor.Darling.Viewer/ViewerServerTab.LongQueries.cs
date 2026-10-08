@@ -50,7 +50,7 @@ public partial class ViewerServerTab
         }
     }
 
-    /// <summary>Sets the "trace is off" note from the trace check (see <see cref="TraceEnabledOrNullAsync"/>); never throws.</summary>
+    /// <summary>Sets the "trace is off" note and the empty grid text from the trace check (see <see cref="TraceEnabledOrNullAsync"/>); never throws.</summary>
     private async Task ApplyTraceNoteAsync(Task<bool> check)
     {
         if (await TraceEnabledOrNullAsync(check) is bool traceEnabled)
