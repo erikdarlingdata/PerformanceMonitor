@@ -65,7 +65,8 @@ for (const f of files) {
   }
   // database-box.js is the shared Database box the Index Analysis and Locking tabs import (#5231): a helper, not a tab;
   // gate.js is the shared helper for the tabs' empty and not-collected states on a PostgreSQL target, also not a tab.
-  if (name.startsWith("pages/finops/") && name !== "pages/finops/database-box.js" && name !== "pages/finops/gate.js") {
+  // window.js is the rolling-only time range picker the windowed tabs share (#5562), also not a tab.
+  if (name.startsWith("pages/finops/") && name !== "pages/finops/database-box.js" && name !== "pages/finops/gate.js" && name !== "pages/finops/window.js") {
     if (!m.tab || typeof m.tab.build !== "function" || !m.tab.id) {
       console.error(name + " does not export tab = { id, build }");
       process.exit(1);
