@@ -31,20 +31,52 @@ public partial class ViewerServerTab
     private async Task LoadRunningJobsAsync()
     {
         using var readFanOut = ViewerReadFanOut.Of(2);
-        var jobsTask = _dataService.GetRunningJobsAsync(_server.ServerId);
-        var statusTask = _dataService.GetLatestRunningJobsCollectorStatusAsync(_server.ServerId);
-        var jobs = await jobsTask;
-        var status = await statusTask;
+        _ownNoDataText.TryAdd(RunningJobsNoDataMessage, RunningJobsNoDataMessage.Text); /* the words are kept for when the banner goes away */
+        RunningJobsRead read;
+        string? status;
+        try
+        {
+            var jobsTask = _dataService.ReadRunningJobsAsync(_server.ServerId);
+            var statusTask = _dataService.GetLatestRunningJobsCollectorStatusAsync(_server.ServerId);
+            read = await jobsTask;
+            status = await statusTask;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed read is not "no jobs are running": the grid empties and says the read failed (the caller also reports it
+               in the status bar). The grid used to keep whatever its last load said, "No SQL Agent jobs are running." included. */
+            _runningJobsFilterMgr!.UpdateData(new System.Collections.Generic.List<RunningJobRow>());
+            RunningJobsNoDataMessage.Text = RunningJobsReadFailedText(ex);
+            RunningJobsNoDataMessage.Visibility = Visibility.Visible;
+            throw;
+        }
+
+        var jobs = read.Jobs;
 
         /* Both reads are done, and the not-collected note below may read the store once more. Release here so that read is not
            priced against contention that has already finished. */
         readFanOut.Release();
 
         _runningJobsFilterMgr!.UpdateData(jobs);
-        await ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count);
+        /* D20: an empty grid says no job is running, unless the collector was denied msdb (then the banner says why the grid is
+           empty, and "no jobs running" would be a claim nobody checked) or the not-collected note applies. */
+        var bannerShows = ShouldShowMsdbBanner(status);
+        await ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count, keepsOwnEmptyText: !bannerShows);
 
-        RunningJobsMsdbWarning.Visibility = ShouldShowMsdbBanner(status) ? Visibility.Visible : Visibility.Collapsed;
+        /* An empty grid whose collector has not collected within the freshness bound says that instead (the gap note and the banner win). */
+        if (jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
+            && RunningJobsNoDataMessage.Text == _ownNoDataText[RunningJobsNoDataMessage])
+        {
+            RunningJobsNoDataMessage.Text = PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGood);
+            RunningJobsNoDataMessage.Visibility = Visibility.Visible;
+        }
+
+        RunningJobsMsdbWarning.Visibility = bannerShows ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    /// <summary>What the tab says in place of "No SQL Agent jobs are running." when the read itself failed.</summary>
+    internal static string RunningJobsReadFailedText(Exception ex) =>
+        $"The running jobs could not be read: {ex.Message}";
 
     /// <summary>
     /// The msdb-access banner rule, derived from the store (the viewer has no live msdb probe): Lite shows

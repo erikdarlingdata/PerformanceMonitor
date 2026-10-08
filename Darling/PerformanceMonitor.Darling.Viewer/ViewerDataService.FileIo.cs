@@ -34,7 +34,11 @@ public sealed record FileIoLatencyPoint(
     double AvgReadLatencyMs,
     double AvgWriteLatencyMs,
     double AvgQueuedReadLatencyMs,
-    double AvgQueuedWriteLatencyMs);
+    double AvgQueuedWriteLatencyMs,
+    long Reads = 0,
+    long Writes = 0,
+    bool InReadTen = false,
+    bool InWriteTen = false);
 
 /// <summary>
 /// One file's throughput point (MB/s) for the File I/O tab's Throughput sub-tab — a mirror of Lite's
@@ -56,7 +60,7 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The File I/O latency read — Lite's <c>GetFileIoLatencyTrendAsync</c> ported to Postgres, then bucketed
     /// (#4234). Reads <c>v_file_io_stats</c> (a <c>SELECT *</c> passthrough over <c>file_io_stats</c>): a
-    /// <c>top_files</c> CTE picks the 10 busiest (database, file) pairs by total delta ops over the window —
+    /// <c>top_files</c> CTE picks the 10 busiest (database, file) pairs by total delta reads and the 10 busiest by total delta writes over the window (release walk V9) —
     /// unchanged by bucketing — then average read/write (and queued read/write) latency per bucket is computed
     /// as summed stall-ms / summed ops, with the delta-stall sums CAST to double precision before division. The
     /// queued-stall columns are COALESCE'd to 0 so a server whose build predates them still reads 0.
@@ -77,8 +81,12 @@ public sealed partial class ViewerDataService
     /// </para>
     /// </summary>
     public const string FileIoLatencyTrendSql = $$"""
-        WITH top_files AS (
-            SELECT database_name, file_name
+        WITH file_totals AS (
+            SELECT
+                database_name,
+                file_name,
+                COALESCE(SUM(delta_reads), 0) AS total_reads,
+                COALESCE(SUM(delta_writes), 0) AS total_writes
             FROM v_file_io_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -86,14 +94,42 @@ public sealed partial class ViewerDataService
             AND   (delta_reads > 0 OR delta_writes > 0)
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, file_name
-            ORDER BY SUM(delta_reads + delta_writes) DESC
-            LIMIT 10
+        ),
+        /* Release walk V9: the two charts are about different files, so each picks its own. The ten busiest
+           files by reads feed the read chart and the ten busiest by writes feed the write chart; a file in
+           either list is charted. Ranking on reads + writes put only log files in the ten on a server whose
+           logs carry the most operations, and the read chart (and the Overview I/O Latency lane, which reads
+           the same rows) then held nothing but log files with no reads. A tie on one count goes to the file with more
+           of the other, so equally busy files rank by total activity. */
+        ranked_files AS (
+            SELECT
+                database_name,
+                file_name,
+                total_reads,
+                total_writes,
+                ROW_NUMBER() OVER (ORDER BY total_reads DESC NULLS LAST, total_writes DESC NULLS LAST, database_name COLLATE "C" NULLS LAST, file_name COLLATE "C" NULLS LAST) AS read_rank,
+                ROW_NUMBER() OVER (ORDER BY total_writes DESC NULLS LAST, total_reads DESC NULLS LAST, database_name COLLATE "C" NULLS LAST, file_name COLLATE "C" NULLS LAST) AS write_rank
+            FROM file_totals
+        ),
+        /* Round 2, L4: the read says which ten each file is in (the two flags), so the charts draw exactly the files the read
+           ranked instead of ranking again on the bucketed counts, which drop rows with no interval and break ties in another order. */
+        top_files AS (
+            SELECT
+                database_name,
+                file_name,
+                (read_rank <= 10 AND total_reads > 0) AS in_read_ten,
+                (write_rank <= 10 AND total_writes > 0) AS in_write_ten
+            FROM ranked_files
+            WHERE (read_rank <= 10 AND total_reads > 0)
+            OR    (write_rank <= 10 AND total_writes > 0)
         ),
         rated AS (
             SELECT
                 f.collection_time,
                 f.database_name,
                 f.file_name,
+                tf.in_read_ten,
+                tf.in_write_ten,
                 /* #3540: a stored interval of 0 means this row's own deltas are not knowable, so they are
                    nulled out of the sums below — the row still counts as a physical collection (collection_count)
                    but contributes nothing to a bucket's rate. */
@@ -126,7 +162,14 @@ public sealed partial class ViewerDataService
                  THEN SUM(CAST(rated_stall_queued_write_ms AS double precision)) / SUM(rated_writes)
                  ELSE 0 END AS avg_queued_write_latency_ms,
             MIN(collection_time) AS first_collection_time,
-            COUNT(*) AS collection_count
+            COUNT(*) AS collection_count,
+            /* Release walk V9b: the bucket's read and write counts ride along so the Overview lane can weight the
+               files' latencies by operations (total stall over total operations) instead of averaging a no-read
+               log file as 0 ms. */
+            COALESCE(SUM(rated_reads), 0)::bigint AS total_reads,
+            COALESCE(SUM(rated_writes), 0)::bigint AS total_writes,
+            bool_or(in_read_ten) AS in_read_ten,
+            bool_or(in_write_ten) AS in_write_ten
         FROM rated
         GROUP BY database_name, file_name, 3
         HAVING COUNT(rated_reads) > 0
@@ -159,7 +202,7 @@ public sealed partial class ViewerDataService
             AND   (delta_read_bytes > 0 OR delta_write_bytes > 0)
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, file_name
-            ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC
+            ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC NULLS LAST, database_name COLLATE "C" NULLS LAST, file_name COLLATE "C" NULLS LAST
             LIMIT 10
         ),
         with_interval AS (
@@ -208,7 +251,7 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// Per-file I/O-latency points (top 10 files by delta ops) for one server over the window, for the
+    /// Per-file I/O-latency points (top 10 files by delta reads and top 10 by delta writes) for one server over the window, for the
     /// File I/O tab's Latency sub-tab.
     /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (file), like
     /// <c>GetWaitStatsTrendsByTypesAsync</c>; <paramref name="serverId"/>'s window alone decides the width
@@ -240,7 +283,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime,
-            double AvgRead, double AvgWrite, double AvgQueuedRead, double AvgQueuedWrite)>();
+            double AvgRead, double AvgWrite, double AvgQueuedRead, double AvgQueuedWrite, long Reads, long Writes, bool InReadTen, bool InWriteTen)>();
         var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -259,7 +302,11 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                 reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                reader.IsDBNull(6) ? 0 : reader.GetDouble(6)));
+                reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
+                reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                !reader.IsDBNull(11) && reader.GetBoolean(11),
+                !reader.IsDBNull(12) && reader.GetBoolean(12)));
         }
 
         foreach (var row in rows)
@@ -271,7 +318,11 @@ public sealed partial class ViewerDataService
                 row.AvgRead,
                 row.AvgWrite,
                 row.AvgQueuedRead,
-                row.AvgQueuedWrite));
+                row.AvgQueuedWrite,
+                row.Reads,
+                row.Writes,
+                row.InReadTen,
+                row.InWriteTen));
         }
 
         return items;
