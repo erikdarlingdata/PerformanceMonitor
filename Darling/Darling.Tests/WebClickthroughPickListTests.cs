@@ -150,6 +150,34 @@ public sealed class WebClickthroughPickListTests
     }
 
     [Fact]
+    public void APanelThatSaysHideWhenNotCollected_IsNotDrawnOnANotCollectedAnswer_AndOneThatDoesNotSayItIs()
+    {
+        var r = Run("panelHide");
+        Assert.True(r.GetProperty("hidingHidden").GetBoolean());
+        Assert.False(r.GetProperty("keepingHidden").GetBoolean());
+    }
+
+    [Fact]
+    public void AGridThatNamesOrderRows_OpensInThatOrder_AndWorstFirstRanksFailingBeforeHealthyBeforeNotApplicable()
+    {
+        var r = Run("gridOrder");
+        Assert.Equal(new[] { "c_fail", "d_warn", "a_ok", "b_ok", "a_gated" }, Strings(r.GetProperty("worst")));
+        Assert.Equal(new[] { "2026-10-03", "2026-10-02", "2026-10-01" }, Strings(r.GetProperty("newest")));
+        Assert.Equal(Strings(r.GetProperty("worst")), Strings(r.GetProperty("drawn")));
+        Assert.Equal(new[] { "b_ok", "a_gated", "c_fail", "a_ok", "d_warn" }, Strings(r.GetProperty("drawnPlain")));
+    }
+
+    [Fact]
+    public void TheTabs_HideInstanceCpuOnANotCollectedAnswer_ListCollectorsWorstFirst_AndTheCalendarNewestFirst()
+    {
+        var r = Run("tabs");
+        Assert.Equal(new[] { true }, r.GetProperty("cpuPanels").EnumerateArray().Select(x => x.GetBoolean()).ToArray());
+        Assert.Equal(new[] { "c_fail", "a_ok", "b_ok" }, Strings(r.GetProperty("pgCollectors")));
+        Assert.Equal(new[] { "c_fail", "a_ok", "b_ok" }, Strings(r.GetProperty("sqlCollectors")));
+        Assert.Equal(new[] { "2026-10-03", "2026-10-02", "2026-10-01" }, Strings(r.GetProperty("calendar")));
+    }
+
+    [Fact]
     public void CollectorCounts_WrittenWithUnderscores_ReadAsWords_AndLoneNamesAreKept()
     {
         string[] inputs =

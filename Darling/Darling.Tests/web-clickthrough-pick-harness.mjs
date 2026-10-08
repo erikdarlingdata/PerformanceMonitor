@@ -26,6 +26,7 @@ class FakeNode {
     return this.children[0] || null;
   }
   appendChild(child) {
+    child.parentNode = this;
     this.children.push(child);
     return child;
   }
@@ -95,10 +96,14 @@ const FLEET_CARDS = [["SQL2016", 5], ["PGEXT", 4], ["AG2", 3], ["AG1", 2], ["PG1
   server_name: n, display_name: n, server_id: id,
 }));
 const fetches = [];
+let routeBody = null;
 globalThis.fetch = async (url) => {
   fetches.push(String(url));
   await new Promise((r) => setTimeout(r, 5));
-  const raw = String(url).includes("/api/read/list_servers")
+  const routed = routeBody ? routeBody(String(url)) : undefined;
+  const raw = routed !== undefined
+    ? JSON.stringify(routed)
+    : String(url).includes("/api/read/list_servers")
     ? JSON.stringify({ server_count: REGISTRY.length, servers: REGISTRY })
     : String(url).includes("/api/fleet")
       ? JSON.stringify({ cards: FLEET_CARDS, tags: [] })
@@ -122,6 +127,7 @@ try {
     plain: await load("plain-text.js"),
     panels: await load("panels.js"),
     fleet: await load(path.join("pages", "fleet.js")),
+    tabs: await load(path.join("pages", "server-tabs.js")),
     jobs: await load(path.join("pages", "job-history.js")),
     finops: await load(path.join("pages", "finops.js")),
     alerts: await load(path.join("pages", "alerts.js")),
@@ -203,6 +209,71 @@ const scenarios = {
     };
     const node = modules.panels.VIZ.stat(data, desc);
     return { labels: all(node, (n) => n.className === "label").map((n) => n.text) };
+  },
+  panelHide: async () => {
+    /* A panel that says hideWhenNotCollected is not drawn when its read answers not_collected; one that does not say it is. */
+    routeBody = () => ({ status: "not_collected", message: "This server does not collect this data." });
+    const make = (flag) => modules.panels.renderPanel({
+      title: "T", read: "get_x", params: {}, viz: "stat", stats: [{ key: "n", label: "N", format: "int" }],
+      hideWhenNotCollected: flag,
+    });
+    const hiding = make(true);
+    const keeping = make(false);
+    await settle();
+    return { hidingHidden: hiding.hidden === true, keepingHidden: keeping.hidden === true };
+  },
+  gridOrder: async () => {
+    const rows = [
+      { collector: "b_ok", status: "HEALTHY" }, { collector: "a_gated", status: "not_collected" },
+      { collector: "c_fail", status: "FAILING" }, { collector: "a_ok", status: "HEALTHY" }, { collector: "d_warn", status: "WARNING" },
+    ];
+    const names = (r) => r.map((x) => x.collector);
+    const grid = modules.panels.VIZ.table({ rows }, {
+      rowsKey: "rows", columns: [{ key: "collector", label: "Collector" }], orderRows: modules.panels.worstFirst,
+    });
+    const gridPlain = modules.panels.VIZ.table({ rows }, { rowsKey: "rows", columns: [{ key: "collector", label: "Collector" }] });
+    const firstCells = (g) => all(g, (n) => n.tag === "tr").map((tr) => tr.textContent).filter((t) => /_/.test(t));
+    return {
+      worst: names(modules.panels.worstFirst(rows)),
+      newest: modules.panels.newestFirst("d")([{ d: "2026-10-01" }, { d: "2026-10-03" }, { d: "2026-10-02" }]).map((x) => x.d),
+      drawn: firstCells(grid),
+      drawnPlain: firstCells(gridPlain),
+    };
+  },
+  tabs: async () => {
+    /* The wiring: the PostgreSQL Overview tab hides Instance CPU on a server that is not Aurora and lists Collectors worst
+       first; the Daily Health Calendar opens newest day first. */
+    const collectors = [
+      { collector: "b_ok", status: "HEALTHY", total_runs: 1 }, { collector: "c_fail", status: "FAILING", total_runs: 1 },
+      { collector: "a_ok", status: "HEALTHY", total_runs: 1 },
+    ];
+    routeBody = (url) => {
+      if (url.includes("get_pg_cpu_utilization")) return { status: "not_collected", message: "This server does not collect this data." };
+      if (url.includes("get_collection_health")) return { server: "SRV1", collectors };
+      if (url.includes("get_daily_summary_range")) {
+        return { to_date: "2026-10-03", days: [{ summary_date: "2026-10-01" }, { summary_date: "2026-10-03" }, { summary_date: "2026-10-02" }] };
+      }
+      return undefined;
+    };
+    const ctx = { hours: 24, label: "last 24 hours", signal: new AbortController().signal };
+    const overview = modules.tabs.POSTGRES_TABS.find((t) => t.id === "overview");
+    const pgRoot = new FakeNode("main");
+    modules.util.mount(pgRoot, overview.build("SRV1", ctx));
+    const sqlHealth = modules.tabs.SERVER_TABS.find((t) => t.id === "health");
+    const sqlRoot = new FakeNode("main");
+    modules.util.mount(sqlRoot, sqlHealth.build("SRV1", ctx));
+    const calendar = new FakeNode("main");
+    modules.util.mount(calendar, modules.tabs.dailySummaryPanels("SRV1").map((p) => p));
+    await settle();
+    const panelTitled = (root, title) =>
+      all(root, (n) => String(n.className).startsWith("panel") && n.children[0] && n.children[0].tag === "h3" && n.children[0].textContent.startsWith(title));
+    const rowsOf = (root, re) => all(root, (n) => n.tag === "tr").map((tr) => (tr.children[0] ? tr.children[0].textContent : "")).filter((t) => re.test(t));
+    return {
+      cpuPanels: panelTitled(pgRoot, "Instance CPU").map((p) => p.hidden === true),
+      pgCollectors: rowsOf(pgRoot, /^[a-c]_(ok|fail)/),
+      sqlCollectors: rowsOf(sqlRoot, /^[a-c]_(ok|fail)/),
+      calendar: rowsOf(calendar, /^2026-10-0/),
+    };
   },
   plain: async () => ({
     out: JSON.parse(process.env.HARNESS_INPUT).map((t) => modules.plain.plainText(t)),
