@@ -124,7 +124,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
     /// <summary>
     /// Review D4R H1: a window under <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> must issue ZERO
     /// round trips against <c>collect.query_store_interval_wide</c> — no <c>ReadSourceInputsSql</c>, no
-    /// <c>ChunkFloorsSql</c>, and above all no <c>PlainTableFloorSql</c> (the unindexed
+    /// <c>RawChunkFloorSql</c>, and above all no <c>PlainTableFloorSql</c> (the unindexed
     /// <c>MIN(first_execution_time) WHERE server_id = $1</c> scan) — counted directly off
     /// <c>pg_stat_user_tables.seq_scan</c>/<c>idx_scan</c> before and after the call, since PostgreSQL's own
     /// catalog is the only seam that tells "no statement ran" apart from "a statement ran and returned
