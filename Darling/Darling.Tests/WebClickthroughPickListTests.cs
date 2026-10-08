@@ -158,6 +158,28 @@ public sealed class WebClickthroughPickListTests
     }
 
     [Fact]
+    public void AColumnMarkedPlain_ShowsPlainText_AndAnUnmarkedOneShowsTheRawText()
+    {
+        var r = Run("plainCell");
+        Assert.Contains("widen the time range", Strings(r.GetProperty("plain")).Single());
+        Assert.DoesNotContain("hours_back", Strings(r.GetProperty("plain")).Single());
+        Assert.Contains("hours_back", Strings(r.GetProperty("raw")).Single());
+    }
+
+    [Fact]
+    public void TheCollectorGridsMessageColumns_ArePlain_AndTheQueryStorePageTextNamesNoTool()
+    {
+        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        foreach (var key in new[] { "last_error", "note_summary", "output_finding", "regression_finding" })
+        {
+            Assert.Matches("key: \"" + key + "\"[^}]*plain: true", tabs);
+        }
+
+        Assert.DoesNotContain("which is what get_query_trend", tabs, StringComparison.Ordinal);
+        Assert.DoesNotContain("no query_store_health capture", tabs, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AGridThatNamesOrderRows_OpensInThatOrder_AndWorstFirstRanksFailingBeforeHealthyBeforeNotApplicable()
     {
         var r = Run("gridOrder");

@@ -275,6 +275,15 @@ const scenarios = {
       calendar: rowsOf(calendar, /^2026-10-0/),
     };
   },
+  plainCell: async () => {
+    /* A column marked `plain` goes through plainText; an unmarked one shows the raw text. */
+    const rows = [{ note: "This is a gap rather than a dead collector: widen hours_back, or use get_collection_health to find where it stopped." }];
+    const cellText = (plain) => {
+      const g = modules.panels.VIZ.table({ rows }, { rowsKey: "rows", columns: [{ key: "note", label: "Note", wrap: true, plain }] });
+      return all(g, (n) => n.tag === "td").map((n) => n.textContent);
+    };
+    return { plain: cellText(true), raw: cellText(false) };
+  },
   plain: async () => ({
     out: JSON.parse(process.env.HARNESS_INPUT).map((t) => modules.plain.plainText(t)),
   }),
