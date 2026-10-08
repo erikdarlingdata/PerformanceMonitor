@@ -57,8 +57,9 @@ internal readonly record struct FleetGateSnapshot(
 ///
 /// <para>#5597: every count is kept twice, in full and as the "judged" count that leaves out what was recorded in the first
 /// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/> minutes after the service started. Which count a record
-/// belongs to is decided when it is recorded, on the monotonic uptime, so a wall-clock step in either direction cannot move
-/// a start-up count into the judged window or a judged one out of it.</para>
+/// belongs to is decided when it is recorded, on the monotonic uptime, so a wall-clock step in either direction cannot make
+/// a start-up count judged or a judged count unjudged. (A forward step still ages minutes out of the hour early, as it does
+/// the full counts.)</para>
 /// </summary>
 internal sealed class FleetGateStats
 {
@@ -84,7 +85,7 @@ internal sealed class FleetGateStats
     /// <summary>
     /// #5597: whether a slot recorded now belongs in the judged counts: the monotonic uptime is at least
     /// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/>. Decided when the slot is recorded, so a wall-clock step
-    /// afterwards cannot bring a start-up count into the judged window, or take a judged one out of it.
+    /// afterwards cannot make a start-up count judged, or a judged one unjudged.
     /// </summary>
     private bool IsJudgedNow()
     {

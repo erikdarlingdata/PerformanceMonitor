@@ -6064,9 +6064,10 @@ WHERE c.is_enabled";
     /// start is the service's own (once per process, never a stall, a clock step, a pause ending or a launch-guard release), over
     /// at most the last hour; while that is shorter than <see cref="FleetGateMinJudgedMinutes"/> it neither fires nor
     /// resolves. Which counts are left out is decided when each slot is recorded, on the monotonic uptime
-    /// (<see cref="FleetGateStats.SnapshotJudged"/>), so a wall-clock step in either direction changes neither the counts it
-    /// judges nor the minutes it names. A slot is counted in the minute the run that stepped over it lands; counting it there is the safe side (a slot
-    /// due at minute 14 that a run steps over at minute 16 is judged).</para>
+    /// (<see cref="FleetGateStats.SnapshotJudged"/>), so a wall-clock step in either direction cannot bring a start-up count
+    /// into what it judges, and the minutes it names follow the monotonic uptime. A slot is counted in the minute the run
+    /// that stepped over it lands; counting it there is the safe side (a slot due at minute 14 that a run steps over at
+    /// minute 16 is judged).</para>
     ///
     /// <para><b>Fires</b> when, over the window it judges (the last hour once the start is old enough), at least <see cref="FleetGateBehindMinSkipped"/> slots were skipped
     /// AND they are at least <see cref="FleetGateBehindPercent"/> of the slots that came due. <b>Resolves</b> once the
