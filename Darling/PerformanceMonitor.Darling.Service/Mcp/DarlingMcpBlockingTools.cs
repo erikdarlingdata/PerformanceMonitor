@@ -804,7 +804,7 @@ public sealed class DarlingMcpBlockingTools
     public static Task<string> GetBlockingTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
@@ -879,7 +879,7 @@ public sealed class DarlingMcpBlockingTools
     public static async Task<string> GetDeadlockTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
@@ -933,7 +933,7 @@ public sealed class DarlingMcpBlockingTools
     public static Task<string> GetLockWaitTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default) =>

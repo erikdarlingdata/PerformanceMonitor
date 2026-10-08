@@ -50,16 +50,6 @@ public sealed class ServerPageTabsTests
     private static string ServerTabsJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
-    /// <summary>
-    /// <c>server-tabs.js</c> without the <c>reachReads: [...]</c> lists (#5562 M4). A tab's <c>reachReads</c> names
-    /// the windowed reads it makes so the picker can derive the tab's reach from the catalog; it does not FETCH them.
-    /// The two scans that count how often a tab fetches a read must not see those names as a second fetch. The
-    /// strip is a pattern over the list only, so a read the tab really makes still counts, and
-    /// <c>WebServerPageRangeTests</c> holds the lists themselves (every name served, every windowed read declared).
-    /// </summary>
-    private static string ServerTabsJsWithoutReachReads =>
-        Regex.Replace(ServerTabsJs, @"reachReads:\s*\[[^\]]*\]", "reachReads: []", RegexOptions.CultureInvariant);
-
     private static string ServerJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
 
@@ -140,7 +130,7 @@ public sealed class ServerPageTabsTests
     [Fact]
     public void TheQueryStoreTopGrid_DrawsTheApproximationNote_AsAFurtherNote()
     {
-        var js = ServerTabsJsWithoutReachReads;
+        var js = ServerTabsJs;
         var at = js.IndexOf("\"get_query_store_top\",", StringComparison.Ordinal);
         Assert.True(at >= 0);
         var end = js.IndexOf("\n      ),", at, StringComparison.Ordinal);
@@ -1050,7 +1040,7 @@ public sealed class ServerPageTabsTests
     [Fact]
     public void NoTab_FetchesTheSameReadTwice()
     {
-        var js = ServerTabsJsWithoutReachReads;
+        var js = ServerTabsJs;
 
         /* The composite -> reads map, verified against the composites themselves before it is trusted. */
         var composites = new Dictionary<string, string[]>(StringComparer.Ordinal)

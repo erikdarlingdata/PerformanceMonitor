@@ -145,12 +145,16 @@ public sealed class WebReadReachTests
     }
 
     /// <summary>
-    /// Review r1 M6: the <c>hours_back</c> description of every MCP tool carries the number its <see cref="WebReadReach"/> row
-    /// holds, so raising or lowering a row cannot leave the description stating the old ceiling. A tool that never capped
-    /// (<c>ValidateUncappedWindow</c>) states no ceiling and is skipped; a tool whose row stays at the default states none either.
+    /// Review r1 M6, as moved by r3: no MCP tool states a reach its <see cref="WebReadReach"/> row does not hold, so raising or
+    /// lowering a row cannot leave a description stating the old ceiling. The number is not in the <c>hours_back</c> parameter's
+    /// description (that line is in every <c>tools/list</c> answer, and <c>McpToolsListBudgetTests</c> holds it at "Hours of history.
+    /// Default N."): a raised tool that has a reading guide states it there, as "hours_back reaches N", after its
+    /// <c>&lt;&lt;GUIDE&gt;&gt;</c> marker (get_tool_guide serves it); a raised tool with no guide states none, because a guide would cost
+    /// every <c>tools/list</c> answer a pointer sentence, and its refusal past the row names the ceiling. A tool that never capped
+    /// (<c>ValidateUncappedWindow</c>) states no ceiling and is skipped.
     /// </summary>
     [Fact]
-    public void EveryRaisedTool_HoursBackDescription_NamesItsRowsNumber_AndNoOtherToolClaimsAHigherOne()
+    public void EveryRaisedTool_StatesItsRowsNumberInTheGuideTail_NeverInTheHead_AndNoToolClaimsMoreThanItsRow()
     {
         var tools = typeof(WebReadReach).Assembly.GetTypes()
             .SelectMany(t => t.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
@@ -159,6 +163,7 @@ public sealed class WebReadReachTests
             .ToDictionary(x => x.Attr!.Name!, x => x.Method, StringComparer.Ordinal);
         var uncapped = new[] { "get_blocking_stats" };
         var raised = 0;
+        var guided = 0;
         foreach (var (read, reach) in WebReadReach.All)
         {
             if (!tools.TryGetValue(read, out var method))
@@ -174,21 +179,35 @@ public sealed class WebReadReachTests
                 continue;
             }
 
-            var claim = Regex.Match(description, @"up to (?<n>\d+)");
+            var toolDescription = ((System.ComponentModel.DescriptionAttribute?)Attribute.GetCustomAttribute(method, typeof(System.ComponentModel.DescriptionAttribute)))?.Description ?? string.Empty;
+            var marker = toolDescription.IndexOf(McpToolGuide.Marker, StringComparison.Ordinal);
+
+            /* The head (the parameter line, and the tool's text before its marker) states no reach: it is in every tools/list answer. */
+            var head = description + " " + (marker >= 0 ? toolDescription[..marker] : toolDescription);
+            Assert.False(
+                Regex.Matches(head, @"(?:up to|reaches) (?<n>\d+)").Any(m => int.Parse(m.Groups["n"].Value, System.Globalization.CultureInfo.InvariantCulture) > McpHelpers.MaxHoursBack),
+                $"{read}: the tools/list head states a reach ('{description}'); move it after the tool's <<GUIDE>> marker.");
+
+            var claim = marker >= 0 ? Regex.Match(toolDescription[marker..], @"hours_back reaches (?<n>\d+)") : Match.Empty;
             if (reach.MaxHours > McpHelpers.MaxHoursBack)
             {
                 raised++;
-                Assert.True(claim.Success && claim.Groups["n"].Value == reach.MaxHours.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    $"{read}: hours_back says '{description}' but its WebReadReach row holds {reach.MaxHours}.");
+                if (marker >= 0)
+                {
+                    guided++;
+                    Assert.True(claim.Success && claim.Groups["n"].Value == reach.MaxHours.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        $"{read}: its guide tail says '{(claim.Success ? claim.Value : "nothing")}' but its WebReadReach row holds {reach.MaxHours}.");
+                }
             }
             else if (claim.Success)
             {
                 Assert.True(int.Parse(claim.Groups["n"].Value, System.Globalization.CultureInfo.InvariantCulture) <= reach.MaxHours,
-                    $"{read}: hours_back says '{description}' but its WebReadReach row holds only {reach.MaxHours}.");
+                    $"{read}: its guide tail says '{claim.Value}' but its WebReadReach row holds only {reach.MaxHours}.");
             }
         }
 
         Assert.True(raised >= 14, $"Only {raised} raised tools had an hours_back description to check; the reflection missed them.");
+        Assert.True(guided >= 7, $"Only {guided} raised tools carry their reach in a guide tail.");
     }
 
     /// <summary>

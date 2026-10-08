@@ -60,7 +60,7 @@ public sealed class DarlingMcpDataTools
     public static Task<string> GetCpuUtilization(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 4; up to 720 (30 days).")] int hours_back = 4,
+        [Description("Hours of history. Default 4.")] int hours_back = 4,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default) =>
@@ -242,7 +242,7 @@ public sealed class DarlingMcpDataTools
         NpgsqlDataSource postgres,
         [Description("The exact wait type name, e.g. CXPACKET, PAGEIOLATCH_SH.")] string wait_type,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default) =>
@@ -529,7 +529,7 @@ public sealed class DarlingMcpDataTools
     public static Task<string> GetTempDbTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default) =>

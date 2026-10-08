@@ -50,6 +50,7 @@ import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
+import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -1079,11 +1080,6 @@ export const SERVER_TABS = [
   {
     id: "overview",
     label: "Overview",
-    collector: "cpu_utilization",
-    reachReads: [
-      "get_analysis_findings", "get_blocking_trend", "get_cpu_utilization", "get_deadlock_trend",
-      "get_file_io_trend", "get_memory_trend"
-    ],
     build: (server, ctx) => [
       stat("Overview", "get_server_summary", { server }, OVERVIEW_STATS, SNAPSHOT, 2),
       stat("Server Properties", "get_server_properties", { server }, PROPERTY_STATS, SNAPSHOT, 2),
@@ -1132,10 +1128,6 @@ export const SERVER_TABS = [
   {
     id: "waits",
     label: "Wait Stats",
-    collector: "wait_stats",
-    reachReads: [
-      "get_latch_stats", "get_spinlock_stats", "get_wait_stats", "get_wait_trend", "get_waiting_tasks"
-    ],
     build: (server, ctx) => [
       waitsPanel(server, ctx),
       table(
@@ -1173,10 +1165,6 @@ export const SERVER_TABS = [
   {
     id: "cpu",
     label: "CPU",
-    collector: "cpu_utilization",
-    reachReads: [
-      "get_cpu_utilization", "get_server_trend", "get_top_procedures_by_cpu", "get_top_queries_by_cpu"
-    ],
     build: (server, ctx) => [
       line("CPU Utilization", "get_cpu_utilization", { server, hours: ctx.hours }, "samples", "sample_time", CPU_SERIES, {
         subtitle: ctx.label,
@@ -1228,11 +1216,6 @@ export const SERVER_TABS = [
   {
     id: "memory",
     label: "Memory",
-    collector: "memory_stats",
-    reachReads: [
-      "get_memory_grants", "get_memory_pressure_events", "get_memory_trend", "get_plan_cache_bloat",
-      "get_resource_semaphore", "get_server_trend"
-    ],
     build: (server, ctx) => [
       stat("Memory", "get_memory_stats", { server }, MEMORY_STATS, SNAPSHOT, 2),
       line("Memory Trend", "get_memory_trend", { server, hours: ctx.hours }, "trend", "time", MEMORY_SERIES, {
@@ -1323,7 +1306,6 @@ export const SERVER_TABS = [
   {
     id: "blocking",
     label: "Blocking",
-    collector: "blocked_process_report",
     /* get_blocking_stats, which draws Blocking Severity and Deadlock Severity, takes any window, and its tables keep
        more than this page's widest Range. The note names that Range from the presets (tabNote), so narrowing them
        cannot leave it wrong. */
@@ -1332,11 +1314,6 @@ export const SERVER_TABS = [
       "is one of the desktop-viewer features this page does not have. A deadlock graph can be drawn from its row. This page shows at most " +
       daysText(widestHours) +
       ". A Custom View can show more blocking and deadlock history.",
-    reachReads: [
-      "get_blocked_process_xml", "get_blocking", "get_blocking_stats", "get_blocking_trend",
-      "get_current_waits_trend", "get_deadlock_detail", "get_deadlock_trend", "get_deadlocks",
-      "get_lock_wait_trend"
-    ],
     build: (server, ctx) => [
       line("Blocking Events", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
@@ -1472,10 +1449,6 @@ export const SERVER_TABS = [
   {
     id: "io",
     label: "File I/O",
-    collector: "file_io_stats",
-    reachReads: [
-      "get_file_io_trend", "get_tempdb_trend"
-    ],
     build: (server, ctx) => [
       fileIoPanel(server, ctx),
       table(
@@ -1530,17 +1503,10 @@ export const SERVER_TABS = [
   {
     id: "queries",
     label: "Queries",
-    collector: "query_stats",
     note:
       "Execution-plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution are " +
       "desktop-viewer features — they need a plan renderer and a command back to the monitored server, neither " +
       "of which this read-only web seat has.",
-    reachReads: [
-      "get_active_queries", "get_long_query_completions", "get_plan_corrections", "get_procedure_duration_trend",
-      "get_query_duration_trend", "get_query_heatmap", "get_query_store_clutter",
-      "get_query_store_duration_trend", "get_query_store_regressions", "get_query_store_top", "get_query_trend",
-      "get_top_procedures_by_cpu", "get_top_queries_by_cpu"
-    ],
     build: (server, ctx) => [
       activeQueriesPanel(server, ctx),
       /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
@@ -1824,9 +1790,6 @@ export const SERVER_TABS = [
   {
     id: "changes",
     label: "Config Changes",
-    reachReads: [
-      "get_database_config_changes", "get_server_config_changes", "get_trace_flag_changes"
-    ],
     build: (server, ctx) => [
       table(
         "Server Configuration Changes",
@@ -1861,9 +1824,6 @@ export const SERVER_TABS = [
   {
     id: "activity",
     label: "Activity",
-    reachReads: [
-      "get_job_history", "get_perfmon_trend", "get_server_trend"
-    ],
     build: (server, ctx) => [
       perfmonPanel(server, ctx),
       sessionStatsTrendPanel(server, ctx),
@@ -1914,12 +1874,6 @@ export const SERVER_TABS = [
     note:
       "These are the system_health session and default trace, parsed on read. The desktop viewer additionally " +
       "charts the corruption and contention counters hour-by-hour; here they are the raw parsed rows.",
-    reachReads: [
-      "get_default_trace_events", "get_health_parser_cpu_tasks", "get_health_parser_io_issues",
-      "get_health_parser_memory_broker", "get_health_parser_memory_conditions",
-      "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
-      "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health"
-    ],
     build: (server, ctx) => [
       ...fanout("get_health_parser_system_health", { server, hours: ctx.hours, limit: 50 }, [
         {
@@ -2034,9 +1988,6 @@ export const SERVER_TABS = [
   {
     id: "health",
     label: "Collection Health",
-    reachReads: [
-      "get_collection_log"
-    ],
     build: (server, ctx) => [
       /* One read, three panels. get_collection_health rolls up seven days of collector logs AND computes sweep
          pressure; these are three slices of that single payload, so three descriptors meant running the tab's
@@ -2118,10 +2069,6 @@ export const POSTGRES_TABS = [
   {
     id: "overview",
     label: "Overview",
-    reachReads: [
-      "get_analysis_findings", "get_collection_log", "get_pg_autovacuum_health", "get_pg_cpu_utilization",
-      "get_pg_extensions", "get_pg_replication_slots", "get_pg_wraparound_risk", "get_pg_xmin_horizon"
-    ],
     build: (server, ctx) => [
       /* The vitals are the three Tier 0 outage predictors plus the backlog that feeds two of them, as tiles
          rather than the tables the owning tabs carry: the question on a triage screen is "is anything wrong",
@@ -2293,11 +2240,6 @@ export const POSTGRES_TABS = [
       "not: it comes from Amazon Aurora's aurora_stat_statements(), which core PostgreSQL has in no version, " +
       "so on a stock PostgreSQL target that one panel is permanently empty and says so in its own words " +
       "while the two above it keep working.",
-    reachReads: [
-      "get_pg_blocking", "get_pg_column_stats", "get_pg_database_stats", "get_pg_database_trend",
-      "get_pg_deadlocks", "get_pg_lock_stats", "get_pg_log_events", "get_pg_plan_capture_readiness",
-      "get_pg_plans", "get_pg_predicate_stats", "get_pg_query_duration_trend", "get_pg_top_queries"
-    ],
     build: (server, ctx) => [
       /* One read, three panels, and the FIRST of them is the denominator. get_pg_blocking is a periodic SAMPLE,
          not an event log: PostgreSQL records nothing unless asked, so "no chains" is ambiguous between a quiet
@@ -2534,9 +2476,6 @@ export const POSTGRES_TABS = [
       "which is where the fix has to be made, and only it says whether that session pins anything at all: an " +
       "open transaction holding no snapshot and no transaction id costs vacuum nothing, however long it has " +
       "been idle.",
-    reachReads: [
-      "get_pg_autovacuum_health", "get_pg_session_states", "get_pg_wraparound_risk", "get_pg_xmin_horizon"
-    ],
     build: (server, ctx) => [
       /* Ordered by CAUSE, not by severity: session, then horizon, then backlog, then headroom.
 
@@ -2643,7 +2582,6 @@ export const POSTGRES_TABS = [
   {
     id: "waits",
     label: "Waits",
-    collector: "pg_wait_sampling",
     /* THE DECISION, argued in the PR: this tab is SHOWN at every PostgreSQL target, including the stock ones
        where its read can never have content. get_pg_wait_stats reads aurora_stat_system_waits(), which core
        PostgreSQL has in no version, so on `postgres` the panel is permanently empty — and it is permanently
@@ -2658,9 +2596,6 @@ export const POSTGRES_TABS = [
       "aurora_stat_system_waits(), which core PostgreSQL has in no version. On a stock PostgreSQL target this " +
       "tab is permanently empty and the panel says so in its own words. The tab is here anyway so that the tab " +
       "set does not change shape between two PostgreSQL servers in the same fleet.",
-    reachReads: [
-      "get_pg_kernel_stats", "get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend"
-    ],
     build: (server, ctx) => [
       table(
         "Wait Events",
@@ -2719,15 +2654,11 @@ export const POSTGRES_TABS = [
   {
     id: "io",
     label: "I/O",
-    collector: "pg_io_stats",
     note:
       "PostgreSQL reports I/O by BACKEND TYPE, object and context rather than by file, so there is no " +
       "per-file grid here and the shape is deliberately not the SQL Server one. On Aurora the whole write side " +
       "is NULL — backends there do not write data files, storage does — so the write columns read as blank " +
       "rather than as zero, which would claim a measurement never taken.",
-    reachReads: [
-      "get_pg_buffer_usage", "get_pg_io_stats", "get_pg_io_trend", "get_pg_write_stats"
-    ],
     build: (server, ctx) => [
       ...fanout("get_pg_io_stats", { server, hours: ctx.hours, limit: 20 }, [
         {
@@ -2791,9 +2722,6 @@ export const POSTGRES_TABS = [
   {
     id: "replication",
     label: "Replication",
-    reachReads: [
-      "get_pg_replication_slots", "get_pg_replication_stats"
-    ],
     build: (server, ctx) => [
       ...fanout("get_pg_replication_slots", { server, hours: ctx.hours }, [
         {
@@ -2840,9 +2768,6 @@ export const POSTGRES_TABS = [
   {
     id: "storage",
     label: "Storage",
-    reachReads: [
-      "get_pg_index_bloat", "get_pg_index_usage", "get_pg_table_bloat"
-    ],
     build: (server, ctx) => [
       ...fanout("get_pg_table_bloat", { server, hours: ctx.hours, limit: 25 }, [
         {
@@ -2947,9 +2872,6 @@ export const POSTGRES_TABS = [
   {
     id: "config",
     label: "Configuration",
-    reachReads: [
-      "get_pg_server_config_changes"
-    ],
     build: (server, ctx) => [
       table(
         "Configuration Changes",
@@ -2972,6 +2894,11 @@ export const POSTGRES_TABS = [
     ],
   },
 ];
+
+/* Each tab's `reachReads` and `collector`, from server-tab-reach.js (#5562 r3): kept apart so a pin that counts a tab's fetches or
+   reads its neighbouring fields as text never sees a reach list. The tab objects carry both at run time. */
+withTabReach(SERVER_TABS, SQL_TAB_REACH);
+withTabReach(POSTGRES_TABS, POSTGRES_TAB_REACH);
 
 /**
  * The tab registry for a fleet card — the ONE place the engine branch lives.

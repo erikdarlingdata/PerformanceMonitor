@@ -132,8 +132,13 @@ public sealed class WebPageRangeTests
     public void EveryServerTabThatDeclaresACollectorNamesARealOne_AndTheViewerAgreesOnTheSharedTabs()
     {
         var tabs = Js("pages", "server-tabs.js");
-        var declared = Regex.Matches(tabs, "(?m)^    id: \"([a-z-]+)\",\n    label: \"([^\"]+)\",\n    collector: \"([a-z_]+)\",").Select(m => (m.Groups[2].Value, m.Groups[3].Value)).ToList();
+        /* A tab's collector is declared in server-tab-reach.js (#5562 r3), by tab id, in registry order: the seven SQL Server tabs, then the
+           two PostgreSQL ones. The label is the tab's own, from the SQL Server registry's first tab of that id. */
+        var reach = Js("pages", "server-tab-reach.js");
+        var declared = Regex.Matches(reach, "(?m)^  ([a-z-]+): \\{\n    collector: \"([a-z_]+)\",")
+            .Select(m => (Regex.Match(tabs, "(?m)^    id: \"" + m.Groups[1].Value + "\",\n    label: \"([^\"]+)\",").Groups[1].Value, m.Groups[2].Value)).ToList();
         Assert.Equal(9, declared.Count);
+        Assert.All(declared, d => Assert.NotEqual(string.Empty, d.Item1));
 
         foreach (var (_, collector) in declared)
             Assert.True(CollectorScheduleDefaults.All.ContainsKey(collector), collector + " is not a collector the schedule knows");

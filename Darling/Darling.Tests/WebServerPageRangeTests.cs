@@ -167,18 +167,24 @@ public sealed class WebServerPageRangeTests
     public void ATab_NamesItsReads_AndNeverTypesItsHours()
     {
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var reach = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tab-reach.js");
         var findings = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "analysis-findings.js");
         var server = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js");
 
         var hand = new Regex(@"\b(reach|reachHours|reachReads|maxHours|max_hours)\s*[:=]\s*[0-9]", RegexOptions.CultureInvariant);
-        foreach (var (file, text) in new[] { ("server-tabs.js", tabs), ("analysis-findings.js", findings), ("server.js", server) })
+        foreach (var (file, text) in new[] { ("server-tabs.js", tabs), ("server-tab-reach.js", reach), ("analysis-findings.js", findings), ("server.js", server) })
         {
             var typed = hand.Matches(text).Select(m => m.Value).ToArray();
             Assert.True(typed.Length == 0, $"{file} types a reach as a number ({string.Join("; ", typed)}); a tab's reach is the catalog's max_hours of its reachReads.");
         }
 
-        /* Each registry tab declares reachReads (the whole registry is 12 + 8 tabs; the Recommendations tab lives in its own module). */
-        var declared = Regex.Matches(tabs, @"reachReads:\s*\[([^\]]*)\]", RegexOptions.CultureInvariant);
+        /* Each registry tab declares reachReads, in server-tab-reach.js and not on the tab objects (the whole registry is 12 + 8 tabs; the
+           Recommendations tab lives in its own module): server-tabs.js is read as text by the pins that count a tab's fetches, and a
+           reach list there would read as a second fetch of every name in it. The registry applies the table to its tabs at load. */
+        Assert.DoesNotContain("reachReads:", tabs, System.StringComparison.Ordinal);
+        Assert.Contains("withTabReach(SERVER_TABS, SQL_TAB_REACH);", tabs, System.StringComparison.Ordinal);
+        Assert.Contains("withTabReach(POSTGRES_TABS, POSTGRES_TAB_REACH);", tabs, System.StringComparison.Ordinal);
+        var declared = Regex.Matches(reach,@"reachReads:\s*\[([^\]]*)\]", RegexOptions.CultureInvariant);
         Assert.True(declared.Count >= 15, $"Only {declared.Count} tabs declare reachReads.");
         Assert.Contains("reachReads: [\"get_analysis_findings\"]", findings, System.StringComparison.Ordinal);
 
@@ -231,20 +237,21 @@ public sealed class WebServerPageRangeTests
     /// <summary>The reads a tab declares, from the registry source: the tab key is "engine id" as the harness names it.</summary>
     private static string[] TabReads(string key)
     {
-        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tab-reach.js");
         var postgres = key.StartsWith("PostgreSQL ", System.StringComparison.Ordinal);
         var id = key[(key.LastIndexOf(' ') + 1)..];
-        var registry = tabs[tabs.IndexOf("export const POSTGRES_TABS", System.StringComparison.Ordinal)..];
-        var sql = tabs[..tabs.IndexOf("export const POSTGRES_TABS", System.StringComparison.Ordinal)];
+        var registry = tabs[tabs.IndexOf("export const POSTGRES_TAB_REACH", System.StringComparison.Ordinal)..];
+        var sql = tabs[..tabs.IndexOf("export const POSTGRES_TAB_REACH", System.StringComparison.Ordinal)];
         var source = postgres ? registry : sql;
         if (key.StartsWith("SQL Server recommendations", System.StringComparison.Ordinal))
         {
             return ["get_analysis_findings"];
         }
 
-        var match = Regex.Match(source, "    id: \"" + Regex.Escape(id) + "\",.*?(?:reachReads: \\[([^\\]]*)\\])?\\s*,?\\s*build", RegexOptions.Singleline | RegexOptions.CultureInvariant);
-        return match.Success && match.Groups[1].Success
-            ? Regex.Matches(match.Groups[1].Value, "\"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToArray()
+        var tab = Regex.Match(source, "\\n  " + Regex.Escape(id) + ": \\{(?<body>.*?)\\n  \\}", RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        var list = tab.Success ? Regex.Match(tab.Groups["body"].Value, "reachReads: \\[([^\\]]*)\\]", RegexOptions.CultureInvariant) : Match.Empty;
+        return list.Success
+            ? Regex.Matches(list.Groups[1].Value, "\"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToArray()
             : [];
     }
 
