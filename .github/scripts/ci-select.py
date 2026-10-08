@@ -417,6 +417,9 @@ DOC_PATTERNS = (
 )
 
 
+_TEST_PROJECT_FILE = re.compile(r"(^|/)[^/]*Tests/")
+
+
 def _full(reason: str) -> dict:
     return {"full": True, "reason": reason, "selected": {}, "why": {}, "seconds": {}, "total": {}}
 
@@ -481,8 +484,11 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
 
     Returns `{"full": bool, "reason": str, "selected": {suite: [Class, ...]}, "why": {suite: {Class: reason}},
     "seconds": {suite: float}, "total": {suite: int}}`. FULL (never "nothing") whenever the map cannot be trusted:
-    missing, unreadable, wrong schema, too old, drift over `max_drift` files, a keep-full file, a non-.cs file the
-    map knows nothing about, or any event but a pull request."""
+    missing, unreadable, wrong schema, too old, drift over `max_drift` files, a keep-full file, a file the map knows
+    nothing about, or any event but a pull request. That includes a new product .cs file: types found by reflection,
+    DI or attribute scanning change what a census class sees without any file it covers changing. The one exception
+    is a new .cs file under a test project (a `*Tests/` or `*.Tests/` directory) while `discovered` holds a class the
+    map has never seen; that class runs as a "new class"."""
     if event != "pull_request":
         return _full(f"event {event or '(none)'} always runs everything")
     if test_map is None:
@@ -539,13 +545,16 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
             return bool(live)
         return isinstance(g, list) and any(matches(p, f) for p in g for f in live)
 
+    new_classes = any(cls not in parsed.get(suite, {}) for suite, found in discovered.items() for cls in found)
     for f in live:
-        if f in known or f.endswith(".cs"):
-            # A new .cs file has no call edges yet: whoever calls it changes too, and the classes of a new test
-            # file are found through `discovered`.
+        if f in known:
             continue
         if any(isinstance(g, list) and any(matches(p, f) for p in g) for g in globs.values()):
             continue
+        if f.endswith(".cs"):
+            if _TEST_PROJECT_FILE.search(f) and new_classes:
+                continue  # a new test file: its classes are found through `discovered`
+            return _full(f"new file not in the map: {f}")
         return _full(f"{f} is in no class, no text pattern and not in the map")
 
     live_set = set(live)

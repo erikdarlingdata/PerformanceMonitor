@@ -178,10 +178,28 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     [Fact]
     public void FileChangedSinceTheMap_CountsAsChanged()
     {
-        // The pull request itself touches nothing the map covers; A.cs changed between the map and the merge base.
-        var (_, r) = MapSelect(WriteMap(), new[] { "Lite/Services/Brand.cs" }, new[] { "Lite/Services/A.cs" });
+        // The pull request itself touches no code; A.cs changed between the map and the merge base.
+        var (_, r) = MapSelect(WriteMap(), new[] { "README.md" }, new[] { "Lite/Services/A.cs" });
 
         Assert.Equal("covers a changed file", Why(r)["OwnTests"]);
+    }
+
+    [Fact]
+    public void NewProductCsFile_NotInTheMap_RunsEverything()
+    {
+        // Reflection, DI and attribute scanning find types no covered file mentions.
+        var (_, r) = MapSelect(WriteMap(), new[] { "Lite/Services/Brand.cs" }, new[] { "Lite/Services/A.cs" });
+
+        AssertFull(r, "new file not in the map: Lite/Services/Brand.cs");
+    }
+
+    [Fact]
+    public void NewTestProjectFile_WithADiscoveredClass_SelectsThatClass_AndIsNotFull()
+    {
+        var (_, r) = MapSelect(WriteMap(), new[] { "Lite.Tests/Fresh.cs" });
+
+        Assert.False(r.GetProperty("full").GetBoolean());
+        Assert.Equal("new class", Why(r)["FreshTests"]);
     }
 
     [Fact]
