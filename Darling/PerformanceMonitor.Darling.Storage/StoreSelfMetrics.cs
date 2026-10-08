@@ -647,6 +647,35 @@ FROM pg_stat_bgwriter AS b";
     public const string AlertLogTable = "config.config_alert_log";
 
     /// <summary>
+    /// The size of a day-partitioned interval parent (#5571): the sum of <c>pg_total_relation_size</c> over its LEAF
+    /// partitions (heap, indexes and TOAST of the legacy table, every day and DEFAULT), because the partitioned parent
+    /// itself has no storage and reads 0. <c>pg_partition_tree</c> returns NO row for a plain table (it is not the
+    /// table's own single leaf), so for a table that is not partitioned (a store that has not run its rung yet) the sum
+    /// is NULL and the COALESCE falls back to the plain size. Both arms are live: the first for every migrated store,
+    /// the second for a store below the rung.
+    /// </summary>
+    private const string IntervalLatestPartitionBytesSql =
+        $"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('collect.{QueryStoreIntervalLatest.TableName}'))::bigint";
+
+    /// <summary>The wide parent's size, summed over its leaf partitions. See <see cref="IntervalLatestPartitionBytesSql"/>.</summary>
+    private const string IntervalWidePartitionBytesSql =
+        $"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('collect.{QueryStoreIntervalWide.TableName}'))::bigint";
+
+    /// <summary>
+    /// The row count of a day-partitioned interval parent (#5571): the sum of the leaf partitions' planner estimates
+    /// (<c>reltuples</c>, as every other row of this kind), NULL where none has been vacuumed or analysed yet. The
+    /// parent's own <c>reltuples</c> is only set by an ANALYZE of the parent, so it would lag the partitions. For a table
+    /// that is not partitioned <c>pg_partition_tree</c> returns no row (not the table itself as a leaf), so the
+    /// <c>NOT EXISTS</c> arm counts the table's own estimate instead.
+    /// </summary>
+    private const string IntervalLatestPartitionRowsSql =
+        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass)))))";
+
+    /// <summary>The wide parent's row estimate, summed over its leaf partitions. See <see cref="IntervalLatestPartitionRowsSql"/>.</summary>
+    private const string IntervalWidePartitionRowsSql =
+        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalWide.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass)))))";
+
+    /// <summary>
     /// The named plain-table rows (#3582, extended #4609) — every store shape, like the dimension rows,
     /// and in the same shape: <c>pg_total_relation_size</c> (heap + indexes + TOAST) and the exact row
     /// count. Product-owned tables that are neither hypertables nor payload dimensions and were therefore
@@ -711,8 +740,8 @@ SELECT
     $1,
     'collect.{QueryStoreIntervalLatest.TableName}',
     '{TableObjectKind}',
-    pg_total_relation_size('collect.{QueryStoreIntervalLatest.TableName}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass)
+    {IntervalLatestPartitionBytesSql},
+    {IntervalLatestPartitionRowsSql}
 UNION ALL
 SELECT
     $1,
@@ -725,8 +754,8 @@ SELECT
     $1,
     'collect.{QueryStoreIntervalWide.TableName}',
     '{TableObjectKind}',
-    pg_total_relation_size('collect.{QueryStoreIntervalWide.TableName}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.TableName}'::regclass)
+    {IntervalWidePartitionBytesSql},
+    {IntervalWidePartitionRowsSql}
 UNION ALL
 SELECT
     $1,
@@ -764,8 +793,16 @@ SELECT
     /// nobody checks. Aliases <c>c</c> (<c>pg_class</c>) and <c>n</c> (<c>pg_namespace</c>) are the
     /// contract every consumer of this fragment supplies.
     /// </summary>
-    public const string CensusRelationPredicateSql = @"c.relkind IN ('r', 'm', 'p', 'S')
-AND   NOT c.relisshared";
+    public const string CensusRelationPredicateSql = $@"c.relkind IN ('r', 'm', 'p', 'S')
+AND   NOT c.relisshared
+AND   NOT (c.relispartition AND EXISTS (
+        SELECT 1 FROM pg_inherits AS inh
+        JOIN pg_class AS parent_c ON parent_c.oid = inh.inhparent
+        JOIN pg_namespace AS parent_n ON parent_n.oid = parent_c.relnamespace
+        WHERE inh.inhrelid = c.oid
+        AND   (parent_n.nspname || '.' || parent_c.relname) IN (
+            'collect.{QueryStoreIntervalLatest.TableName}',
+            'collect.{QueryStoreIntervalWide.TableName}')))";
 
     /// <summary>
     /// Which side of the user/system line a relation falls on, as a fragment over <c>n.nspname</c> (#3582).
