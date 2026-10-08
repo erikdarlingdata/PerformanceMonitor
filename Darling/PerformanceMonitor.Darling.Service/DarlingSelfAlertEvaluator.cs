@@ -7725,6 +7725,13 @@ WHERE c.is_enabled";
     /// it cannot produce a delta; and if one ever did, the sentence to say about it belongs to the hold, not
     /// to this arm.</para>
     ///
+    /// <para><b>One known benign source (#5551).</b> The startup and hourly sweeps that drop a retired or reshaped
+    /// continuous aggregate stop its jobs first, and TimescaleDB's scheduler ends a worker that is running at that
+    /// moment, which records ONE failed run (<c>total_failures</c> + 1, last run Failed). When the drop goes ahead
+    /// the job and its statistics are deleted with the aggregate and this arm never sees it. When the drop is
+    /// skipped (the worker outlasted the sweep's cap) or fails, the job stays, scheduled again, and carries that
+    /// failure until its next run succeeds, so this arm can report it once at INFORMATION.</para>
+    ///
     /// <para>Event-shaped, so there is no standing state and no resolution row: what is reported is "N more
     /// failures since the previous sample", which is true when it is said and is not a condition that later
     /// clears. The alert cooldown still gates the re-fire, so a job failing every few minutes cannot outrun

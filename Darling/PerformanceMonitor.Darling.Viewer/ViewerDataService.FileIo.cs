@@ -34,7 +34,9 @@ public sealed record FileIoLatencyPoint(
     double AvgReadLatencyMs,
     double AvgWriteLatencyMs,
     double AvgQueuedReadLatencyMs,
-    double AvgQueuedWriteLatencyMs);
+    double AvgQueuedWriteLatencyMs,
+    long Reads = 0,
+    long Writes = 0);
 
 /// <summary>
 /// One file's throughput point (MB/s) for the File I/O tab's Throughput sub-tab — a mirror of Lite's
@@ -150,7 +152,12 @@ public sealed partial class ViewerDataService
                  THEN SUM(CAST(rated_stall_queued_write_ms AS double precision)) / SUM(rated_writes)
                  ELSE 0 END AS avg_queued_write_latency_ms,
             MIN(collection_time) AS first_collection_time,
-            COUNT(*) AS collection_count
+            COUNT(*) AS collection_count,
+            /* Release walk V9b: the bucket's read and write counts ride along so the Overview lane can weight the
+               files' latencies by operations (total stall over total operations) instead of averaging a no-read
+               log file as 0 ms. */
+            COALESCE(SUM(rated_reads), 0)::bigint AS total_reads,
+            COALESCE(SUM(rated_writes), 0)::bigint AS total_writes
         FROM rated
         GROUP BY database_name, file_name, 3
         HAVING COUNT(rated_reads) > 0
@@ -264,7 +271,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime,
-            double AvgRead, double AvgWrite, double AvgQueuedRead, double AvgQueuedWrite)>();
+            double AvgRead, double AvgWrite, double AvgQueuedRead, double AvgQueuedWrite, long Reads, long Writes)>();
         var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -283,7 +290,9 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                 reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                reader.IsDBNull(6) ? 0 : reader.GetDouble(6)));
+                reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
+                reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                reader.IsDBNull(10) ? 0 : reader.GetInt64(10)));
         }
 
         foreach (var row in rows)
@@ -295,7 +304,9 @@ public sealed partial class ViewerDataService
                 row.AvgRead,
                 row.AvgWrite,
                 row.AvgQueuedRead,
-                row.AvgQueuedWrite));
+                row.AvgQueuedWrite,
+                row.Reads,
+                row.Writes));
         }
 
         return items;

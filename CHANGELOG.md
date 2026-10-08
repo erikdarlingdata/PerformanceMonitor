@@ -137,6 +137,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **Each PostgreSQL server in Darling can use its own AWS role** ([#5468])
 - **Filter web grid columns by number, text operator or empty cell** ([#5255])
 - **Web sidebar search and tag grouping** ([#5259])
+- **Lite has a DuckDB memory limit setting** ([#5553])
 
 ### Changed
 
@@ -293,6 +294,13 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **A managed store near a WAL size step no longer rewrites its settings file on every restart** ([#5544])
 - **The start-up check for gaps in the rollups no longer reads a whole chunk of a daily rollup to look for one missing day** ([#5538])
 - **The fleet overview tool and the web Fleet page total PostgreSQL deadlocks faster over multi-day windows** ([#5536])
+- **The module map no longer re-reads two days of procedure stats at every restart** ([#5528])
+- **Custom Views, custom alert rules and alert notebook charts read far fewer rows for a scoped server** ([#5537])
+- **Query Store reads that use the stored interval tables no longer miss an interval that started up to about a day before the table's oldest data** ([#5543])
+- **A quiet server's job history and default trace watermark read touches a week of data, not its whole history** ([#5532])
+- **Small fixes across Lite and the Darling Viewer from the final release walk: Collector Schedules wording, Server Inventory health, time columns, screen-reader names and FinOps dashes** ([#5542])
+- **Lite's Job History tab reads only the selected time range, and tab loads no longer wait on the database from the window** ([#5553])
+- **Darling stops a rollup's refresh jobs before it drops the rollup** ([#5552])
 
 ## [3.9.0] - 2026-10-02
 
@@ -5120,10 +5128,17 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5511]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5511
 [#5524]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5524
 [#5527]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5527
+[#5528]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5528
 [#5529]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5529
 [#5530]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5530
+[#5532]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5532
 [#5533]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5533
 [#5534]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5534
 [#5536]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5536
+[#5537]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5537
 [#5538]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5538
+[#5542]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5542
+[#5543]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5543
 [#5544]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5544
+[#5552]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5552
+[#5553]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5553
