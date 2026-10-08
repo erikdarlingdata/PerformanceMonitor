@@ -807,8 +807,23 @@
                           MouseDoubleClick="ServerScheduleGrid_DoubleClick">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="*"/>
-                        <DataGridTextColumn Header="Preset" Binding="{Binding Preset}" Width="110"/>
-                        <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
+                        <DataGridTextColumn Binding="{Binding Preset}" Width="110">
+                            <DataGridTextColumn.Header>
+                                <TextBlock Text="Preset"
+                                           ToolTip="Which preset (Aggressive, Balanced, Low-Impact) the schedule this server runs on matches. Custom means at least one collector interval differs from every preset."/>
+                            </DataGridTextColumn.Header>
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="ToolTip" Value="{Binding PresetDetail}"/>
+                                </Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding Status}" Width="110">
+                            <DataGridTextColumn.Header>
+                                <TextBlock Text="Status"
+                                           ToolTip="Uses default: the server follows the default schedule (Edit Default). Own schedule: the server has its own collector schedule. The Preset column describes whichever schedule applies."/>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
                     </DataGrid.Columns>
                 </DataGrid>
 
