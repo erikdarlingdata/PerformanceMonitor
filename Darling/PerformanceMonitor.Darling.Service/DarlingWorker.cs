@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -11617,6 +11617,7 @@ AND   j.hypertable_name = '{relation}'", connection))
            its built table are plain tables), so it sits outside the gate, after the module-map refresh: a builder
            that runs out its budget never makes the cheaper tenants above it wait, and a fault here skips nothing. */
         await BuildPlanRegressionDailyAsync(stoppingToken);
+        await BuildPgIoStatsHourlyAsync(stoppingToken);
     }
 
     /// <summary>
@@ -11638,6 +11639,23 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
     }
 
+    /// <summary>
+    /// The hourly store-maintenance tick's eighth tenant (#5495): builds the hourly rollup of the differenced PostgreSQL I/O
+    /// counters that long <c>get_pg_io_stats</c> windows read, one failure-isolated pass (see
+    /// <see cref="PgIoStatsHourlyBuilder.RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>). The first pass after
+    /// the V170 upgrade is the fill, capped at <see cref="PgIoStatsHourlyBuilder.MaxBuildsPerTick"/> hours. Its own catch-all: nothing here can fail the tick.
+    /// </summary>
+    private async Task BuildPgIoStatsHourlyAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await PgIoStatsHourlyBuilder.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("PostgreSQL I/O hourly rollup could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+    }
     /// <summary>
     /// The hourly store-maintenance tick's seventh tenant (#5448): builds the per-day per-plan totals PLAN_REGRESSION reads
     /// for closed days, one failure-isolated pass (see <see cref="PlanRegressionDaily.RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>).

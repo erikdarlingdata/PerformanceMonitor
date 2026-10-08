@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -860,6 +860,15 @@ BEGIN
     END IF;
 END $$;";
 
+    /// <summary>
+    /// V170 (#5495) — <c>collect.pg_io_stats_hourly</c> and <c>collect.pg_io_stats_hourly_state</c>: the hourly rollup of the
+    /// differenced PostgreSQL I/O counters that <c>get_pg_io_stats</c> and the viewer's I/O tab read for long windows. The text and
+    /// the reasoning are on <see cref="PgIoStatsHourly"/>, which the rung embeds. <b>Both tables are empty when created</b> (the
+    /// data-moving census has nothing to declare): the service's hourly tick fills them (<see cref="PgIoStatsHourlyBuilder"/>), at most
+    /// <see cref="PgIoStatsHourlyBuilder.MaxBuildsPerTick"/> hours per tick, and a read stays on raw rows until its window is covered.
+    /// Plain tables, no GRANT (the <c>collect</c> schema's blanket SELECT covers them). <b>No Lite twin:</b> Lite has no PostgreSQL targets.
+    /// </summary>
+    private const string V170Sql = PgIoStatsHourly.CreateSql;
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -1067,6 +1076,7 @@ END $$;";
         new Migration(167, "legacy-pin-candidates", V167Sql),
         new Migration(168, "plan-regression-daily", V168Sql),
         new Migration(169, "aws-per-server-role", V169Sql),
+        new Migration(170, "pg-io-stats-hourly", V170Sql),
     };
 
     /// <summary>
