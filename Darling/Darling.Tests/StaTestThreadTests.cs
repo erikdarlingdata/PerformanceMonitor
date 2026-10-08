@@ -22,7 +22,10 @@ namespace Darling.Tests;
 /// #5602: the shared STA test thread. Bodies run in order on one thread, an exception keeps its stack, a body that pumps does not
 /// let a second one in, the hang guard fires and names the test, and the drain runs the work a body queued before the next body
 /// starts. The hang-guard test uses a host of its own: it leaves that host's thread stuck, which the shared one must never be.
+/// In the <c>timing</c> collection because it judges 200 to 300 ms limits (the hang guard, a gate that must hold a body out), which a
+/// parallel run's load would stretch (#5602).
 /// </summary>
+[Collection("timing")]
 public sealed class StaTestThreadTests
 {
     [Fact]
