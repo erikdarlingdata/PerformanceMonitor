@@ -367,6 +367,17 @@ public sealed class TestMapShadowGuardTests : IDisposable
         Assert.Contains("id: testmap", step, StringComparison.Ordinal);
         Assert.Contains("if: github.event_name == 'pull_request' && steps.decide.outputs.run == 'true'", step, StringComparison.Ordinal);
         Assert.Contains("continue-on-error: true", step[..step.IndexOf("run: |", StringComparison.Ordinal)], StringComparison.Ordinal);
+
+        // continue-on-error absorbs a step failure but not the job's own timeout: a hung gh api call would otherwise run
+        // the gate into its 5-minute limit and red the whole run with no tests. A step timeout turns the hang into a step
+        // failure first (#5459).
+        var header = step[..step.IndexOf("run: |", StringComparison.Ordinal)];
+        var stepTimeout = Regex.Match(header, @"^        timeout-minutes: (\d+)\s*$", RegexOptions.Multiline);
+        Assert.True(stepTimeout.Success, "the pin step needs its own timeout-minutes");
+        var gateTimeout = Regex.Match(gate, @"^    timeout-minutes: (\d+)\s*$", RegexOptions.Multiline);
+        Assert.True(gateTimeout.Success, "the gate job needs a timeout-minutes");
+        Assert.True(int.Parse(stepTimeout.Groups[1].Value) < int.Parse(gateTimeout.Groups[1].Value),
+            "the pin step's timeout must be below the gate job's");
         Assert.Contains("nightly.yml/runs?status=success", step, StringComparison.Ordinal);
         Assert.Contains("compare/${sha}...${BASE_SHA}", step, StringComparison.Ordinal);   // the map's commit must be an ancestor of the base
         Assert.Contains("ahead|identical", step, StringComparison.Ordinal);

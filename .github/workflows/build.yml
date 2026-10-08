@@ -226,6 +226,9 @@ jobs:
         id: testmap
         if: github.event_name == 'pull_request' && steps.decide.outputs.run == 'true'
         continue-on-error: true
+        # A hang in one of the gh api calls must end this step (a step failure, which continue-on-error absorbs), not
+        # run into the gate job's own 5-minute timeout, which continue-on-error does not cover and which would red the PR.
+        timeout-minutes: 2
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1946,6 +1949,7 @@ jobs:
       - name: Upload Darling test timings
         if: always() && steps.filter.outputs.darling == 'true'
         continue-on-error: true
+        timeout-minutes: 5
         uses: actions/upload-artifact@v6
         with:
           name: darling-tests-timing-${{ matrix.shard }}
