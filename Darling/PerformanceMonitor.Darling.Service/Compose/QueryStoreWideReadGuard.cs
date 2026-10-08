@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// #5582: refuses, before it runs, a composed Query Store panel that would read more of
 /// <c>collect.query_store_interval_wide</c> than the compose statement timeout allows. A one-day read across 43 servers
-/// read 8,457,483 rows (9.2 GB) in 48.3 s against a 60 s timeout, so a fleet-wide panel over a longer window (or a
+/// read 8,457,483 rows (9.2 GB) in 48 to 55 s cold against a 60 s timeout, so a fleet-wide panel over a longer window (or a
 /// RankedTimeSeries panel that read the rows twice) ran to the timeout and failed after a minute of wasted work.
 /// A refusal in milliseconds, with a message that says what to change, is the better answer.
 ///
@@ -58,10 +58,25 @@ WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
     internal readonly record struct Estimate(long DailyRows, int Servers)
     {
         /// <summary>The wide-table rows a read over the counted range is expected to take.</summary>
-        public long RowsOver(DateTime countedStart, DateTime countedEnd)
+        public long RowsOver(DateTime countedStart, DateTime countedEnd) => RowsOver(countedStart, countedEnd, null);
+
+        /// <summary>
+        /// The wide-table rows a read over the counted range is expected to take, in equivalent rows (#5582). The hours in
+        /// <c>[countedStart, stampThrough)</c> are served from the compose stamp's rollup and count at
+        /// <see cref="ComposeLimits.StampRowWeight"/> per wide row; the rest, the tail the stamp has not reached, counts at 1.0.
+        /// With no <paramref name="stampThrough"/> every hour counts at 1.0, which is the figure before the stamp existed.
+        /// </summary>
+        public long RowsOver(DateTime countedStart, DateTime countedEnd, DateTime? stampThrough)
         {
             var days = Math.Max(0d, (countedEnd - countedStart).TotalDays);
-            return (long)Math.Ceiling(DailyRows * days);
+            if (stampThrough is not { } through)
+            {
+                return (long)Math.Ceiling(DailyRows * days);
+            }
+
+            var stampedDays = Math.Clamp((through - countedStart).TotalDays, 0d, days);
+            var weighted = (days - stampedDays) + (stampedDays * ComposeLimits.StampRowWeight);
+            return (long)Math.Ceiling(DailyRows * weighted);
         }
     }
 
@@ -99,20 +114,29 @@ WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
     /// <summary>
     /// The refusal for a read of <paramref name="countedStart"/>..<paramref name="countedEnd"/> on the wide table, or null when the
     /// estimate is under <paramref name="limit"/> (or there is no estimate). In the style of the <see cref="ComposeLimits.MaxBuckets"/>
-    /// refusal: it says how big the read is and what to change.
+    /// refusal: it says how big the read is and what to change. With <paramref name="stampThrough"/> the figure is weighted
+    /// (<see cref="Estimate.RowsOver(DateTime, DateTime, DateTime?)"/>), so it is not a row count and the message does not call it one:
+    /// it says the read is too big for the time limit, for these servers and this window, and what to change.
     /// </summary>
     internal static string? Refusal(
-        Estimate? estimate, DateTime countedStart, DateTime countedEnd, long limit = ComposeLimits.MaxQueryStoreWideRows)
+        Estimate? estimate, DateTime countedStart, DateTime countedEnd, long limit = ComposeLimits.MaxQueryStoreWideRows,
+        DateTime? stampThrough = null)
     {
         if (estimate is not { } found || found.Servers == 0)
         {
             return null;
         }
 
-        var rows = found.RowsOver(countedStart, countedEnd);
+        var rows = found.RowsOver(countedStart, countedEnd, stampThrough);
         if (rows <= limit)
         {
             return null;
+        }
+
+        if (stampThrough is not null)
+        {
+            return $"This panel reads too much Query Store history to finish inside the time limit ({Servers(found.Servers)}, {Window(countedEnd - countedStart)}). "
+                + "Choose fewer servers or a shorter window.";
         }
 
         var million = (rows / 1_000_000d).ToString("0.#", CultureInfo.InvariantCulture);
@@ -124,16 +148,19 @@ WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
     /// <summary>The guard end to end: estimate, then refuse. Null means the panel runs.</summary>
     internal static async Task<string?> CheckAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedStart, DateTime countedEnd,
-        ILogger? logger, CancellationToken cancellationToken, long limit = ComposeLimits.MaxQueryStoreWideRows) =>
-        Refusal(await EstimateAsync(postgres, serverScope, logger, cancellationToken), countedStart, countedEnd, limit);
+        ILogger? logger, CancellationToken cancellationToken, long limit = ComposeLimits.MaxQueryStoreWideRows,
+        DateTime? stampThrough = null) =>
+        Refusal(await EstimateAsync(postgres, serverScope, logger, cancellationToken), countedStart, countedEnd, limit, stampThrough);
 
     /// <summary>
     /// The limit for a panel (#5582): <see cref="ComposeLimits.MaxQueryStoreWideRows"/> is the rows ONE scan of the wide table can read
-    /// inside the statement timeout, so a RankedTimeSeries panel that still scans the fact rows twice (a <c>query_hash</c> group, or a
-    /// series past <see cref="ComposeLimits.MaxSingleScanBuckets"/> buckets) gets half of it.
+    /// inside the statement timeout, so a RankedTimeSeries panel that still scans the fact rows twice (a <c>query_hash</c> group, a
+    /// series past <see cref="ComposeLimits.MaxSingleScanBuckets"/> buckets, or a bucket x member product past
+    /// <see cref="ComposeLimits.MaxSingleScanBaseRows"/>) gets <see cref="ComposeLimits.MaxQueryStoreWideRowsTwoScans"/>, which is
+    /// measured on the second scan being warm, not half of the one-scan figure.
     /// </summary>
     internal static long LimitFor(bool scansFactRowsTwice) =>
-        scansFactRowsTwice ? ComposeLimits.MaxQueryStoreWideRows / 2 : ComposeLimits.MaxQueryStoreWideRows;
+        scansFactRowsTwice ? ComposeLimits.MaxQueryStoreWideRowsTwoScans : ComposeLimits.MaxQueryStoreWideRows;
 
     private static string Servers(int count) => count == 1 ? "1 server" : $"{count.ToString(CultureInfo.InvariantCulture)} servers";
 

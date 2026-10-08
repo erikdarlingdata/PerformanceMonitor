@@ -47,6 +47,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>server_id</c>, resolved from the registry by name; a name with no registry row resolves to no id, so those names alone are
 /// also matched on the row's stored <c>server_name</c>, exactly as the old scope matched them. Null or empty (the default, and
 /// every run whose names are all registered) adds nothing to the SQL or to the parameters.
+/// <see cref="QueryStoreGroupMembers"/> (#5582) is the runner's count of the members of a Query Store RankedTimeSeries panel's group
+/// dimension(s), the product when there are several: the servers in scope for <c>server</c>, and <c>pg_stats.n_distinct</c> of the
+/// wide parent for <c>database_name</c> and <c>module_name</c> (a high figure, since it counts all retention). Null (the default, and
+/// every run that could not count) means unknown, and unknown compiles the two-scan text: the single-scan base CTE holds buckets x
+/// members rows, which only a known count can bound by <see cref="ComposeLimits.MaxSingleScanBaseRows"/>.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
@@ -59,7 +64,8 @@ public sealed record ComposeRunContext(
     DateTime? QueryStoreWideStart = null,
     ComposeHourlyEdgesVerdict? HourlyEdges = null,
     DateTime? ModuleMapThrough = null,
-    IReadOnlyList<string>? UnregisteredServers = null)
+    IReadOnlyList<string>? UnregisteredServers = null,
+    long? QueryStoreGroupMembers = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -1316,31 +1322,38 @@ public static class ComposeCompiler
         context.QueryStoreWideEligible
         && !route.IsCagg
         && route.Tier != ComposeSourceTier.HourlyRawEdges
-        && PlanTakesSingleScan(plan, windowBuckets);
+        && PlanTakesSingleScan(plan, windowBuckets, context.QueryStoreGroupMembers);
 
     /// <summary>
     /// The plan-level half of <see cref="CanSingleScan"/>, and the half the Query Store read guard asks before any context
     /// exists (<see cref="RankedTimeSeriesScansFactRowsTwice"/>): a Query Store RankedTimeSeries plan whose single-scan base
     /// CTE is BOUNDED and whose aggregate decomposes.
     ///
-    /// <para><b>Why a bound at all (#5582).</b> The base CTE holds one row per (bucket, group). Measured on the rig with
-    /// every fact row its own group, that is about 150 to 180 bytes of temp file per row (the materialized CTE, the sort or
-    /// hash spill that builds it, and the rank's re-aggregation over it), so a read of the guard's 9.4 million rows would write
-    /// 1.4 to 1.7 GB against the compose session's 1 GB <c>temp_file_limit</c>, where the two-scan text writes only what its
-    /// rank aggregate over the groups spills. So the single scan is taken only when the number of rows is bounded by the plan:
+    /// <para><b>Why a bound at all (#5582).</b> The base CTE holds one row per (bucket, group). A large production store measured
+    /// 436 bytes of temp file per base row with every fact row its own group (the materialized CTE, the sort or hash spill that
+    /// builds it, and the rank's re-aggregation over it), against the compose session's 1 GB <c>temp_file_limit</c>, where the
+    /// two-scan text writes only what its rank aggregate over the groups spills. So the single scan is taken only when the number of rows is bounded by the plan:
     /// buckets x groups, with at most <see cref="ComposeLimits.MaxSingleScanBuckets"/> buckets and no group dimension that is
     /// as large as the fact rows. <c>query_hash</c> is that dimension (one member per statement), and it is the one the
     /// "top N queries over time" panel groups by, so that panel keeps the two-scan text and the guard counts its second
     /// scan. <c>database_name</c>, <c>module_name</c> and <c>server</c> are bounded by the fleet's databases, modules and
-    /// servers.</para>
+    /// servers, and the runner counts them: <paramref name="groupMembers"/> is that count (null: unknown, so two scans).</para>
+    ///
+    /// <para><b>The bound is buckets x members (#5582).</b> A large production store measured 436 bytes of temp file per base row
+    /// (the rig's 150 to 180 was wrong), so 100 buckets x 30,000 module names, 3 million rows, would write about 1.3 GB against the
+    /// 1 GB limit. The single scan is taken only when <c>buckets x members</c> is at most
+    /// <see cref="ComposeLimits.MaxSingleScanBaseRows"/> (about 436 MB), and the bucket cap stays as the series-length bound.</para>
     /// </summary>
-    private static bool PlanTakesSingleScan(PanelPlan plan, double windowBuckets) =>
+    private static bool PlanTakesSingleScan(PanelPlan plan, double windowBuckets, long? groupMembers) =>
         plan.Mode == PanelMode.RankedTimeSeries
         && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal)
         && plan.Overlay is null
         && !plan.UsesModuleJoin
         && windowBuckets > 0
         && windowBuckets <= ComposeLimits.MaxSingleScanBuckets
+        && groupMembers is { } members
+        && members >= 0
+        && windowBuckets * members <= ComposeLimits.MaxSingleScanBaseRows
         && plan.GroupBy.All(dim => !dim.ViaModuleJoin && !dim.TrailingSpaceHistory && !s_unboundedGroupColumns.Contains(dim.Column))
         && TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, new PartialColumns()) is not null;
 
@@ -1353,8 +1366,10 @@ public static class ComposeCompiler
     /// the series each read them. The Query Store read guard counts that second scan against the statement timeout, so it asks
     /// before the context exists, from the plan and the window alone. Any panel that is not a RankedTimeSeries reads them once.
     /// Exact for a run on the wide route, the only route the guard checks; <see cref="CompileCore"/> takes the same decision.
+    /// <paramref name="groupMembers"/> is the same count the compile reads from <see cref="ComposeRunContext.QueryStoreGroupMembers"/>
+    /// (null: unknown, so two scans), so the guard's limit matches what compiles.
     /// </summary>
-    internal static bool RankedTimeSeriesScansFactRowsTwice(PanelPlan plan, DateTime startUtc, DateTime endUtc)
+    internal static bool RankedTimeSeriesScansFactRowsTwice(PanelPlan plan, DateTime startUtc, DateTime endUtc, long? groupMembers)
     {
         if (plan is null)
         {
@@ -1369,7 +1384,7 @@ public static class ComposeCompiler
         var windowSeconds = (endUtc - startUtc).TotalSeconds;
         var bucketSeconds = MeasureCatalog.BucketSeconds(MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds));
         var buckets = bucketSeconds > 0 ? Math.Ceiling(windowSeconds / bucketSeconds) : 0d;
-        return !PlanTakesSingleScan(plan, buckets);
+        return !PlanTakesSingleScan(plan, buckets, groupMembers);
     }
 
     /// <summary>

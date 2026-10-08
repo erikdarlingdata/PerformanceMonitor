@@ -64,9 +64,11 @@ internal static class QueryStoreRankedHarness
     internal sealed record Comparison(
         bool Equal, int CandidateRows, int OracleRows, bool MemberSetsDiffered, string? Difference, string CandidateSql, string OracleSql);
 
-    /// <summary>The wide-route context for a window: Query Store reads the wide table, no rollups.</summary>
-    internal static ComposeRunContext WideContext(DateTime start, DateTime end, IReadOnlyList<string>? servers = null) =>
-        new(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown, QueryStoreWideEligible: true);
+    /// <summary>The wide-route context for a window: Query Store reads the wide table, no rollups. <paramref name="groupMembers"/> is
+    /// the runner's member count of the group dimension (#5582); the default, 1,000, is a bounded group, so the single-scan gate's
+    /// member term passes and the bucket cap and the group column decide, as the seeded groups here are a handful.</summary>
+    internal static ComposeRunContext WideContext(DateTime start, DateTime end, IReadOnlyList<string>? servers = null, long? groupMembers = 1_000) =>
+        new(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown, QueryStoreWideEligible: true, QueryStoreGroupMembers: groupMembers);
 
     internal static PanelPlan Parse(string planJson)
     {
