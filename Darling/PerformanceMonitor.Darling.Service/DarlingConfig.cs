@@ -235,13 +235,14 @@ public sealed class DarlingConfig
 
     /// <summary>
     /// #5158: whether <c>procedure_stats</c> fetches plan XML only for module plans this host has not already
-    /// committed. <c>off</c> (the default) keeps the inline capture. <c>shadow</c> keeps the inline capture and every
+    /// committed. <c>on</c> (the default since 3.10) skips the render for a recognized plan. <c>off</c> keeps the inline capture. <c>shadow</c> keeps the inline capture and every
     /// stored row exactly as <c>off</c> writes it, and in addition recognizes each module plan by its identity (the
     /// plan handle, its cached time and a fingerprint of its statements) and checks that identity against the plans
     /// this host has committed, recording in the run's collection-log note how many it would have skipped and how
     /// many of those the identity got wrong (<c>deferred_would_hit</c>, <c>deferred_false_hit</c> when the plan's shape changed;
     /// a render whose shape held, in the field only the memory grant moved, counts as <c>deferred_same_shape</c>, not a false hit). <c>on</c> skips
     /// the render for a recognized plan, sends its stored digest instead, and renders only the rest, at most 150 a run.
+    /// Set <c>off</c> to restore the inline capture.
     /// An unrecognized value logs a warning and means <c>off</c>.
     ///
     /// <para><b>Why a shadow mode.</b> A module plan changes in place when one statement recompiles, with the same
@@ -253,10 +254,10 @@ public sealed class DarlingConfig
     /// <para>A file-only knob like <see cref="QueryStatsDeferredPlanFetch"/>: an edit takes effect on the next restart,
     /// and it needs no schema rung. Because it cannot change while the service runs, the plan cache starts empty under
     /// whichever mode the service started in, so nothing needs clearing on a change. Only meaningful while
-    /// <see cref="CapturePlans"/> is on; Azure SQL Database keeps <c>off</c>.</para>
+    /// <see cref="CapturePlans"/> is on; Azure SQL Database stays <c>off</c> whatever this says.</para>
     /// </summary>
     [JsonPropertyName("procedureStatsDeferredPlanFetch")]
-    public string ProcedureStatsDeferredPlanFetch { get; set; } = "off";
+    public string ProcedureStatsDeferredPlanFetch { get; set; } = "on";
 
     /// <summary>
     /// The shared alert engine's enabled flags and thresholds (Phase-5 slice D). Every default

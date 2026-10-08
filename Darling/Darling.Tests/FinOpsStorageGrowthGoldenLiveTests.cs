@@ -153,11 +153,19 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
         await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-27), "GrowAlpha", 1, 88888m);
 
         /* Azure sibling database on server A: one whole-database row per snapshot (file_id NULL, file_name = the sibling name),
-           so HasSiblingRow is true. The p30 row is an old-shape row (no used_size_mb); ExcludePreFixRows drops it, so the
-           30-day point and growth are blank. Were it counted, they would be 100 MB and 500 MB. */
+           so HasSiblingRow is true. The latest side drops only the old-shape row (no used_size_mb); the 7-day and 30-day sides
+           (#5498) drop EVERY whole-database row, so both past points and both growth figures are blank. Were the p7 and p30
+           rows counted, they would be 560 MB and 100 MB. */
         await Sibling(c, ct, ServerIdA, ServerNameA, latest, "SiblingOmega", 600m, 500m);
         await Sibling(c, ct, ServerIdA, ServerNameA, p7, "SiblingOmega", 560m, 450m);
         await Sibling(c, ct, ServerIdA, ServerNameA, p30, "SiblingOmega", 100m, null);
+
+        /* #5498: an Azure database upgraded to the per-file collector. Its older rows are the whole-database shape (data space
+           only, used space present), its newest rows are the real data file and log file. The log must not read as growth: the
+           past points and growth are blank. Were the 7-day sibling row counted, growth would be 120 MB. */
+        await Sibling(c, ct, ServerIdA, ServerNameA, p7, "SiblingZeta", 380m, 350m);
+        await Size(c, ct, ServerIdA, ServerNameA, latest, "SiblingZeta", 1, 380m);
+        await Size(c, ct, ServerIdA, ServerNameA, latest, "SiblingZeta", 2, 120m);
 
         /* Server B: one snapshot, so the latest probe's two-day window is empty and the fallback finds it. */
         await Size(c, ct, ServerIdB, ServerNameB, anchor.AddDays(-5), "OnlyBeta", 1, 123.75m);

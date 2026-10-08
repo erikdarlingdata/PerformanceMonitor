@@ -205,7 +205,7 @@
   // capturePlans is on.
   "queryStatsDeferredPlanFetch": true,
 
-  // procedure_stats plan fetching: "off" (the default), "shadow" or "on". "off" renders and ships every captured
+  // procedure_stats plan fetching: "on" (the default since 3.10), "shadow" or "off". "off" renders and ships every captured
   // module plan, as before. "shadow" does the same and also checks, run by run, whether this service's way of
   // recognizing a module plan (its handle, cached time and a fingerprint of its statements) would have recognized
   // the plans it just rendered; the run's collection-log note reports deferred_would_hit, deferred_false_hit (the plan's shape
@@ -213,8 +213,8 @@
   // memory grant adjusted in place; "on" treats that as a correct hit), and no stored row changes. "on" skips the render for a plan the service has already stored and renders at most
   // 150 others per run; procedureStatsPlanCycleInterval still decides which runs may render. Move from "shadow"
   // to "on" only after deferred_false_hit has stayed 0; deferred_same_shape does not count. An unrecognized value means "off". A file-only knob:
-  // edit + restart. Only matters while capturePlans is on; Azure SQL Database keeps "off".
-  "procedureStatsDeferredPlanFetch": "off",
+  // edit + restart. Only matters while capturePlans is on; Azure SQL Database stays "off" whatever this says. Set "off" to restore the inline capture.
+  "procedureStatsDeferredPlanFetch": "on",
 
   // The alert engine (optional section). Every default mirrors Performance Monitor Lite's:
   // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, long-running query
