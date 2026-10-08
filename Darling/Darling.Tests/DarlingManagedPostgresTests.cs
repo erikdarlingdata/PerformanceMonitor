@@ -20,6 +20,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
@@ -2921,6 +2922,154 @@ public sealed class DarlingManagedPostgresTests
         var settings = DarlingManagedPostgres.DeriveWalSettings(64 * OneGb);
         Assert.True(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(block, DarlingManagedPostgres.BuildWalSizingStamp(settings, postgresMajor)));
         Assert.False(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(block, DarlingManagedPostgres.BuildWalSizingStamp(settings, postgresMajor + 1)));
+    }
+
+    /// <summary>Runs <see cref="DarlingManagedPostgres.EnsureConfAppended"/> once per (free bytes, PG major) step
+    /// against one data directory, with the volume read replaced (#5459), and returns the conf text after each.</summary>
+    private static List<string> HealWalSizingAcrossStarts(params (long FreeBytes, int Major)[] starts)
+        => HealWalSizingAcrossStarts(NullLogger.Instance, starts);
+
+    private static List<string> HealWalSizingAcrossStarts(ILogger logger, params (long FreeBytes, int Major)[] starts)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v12-drift-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, DarlingManagedPostgres.BuildConfAppend(5993));
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5993, DataDirectory = dataDirectory }, logger);
+
+            var afterEachStart = new List<string>();
+            foreach (var (freeBytes, major) in starts)
+            {
+                File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), major.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n");
+                pg.EnsureConfAppended(dataDirectory, _ => (freeBytes, 120 * OneGb));
+                afterEachStart.Add(File.ReadAllText(confPath));
+            }
+
+            return afterEachStart;
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #5459, the writer's side: a start whose free-space reading is just across a rung edge from the one the
+    /// block was written at keeps that block. The file is byte-identical, in both directions of the crossing and
+    /// at every edge, so a volume hovering at an edge no longer grows postgresql.conf by one block per flip.
+    /// </summary>
+    [Theory]
+    [InlineData(16, 300)]
+    [InlineData(32, 300)]
+    [InlineData(64, 1024)]
+    [InlineData(128, 2048)]
+    public void WalSizing_StartJustAcrossARungEdge_AppendsNothing(long edgeGb, long churnMb)
+    {
+        var above = edgeGb * OneGb + churnMb * 1024L * 1024;
+        var below = edgeGb * OneGb - churnMb * 1024L * 1024;
+        Assert.NotEqual(
+            DarlingManagedPostgres.DeriveWalSettings(above).MaxWalSizeMb,
+            DarlingManagedPostgres.DeriveWalSettings(below).MaxWalSizeMb);
+
+        foreach (var (written, later) in new[] { (above, below), (below, above) })
+        {
+            var confs = HealWalSizingAcrossStarts((written, 18), (later, 18), (written, 18));
+            Assert.Equal(1, CountOccurrences(confs[0], DarlingManagedPostgres.ConfMarkerV12));
+            Assert.Equal(confs[0], confs[1]);
+            Assert.Equal(confs[0], confs[2]);
+        }
+    }
+
+    /// <summary>
+    /// #5459: the "kept" log line names the block IN FORCE. A start just across a rung edge keeps the old stamp's
+    /// size, so the line must say that size (16 GB free writes 8192MB; 15.7 GB free derives 4096MB) plus the value
+    /// this reading derives and that it is within the drift tolerance. A start on the same rung keeps the plain
+    /// "unchanged" line and names the one value that is both derived and in force.
+    /// </summary>
+    [Fact]
+    public void WalSizing_KeptLogLine_NamesTheValuesInForce_NotTheOnesThisReadingDerives()
+    {
+        var written = 16 * OneGb + 300L * 1024 * 1024;
+        var below = 16 * OneGb - 300L * 1024 * 1024;
+        var inForceMb = DarlingManagedPostgres.DeriveWalSettings(written).MaxWalSizeMb;
+        var derivedMb = DarlingManagedPostgres.DeriveWalSettings(below).MaxWalSizeMb;
+        Assert.NotEqual(inForceMb, derivedMb);
+
+        var drift = new CapturingTestLogger();
+        HealWalSizingAcrossStarts(drift, (written, 18), (below, 18));
+        var driftLine = Assert.Single(drift.Lines, l => l.Contains("Managed store WAL sizing (v12)", StringComparison.Ordinal));
+        Assert.Contains(FormattableString.Invariant($"max_wal_size {inForceMb}MB"), driftLine, StringComparison.Ordinal);
+        Assert.Contains("in force and kept", driftLine, StringComparison.Ordinal);
+        Assert.Contains(FormattableString.Invariant($"derives max_wal_size {derivedMb}MB"), driftLine, StringComparison.Ordinal);
+        Assert.Contains("within the drift tolerance", driftLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("unchanged", driftLine, StringComparison.Ordinal);
+
+        var sameRung = new CapturingTestLogger();
+        HealWalSizingAcrossStarts(sameRung, (64 * OneGb, 18), (100 * OneGb, 18));
+        var sameLine = Assert.Single(sameRung.Lines, l => l.Contains("Managed store WAL sizing (v12)", StringComparison.Ordinal));
+        var rungMb = DarlingManagedPostgres.DeriveWalSettings(100 * OneGb).MaxWalSizeMb;
+        Assert.Contains(FormattableString.Invariant($"max_wal_size {rungMb}MB"), sameLine, StringComparison.Ordinal);
+        Assert.Contains("unchanged, the block in force is kept", sameLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("in force and kept", sameLine, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5459: the stamp parse hands back the sizes the stamp names, and zeros when it names none.</summary>
+    [Fact]
+    public void WalSizing_ConfHasWalSizingStampWithinDrift_ReturnsTheStampValues()
+    {
+        var written = 16 * OneGb + 300L * 1024 * 1024;
+        var block = DarlingManagedPostgres.BuildWalSizingConfAppend(written, 120 * OneGb, 18);
+        var settings = DarlingManagedPostgres.DeriveWalSettings(written);
+        Assert.True(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift(block, 16 * OneGb - 300L * 1024 * 1024, 18, out var maxMb, out var minMb));
+        Assert.Equal(settings.MaxWalSizeMb, maxMb);
+        Assert.Equal(settings.MinWalSizeMb, minMb);
+        Assert.False(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift("max_wal_size = 4GB\n", 16 * OneGb, 18, out maxMb, out minMb));
+        Assert.Equal(0, maxMb);
+        Assert.Equal(0, minMb);
+    }
+
+    /// <summary>#5459: the writer's tolerance is a band, not a switch-off. Headroom that halved or doubled still
+    /// appends a new block, so a real change is still healed.</summary>
+    [Theory]
+    [InlineData(20, 10)]
+    [InlineData(10, 20)]
+    [InlineData(40, 16)]
+    [InlineData(200, 60)]
+    public void WalSizing_HalvedOrDoubledHeadroom_StillAppends(long writtenGb, long laterGb)
+    {
+        var confs = HealWalSizingAcrossStarts((writtenGb * OneGb, 18), (laterGb * OneGb, 18));
+        Assert.Equal(1, CountOccurrences(confs[0], DarlingManagedPostgres.ConfMarkerV12));
+        Assert.Equal(2, CountOccurrences(confs[1], DarlingManagedPostgres.ConfMarkerV12));
+        Assert.Equal(
+            DarlingManagedPostgres.DeriveWalSettings(laterGb * OneGb).MaxWalSizeMb.ToString(System.Globalization.CultureInfo.InvariantCulture) + "MB",
+            LastSettingValue(confs[1], "max_wal_size"));
+    }
+
+    /// <summary>#5459: a different PostgreSQL major still appends even when the reading is within the band, because
+    /// the stamp's major decides the checkpoint pin and the tolerance never covers it.</summary>
+    [Fact]
+    public void WalSizing_MajorChangeWithinTheBand_StillAppends()
+    {
+        var free = 16 * OneGb + 300L * 1024 * 1024;
+        var confs = HealWalSizingAcrossStarts((free, 18), (free, 13));
+        Assert.Equal(1, CountOccurrences(confs[0], DarlingManagedPostgres.ConfMarkerV12));
+        Assert.Equal(2, CountOccurrences(confs[1], DarlingManagedPostgres.ConfMarkerV12));
+    }
+
+    /// <summary>#5459: no stamp yet, an unparseable stamp and a stamp of another major are never "within drift".</summary>
+    [Fact]
+    public void WalSizing_ConfHasWalSizingStampWithinDrift_RejectsAbsentUnparseableAndOtherMajor()
+    {
+        var block = DarlingManagedPostgres.BuildWalSizingConfAppend(16 * OneGb + 300L * 1024 * 1024, 120 * OneGb, 18);
+        Assert.True(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift(block, 16 * OneGb - 300L * 1024 * 1024, 18));
+        Assert.False(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift(block, 16 * OneGb - 300L * 1024 * 1024, 17));
+        Assert.False(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift("max_wal_size = 4GB\n", 16 * OneGb, 18));
+        Assert.False(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift(
+            DarlingManagedPostgres.ConfWalSizingStampPrefix + "garbage\n", 16 * OneGb, 18));
     }
 
     /// <summary>
