@@ -79,7 +79,7 @@ public sealed class ViewerLongQueriesDataStartTests : IDisposable
     {
         var load = MethodBody(ViewerFile("ViewerServerTab.LongQueries.cs"), @"private async Task LoadLongQueriesAsync\(");
 
-        Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetLongQueriesDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(load, @"var dataStartTask = Timed\(timer, ""data start"", _dataService\.GetLongQueriesDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(load,
             @"await ShowEventDataStartAsync\(LongQueriesTruncationBanner,\s*dataStartTask,\s*""Long Queries"",\s*startUtc,\s*rows\.Select\(r => r\.EventTime\),\s*ViewerDataService\.LongQueriesRowCap\);"));
     }
