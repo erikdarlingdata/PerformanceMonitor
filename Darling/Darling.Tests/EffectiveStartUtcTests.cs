@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// or the floor read off the store (a naive instant, so it printed none), which made the zone marker come and go
 /// with <c>window_truncated</c>. One formatter, <see cref="McpHelpers.FormatEffectiveStart"/>, now serves both.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class EffectiveStartUtcTests
 {
     /// <summary>A naive instant and a UTC instant print the same text, ending in Z, and the instant is never shifted.</summary>

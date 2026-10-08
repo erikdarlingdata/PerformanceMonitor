@@ -979,7 +979,7 @@ public class CollectionLogRow
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
 
-    public string CollectionTimeFormatted => ViewerTimeHelper.FormatForDisplay(CollectionTime, "g");
+    public string CollectionTimeFormatted => ViewerTimeHelper.FormatForDisplay(CollectionTime, "yyyy-MM-dd HH:mm:ss");
 
     public string DurationFormatted => DurationMs.HasValue
         ? (DurationMs.Value < 1000 ? $"{DurationMs.Value} ms" : $"{DurationMs.Value / 1000.0:F1} s")
@@ -1152,15 +1152,15 @@ public class CollectorHealthRow
         : $"{AvgDurationMs / 1000:F1} s";
 
     public string LastSuccessFormatted => LastSuccessTime.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(LastSuccessTime.Value, "g")
+        ? ViewerTimeHelper.FormatForDisplay(LastSuccessTime.Value, "yyyy-MM-dd HH:mm:ss")
         : "Never";
 
     public string LastRunFormatted => LastRunTime.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(LastRunTime.Value, "g")
+        ? ViewerTimeHelper.FormatForDisplay(LastRunTime.Value, "yyyy-MM-dd HH:mm:ss")
         : "Never";
 
     public string LastErrorFormatted => LastErrorTime.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(LastErrorTime.Value, "g")
+        ? ViewerTimeHelper.FormatForDisplay(LastErrorTime.Value, "yyyy-MM-dd HH:mm:ss")
         : "";
 
     /// <summary>
@@ -1186,6 +1186,6 @@ public class CollectionCaveatRow
     public DateTime FirstSeenUtc { get; set; }
     public DateTime LastSeenUtc { get; set; }
 
-    public string FirstSeenFormatted => ViewerTimeHelper.FormatForDisplay(FirstSeenUtc, "g");
-    public string LastSeenFormatted => ViewerTimeHelper.FormatForDisplay(LastSeenUtc, "g");
+    public string FirstSeenFormatted => ViewerTimeHelper.FormatForDisplay(FirstSeenUtc, "yyyy-MM-dd HH:mm:ss");
+    public string LastSeenFormatted => ViewerTimeHelper.FormatForDisplay(LastSeenUtc, "yyyy-MM-dd HH:mm:ss");
 }

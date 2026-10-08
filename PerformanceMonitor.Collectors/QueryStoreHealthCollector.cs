@@ -131,7 +131,7 @@ public sealed class QueryStoreHealthCollector : CollectorDefinitionBase<QuerySto
     private const string OnPremDatabaseListQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     d.name
 FROM sys.databases AS d
 LEFT JOIN sys.dm_hadr_database_replica_states AS drs
@@ -171,7 +171,7 @@ OPTION(RECOMPILE);";
     /// has — are this text, in <see cref="ReadRowsAsync"/>'s order.</para>
     /// </summary>
     private const string UngatedPayloadBodyText = @"
-SELECT
+SELECT /* PerformanceMonitorLite */
     actual_state = qso.actual_state_desc,
     desired_state = qso.desired_state_desc,
     readonly_reason = qso.readonly_reason,

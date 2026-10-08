@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The Query Store read indexes that are built in the background after the service is up rather than by a
-/// migration rung (#4605's BRIN, #4952's btree), and the one piece of machinery they share: the state read,
+/// migration rung (#4605's BRIN, #4952's and #5507's btrees), and the one piece of machinery they share: the state read,
 /// the build-or-skip decision, the invalid-leftover drop, the build and the delayed start.
 ///
 /// <para><b>Why not a migration rung.</b> Migrations run in one transaction and block startup, and
@@ -66,6 +66,9 @@ public static class QueryStoreBackgroundIndexes
 
     /// <summary>Name of the btree that lets the per-server table read range-scan <c>first_execution_time</c> (#4952).</summary>
     public const string WideServerFirstExecIndexName = "collect.ix_query_store_interval_wide_server_first_exec";
+
+    /// <summary>Name of the btree that lets the per-day plan regression build range-scan <c>first_execution_time</c> on the latest table (#5507).</summary>
+    public const string LatestServerFirstExecIndexName = "collect.ix_query_store_interval_latest_server_first_exec";
 
     /// <summary>What the ensure does about one index.</summary>
     public enum IndexAction
@@ -121,11 +124,43 @@ public static class QueryStoreBackgroundIndexes
         + "ON collect.query_store_interval_wide (server_id, first_execution_time);",
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_server_first_exec;");
 
+    /// <summary>
+    /// A btree on <c>collect.query_store_interval_latest (server_id, first_execution_time)</c> (#5507), built
+    /// <c>CONCURRENTLY</c> (the table is a plain heap), the twin of <see cref="WideServerFirstExec"/>.
+    ///
+    /// <para><b>Why.</b> <c>PlanRegressionDaily</c>'s per-day build, the live half of the PLAN_REGRESSION fact, its
+    /// table route (<c>PlanRegressionTableSql</c>), the drill-down table twin and the read gate's floor all bound
+    /// <c>server_id</c> and <c>first_execution_time</c> on
+    /// this table. In <c>ux_query_store_interval_latest</c> <c>first_execution_time</c> is the last of seven columns,
+    /// behind five other key columns, three of them high-cardinality (<c>runtime_stats_interval_id</c>,
+    /// <c>plan_id</c>, <c>query_id</c>; <c>database_name</c> and <c>replica_role</c> are not), so the bound cannot
+    /// narrow the range and the scan reads every index entry
+    /// the server has. V153's <c>idx_query_store_interval_latest_first_exec</c> leads with <c>first_execution_time</c>
+    /// alone, so it serves the retention purge (#4608) but not a per-server read. This index leads with
+    /// <c>server_id</c>, so the bound becomes the range and a build reads only its server's two days. V153's index
+    /// stays: the purge needs it.</para>
+    ///
+    /// <para><b>Why not a rung.</b> A rung would build inside the startup transaction, which cancels after
+    /// <c>MigrationCommandTimeoutSeconds</c> (300 s) of backend silence, so a large store would fail every start. The
+    /// background build has no such limit; until it is valid, builds run at today's cost.</para>
+    ///
+    /// <para><b>HOT.</b> As on the wide table: the upsert never rewrites <c>server_id</c> or
+    /// <c>first_execution_time</c>, so an update stays heap-only; the live tests pin the catalog fact and a
+    /// rolled-back update.</para>
+    /// </summary>
+    public static readonly IndexSpec LatestServerFirstExec = new(
+        LatestServerFirstExecIndexName,
+        "collect.query_store_interval_latest",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_latest_server_first_exec "
+        + "ON collect.query_store_interval_latest (server_id, first_execution_time);",
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_latest_server_first_exec;");
+
     /// <summary>Every background index, in the order the one delayed task ensures them.</summary>
     public static readonly IReadOnlyList<IndexSpec> All = new[]
     {
         QueryStoreIntervalWideBrinIndex.Spec,
         WideServerFirstExec,
+        LatestServerFirstExec,
     };
 
     /* One read of everything the decision needs. The names are bound, never interpolated. */

@@ -65,10 +65,17 @@ const fetches = [];
 const healthBody = { collectors: [{ collector: "wait_stats", status: "HEALTHY", total_runs: 5 }, { collector: "query_store", status: "HEALTHY", total_runs: 7 }], sweep_pressure: {} };
 const healthHangs = false;
 const logSignals = [];
+/* While true a Collection Log read stays in flight until its signal aborts it (then it rejects with an AbortError, as a real
+   fetch does). A read that finished by itself can no longer be aborted, so only an in-flight read shows that a newer pick
+   cancels the older one (the shared in-flight reads of util.js cancel the request when the last waiter is gone). */
+let holdLogReads = false;
 globalThis.fetch = async (url, opts) => {
   const u = new URL(String(url), "http://viewer.test");
   fetches.push(u.pathname.replace("/api/read/", "") + "?" + u.searchParams.toString());
   if (u.pathname.endsWith("/get_collection_log") && opts && opts.signal) logSignals.push({ collector: u.searchParams.get("collector_name"), signal: opts.signal });
+  if (holdLogReads && u.pathname.endsWith("/get_collection_log") && opts && opts.signal) {
+    return new Promise((_, reject) => opts.signal.addEventListener("abort", () => reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })), { once: true }));
+  }
   if (healthHangs && u.pathname.endsWith("/get_collection_health")) return new Promise(() => {});
   const body = u.pathname.endsWith("/get_collection_health") ? healthBody : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
@@ -117,12 +124,14 @@ try {
   // a second pick aborts the first read; the new one stays live
   const other = row(panels, "wait_stats");
   logSignals.length = 0;
+  holdLogReads = true;
   globalThis.window = { getSelection: () => ({ isCollapsed: true, toString: () => "" }) };
   for (const h of (r && r.handlers.click) || []) h({ type: "click" });
   await settle();
   for (const h of (other && other.handlers.click) || []) h({ type: "click" });
   await settle();
   const pickSignals = logSignals.map((x) => ({ collector: x.collector, aborted: x.signal.aborted }));
+  holdLogReads = false;
   // a click that ends a text selection inside the row picks nothing
   logSignals.length = 0;
   globalThis.window = { getSelection: () => ({ isCollapsed: false, anchorNode: r, toString: () => "query" }) };

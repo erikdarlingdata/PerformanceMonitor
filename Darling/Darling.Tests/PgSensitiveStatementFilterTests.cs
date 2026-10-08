@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// behavior.
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class PgSensitiveStatementFilterTests
 {
     /// <summary>

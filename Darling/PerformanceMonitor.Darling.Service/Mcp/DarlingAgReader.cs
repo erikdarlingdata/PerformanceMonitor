@@ -176,6 +176,26 @@ internal static class DarlingAgReader
                 worstMagnitude = Math.Max(worstMagnitude, Math.Max(database.LogSendQueueKb ?? 0, database.RedoQueueKb ?? 0));
             }
 
+            /* #5489: the badge describes the snapshot, so it can only be as current as the snapshot. A group whose
+               newest replica snapshot is older than the fleet's offline mark (ServerHealthThresholds.OfflineThreshold,
+               the same 30 minutes the card's Offline band and the AG self-alert's freshness gate use) says "Stale"
+               and ranks Warning, whatever the old rows said: 12 days after the last collection a row that read
+               HEALTHY is a memory, not a status. It is NOT Unknown: Unknown is the lowest enum value, so a stale
+               group would sort below a Healthy one and a fleet whose only non-healthy group is stale would read
+               Healthy in worst_severity (round-1 M1). Warning gives the roll-up and the severity sort the
+               honest "something needs a look" reading; the label stays "Stale". Otherwise a group with no PRIMARY in view is never Healthy: with
+               nobody holding the role the group is not serving, and all-green replicas around a missing primary
+               were the "Healthy, No primary reported" card. Warning is the floor, a worse band stays. */
+            var isStale = nowUtc - first.CollectionTime > ServerHealthThresholds.OfflineThreshold;
+            if (isStale)
+            {
+                worst = HealthSeverity.Warning;
+            }
+            else if (!replicaViews.Any(r => r.IsPrimary) && worst < HealthSeverity.Warning)
+            {
+                worst = HealthSeverity.Warning;
+            }
+
             groups.Add(new AvailabilityGroupView
             {
                 ServerId = first.ServerId,
@@ -188,7 +208,8 @@ internal static class DarlingAgReader
                 DatabaseCollectionTime = dbRows is { Count: > 0 } ? dbRows[0].CollectionTime : null,
                 PrimaryReplica = replicaViews.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName,
                 Severity = worst,
-                SeverityLabel = SeverityLabel(worst),
+                SeverityLabel = isStale ? "Stale" : SeverityLabel(worst),
+                IsStale = isStale,
                 Replicas = replicaViews,
                 Databases = databaseViews,
                 WorstMagnitude = worstMagnitude,
@@ -784,6 +805,12 @@ public sealed class AvailabilityGroupView
     [JsonPropertyName("severity")] public HealthSeverity Severity { get; init; }
 
     [JsonPropertyName("severity_label")] public string SeverityLabel { get; init; } = "";
+
+    /// <summary>True when the reporting server's newest replica snapshot is older than
+    /// <see cref="ServerHealthThresholds.OfflineThreshold"/> (#5489): the band is Warning (so the roll-up and
+    /// the severity sort never rank it below Healthy) and the label "Stale", rather than whatever the old rows said.</summary>
+    [JsonPropertyName("is_stale")] public bool IsStale { get; init; }
+
     [JsonPropertyName("replicas")] public IReadOnlyList<AgReplicaView> Replicas { get; init; } = Array.Empty<AgReplicaView>();
     [JsonPropertyName("databases")] public IReadOnlyList<AgDatabaseView> Databases { get; init; } = Array.Empty<AgDatabaseView>();
 

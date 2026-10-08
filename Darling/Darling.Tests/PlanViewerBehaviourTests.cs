@@ -75,6 +75,13 @@ public sealed class PlanViewerBehaviourTests
         Assert.True(r.GetProperty("hasDownload").GetBoolean());
         Assert.Equal("\u2014", Str(r, "noHashCell"));
         Assert.True(r.GetProperty("closed").GetBoolean());
+        // The open panel is drawn full width under the row (plan-row.js), not inside the last column (click-through 1).
+        Assert.Equal("plan-cell plan-open", Str(r, "openClass"));
+        Assert.True(r.GetProperty("hasSpacer").GetBoolean());
+        Assert.Equal("plan-cell", Str(r, "closedClass"));
+        // One observer while the panel is open and none once it is closed (plan-row.js disconnects it).
+        Assert.Equal(1, r.GetProperty("observersOpen").GetInt32());
+        Assert.Equal(0, r.GetProperty("observersClosed").GetInt32());
     }
 
     [Fact]

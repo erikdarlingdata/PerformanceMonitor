@@ -83,6 +83,9 @@ public sealed class QueryStoreHistoryBehaviourTests
         Assert.Equal(new[] { "p7", "p9" }, chart.GetProperty("series").EnumerateArray().Select(s => s.GetString()));
         Assert.Equal(2, chart.GetProperty("points").GetInt32());
         Assert.True(r.GetProperty("closed").GetBoolean());
+        // One observer while the panel is open (it reloaded and redrew meanwhile) and none once it is closed (plan-row.js).
+        Assert.Equal(1, r.GetProperty("observersOpen").GetInt32());
+        Assert.Equal(0, r.GetProperty("observersClosed").GetInt32());
     }
 
     [Fact]

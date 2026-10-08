@@ -368,6 +368,32 @@ public sealed class ViewerServerSummaryDisplayTests
     }
 
     [Fact]
+    public void OfflineCard_DeadlockDetailAndHasAlerts_ReadAsNoCurrentData()
+    {
+        /* Round-1 L7: the values read "--" while the detail line and the alert flag still carried the old counts. */
+        var online = new ServerSummaryItem
+        {
+            IsOnline = true,
+            BlockingCount = 2,
+            DeadlockCount = 3,
+            LastDeadlockMinutesAgo = 10,
+        };
+        Assert.NotEqual("", online.DeadlockDetail);
+        Assert.True(online.HasAlerts);
+
+        var offline = new ServerSummaryItem
+        {
+            IsOnline = false,
+            BlockingCount = 2,
+            DeadlockCount = 3,
+            LastDeadlockMinutesAgo = 10,
+        };
+        Assert.Equal("--", offline.DeadlockDisplay);
+        Assert.Equal("", offline.DeadlockDetail);
+        Assert.False(offline.HasAlerts);
+    }
+
+    [Fact]
     public void CardBorderBrush_RedForDeadlock_DefaultOtherwise()
     {
         /* #3368: red is the CRITICAL border, and Critical is now a RATE — 30 deadlocks in an hour. One

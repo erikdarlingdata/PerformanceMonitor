@@ -42,6 +42,7 @@ namespace Darling.Tests;
 /// <c>deadlock_coverage</c> established one level up: numbers, a denominator, a named cause, and a sentence
 /// that names both windows and disclaims the one it did not measure.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class CollectionOutputBesideCostTests
 {
     /* The measured pg_deadlocks counts, so every row below is the shape this issue was filed on rather

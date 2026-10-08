@@ -201,7 +201,7 @@ DROP TABLE IF EXISTS #pm_plan_correction_plans;
 DROP TABLE IF EXISTS #pm_plan_correction_queries;
 DROP TABLE IF EXISTS #pm_plan_correction_query_text;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     recommendation_name = dtr.name,
     recommendation_type = dtr.type,
     recommendation_state = JSON_VALUE(dtr.state, '$.currentValue'),
@@ -281,7 +281,7 @@ OPTION(RECOMPILE);
   catalog views are seeked once each here and never joined by the shipping SELECT below. Plans are
   keyed by the (query_id, last_good_plan_id) pair the final join needs; queries by query_id; text by
   query_text_id from the queries temp, the same plan -> query -> text chain sp_QuickieStore walks.*/
-SELECT
+SELECT /* PerformanceMonitorLite */
     query_id = qsp.query_id,
     plan_id = qsp.plan_id,
     plan_forcing_type_desc = qsp.plan_forcing_type_desc,
@@ -298,7 +298,7 @@ WHERE EXISTS
     AND   r.last_good_plan_id = qsp.plan_id
 );
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     query_id = qsq.query_id,
     query_text_id = qsq.query_text_id
 INTO #pm_plan_correction_queries
@@ -311,7 +311,7 @@ WHERE EXISTS
     WHERE r.query_id = qsq.query_id
 );
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     query_text_id = qsqt.query_text_id,
     query_sql_text = qsqt.query_sql_text
 INTO #pm_plan_correction_query_text
@@ -324,7 +324,7 @@ WHERE EXISTS
     WHERE q.query_text_id = qsqt.query_text_id
 );
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     force_last_good_plan_desired_state = o.desired_state_desc,
     force_last_good_plan_actual_state = o.actual_state_desc,
     force_last_good_plan_reason = o.reason_desc,
@@ -428,7 +428,7 @@ DECLARE
     @product_major integer =
         CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4));
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     d.name
 FROM sys.databases AS d
 LEFT JOIN sys.dm_hadr_database_replica_states AS drs

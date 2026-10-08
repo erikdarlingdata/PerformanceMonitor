@@ -367,7 +367,7 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         Assert.NotNull(probe);
         Assert.Equal(
-            "SELECT CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4))",
+            "SELECT /* PerformanceMonitorLite */ CONVERT(integer, PARSENAME(CONVERT(sysname, SERVERPROPERTY('PRODUCTVERSION')), 4))",
             probe!.Text);
         Assert.Empty(probe.Parameters);
     }

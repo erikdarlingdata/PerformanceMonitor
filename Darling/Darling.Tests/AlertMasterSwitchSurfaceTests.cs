@@ -43,6 +43,7 @@ namespace Darling.Tests;
 /// AND'd gates follow.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class AlertMasterSwitchSurfaceTests
 {
     /* ---------------- the delivery-call census ---------------- */

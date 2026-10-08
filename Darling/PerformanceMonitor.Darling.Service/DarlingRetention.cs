@@ -939,6 +939,30 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.pg_io_stats_hourly (#5495, V170): the hourly rollup of pg_io_stats. NOT in CollectorCatalog.All (the hourly
+               tick's builder writes it), so the loop above skips it. It keeps exactly the raw collector's retention (the same
+               resolved days, so a per-collector override moves both): a rollup hour whose raw rows are gone makes the read's count guard
+               differ and sends that read to raw, which holds nothing there either. A plain table, one row per combination per hour,
+               and the unique index leads with server_id then hour_start; a plain DELETE is one execution. */
+            var pgIoHourlyDays = EffectivePurgeRetentionDays(
+                "pg_io_stats",
+                retentionDaysFor?.Invoke("pg_io_stats")
+                    ?? (CollectorScheduleDefaults.All.TryGetValue("pg_io_stats", out var pgIoSchedule) ? pgIoSchedule.RetentionDays : DataRetentionBaseDays));
+            var pgIoHourlyDeleted = await PurgeOneAsync(
+                postgres, PgIoStatsHourly.Table,
+                PgIoStatsHourlyBuilder.PruneSql,
+                utcNow.AddDays(-pgIoHourlyDays), logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (pgIoHourlyDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += pgIoHourlyDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
             /* collect.oversized_plan_backlog (#3392) purges on last_seen_at at
                OversizedPlanBacklogRetentionDays. NOT in CollectorCatalog.All (it is written by the collector
                runner's post-write hook and by the backlog sweep, not by a collector definition), so the loop

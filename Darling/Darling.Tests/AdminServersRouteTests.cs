@@ -131,6 +131,14 @@ public sealed class AdminServersRouteTests
         Assert.Equal(expected, DarlingAdminServersReader.AuthLabel(stored));
 
     [Theory]
+    [InlineData("sql", "postgres", "Username and password")]
+    [InlineData("SQL", "aurora-postgres", "Username and password")]
+    [InlineData("sql", "sqlserver", "SQL Server")]
+    [InlineData("integrated", "sqlserver", "Windows")]
+    public void ThePostgresAuthMode_IsNotCalledSqlServer(string stored, string engineKind, string expected) =>
+        Assert.Equal(expected, DarlingAdminServersReader.AuthLabel(stored, engineKind));
+
+    [Theory]
     [InlineData("0", "$0")]
     [InlineData("0.4", "$0")]
     [InlineData("-5", "-$5")]

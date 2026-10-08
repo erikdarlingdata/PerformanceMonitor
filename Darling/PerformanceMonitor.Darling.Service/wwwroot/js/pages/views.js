@@ -27,6 +27,7 @@
 
 import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, fmtNum } from "../util.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
+import { orderServers } from "../server-order.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
@@ -306,10 +307,9 @@ async function createFromTemplate(template, server, status) {
 async function loadServerNames() {
   const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
-  return [...(res.data.cards || [])]
+  return orderServers(res.data.cards || [])
     .map((c) => ({ value: c.server_name || c.display_name, label: c.display_name || c.server_name }))
-    .filter((o) => o.value)
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .filter((o) => o.value);
 }
 
 function viewCard(v) {
@@ -872,10 +872,9 @@ function backToViews() {
 /* Fleet server options for the scope picker (value = stored server_name, label = display name). */
 function fleetOptions(fleetRes) {
   if (fleetRes.kind !== "data" || !fleetRes.data) return [];
-  return [...(fleetRes.data.cards || [])]
+  return orderServers(fleetRes.data.cards || [])
     .map((c) => ({ value: c.server_name || c.display_name, label: c.display_name }))
-    .filter((o) => o.value)
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .filter((o) => o.value);
 }
 
 /* The view-scope control bar: a server scope picker (single / multi / All), a time-range select, and a value input

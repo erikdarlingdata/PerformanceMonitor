@@ -135,7 +135,7 @@ public sealed class FinOpsTabUtilizationPageTests
     {
         var tab = Tab();
         Assert.Equal(2, Regex.Matches(tab, "(?m)^\\s+if \\(res\\.kind === \"aborted\" \\|\\| res\\.kind === \"auth\"\\) return;$").Count);
-        Assert.Equal(2, Regex.Matches(tab, Regex.Escape("emptyStrip(res.message)")).Count);
+        Assert.Equal(2, Regex.Matches(tab, Regex.Escape("gatedEmptyStrip(res, ctx)")).Count);
         Assert.Equal(2, Regex.Matches(tab, Regex.Escape("readErrorStrip(res.message)")).Count);
         Assert.Equal(2, Regex.Matches(tab, Regex.Escape("\"Could not render this tab: \"")).Count);
         Assert.DoesNotContain("Promise.all", tab);
@@ -149,7 +149,7 @@ public sealed class FinOpsTabUtilizationPageTests
         Assert.Contains("const BAND_SEV = { good: \"Healthy\", fair: \"Warning\", poor: \"Critical\" };", tab);
         Assert.Contains("sev: BAND_SEV[data.health_band]", tab);
         Assert.Contains("\"N/A\"", tab);
-        Assert.Contains("health_band = FinOpsUtilizationFigures.HealthBand(score)", UtilizationSource());
+        Assert.Contains("health_band = score is int scoreValue ? FinOpsUtilizationFigures.HealthBand(scoreValue) : null", UtilizationSource());
         var figures = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsUtilizationFigures.cs");
         Assert.Contains("BandGood = \"good\"", figures);
         Assert.Contains("BandFair = \"fair\"", figures);

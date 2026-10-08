@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// <c>Lite.Tests/McpToolGuideHeadsSqlCoreTests</c>. Follows the pattern in
 /// <see cref="McpToolGuideHeadsDataTests"/>.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpToolGuideHeadsSqlCoreTests
 {
     private static readonly string[] ConvertedTools =
@@ -182,6 +183,7 @@ public sealed class McpToolGuideHeadsSqlCoreTests
 /// had, because Lite's daily-summary payload has no rollup tier to disclose (<c>Lite/Mcp/McpHealthTools.cs</c>'s
 /// <c>GetDailySummary</c>/<c>GetDailySummaryRange</c> bodies carry no <c>days_missing</c> key at all).
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpToolGuideHeadsSqlCoreDailySummaryTests
 {
     private static readonly string[] ConvertedTools =
@@ -240,6 +242,7 @@ public sealed class McpToolGuideHeadsSqlCoreDailySummaryTests
 /// generic cross-SKU pin in <see cref="McpToolGuideTests"/> also covers this); each product's own tail keeps its
 /// own original prose, including the one line that names that product's own blocked-process-report tool.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpToolGuideHeadsSqlCoreActiveQueriesTests
 {
     private static readonly (string Tool, string Fact)[] HeadFacts =

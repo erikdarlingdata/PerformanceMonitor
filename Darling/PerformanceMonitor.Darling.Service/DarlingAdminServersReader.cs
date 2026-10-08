@@ -188,12 +188,22 @@ internal static class DarlingAdminServersReader
             read_only = r.ReadOnlyIntent || serverName.EndsWith(":RO", StringComparison.Ordinal),
             last_collected = r.LastCollection?.ToString("o", CultureInfo.InvariantCulture),
             status = r.IsEnabled ? "Enabled" : "Disabled",
-            auth = AuthLabel(r.Auth),
+            auth = AuthLabel(r.Auth, engineKind),
             monthly_cost = CostLabel(r.MonthlyCostUsd),
             monthly_cost_usd = r.MonthlyCostUsd,
             added = r.CreatedAt.ToString("o", CultureInfo.InvariantCulture),
         };
     }
+
+    /// <summary>
+    /// The Auth column's words for a row of this engine. A PostgreSQL target stores the same "sql" mode as a SQL Server
+    /// login, but "SQL Server" on a PostgreSQL row read as the wrong product (click-through 12), so its stored password
+    /// login is "Username and password". Every other mode, and every SQL Server row, reads as <see cref="AuthLabel(string?)"/>.
+    /// </summary>
+    internal static string? AuthLabel(string? auth, string engineKind) =>
+        MonitoredEngineKind.IsPostgres(engineKind) && string.Equals(auth, "sql", StringComparison.OrdinalIgnoreCase)
+            ? "Username and password"
+            : AuthLabel(auth);
 
     /// <summary>The desktop's words for the stored mode; a mode this build does not know is shown as stored.</summary>
     internal static string? AuthLabel(string? auth) => auth switch

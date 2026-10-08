@@ -313,7 +313,9 @@ public partial class ViewerServerTab
         var data = await _dataService.GetBlockingSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _blockingSlicerData = data;
         _blockingSlicerMetric = "Events";
-        if (data.Count > 0)
+        if (data.Count == 0)
+            BlockingSlicer.ShowEmpty("No blocked process reports in the selected time window.");
+        else
             BlockingSlicer.LoadData(data, "Blocking Events", startUtc, endUtc);
     }
 
@@ -321,7 +323,9 @@ public partial class ViewerServerTab
     {
         var data = await _dataService.GetDeadlockSlicerDataAsync(_server.ServerId, startUtc, endUtc);
         _deadlockSlicerData = data;
-        if (data.Count > 0)
+        if (data.Count == 0)
+            DeadlockSlicer.ShowEmpty("No deadlocks in the selected time window.");
+        else
             DeadlockSlicer.LoadData(data, "Deadlocks", startUtc, endUtc);
     }
 
@@ -510,6 +514,7 @@ public partial class ViewerServerTab
         var rangeEnd = winEndUtc;
 
         _blockingTrendHover?.Clear();
+        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No blocking in the selected time window.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */
@@ -580,6 +585,7 @@ public partial class ViewerServerTab
         var rangeEnd = winEndUtc;
 
         _deadlockTrendHover?.Clear();
+        EmptyState.Show(DeadlockTrendChart, data.Count == 0, "No deadlocks in the selected time window.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No deadlocks — show a flat line at zero so the chart looks active */

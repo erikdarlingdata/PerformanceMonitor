@@ -12,7 +12,8 @@
    em dash, and the finding and detail text comes from the service in invariant format (a percent reads "20 %"). */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { gatedEmptyStrip } from "./gate.js";
 
 const SEV = { High: "Critical", Medium: "Warning", Low: "Healthy" };
 
@@ -22,7 +23,7 @@ const COLUMNS = [
   { key: "confidence", label: "Confidence" },
   { key: "finding", label: "Finding", wrap: true },
   { key: "detail", label: "Detail", wrap: true },
-  { key: "est_savings_usd_month", label: "Est. Savings ($/mo)", format: "int" },
+  { key: "est_savings_usd_month", label: "Est. Savings ($/mo)", format: "int", nullKey: "est_savings_note" },
 ];
 
 function noticeText(n) {
@@ -31,7 +32,8 @@ function noticeText(n) {
 }
 
 function displayRow(r) {
-  return { ...r, severity_sev: SEV[r.severity] ?? null };
+  /* An empty estimate reads as a dash with the setting that fills it (the same words as the desktop viewer's tooltip). */
+  return { ...r, severity_sev: SEV[r.severity] ?? null, est_savings_note: r.est_savings_usd_month == null ? "No estimate: set this server's Monthly Cost ($) in Admin > Servers." : null };
 }
 
 export const tab = {
@@ -44,7 +46,7 @@ export const tab = {
         const res = await readTool("get_finops_recommendations", { server }, ctx && ctx.signal);
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         const rows = (data.recommendations || []).map(displayRow);
         const skipped = data.skipped_checks || [];

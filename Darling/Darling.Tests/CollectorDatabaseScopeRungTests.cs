@@ -42,6 +42,7 @@ namespace Darling.Tests;
 /// really about being NEWEST — keeping a copy of those would assert this rung is still the top,
 /// which is how the NEXT rung's build goes red.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class CollectorDatabaseScopeRungTests
 {
     private const int RungVersion = 125;

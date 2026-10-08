@@ -50,6 +50,7 @@ namespace Darling.Tests;
 /// additionally asserts its ANCHOR is present before judging the file: the bare-read check keys on the
 /// <c>dte</c> alias, so a rename would otherwise turn it into an assertion about nothing.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ServerLocalReadFrameDisciplineTests
 {
     /* ───────────────────────── the literal-SQL reads of default_trace_events ───────────────────────── */

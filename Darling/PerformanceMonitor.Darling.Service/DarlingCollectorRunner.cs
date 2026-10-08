@@ -484,7 +484,8 @@ public sealed class DarlingCollectorRunner
     private readonly ServerWatermarkCache _watermarkCache = new();
 
     /// <summary>
-    /// Exact per-(server, database) Query Store watermark cache for the enumerated per-item path. The
+    /// Exact per-(server, database) Query Store watermark cache for the enumerated per-item path and the
+    /// Azure SQL Database per-database loop (#5514). The
     /// runner is constructed once per service process and the backfill holds this same runner, so the
     /// cache outlives every cycle and sees every writer. See <see cref="DatabaseWatermarkCache"/> for the
     /// hit rule and the single-writer assumption.
@@ -2489,6 +2490,11 @@ public sealed class DarlingCollectorRunner
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
 
+                /* #5514: this database's contribution to the per-database Query Store watermark cache, staged
+                   after the read and landed only once the flush returned — per iteration, like the stamp above,
+                   so a fault cannot leak one database's contribution into a sibling's. */
+                StagedDatabaseWatermark? stagedDatabaseWatermark = null;
+
                 /* The definition's own per-item staged state (CollectorContext.StagedItemState), cleared per
                    iteration for the same reason: a fault must not leak this database's staged cursor into a
                    sibling's landing. It lands below, after this database's flush, and nowhere else. */
@@ -2577,11 +2583,26 @@ public sealed class DarlingCollectorRunner
                         var azureReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                             ? WatermarkPolicy.ReadFloor(collectionTime)
                             : null;
-                        /* This path is excluded from the per-database cache; the invalidate is only defensive. */
-                        _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
-                        context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
-                            server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                            definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
+                        /* #5514: query_store on this arm resolves its watermark through the per-database cache,
+                           exactly as the enumerated arm does. #4669 left this arm out of the cache ("it shares its
+                           read with the unbounded XE collectors") and invalidated the key every pass, so every
+                           Azure SQL Database paid one bounded store read per database per cycle: 181,050 calls in
+                           13 days on a 43-server store. The key is read through the same floor the enumerated arm
+                           uses, advanced from this database's batch only after its write returned (stage below,
+                           commit in the success block), and dropped by both fault arms. The XE ring-buffer
+                           collectors have no read floor (azureReadFloor is null) and keep their own read. */
+                        if (azureReadFloor is DateTime azureCacheFloor)
+                        {
+                            context.Watermark = await ResolveQueryStoreDatabaseWatermarkAsync(
+                                server, definition.TargetTable, definition.WatermarkColumn!,
+                                definition.PerDatabaseWatermarkColumn!, databaseName, azureCacheFloor, collectionTime, dbToken);
+                        }
+                        else
+                        {
+                            context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
+                                server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
+                                definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
+                        }
 
                         /* #2111 adaptive shrink, Azure arm — tighten BEFORE BuildQuery: the
                            definition's own clamp only floors OLDER watermarks, so a tighter one
@@ -2796,6 +2817,13 @@ public sealed class DarlingCollectorRunner
                         sqlMs += dbFetchMs;
                     }
 
+                    /* #5514: what this batch contributes to the cache, computed from the rows as read (the same
+                       staging the enumerated arm does after its fetch) and landed below, after the flush. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        stagedDatabaseWatermark = StageQueryStoreDatabaseWatermark(batch, databaseName, collectionTime);
+                    }
+
                     /* Flush this database before reading the next — peak memory is one database's rows. */
                     long dbStorageMs = 0;
                     if (batch.Count > 0)
@@ -2906,6 +2934,13 @@ public sealed class DarlingCollectorRunner
                     {
                         OnQueryStoreItemSucceeded(server.ServerId, databaseName);
 
+                        /* #5514: the flush returned, so the staged batch is in the store and the cache may
+                           advance past it. Never earlier: a watermark ahead of committed rows skips them. */
+                        if (stagedDatabaseWatermark is { } landedWatermark)
+                        {
+                            CommitQueryStoreDatabaseWatermark(server, databaseName, landedWatermark);
+                        }
+
                         /* #2312: read and flush both landed — the staged open-interval stamp may too. */
                         if (stagedOpenIntervalStamp is not null)
                         {
@@ -2947,6 +2982,19 @@ public sealed class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemFailed(server.ServerId, databaseName);
+
+                        /* #5514: a batch was staged, so its write may or may not have committed: drop this key and
+                           let the next cycle read the store. A fault before the stage wrote nothing, and the key
+                           stays. That matters for a PARTIAL failure: a database that fails every cycle (offline, a
+                           login that cannot reach it) beside healthy siblings must not turn back into a store read
+                           every cycle. When EVERY database fails (a one-database registration, the common shape)
+                           the loop rethrows and RunAsync's catch drops all of this server's query_store keys
+                           anyway, so there the kept key buys nothing. Correctness is the same either way: a kept
+                           key is equal to the store or stale-low, never ahead. */
+                        if (stagedDatabaseWatermark is not null)
+                        {
+                            _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
+                        }
                     }
 
                     /* WARNING, not Debug, unlike the routine per-database skip beside it: an offline
@@ -2985,6 +3033,19 @@ public sealed class DarlingCollectorRunner
                     if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                     {
                         OnQueryStoreItemFailed(server.ServerId, databaseName);
+
+                        /* #5514: a batch was staged, so its write may or may not have committed: drop this key and
+                           let the next cycle read the store. A fault before the stage wrote nothing, and the key
+                           stays. That matters for a PARTIAL failure: a database that fails every cycle (offline, a
+                           login that cannot reach it) beside healthy siblings must not turn back into a store read
+                           every cycle. When EVERY database fails (a one-database registration, the common shape)
+                           the loop rethrows and RunAsync's catch drops all of this server's query_store keys
+                           anyway, so there the kept key buys nothing. Correctness is the same either way: a kept
+                           key is equal to the store or stale-low, never ahead. */
+                        if (stagedDatabaseWatermark is not null)
+                        {
+                            _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
+                        }
                     }
 
                     _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
@@ -4446,7 +4507,7 @@ public sealed class DarlingCollectorRunner
         var fencedServerId = queryStoreDatabases is not null ? server.ServerId : (int?)null;
         if (fencedServerId is { } beginServerId)
         {
-            _queryStoreWriteFence?.BeginWrite(beginServerId);
+            _queryStoreWriteFence?.BeginWrite(beginServerId, queryStoreDatabases);
         }
 
         var fenceSucceeded = false;

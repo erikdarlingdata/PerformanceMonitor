@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// scheduled pass, and nothing here restricts it.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class SameStatementPileupSourceCensusTests
 {
     /// <summary>

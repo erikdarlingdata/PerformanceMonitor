@@ -6,7 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-/* FinOps "Server Inventory" tab: one row per monitored server from get_finops_inventory (view server_inventory).
+/* FinOps "Server Inventory" tab: one row per configured server from get_finops_inventory (view server_inventory).
+   A server removed from the configuration is not listed, and is not in the count, unless "Show removed servers" is
+   ticked (off by default; the choice survives the tab's periodic rebuild).
    The view is fleet-wide: the page's server choice is shown but not used. Uptime is not shown: the start time is
    each server's own clock, and the browser's clock cannot be subtracted from it. */
 
@@ -14,6 +16,8 @@ import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 
 const LIMIT = 200;
+// The "Show removed servers" choice, kept here so the tab's periodic rebuild does not untick it.
+let showRemoved = false;
 const BAND_SEV = { good: "Healthy", fair: "Warning", poor: "Critical" };
 const PROVISIONING = {
   RIGHT_SIZED: ["RIGHT SIZED", "Healthy"],
@@ -67,7 +71,7 @@ function displayRow(r, legend) {
 }
 
 function noticeText(data, n) {
-  return n + (n === 1 ? " server" : " servers")
+  return n + (n === 1 ? " server" : " servers") + (showRemoved ? " (removed servers included)" : "")
     + (data.truncated ? " (the first " + n + " of " + data.total_servers + ")" : "")
     + ". Fleet-wide: the server picked above does not filter this list. CPU over the last " + (data.cpu_window_hours ?? 24)
     + " hours, idle databases over the last " + (data.idle_window_days ?? 7)
@@ -79,9 +83,13 @@ export const tab = {
   label: "Server Inventory",
   build(server, ctx) {
     const body = el("div", {}, [loadingStrip()]);
-    (async () => {
+    let seq = 0;
+    const load = async () => {
+      const mine = ++seq;
+      mount(body, loadingStrip());
       try {
-        const res = await readTool("get_finops_inventory", { view: "server_inventory", limit: LIMIT }, ctx && ctx.signal);
+        const res = await readTool("get_finops_inventory", { view: "server_inventory", limit: LIMIT, include_removed: showRemoved ? "true" : null }, ctx && ctx.signal);
+        if (mine !== seq) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
         if (res.kind === "empty") return mount(body, emptyStrip(res.message));
@@ -93,9 +101,17 @@ export const tab = {
           VIZ.table({ servers: rows }, { rowsKey: "servers", columns: COLUMNS, emptyText: "No server property data collected yet." }),
         ]);
       } catch (e) {
-        if (e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
+        if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
       }
-    })();
-    return body;
+    };
+    const box = el("input", { type: "checkbox", "aria-label": "Show removed servers" });
+    box.checked = showRemoved;
+    box.addEventListener("change", () => {
+      showRemoved = box.checked;
+      load();
+    });
+    const root = el("div", {}, [el("label", { class: "range-control" }, [box, el("span", { text: "Show removed servers" })]), body]);
+    load();
+    return root;
   },
 };

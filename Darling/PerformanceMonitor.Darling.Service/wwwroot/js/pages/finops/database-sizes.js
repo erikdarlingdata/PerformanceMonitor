@@ -11,7 +11,8 @@
    the read returns them. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtMb, applyFormat, relTime, localTime } from "../../util.js";
+import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtMb, applyFormat, relTime, localTime } from "../../util.js";
+import { gatedEmptyStrip } from "./gate.js";
 
 // The desktop's Auto Growth text: a percentage step, a MB step, "Disabled" when growth is off, "-" when unknown.
 function growthText(row) {
@@ -71,7 +72,7 @@ export const tab = {
         const res = await readTool("get_finops", { server, view: "database_sizes", limit: MAX_FILES }, ctx && ctx.signal);
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         const files = Array.isArray(data.rows) ? data.rows : [];
         const notes = [];

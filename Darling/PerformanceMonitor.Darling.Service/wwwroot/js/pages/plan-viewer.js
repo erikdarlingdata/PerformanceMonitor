@@ -21,6 +21,7 @@
 
 import { el, readTool } from "../util.js";
 import { copyText, downloadText } from "../grid-tools.js";
+import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 
 const NO_PLAN = "No stored plan was found for this query.";
 const TRUNCATED_NOTE =
@@ -458,7 +459,8 @@ export function planSourceCell(server, source, label, title) {
     });
     button.addEventListener("click", () => openPlanSource(server, source));
     host.appendChild(button);
-    if (isOpen) host.appendChild(panelFor(key, stem, server, source));
+    if (isOpen) dockPanelUnderRow(host, panelFor(key, stem, server, source));
+    else undockPanel(host);
   };
   draw.host = host;
   draw.generation = generation;

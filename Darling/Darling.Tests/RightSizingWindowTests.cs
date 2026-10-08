@@ -97,14 +97,17 @@ public sealed class RightSizingWindowTests
     }
 
     [Fact]
-    public void QueryStatsFirstSampleSql_IsOneScalarOverTheServersCutoffWindow()
+    public void IdleCoverageSql_CountsTheDistinctUtcDaysWithAQueryStatsSample()
     {
-        var sql = ViewerDataService.RecommendationsQueryStatsFirstSampleSql;
-        Assert.Contains("SELECT MIN(collection_time)", sql, StringComparison.Ordinal);
+        var sql = ViewerDataService.RecommendationsIdleCoverageSql;
+        /* One EXISTS probe per complete UTC day (#5492), the day starts D-7 .. D-1: $2 through $3 - 1 day. */
+        Assert.Contains("generate_series(CAST($2 AS timestamp), CAST($3 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day')", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("$1", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$2", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+        Assert.Contains("q.server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("q.collection_time >= d.day_start", sql, StringComparison.Ordinal);
+        /* Each day stops at its own end, and the oldest sample is read beside them (the rule needs both). */
+        Assert.Contains("q.collection_time <  d.day_start + INTERVAL '1 day'", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time LIMIT 1", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -112,7 +115,7 @@ public sealed class RightSizingWindowTests
     {
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsRecommendationsReader.cs");
         var viewerRaw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs");
-        Assert.Contains("firstSample <= cutoff", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("firstSample <= cutoff", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("TimeSpan.FromDays(1)", viewerRaw, StringComparison.Ordinal);
         Assert.DoesNotContain("TimeSpan.FromDays(1)", raw, StringComparison.Ordinal);
     }

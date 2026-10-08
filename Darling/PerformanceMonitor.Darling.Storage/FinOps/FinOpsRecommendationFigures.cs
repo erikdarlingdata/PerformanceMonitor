@@ -100,6 +100,65 @@ public static class FinOpsRecommendationFigures
     }
 
     /// <summary>
+    /// True for an edition that is paid for as Enterprise, the only editions the licensing advice ("Enterprise may not be
+    /// required", the downgrade savings) can apply to. A Developer or Evaluation edition (including "Enterprise Developer Edition"
+    /// and "Enterprise Evaluation Edition") has no license fee to save, and Express is never Enterprise, so none of the three gets
+    /// licensing advice. Lite's recommendation reads the same rule.
+    /// </summary>
+    public static bool EditionNeedsLicensingAdvice(string? edition) =>
+        !string.IsNullOrEmpty(edition)
+        && edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase)
+        && !edition.Contains("Developer", StringComparison.OrdinalIgnoreCase)
+        && !edition.Contains("Evaluation", StringComparison.OrdinalIgnoreCase)
+        && !edition.Contains("Express", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>How long the 7-day CPU right-sizing rule's samples must span before it may speak: its window is 7 days, and a first collect backfills only minutes.</summary>
+    public static readonly TimeSpan CpuRightSizingMinSpan = TimeSpan.FromHours(24);
+
+    /// <summary>True when the 7-day rule's CPU samples spanning <paramref name="span"/> are enough for advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
+    public static bool CpuSamplesSpanEnough(TimeSpan span) => span >= CpuRightSizingMinSpan;
+
+    /// <summary>How old the oldest CPU sample inside the last 24 hours must be before the 24-hour rule (CPU over-provisioned) may speak.</summary>
+    public static readonly TimeSpan Cpu24HourRuleMinOldestAge = TimeSpan.FromHours(23);
+
+    /// <summary>
+    /// True when the 24-hour rule's window is watched: its oldest CPU sample inside the last 24 hours is at least 23 hours old. A span from
+    /// the oldest to the newest sample over 7 days is the wrong test for a rule that reads only 24 hours: a server with two days of
+    /// samples last week and 60 minutes since a restart spans days, yet its 24-hour window holds one hour.
+    /// </summary>
+    public static bool Cpu24HourWindowWatched(DateTime? oldestSampleInWindowUtc, DateTime nowUtc) =>
+        oldestSampleInWindowUtc is DateTime oldest && nowUtc - oldest >= Cpu24HourRuleMinOldestAge;
+
+    /// <summary>
+    /// True when the prescriptive CPU row (the VM right-sizing one) replaces the compute row (the utilization one) or stands alone: it
+    /// does when no compute row exists (<paramref name="computeTargetCores"/> null) or when it keeps MORE cores than that row. At a
+    /// tie the compute row ("CPU over-provisioned") stays. One CPU right-sizing row per server, never two with savings that add up.
+    /// </summary>
+    public static bool PrescriptiveCpuRowWins(int? computeTargetCores, int prescriptiveTargetCores) =>
+        computeTargetCores is not int compute || prescriptiveTargetCores > compute;
+
+    /// <summary>The cores the compute row (<see cref="CpuRightSizing"/>) advises, or null when it advises nothing for this row.</summary>
+    public static int? CpuRightSizingTargetCores(UtilizationEfficiencyDto? util)
+    {
+        if (util == null || !FinOpsUtilizationFigures.HasCpuSample(util) || util.P95CpuPct >= 30 || util.CpuCount <= 4
+            || util.ProvisioningStatus == ProvisioningVerdict.NotApplicable)
+            return null;
+        return Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
+    }
+
+    /// <summary>The cores the prescriptive CPU row (<see cref="VmRightSizing"/>) advises, or null when it advises nothing.</summary>
+    public static int? VmCpuTargetCores(decimal p95Cpu7d, int cpuCount)
+    {
+        if (cpuCount < 4) return null;
+        int targetCores = 0;
+        if (p95Cpu7d < 15)
+            targetCores = Math.Max(2, cpuCount / 4);
+        else if (p95Cpu7d < 30)
+            targetCores = Math.Max(2, cpuCount / 2);
+        return targetCores > 0 && targetCores < cpuCount ? targetCores : null;
+    }
+
+    /// <summary>
     /// Builds the Edition / license audit recommendations from the collected facts (check 1 + Lite's check 10
     /// license-cost math). Returns an empty list for non-Enterprise editions. The full Enterprise branching is
     /// ported verbatim from Lite — 2019+ (TDE moved to Standard) vs pre-2019 (TDE is the last Enterprise-only
@@ -124,7 +183,7 @@ public static class FinOpsRecommendationFigures
     {
         var recommendations = new List<FinOpsRecommendation>();
 
-        if (!edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase))
+        if (!EditionNeedsLicensingAdvice(edition))
         {
             return recommendations;
         }
@@ -285,11 +344,9 @@ public static class FinOpsRecommendationFigures
     /// </summary>
     public static FinOpsRecommendation? CpuRightSizing(UtilizationEfficiencyDto? util, decimal monthlyCost)
     {
-        if (util == null || !FinOpsUtilizationFigures.HasCpuSample(util) || util.P95CpuPct >= 30 || util.CpuCount <= 4
-            || util.ProvisioningStatus == ProvisioningVerdict.NotApplicable)
+        if (util == null || CpuRightSizingTargetCores(util) is not int targetCores)
             return null;
 
-        var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
         var savingsPct = 1m - ((decimal)targetCores / util.CpuCount);
         var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
         return new FinOpsRecommendation
@@ -332,33 +389,24 @@ public static class FinOpsRecommendationFigures
 
     /// <summary>The VM right-sizing advice: up to two rows, one for the cores and one for the memory, each only when its own prescription qualifies.</summary>
     public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu7d, string cpuWindow, int cpuCount, int physMb,
-        int p95MemMb, long memSampleCount, string memWindow, decimal monthlyCost)
+        int p95MemMb, long memSampleCount, string memWindow, decimal monthlyCost, bool includeCpuRow = true)
     {
         var recommendations = new List<FinOpsRecommendation>();
-        // CPU prescription: only if >= 4 cores.
-        if (cpuCount >= 4)
+        // CPU prescription: only if >= 4 cores. includeCpuRow is false when the compute row (or too short a window) already settled the CPU advice.
+        if (includeCpuRow && VmCpuTargetCores(p95Cpu7d, cpuCount) is int targetCores)
         {
-            int targetCores = 0;
-            if (p95Cpu7d < 15)
-                targetCores = Math.Max(2, cpuCount / 4);
-            else if (p95Cpu7d < 30)
-                targetCores = Math.Max(2, cpuCount / 2);
-
-            if (targetCores > 0 && targetCores < cpuCount)
+            recommendations.Add(new FinOpsRecommendation
             {
-                recommendations.Add(new FinOpsRecommendation
-                {
-                    Category = "Hardware",
-                    Severity = "Medium",
-                    Confidence = "Medium",
-                    Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
-                    Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
-                             $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
-                    EstMonthlySavings = monthlyCost > 0
-                        ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
-                        : null
-                });
-            }
+                Category = "Hardware",
+                Severity = "Medium",
+                Confidence = "Medium",
+                Finding = $"CPU: reduce from {cpuCount} to {targetCores} cores (P95 CPU {p95Cpu7d:N1}%)",
+                Detail = $"From {cpuWindow}, P95 CPU utilization was {p95Cpu7d:N1}%. " +
+                         $"Current allocation of {cpuCount} cores can safely be reduced to {targetCores} cores.",
+                EstMonthlySavings = monthlyCost > 0
+                    ? monthlyCost * (1m - (decimal)targetCores / cpuCount) * 0.50m
+                    : null
+            });
         }
 
         // Memory prescription: needs >= 4 GB physical and a handful of samples.

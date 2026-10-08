@@ -43,6 +43,7 @@ namespace Darling.Tests;
 /// the roster is complete on its own; Lite's has no reflection pin and is source-only.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public class FileGrowthRiseUnitCensusTests
 {
     /// <summary>The literal the XAML labels carry. Pinned to the constant so the two cannot drift apart:

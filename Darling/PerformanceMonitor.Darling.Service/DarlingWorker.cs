@@ -1122,6 +1122,10 @@ public sealed class DarlingWorker : BackgroundService
 
     /* The collector runner, kept for the reconcile, which clears a changed server's RDS endpoint verdicts on it. */
     private DarlingCollectorRunner? _runner;
+
+    /* #5518: the Query Store backfill, held so a removed server's cached database list can be dropped with it. */
+    private QueryStoreBackfill? _queryStoreBackfill;
+
     /* Concrete rather than IAlertDeliverer: there is exactly one implementation here and it is constructed
        a few lines from where this is assigned, so the interface bought an indirection per delivered alert
        and no seam (CA1859). */
@@ -2668,8 +2672,9 @@ LIMIT 1";
            its own connection, its own catch, drained with the other background startup work below. */
         var planForceDetailScrub = RunPlanForceActionDetailScrubAsync(postgres, stoppingToken);
 
-        /* #4605, #4952: the Query Store read indexes - the BRIN on collect.query_store_interval_wide (collection_time)
-           and the btree on its (server_id, first_execution_time) - built in the background
+        /* #4605, #4952, #5507: the Query Store read indexes - the BRIN on collect.query_store_interval_wide
+           (collection_time) and the btrees on (server_id, first_execution_time) of collect.query_store_interval_wide
+           and collect.query_store_interval_latest - built in the background
            QueryStoreBackgroundIndexes.StartDelay after start so their heap reads stay off the post-restart IO burst,
            one after another, each failure-isolated. Launched after migrations confirm the tables exist, never awaited
            on the startup path, one attempt per start, and RunDelayedAsync never throws. Drained with the other
@@ -3321,7 +3326,11 @@ LIMIT 1";
             () => _timescaleAvailable,
             /* #5483: the server's effective database_states cadence, resolved live like the alert adapter's, so the
                gone-database check knows how old a snapshot may be. */
-            serverId => StoreConfigProvider.ResolveSchedule("database_states", serverId, _scheduleOverrides).FrequencyMinutes);
+            serverId => StoreConfigProvider.ResolveSchedule("database_states", serverId, _scheduleOverrides).FrequencyMinutes,
+            /* #5518: the same fence the runner's Query Store writes go through, so the candidate list is read from the
+               store only when a write named a database it does not hold, the cut chunk moved or it aged out. */
+            _queryStoreWriteFence);
+        _queryStoreBackfill = queryStoreBackfill;
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* #5450 proposal 2: the outbound heartbeat, on its own task and connection so a slow or dead URL never touches
@@ -4160,7 +4169,7 @@ LIMIT 1";
             /* Expected on shutdown. */
         }
 
-        /* And the Query Store read index ensures (#4605, #4952), which absorb their own failures. */
+        /* And the Query Store read index ensures (#4605, #4952, #5507), which absorb their own failures. */
         await queryStoreIndexes;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
@@ -6313,6 +6322,8 @@ LIMIT 1";
                 _deltas?.ClearServer(id);
                 /* The RDS endpoint verdict and fresh login held for this id go with the server: a re-add checks again. */
                 _runner?.ForgetRdsVerdicts(id);
+                /* #5518: and the backfill's cached database list and the fence's database names for it. */
+                _queryStoreBackfill?.ForgetServer(id);
                 /* #4999: and its single-flight slots. The id is the registration's, so a re-add carries the same one, and a
                    run of this removed state that is still going, or still queued for a permit (hours, behind other daily
                    runs), would hold the slot the re-added server's first daily run needs. That run would skip, and a
@@ -11605,16 +11616,23 @@ AND   j.hypertable_name = '{relation}'", connection))
             await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
         }
 
+        /* #5495: the eighth tenant, same contract — its own method, its own catch-all, one awaited statement. The hourly
+           PostgreSQL I/O rollup needs no TimescaleDB (its tables are plain), so it sits outside the gate and runs on every
+           store shape. It sits BEFORE the module-map refresh and the PLAN_REGRESSION builder, not after them: the pins keep
+           the plan-regression builder, which can run up to a 10-minute tick, as the last await, with the refresh directly
+           before it, so the rollup (budget-bounded to 2 minutes) goes ahead of both and a fault in it skips nothing. */
+        await BuildPgIoStatsHourlyAsync(stoppingToken);
+
         /* #4605: the sixth tenant, same contract — its own method, its own catch-all, one awaited statement.
            It sits AFTER the gate rather than inside it because it needs no TimescaleDB: procedure_stats and
            module_map are plain tables on every store shape, and the daily refresh already runs on all of them.
-           It comes last so a store still being converged, or a summary builder that ran out its budget, is
-           never made to wait behind it, and a fault here skips nothing above. */
+           It comes after the gate and the I/O rollup so a store still being converged, or a summary builder that ran
+           out its budget, is never made to wait behind it, and a fault here skips nothing above. */
         await RefreshModuleMapRecentAsync(stoppingToken);
 
         /* #5448: the seventh tenant, same contract — its own method, its own catch-all, one awaited statement, LAST.
            The PLAN_REGRESSION per-day totals builder needs no TimescaleDB either (collect.plan_regression_daily and
-           its built table are plain tables), so it sits outside the gate, after the module-map refresh: a builder
+           its built table are plain tables), so it sits outside the gate, directly after the module-map refresh: a builder
            that runs out its budget never makes the cheaper tenants above it wait, and a fault here skips nothing. */
         await BuildPlanRegressionDailyAsync(stoppingToken);
     }
@@ -11638,6 +11656,23 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
     }
 
+    /// <summary>
+    /// The hourly store-maintenance tick's eighth tenant (#5495): builds the hourly rollup of the differenced PostgreSQL I/O
+    /// counters that long <c>get_pg_io_stats</c> windows read, one failure-isolated pass (see
+    /// <see cref="PgIoStatsHourlyBuilder.RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>). The first pass after
+    /// the V170 upgrade is the fill, bounded by time (<see cref="PgIoStatsHourlyBuilder.TickBudget"/>). Its own catch-all: nothing here can fail the tick.
+    /// </summary>
+    private async Task BuildPgIoStatsHourlyAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await PgIoStatsHourlyBuilder.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("PostgreSQL I/O hourly rollup could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+    }
     /// <summary>
     /// The hourly store-maintenance tick's seventh tenant (#5448): builds the per-day per-plan totals PLAN_REGRESSION reads
     /// for closed days, one failure-isolated pass (see <see cref="PlanRegressionDaily.RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>).

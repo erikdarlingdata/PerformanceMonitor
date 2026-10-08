@@ -45,6 +45,11 @@ globalThis.fetch = async (url) => {
   return { status: reply.status, ok: reply.status < 400, text: async () => reply.body };
 };
 
+/* ResizeObserver stand-in that counts the observers still connected (plan-row.js: a closed panel must leave none). */
+const observers = [];
+globalThis.ResizeObserver = class { constructor() { this.live = true; observers.push(this); } observe() {} disconnect() { this.live = false; } };
+const liveObservers = () => observers.filter((o) => o.live).length;
+
 const root = process.argv[2];
 /* charts.js draws SVG, which the stand-in DOM cannot: copy the page scripts and replace it with a recorder, so the
    harness sees exactly the spec the panel hands the chart. */
@@ -96,12 +101,15 @@ const scenarios = {
     out.rowTexts = t.all((n) => n.tag === "tr").slice(1).map((r) => r.textContent);
     const planButtons = cell.all((n) => n.tag === "button" && n.textContent === "Plan");
     out.planButtons = planButtons.length;
+    out.observersOpen = liveObservers();
     planButtons[1].click();
     await flush();
     Object.assign(out, { plan: query(1) });
     out.chart = globalThis.__charts.map((c) => ({ id: c.id, scope: c.scope, series: c.spec.series.map((s) => s.key), points: c.spec.points.length, xKey: c.spec.xKey }));
+    cell.byText("Hide plan").click();
     cell.byText("Hide history").click();
     out.closed = tables(cell).length === 0;
+    out.observersClosed = liveObservers();
   },
   async rebuild() {
     respond(history());

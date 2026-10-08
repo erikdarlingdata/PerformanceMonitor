@@ -187,6 +187,11 @@ public sealed class FinOpsOptimizationViewLiveTests
         await Query(c, ct, now.AddDays(-2), "BusyDb", "0xB0", "SELECT busy", 1_000_000, 5, 100, new DateTime(2026, 10, 1, 9, 0, 0), null);
         await Query(c, ct, now.AddDays(-2), "IdleBig", "0xB1", "SELECT idle", 0, 0, 0, new DateTime(2026, 9, 20, 3, 4, 5), null);
 
+        /* Idle needs 7 days of watching (#5492): the oldest query-stats sample at or before now - 7 days and a sample on each complete UTC day
+           D-7..D-1. The coverage samples carry a database nobody lists and run nothing, so IdleBig and IdleSmall stay idle and no query row or
+           cost share moves. Without them the idle section reads "empty" (idle cannot be judged yet), which is the rule, not a fault. */
+        await FinOpsIdleCoverageSeed.SeedAsync(c, ct, ServerId, ServerName, now);
+
         /* Expensive statements. Beta and Gamma tie on CPU; Alpha has a plan; Delta's text is 260 characters. */
         await Query(c, ct, now.AddHours(-2), "AlphaDb", "0xE1", "SELECT alpha", 9_000_000, 30, 1000, null, "<ShowPlanXML />");
         await Query(c, ct, now.AddHours(-2), "DeltaDb", "0xE4", "SELECT " + new string('d', 260), 6_000_000, 3, 50, null, null);

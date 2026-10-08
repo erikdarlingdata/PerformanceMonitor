@@ -73,9 +73,10 @@ public sealed partial class StatementCollectionCensusTests
     }
 
     private static async Task<(List<QuerySnapshotsCollector.Row> Rows, StatementScrubRecordingWriter Writer)> ReadAndWriteSnapshotsAsync(
-        DataTableReader reader)
+        DataTableReader reader, Func<SensitiveStatements.Session>? session = null)
     {
         var context = SnapshotContext();
+        context.ScrubSessionFactory = session;
         var rows = await QuerySnapshotsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
         var writer = new StatementScrubRecordingWriter();
         foreach (var row in rows)
@@ -385,8 +386,8 @@ public sealed partial class StatementCollectionCensusTests
 
     /* ---- the worst case, for the part file: 200 snapshot rows with 47 KB plans plus one 27 MB plan ---- */
 
-    [Fact]
-    public async Task QuerySnapshots_WorstCase_TwoHundredPlansAndAHugeOne_FinishesInsideTheSessionBudget()
+    /// <summary>The worst case: 200 distinct snapshot rows with 47 KB plans plus one 27 MB plan.</summary>
+    private static DataTableReader WorstCaseReader()
     {
         var rowPlan = SizedPlan(47 * 1024);
         var rows = new List<(string? Text, string? Plan, string? Live)>();
@@ -397,9 +398,22 @@ public sealed partial class StatementCollectionCensusTests
         }
 
         rows.Add((null, SizedPlan(27 * 1024 * 1024), null));
+        return SnapshotReader(rows.ToArray());
+    }
 
+    [Fact]
+    public async Task QuerySnapshots_WorstCase_TwoHundredPlansAndAHugeOne_FinishesInsideTheSessionBudget()
+    {
+        /* #5459: this asserted `took < 20 s` under the session's real 15 s wall-clock budget. The budget is charged wall
+           time, so a loaded runner (the Guard stage runs a thousand tests at once) could spend it, withhold plans whole
+           and stretch the read past the bound, though nothing was wrong. The session is pinned to a budget of an hour
+           that cannot run out, so the answer no longer depends on the machine: every one of the 201 plans is judged
+           and none is withheld. The proof that a spent budget withholds and stays bounded is
+           QuerySnapshots_WorstCase_ASpentSessionWithholdsEveryPlanWholeAndNamesNothing. The wall bound is kept only as
+           a hang backstop: the read takes about two seconds alone, so two minutes means something is wrong. */
         var clock = Stopwatch.StartNew();
-        var (read, writer) = await ReadAndWriteSnapshotsAsync(SnapshotReader(rows.ToArray()));
+        var (read, writer) = await ReadAndWriteSnapshotsAsync(
+            WorstCaseReader(), () => new SensitiveStatements.Session(null, null, TimeSpan.FromHours(1), null));
         clock.Stop();
 
         TestContext.Current.SendDiagnosticMessage(
@@ -407,8 +421,22 @@ public sealed partial class StatementCollectionCensusTests
             + read.Count(r => r.QueryPlan == Marker) + " plans withheld whole");
 
         Assert.Equal(201, read.Count);
+        Assert.Equal(0, read.Count(r => r.QueryPlan == Marker));
         AssertNoSecretNeedle(writer);
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(20), "the read took " + clock.Elapsed);
+        Assert.True(clock.Elapsed < TimeSpan.FromMinutes(2), "the read took " + clock.Elapsed);
+    }
+
+    [Fact]
+    public async Task QuerySnapshots_WorstCase_ASpentSessionWithholdsEveryPlanWholeAndNamesNothing()
+    {
+        /* #5459: the other half of the pinned budget. A session whose time is already used up (its limit is zero) judges
+           nothing: all 201 rows still come back, every plan is the marker, and nothing is written but the marker. */
+        var (read, writer) = await ReadAndWriteSnapshotsAsync(
+            WorstCaseReader(), () => new SensitiveStatements.Session(null, null, TimeSpan.Zero, null));
+
+        Assert.Equal(201, read.Count);
+        Assert.Equal(201, read.Count(r => r.QueryPlan == Marker));
+        AssertNoSecretNeedle(writer);
     }
 
     private static string SizedPlan(int approximateChars)

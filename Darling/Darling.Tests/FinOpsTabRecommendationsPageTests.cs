@@ -110,7 +110,7 @@ public sealed class FinOpsTabRecommendationsPageTests
     {
         var tab = Tab();
         Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"aborted\" \\|\\| res\\.kind === \"auth\"\\) return;$", tab);
-        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return mount\\(body, emptyStrip\\(res\\.message\\)\\);$", tab);
+        Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"empty\"\\) return mount\\(body, gatedEmptyStrip\\(res, ctx\\)\\);$", tab);
         Assert.Matches("(?m)^\\s+if \\(res\\.kind === \"error\"\\) return mount\\(body, readErrorStrip\\(res\\.message\\)\\);$", tab);
         Assert.Contains("Could not render this tab: ", tab);
     }
@@ -126,7 +126,8 @@ public sealed class FinOpsTabRecommendationsPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../util.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../util.js", "./gate.js" }));
+        Assert.Contains("./gate.js", imports);
     }
 
     [Fact]

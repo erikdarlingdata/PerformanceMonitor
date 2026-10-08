@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// cry-wolf outcome #3754 drew its closed list to prevent. So the N boundary, the event collector and
 /// #3819's own class are each asserted to keep their EXISTING answers by name.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ProductiveZeroBandingTests
 {
     private static readonly DateTime Now = DateTime.UtcNow;
@@ -400,7 +401,7 @@ public sealed class ProductiveZeroBandingTests
            always carried the sentence, but no column rendered it, so a regressed row read WARNING with every
            cell beside it blank. */
         Assert.Contains(
-            "{ key: \"regression_finding\", label: \"Regression\", wrap: true }",
+            "{ key: \"regression_finding\", label: \"Regression\", wrap: true, plain: true }",
             ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/server-tabs.js"),
             StringComparison.Ordinal);
 

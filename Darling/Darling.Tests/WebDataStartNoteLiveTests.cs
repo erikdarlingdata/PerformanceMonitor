@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to CREATE
    and DROP its own database through ScratchPostgres, then works entirely inside it. */
+[Trait("Cost", "Slow")]
 public sealed class WebDataStartNoteLiveTests
 {
     private const int NewServerId = -496601;

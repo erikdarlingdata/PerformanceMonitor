@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// rung forever — that it is registered, that its DDL is what it was, and that a store migrated to exactly
 /// 79 still maps to 79 rather than falling through a newer arm.
 /// </summary>
+[Trait("Reads", "Lite")]
 public class FileGrowthAlertStoreTests
 {
     [Fact]
