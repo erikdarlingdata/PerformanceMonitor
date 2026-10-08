@@ -399,6 +399,7 @@ public static class ComposeCompiler
         /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
            a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
         var effectiveBucket = plan.TimeBucket;
+        var windowBuckets = 0d;
         if (plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries)
         {
             var windowSeconds = (context.EndUtc - context.StartUtc).TotalSeconds;
@@ -414,6 +415,7 @@ public static class ComposeCompiler
             if (bucketSeconds > 0)
             {
                 var buckets = Math.Ceiling(windowSeconds / bucketSeconds);
+                windowBuckets = buckets;
                 if (buckets > ComposeLimits.MaxBuckets)
                 {
                     return (null,
@@ -496,7 +498,7 @@ public static class ComposeCompiler
            it: every other route, and an aggregate that does not decompose (percentile_cont), compiles today's text. */
         PartialColumns? partials = null;
         string? partialValue = null;
-        if (singleScanRankedTimeSeries && plan.Mode == PanelMode.RankedTimeSeries && CanSingleScan(plan, route, context))
+        if (singleScanRankedTimeSeries && plan.Mode == PanelMode.RankedTimeSeries && CanSingleScan(plan, route, context, windowBuckets))
         {
             partials = new PartialColumns();
             partialValue = TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, partials);
@@ -1305,16 +1307,67 @@ public static class ComposeCompiler
     /// Whether this RankedTimeSeries compile may use the single-scan shape (#5582): the Query Store WIDE route, a plain
     /// raw-tier FROM item (no CAGG, no hourly-raw-edges arms), every group a plain fact column (no module join, no trimmed
     /// history spelling), and no overlay (a RankedTimeSeries panel never carries one; this is a guard, not a feature).
-    /// Everything else compiles today's two-scan text. The aggregate is checked by <see cref="TryBuildPartialValueExpr"/>.
+    /// Everything else compiles today's two-scan text. The plan-level half of the test is <see cref="PlanTakesSingleScan"/>.
     /// </summary>
-    private static bool CanSingleScan(PanelPlan plan, ComposeRoute route, ComposeRunContext context) =>
+    private static bool CanSingleScan(PanelPlan plan, ComposeRoute route, ComposeRunContext context, double windowBuckets) =>
         context.QueryStoreWideEligible
         && !route.IsCagg
         && route.Tier != ComposeSourceTier.HourlyRawEdges
+        && PlanTakesSingleScan(plan, windowBuckets);
+
+    /// <summary>
+    /// The plan-level half of <see cref="CanSingleScan"/>, and the half the Query Store read guard asks before any context
+    /// exists (<see cref="RankedTimeSeriesScansFactRowsTwice"/>): a Query Store RankedTimeSeries plan whose single-scan base
+    /// CTE is BOUNDED and whose aggregate decomposes.
+    ///
+    /// <para><b>Why a bound at all (#5582).</b> The base CTE holds one row per (bucket, group). Measured on the rig with
+    /// every fact row its own group, that is about 150 to 180 bytes of temp file per row (the materialized CTE, the sort or
+    /// hash spill that builds it, and the rank's re-aggregation over it), so a read of the guard's 9.4 million rows would write
+    /// 1.4 to 1.7 GB against the compose session's 1 GB <c>temp_file_limit</c>, where the two-scan text writes only what its
+    /// rank aggregate over the groups spills. So the single scan is taken only when the number of rows is bounded by the plan:
+    /// buckets x groups, with at most <see cref="ComposeLimits.MaxSingleScanBuckets"/> buckets and no group dimension that is
+    /// as large as the fact rows. <c>query_hash</c> is that dimension (one member per statement), and it is the one the
+    /// "top N queries over time" panel groups by, so that panel keeps the two-scan text and the guard counts its second
+    /// scan. <c>database_name</c>, <c>module_name</c> and <c>server</c> are bounded by the fleet's databases, modules and
+    /// servers.</para>
+    /// </summary>
+    private static bool PlanTakesSingleScan(PanelPlan plan, double windowBuckets) =>
+        plan.Mode == PanelMode.RankedTimeSeries
         && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal)
         && plan.Overlay is null
         && !plan.UsesModuleJoin
-        && plan.GroupBy.All(dim => !dim.ViaModuleJoin && !dim.TrailingSpaceHistory);
+        && windowBuckets > 0
+        && windowBuckets <= ComposeLimits.MaxSingleScanBuckets
+        && plan.GroupBy.All(dim => !dim.ViaModuleJoin && !dim.TrailingSpaceHistory && !s_unboundedGroupColumns.Contains(dim.Column))
+        && TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, new PartialColumns()) is not null;
+
+    /// <summary>The Query Store group columns with as many members as the fact rows have (#5582), which a single-scan base CTE
+    /// cannot bound: <c>query_hash</c> (one per statement). See <see cref="PlanTakesSingleScan"/>.</summary>
+    private static readonly string[] s_unboundedGroupColumns = { "query_hash" };
+
+    /// <summary>
+    /// Whether a Query Store RankedTimeSeries panel read through the wide table scans the fact rows twice (#5582): the rank and
+    /// the series each read them. The Query Store read guard counts that second scan against the statement timeout, so it asks
+    /// before the context exists, from the plan and the window alone. Any panel that is not a RankedTimeSeries reads them once.
+    /// Exact for a run on the wide route, the only route the guard checks; <see cref="CompileCore"/> takes the same decision.
+    /// </summary>
+    internal static bool RankedTimeSeriesScansFactRowsTwice(PanelPlan plan, DateTime startUtc, DateTime endUtc)
+    {
+        if (plan is null)
+        {
+            throw new ArgumentNullException(nameof(plan));
+        }
+
+        if (plan.Mode != PanelMode.RankedTimeSeries)
+        {
+            return false;
+        }
+
+        var windowSeconds = (endUtc - startUtc).TotalSeconds;
+        var bucketSeconds = MeasureCatalog.BucketSeconds(MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds));
+        var buckets = bucketSeconds > 0 ? Math.Ceiling(windowSeconds / bucketSeconds) : 0d;
+        return !PlanTakesSingleScan(plan, buckets);
+    }
 
     /// <summary>
     /// <see cref="BuildValueExpr"/> over the base CTE's partial columns (#5582): the same <c>value</c>, built from partials

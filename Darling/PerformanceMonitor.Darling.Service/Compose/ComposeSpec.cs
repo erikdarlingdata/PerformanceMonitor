@@ -40,6 +40,18 @@ public static class ComposeLimits
     /// </summary>
     public const long MaxQueryStoreWideRows = 9_400_000;
 
+    /// <summary>
+    /// The most buckets a Query Store RankedTimeSeries panel may span and still read the wide table once (#5582). The
+    /// single-scan statement holds one row per (bucket, group) in a CTE, and measured on the rig that row costs about 150
+    /// to 180 bytes of temp file (the materialized CTE, the sort or hash spill that builds it, and the rank's own
+    /// re-aggregation) against <see cref="TempFileLimit"/> of 1 GB, so the shape stays under half the limit only while there
+    /// are at most about 3 million such rows. The rows are at most buckets x groups; 100 buckets (an hour grain over four days,
+    /// or a day grain) with a group dimension of at most 30 thousand members (the module names of a large fleet) is 3 million.
+    /// A longer series, or a <c>query_hash</c> group (one member per statement, as many as the fact rows), compiles the
+    /// two-scan text instead: its temp use follows the group count alone.
+    /// </summary>
+    public const int MaxSingleScanBuckets = 100;
+
     /// <summary>The ceiling on a ranked panel's <c>topN</c> (mirrors the read surface's row clamp).</summary>
     public const int MaxTopN = 1_000;
 
