@@ -25,13 +25,22 @@ public sealed class TestCpuAccountantTests
     private const long BurnMs = 40;
     private const long ChargedAtLeastMs = 10;
 
+    /// <summary>
+    /// Spends <see cref="BurnMs"/> of THIS thread's CPU time, read from the same counter the accountant charges from.
+    /// A wall-clock burn (a Stopwatch loop) charged only the slices the thread got in those 40 ms, so on a loaded
+    /// runner two burns could add up to 46 ms and miss the 50 ms lower bound (#5459). This loop keeps spinning until
+    /// the thread's own CPU counter has advanced by the burn, so the charge covers it however the thread was
+    /// scheduled. The 30 s wall limit is only a hang backstop (a counter that never moves).
+    /// </summary>
     private static void Burn()
     {
-        var sw = Stopwatch.StartNew();
+        var wall = Stopwatch.StartNew();
+        var start = TestCpuAccountant.ThreadCpuTicks();
         long sink = 0;
-        while (sw.ElapsedMilliseconds < BurnMs)
+        while ((TestCpuAccountant.ThreadCpuTicks() - start) / TimeSpan.TicksPerMillisecond < BurnMs
+               && wall.Elapsed < TimeSpan.FromSeconds(30))
         {
-            sink += sw.ElapsedTicks & 1;
+            sink += wall.ElapsedTicks & 1;
         }
         GC.KeepAlive(sink);
     }
