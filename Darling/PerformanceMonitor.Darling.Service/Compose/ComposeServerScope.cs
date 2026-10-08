@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -20,8 +21,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>server_id</c> (see <see cref="ComposeCompiler.ServerScope"/>), resolving the scoped names through the registry inside the
 /// SQL. A name with no registry row resolves to no id, so a scope that named one would stop matching the rows written under it.
 /// This finds those names before the compile, so the compiler can keep matching them on the row's stored <c>server_name</c> and
-/// no scope loses what it matched before. The lookup is one read of the registry's unique server_name index; it runs once per
-/// run, not per read, and its result is <see cref="ComposeRunContext.UnregisteredServers"/>.
+/// a scope over a name that was never registered (or was removed) still returns what it returned before. The lookup is one read of
+/// the small registry table (its only key is <c>server_id</c>; there is no index on <c>server_name</c>, and none is needed at fleet
+/// size); it runs once per run, not per read, and its result is <see cref="ComposeRunContext.UnregisteredServers"/>.
+/// <para>What a scoped name means is stated on <see cref="ComposeCompiler.ServerScope"/>: the server or servers the registry holds
+/// under that name now, with all their rows.</para>
 /// </summary>
 internal static class ComposeServerScope
 {
@@ -34,10 +38,14 @@ internal static class ComposeServerScope
     /// The unregistered subset of <paramref name="servers"/>, or null when the scope is the whole fleet or every name is registered
     /// (the common case, and the one whose SQL carries no extra branch). A fault answers with ALL the names: a name matched by
     /// stored <c>server_name</c> as well as by id still returns everything the old scope returned, so a store that cannot answer the
-    /// lookup costs the old read's price, never a missing server. A cancelled run is not a fault and propagates.
+    /// lookup costs the old read's price, never a missing server; the fault is logged as a warning. A cancelled run is not a fault and
+    /// propagates.
+    /// <para>The lookup runs outside the read's own transaction (and outside the hourly-edges snapshot). If a re-connect renames a
+    /// registry row between the lookup and the read, that one run can miss the rows stored under the old name, because the lookup saw
+    /// the name as registered and the read no longer resolves it to an id. The next run is right.</para>
     /// </summary>
     public static async Task<IReadOnlyList<string>?> FindUnregisteredAsync(
-        NpgsqlDataSource postgres, IReadOnlyList<string>? servers, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, IReadOnlyList<string>? servers, CancellationToken cancellationToken, ILogger? logger = null)
     {
         if (servers is not { Count: > 0 })
         {
@@ -65,6 +73,9 @@ internal static class ComposeServerScope
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            logger?.LogWarning(
+                "Compose server-scope lookup failed ({Message}); the read matches the scoped names on the stored server name as well as by id",
+                ex.Message);
             return names;
         }
     }

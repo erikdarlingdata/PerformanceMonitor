@@ -304,11 +304,15 @@ public sealed class CustomAlertEvaluator
         }
 
         var now = DateTime.UtcNow;
+        /* #5525: the scope lookup is per server, not per rule, so it runs once here and every rule below reuses the answer (an empty list
+           means looked up, nothing unregistered). A fault answers with the storage name itself, the safe fallback the lookup documents. */
+        var unregistered = await ComposeServerScope.FindUnregisteredAsync(_viewer, new[] { storageName }, cancellationToken, _logger)
+            ?? (IReadOnlyList<string>)Array.Empty<string>();
         foreach (var (row, def, _) in applicable)
         {
             try
             {
-                await EvaluateRuleForServerAsync(row, def, serverId, storageName, displayName, now, rollups, coverage, composedSeconds, cancellationToken);
+                await EvaluateRuleForServerAsync(row, def, serverId, storageName, displayName, now, rollups, coverage, composedSeconds, unregistered, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -356,7 +360,8 @@ public sealed class CustomAlertEvaluator
 
     private async Task EvaluateRuleForServerAsync(
         CustomAlertRule row, CustomAlertRuleDefinition def, int serverId, string storageName, string displayName,
-        DateTime now, RollupAvailability rollups, RollupCoverage coverage, int composedSeconds, CancellationToken cancellationToken)
+        DateTime now, RollupAvailability rollups, RollupCoverage coverage, int composedSeconds,
+        IReadOnlyList<string> unregistered, CancellationToken cancellationToken)
     {
         var state = await _stateStore.LoadAsync(row.Id, serverId, row.Version, cancellationToken);
 
@@ -369,7 +374,7 @@ public sealed class CustomAlertEvaluator
 
         var nextDue = now.AddSeconds(intervalSeconds);
 
-        var value = await RunScalarAsync(def, storageName, now, rollups, coverage, composedSeconds, cancellationToken);
+        var value = await RunScalarAsync(def, storageName, now, rollups, coverage, composedSeconds, unregistered, cancellationToken);
 
         if (value is null)
         {
@@ -523,8 +528,8 @@ public sealed class CustomAlertEvaluator
 
     private Task<double?> RunScalarAsync(
         CustomAlertRuleDefinition def, string storageName, DateTime now, RollupAvailability rollups, RollupCoverage coverage,
-        int composedSeconds, CancellationToken cancellationToken) =>
-        EvaluateScalarNowAsync(_viewer, def, storageName, now, rollups, coverage, composedSeconds, _logger, cancellationToken);
+        int composedSeconds, IReadOnlyList<string> unregistered, CancellationToken cancellationToken) =>
+        EvaluateScalarNowAsync(_viewer, def, storageName, now, rollups, coverage, composedSeconds, _logger, cancellationToken, unregistered);
 
     /// <summary>
     /// Compiles the rule's Scalar metric scoped to ONE server and reads its current value on the given
@@ -535,16 +540,19 @@ public sealed class CustomAlertEvaluator
     /// <para><b>Pool discipline (Component 4 R2-SEC):</b> <paramref name="pool"/> MUST be a least-privilege role
     /// that carries the <c>statement_timeout</c> cap and the secret-column ACL — the worker's dedicated viewer
     /// pool on the sweep, or the MCP host's mcp-role pool from the tool — NEVER the owner/superuser pool.</para>
+    /// <para><paramref name="resolvedUnregistered"/> (#5525): the sweep looks up once per server which of the scoped names the registry
+    /// does not hold and passes the answer (an empty list for none) to every rule; the evaluate-now tool passes null and the lookup
+    /// runs here.</para>
     /// </summary>
     public static async Task<double?> EvaluateScalarNowAsync(
         NpgsqlDataSource pool, CustomAlertRuleDefinition definition, string storageName, DateTime nowUtc,
         RollupAvailability rollups, RollupCoverage coverage, int composedQuerySeconds,
-        ILogger? logger, CancellationToken cancellationToken)
+        ILogger? logger, CancellationToken cancellationToken, IReadOnlyList<string>? resolvedUnregistered = null)
     {
         var start = nowUtc.AddHours(-definition.WindowHours);
         var servers = new[] { storageName };
         /* #5525: the compiler scopes by server_id; a storage name with no registry row keeps matching on the row's stored name. */
-        var unregistered = await ComposeServerScope.FindUnregisteredAsync(pool, servers, cancellationToken);
+        var unregistered = resolvedUnregistered ?? await ComposeServerScope.FindUnregisteredAsync(pool, servers, cancellationToken, logger);
         var context = new ComposeRunContext(
             servers, start, nowUtc, ComposeRunContext.NoVariables, rollups, nowUtc, coverage, UnregisteredServers: unregistered);
 

@@ -221,7 +221,7 @@ public class ComposeHourlyEdgesRunnerTests
         var below = body.IndexOf("if (schemaVersion < QueryStatsHourLedger.RungVersion)", StringComparison.Ordinal);
         var quiet = body.IndexOf("ReadScope.Note(ReadFallback.GateFailed);", StringComparison.Ordinal);
         var set = body.IndexOf("HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines", StringComparison.Ordinal);
-        var guardSql = body.IndexOf("new NpgsqlCommand(IntervalRollupCountGuard.QueryStatsSql", StringComparison.Ordinal);
+        var guardSql = body.IndexOf("new NpgsqlCommand(IntervalRollupCountGuard.SqlFor(", StringComparison.Ordinal);
         Assert.True(savepoint > 0 && probe > savepoint && below > probe && quiet > below && set > quiet && guardSql > set,
             "savepoint, then the schema-version read, then the below-the-rung branch, then the guard's timeout and SQL");
 

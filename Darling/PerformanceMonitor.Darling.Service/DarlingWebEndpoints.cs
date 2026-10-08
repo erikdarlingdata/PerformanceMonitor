@@ -2846,7 +2846,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         /* #5525: the scoped names that no registry row carries. The compiler scopes by server_id and keeps matching those names on the
            row's stored server_name, so no scope loses what it matched before. Resolved here, before the hourly-edges snapshot below
            takes its connection, so this lookup never asks the pool for a second one while the snapshot holds the first. */
-        var unregisteredServers = await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken);
+        var unregisteredServers = await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken, logger);
 
         /* #4605: only a panel the hourly-plus-raw-edges route could serve pays for the count guard. It runs on one
            connection, in a REPEATABLE READ READ ONLY transaction the panel statement shares, so a collector batch that
@@ -2863,7 +2863,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             candidateComposedSeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
             try
             {
-                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, plan!.UsesModuleJoin, cancellationToken);
+                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, plan!.UsesModuleJoin, cancellationToken, unregisteredServers);
             }
             catch (PostgresException ex)
             {
@@ -3313,7 +3313,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// watermark and the panel statement see one snapshot.</summary>
     private static async Task<HourlyEdgesSnapshot?> BeginHourlyEdgesSnapshotAsync(
         NpgsqlDataSource postgres, ComposeHourlyEdgesCandidate candidate, IReadOnlyList<string>? serverScope, int composedSeconds,
-        bool readModuleMapWatermark, System.Threading.CancellationToken cancellationToken)
+        bool readModuleMapWatermark, System.Threading.CancellationToken cancellationToken, IReadOnlyList<string>? unregisteredServers = null)
     {
         /* The open is outside the try on purpose: a store that cannot be reached throws ComposeStoreOpenException to the caller, who
            answers it the way it answers the panel's own failed open. Opening again here would cost a second open timeout. */
@@ -3323,7 +3323,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesReadOnlySql, McpCommandDeadlines.ReadSeconds, cancellationToken);
-            var verdict = await ResolveHourlyEdgesVerdictAsync(connection, candidate, serverScope, composedSeconds, cancellationToken);
+            var verdict = await ResolveHourlyEdgesVerdictAsync(connection, candidate, serverScope, composedSeconds, cancellationToken, unregisteredServers);
             var moduleMapThrough = verdict is not null && readModuleMapWatermark
                 ? await ReadModuleMapWatermarkInSnapshotAsync(connection, cancellationToken)
                 : null;
@@ -3385,12 +3385,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// noted <see cref="ReadFallback.GateFailed"/> with no log line, for a state the store's migration ends. An undefined table on a
     /// store at the rung is a real fault and takes the normal path below: one Warning. The guard's <c>$3</c> is bound
     /// from <see cref="ComposeSourceRouter.NormalizeServerScope"/> alone, and the verdict carries that same scope, so a verdict
-    /// proven for one scope never serves another. A failed guard is undone to its savepoint so the transaction stays usable
+    /// proven for one scope never serves another. The guard proves the rollup over the scope the panel read takes: by server id, plus
+    /// <c>$4</c> (<paramref name="unregisteredServers"/>, the names the registry does not hold) when the run has any (#5525). A failed guard is undone to its savepoint so the transaction stays usable
     /// for the raw panel statement. If that undo itself fails, the failure is rethrown and the snapshot is abandoned.
     /// </summary>
     internal static async Task<ComposeHourlyEdgesVerdict?> ResolveHourlyEdgesVerdictAsync(
         NpgsqlConnection connection, ComposeHourlyEdgesCandidate candidate, IReadOnlyList<string>? serverScope, int composedSeconds,
-        System.Threading.CancellationToken cancellationToken)
+        System.Threading.CancellationToken cancellationToken, IReadOnlyList<string>? unregisteredServers = null)
     {
         var guardSeconds = HourlyEdgesGuardSeconds(composedSeconds);
         var scope = ComposeSourceRouter.NormalizeServerScope(serverScope);
@@ -3418,7 +3419,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines.ReadSeconds, cancellationToken);
 
             long mismatches;
-            await using (var guard = new NpgsqlCommand(IntervalRollupCountGuard.QueryStatsSql, connection) { CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds })
+            await using (var guard = new NpgsqlCommand(IntervalRollupCountGuard.SqlFor(unregisteredServers is { Count: > 0 }), connection) { CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds })
             {
                 guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourStartUtc, DateTimeKind.Unspecified) });
                 guard.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(candidate.HourEndUtc, DateTimeKind.Unspecified) });
@@ -3427,6 +3428,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
                     Value = scope is null ? DBNull.Value : scope.ToArray(),
                 });
+                if (unregisteredServers is { Count: > 0 })
+                {
+                    /* #5525: the names the registry does not hold, matched on the row's stored name, exactly as the panel read matches them. */
+                    guard.Parameters.Add(new NpgsqlParameter
+                    {
+                        NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
+                        Value = unregisteredServers.ToArray(),
+                    });
+                }
+
                 mismatches = Convert.ToInt64(await guard.ExecuteScalarAsync(cancellationToken));
             }
 

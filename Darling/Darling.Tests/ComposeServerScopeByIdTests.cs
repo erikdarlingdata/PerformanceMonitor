@@ -146,12 +146,21 @@ public sealed class ComposeServerScopeByIdTests
     public void UnregisteredNames_AreMatchedByStoredName_OnEveryEmitter_AndNothingElse()
     {
         string[] ghost = ["GHOST"];
-        foreach (var (label, sql) in ScopedStatements(ghost))
+        var statements = ScopedStatements(ghost).ToList();
+        Assert.True(statements.Count >= 6, "the sweep must reach every emitter: " + string.Join(", ", statements.Select(s => s.Label)));
+        foreach (var (label, sql) in statements)
         {
-            Assert.Matches(@"\(\w*\.?server_id = ANY\(ARRAY\(SELECT reg\.server_id FROM collect\.servers AS reg WHERE reg\.server_name = ANY\(\$\d+\)\)\) OR [\w.]*server_name = ANY\(\$\d+\)\)", sql);
+            /* EVERY by-id scope in the statement carries the arm: one match per statement would let a single CTE drop it. */
+            var scopes = Regex.Matches(sql, @"server_id = ANY\(ARRAY\(SELECT reg\.server_id FROM collect\.servers AS reg WHERE reg\.server_name = ANY\(\$\d+\)\)\)").Count;
+            var armed = Regex.Matches(sql, @"\(\w*\.?server_id = ANY\(ARRAY\(SELECT reg\.server_id FROM collect\.servers AS reg WHERE reg\.server_name = ANY\(\$\d+\)\)\) OR [\w.]*server_name = ANY\(\$\d+\)\)").Count;
+            Assert.True(scopes > 0, $"{label}: no by-id scope");
+            Assert.True(scopes == armed, $"{label}: {scopes} by-id scopes but {armed} carry the unregistered-name arm (#5525).");
             Assert.DoesNotContain("GHOST", sql, StringComparison.Ordinal);
-            _ = label;
         }
+
+        /* The hourly-raw-edges statement scopes the fact alias and the procedure_stats overlay: two scopes, both armed. */
+        var edges = statements.Single(x => x.Label.StartsWith("hourly raw edges", StringComparison.Ordinal)).Sql;
+        Assert.True(Regex.Matches(edges, @"server_id = ANY\(ARRAY\(").Count >= 2);
 
         var plain = Compile(Plan(WaitPanel), Context(TwoServers, RollupAvailability.None, null));
         var withGhost = Compile(Plan(WaitPanel), Context(TwoServers, RollupAvailability.None, ghost));
@@ -165,6 +174,48 @@ public sealed class ComposeServerScopeByIdTests
         var clock = ComposeCompiler.CompileServerClockRead(Context(TwoServers, RollupAvailability.None, ghost));
         Assert.Equal(ComposeParameterCoverageTests.PredictedServerClockReadParameterCount(true, unregistered: true), clock.Parameters.Count);
         Assert.Null(ComposeParameterCoverageTests.CoverageViolation("clock read with an unregistered name", clock.Sql, clock.Parameters));
+    }
+
+    /// <summary>The hourly-edges count guard proves the rollup over the scope the read takes: both of its sides carry the by-id scope
+    /// (and, when the run has unregistered names, the same arm on both), where it once filtered both on <c>server_name = ANY($3)</c>
+    /// and so never compared a renamed server's earlier-name hours.</summary>
+    [Fact]
+    public void TheCountGuard_ScopesTheLedgerAndTheRollup_ByTheSamePredicateTheReadUses()
+    {
+        var plain = IntervalRollupCountGuard.SqlFor(false);
+        Assert.Equal(plain, IntervalRollupCountGuard.QueryStatsSql);
+        Assert.Equal(2, Regex.Matches(plain, Regex.Escape(ByIdScope(3))).Count);
+        Assert.DoesNotContain("server_name = ANY($3))", plain.Replace("reg.server_name = ANY($3)", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", plain, StringComparison.Ordinal);
+
+        var armed = IntervalRollupCountGuard.SqlFor(true);
+        Assert.Equal(2, Regex.Matches(armed, Regex.Escape("(" + ByIdScope(3) + " OR server_name = ANY($4))")).Count);
+        Assert.Equal(ComposeCompiler.ServerScope(string.Empty, "$3", "$4"), ServerScopeSql.Predicate(string.Empty, "$3", "$4"));
+    }
+
+    /// <summary>The runner seam. Deleting either lookup leaves the compiler correct and every compiler test green, but a scope over a
+    /// name that has rows and no registry row would return nothing. The live tests below fail on a deleted call too; these pins read the
+    /// order: the panel runner looks the names up BEFORE the hourly-edges snapshot takes its connection, hands the answer to the
+    /// snapshot (for the count guard) and to the run context, and the alert sweep looks up once per server, outside the per-rule loop.</summary>
+    [Fact]
+    public void BothRunners_LookUpUnregisteredNames_BeforeTheyCompile_AndHandThemOn()
+    {
+        var web = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var lookup = web.IndexOf("await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken", StringComparison.Ordinal);
+        var snapshot = web.IndexOf("await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate", StringComparison.Ordinal);
+        var context = web.IndexOf("new ComposeRunContext(serverScope, start, end", StringComparison.Ordinal);
+        Assert.True(lookup > 0 && snapshot > lookup && context > snapshot, "lookup, then the snapshot, then the run context");
+        Assert.Contains("cancellationToken, unregisteredServers);", web[snapshot..context], StringComparison.Ordinal);
+        Assert.Contains("UnregisteredServers: unregisteredServers", web[context..(context + 700)], StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(web, @"ComposeServerScope\.FindUnregisteredAsync\("));
+
+        var alerts = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs");
+        Assert.Equal(2, Regex.Matches(alerts, @"ComposeServerScope\.FindUnregisteredAsync\(").Count);
+        var sweep = alerts.IndexOf("ComposeServerScope.FindUnregisteredAsync(_viewer", StringComparison.Ordinal);
+        var loop = alerts.IndexOf("foreach (var (row, def, _) in applicable)", StringComparison.Ordinal);
+        Assert.True(sweep > 0 && loop > sweep, "the sweep looks the names up once per server, before the per-rule loop");
+        Assert.Contains("UnregisteredServers: unregistered", alerts, StringComparison.Ordinal);
+        Assert.Contains("resolvedUnregistered ?? await ComposeServerScope.FindUnregisteredAsync(pool", alerts, StringComparison.Ordinal);
     }
 
     /// <summary>A fleet-wide run names no servers: no scope, no parameter, no registry read.</summary>
@@ -344,6 +395,90 @@ VALUES (1, $1, $2, $3, $4, 1, $5, 0, 1, $5, 0)", connection);
             Assert.DoesNotContain(byName, row => row.Contains("1000", StringComparison.Ordinal));
             Assert.Contains(byId, row => row.Contains("1000", StringComparison.Ordinal) && row.Contains(OldNameA, StringComparison.Ordinal));
             Assert.Equal(byName.Count + 1, byId.Count);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await CleanAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private const string GhostWait = "GHOSTWAIT";
+
+    /// <summary>A panel run scoped to a name that has rows and no registry row, through the web runner itself. Deleting the runner's
+    /// lookup makes this return no row.</summary>
+    [Fact]
+    public async Task ThePanelRunner_ReturnsRowsForAScopeNameTheRegistryDoesNotHold()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (connection, end) = Skip(out var cs);
+        await using var _ = connection;
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(connection, end, ct);
+            await InsertAsync(connection, end.AddHours(-1), IdGhost, GhostName, GhostWait, 33, ct);
+
+            await using var source = NpgsqlDataSource.Create(cs!);
+            var body = new JsonObject { ["panel"] = JsonNode.Parse(Panel), ["hours"] = 6, ["server"] = GhostName };
+            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(source, body, ct);
+            Assert.True(outcome.Error is null, outcome.Error);
+            Assert.Contains(GhostWait, outcome.Payload!.ToJsonString(), StringComparison.Ordinal);
+
+            /* A registered name still reads by id, and does not pick up the ghost's rows. */
+            body["server"] = NameA;
+            var registered = await DarlingWebEndpoints.RunComposedPanelAsync(source, body, ct);
+            Assert.True(registered.Error is null, registered.Error);
+            var text = registered.Payload!.ToJsonString();
+            Assert.Contains("WRITELOG", text, StringComparison.Ordinal);
+            Assert.DoesNotContain(GhostWait, text, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await CleanAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The same through the custom-alert scalar seam: a storage name with rows and no registry row still reads its value, and
+    /// a sweep that already resolved the lookup (an empty answer) passes it through without a second read.</summary>
+    [Fact]
+    public async Task TheAlertScalarSeam_ReadsAStorageNameTheRegistryDoesNotHold()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (connection, end) = Skip(out var cs);
+        await using var _ = connection;
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(connection, end, ct);
+            await InsertAsync(connection, end.AddHours(-1), IdGhost, GhostName, GhostWait, 33, ct);
+
+            var (definition, defError) = CustomAlertRuleDefinition.TryParse(
+                "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":3}," +
+                "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1}}");
+            Assert.True(defError is null, defError);
+
+            await using var source = NpgsqlDataSource.Create(cs!);
+            var value = await CustomAlertEvaluator.EvaluateScalarNowAsync(
+                source, definition!, GhostName, end, RollupAvailability.None, RollupCoverage.Unknown, 30, logger: null, ct);
+            Assert.Equal(33d, value);
+
+            /* A sweep passes its once-per-server answer: an empty list means nothing is unregistered, so the ghost matches no id. */
+            var passedThrough = await CustomAlertEvaluator.EvaluateScalarNowAsync(
+                source, definition!, GhostName, end, RollupAvailability.None, RollupCoverage.Unknown, 30, logger: null, ct,
+                resolvedUnregistered: Array.Empty<string>());
+            Assert.Null(passedThrough);
+
+            var registered = await CustomAlertEvaluator.EvaluateScalarNowAsync(
+                source, definition!, NameA, end, RollupAvailability.None, RollupCoverage.Unknown, 30, logger: null, ct);
+            Assert.Equal(107d, registered);
             bodySucceeded = true;
         }
         finally

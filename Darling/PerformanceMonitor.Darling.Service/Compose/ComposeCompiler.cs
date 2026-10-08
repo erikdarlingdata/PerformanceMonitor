@@ -770,20 +770,20 @@ public static class ComposeCompiler
     /// <c>server_name = ANY($n)</c> read every compressed chunk in full and discarded most of it. The uncorrelated sub-select
     /// is an InitPlan: Postgres evaluates it once, pushes the id list into each compressed chunk's segment filter (and through
     /// the Query Store dedupe window, whose PARTITION BY carries <c>server_id</c>), and keeps this compiler free of a connection
-    /// and the parameter list unchanged.
+    /// and the parameter list unchanged. The text is <see cref="ServerScopeSql.Predicate"/>, shared with the hourly-edges count guard.
     ///
-    /// <para><b>Rename semantics.</b> The registry (<c>collect.servers</c>) holds one CURRENT <c>server_name</c> per
-    /// <c>server_id</c>, and a re-connect rewrites it; fact rows keep the name they were written under. A scoped name now selects
-    /// the server that currently carries it, so a renamed server's whole history is included, where the old filter
-    /// matched only the rows written under that exact spelling. A scoped name that has NO registry row (the runner finds those,
-    /// <see cref="ComposeRunContext.UnregisteredServers"/>) can resolve to no id, so those names alone also match on the row's
-    /// stored <c>server_name</c> through <paramref name="unregisteredParam"/>: nothing a scope matched before drops out.</para>
+    /// <para><b>Semantics.</b> A scoped name means the server or servers the registry (<c>collect.servers</c>) holds under that name
+    /// NOW, with all of their rows. The registry holds one current <c>server_name</c> per <c>server_id</c> (a re-connect rewrites it),
+    /// and its only key is <c>server_id</c>, so a name can be held by two rows. Fact rows keep the name they were written under, so:
+    /// a renamed server's whole history is in the scope of its current name, where the old filter matched only the rows written under
+    /// that exact spelling; a name that a NEW server took over after a rename means the new server, and the old server's rows stored
+    /// under that name are no longer in that name's scope (they are in the scope of the old server's current name); a name held by
+    /// two registry rows means both servers, with every row of each, under every name it was written under. A scoped name with NO
+    /// registry row resolves to no id (the runner finds those, <see cref="ComposeRunContext.UnregisteredServers"/>), so those
+    /// names alone also match on the row's stored <c>server_name</c> through <paramref name="unregisteredParam"/>.</para>
     /// </summary>
-    internal static string ServerScope(string prefix, string namesParam, string? unregisteredParam)
-    {
-        var byId = $"{prefix}server_id = ANY(ARRAY(SELECT reg.server_id FROM {PgSchemaGenerator.CollectSchema}.servers AS reg WHERE reg.server_name = ANY({namesParam})))";
-        return unregisteredParam is null ? byId : $"({byId} OR {prefix}server_name = ANY({unregisteredParam}))";
-    }
+    internal static string ServerScope(string prefix, string namesParam, string? unregisteredParam) =>
+        ServerScopeSql.Predicate(prefix, namesParam, unregisteredParam);
 
     /// <summary>
     /// The read that runs before a panel's <see cref="AnnotationClockFrame.ServerLocal"/> annotation query
@@ -994,7 +994,7 @@ public static class ComposeCompiler
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
         var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
-        var serverLocal =source.Frame == AnnotationClockFrame.ServerLocal;
+        var serverLocal = source.Frame == AnnotationClockFrame.ServerLocal;
 
         var ts = serverLocal
             ? $"{FactAlias}.{source.TimeColumn} - make_interval(mins => COALESCE(o.utc_offset_minutes, 0))"
