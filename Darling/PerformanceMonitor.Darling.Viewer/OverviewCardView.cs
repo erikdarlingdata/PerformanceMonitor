@@ -56,6 +56,30 @@ public static class OverviewCardView
     }
 
     /// <summary>
+    /// The fleet roll-up above the cards, narrowed by the search box (D9 of the final walk): the "Needs Attention"
+    /// rows, the band counts and "Monitoring N servers" count the servers the search leaves, not the whole fleet, so
+    /// the panel and the grid under it agree. With no search it is <see cref="FleetRollup.Build"/> over every card
+    /// and the registered fleet size, as before. With one, it reduces only the matching cards and
+    /// <see cref="FleetRollup.FilteredOfTotal"/> carries the registered size, so the subtitle reads "Monitoring 2 of
+    /// 9 servers". The needs-attention toggle does not narrow it: the panel is the shortlist that toggle opens.
+    /// </summary>
+    public static FleetRollup BuildRollup(
+        IReadOnlyList<ServerSummaryItem> cards, FleetTotals totals, int registeredCount, string? search)
+    {
+        ArgumentNullException.ThrowIfNull(cards);
+
+        if (ServerOverviewFilter.Normalize(search) is not { } term)
+        {
+            return FleetRollup.Build(cards, totals, totalServerCount: registeredCount);
+        }
+
+        var matched = cards.Where(c => ServerOverviewFilter.Matches(term, SearchFields(c))).ToList();
+        var rollup = FleetRollup.Build(matched, totals, totalServerCount: matched.Count);
+        rollup.FilteredOfTotal = registeredCount;
+        return rollup;
+    }
+
+    /// <summary>
     /// The line beside the toggle, or null when nothing narrows the grid (no toggle, no search): a grid
     /// showing every server needs no arithmetic. A search that emptied the grid says so itself; it must never
     /// fall through to the all-clear, which claims the fleet is healthy.

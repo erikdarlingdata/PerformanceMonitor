@@ -46,6 +46,14 @@ public partial class AlertsHistoryTab : UserControl
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
+
+    /// <summary>The read's row cap (D7): the newest 500 alerts. <see cref="LoadAlertsAsync"/> passes it to the read and
+    /// the count text (<see cref="JobHistoryCap.CountText(int, int, int, string)"/>) says "showing the newest 500" when
+    /// the read reached it.</summary>
+    internal const int RowCap = 500;
+
+    /// <summary>How many rows the last read returned, before any column filter: the cap belongs to the read.</summary>
+    private int _lastReadRowCount;
     private readonly DispatcherTimer _staleDataTimer;
 
     /// <summary>Raised with a short status message on load/dismiss/mute outcomes so the shell can show it.</summary>
@@ -95,7 +103,7 @@ public partial class AlertsHistoryTab : UserControl
             int? serverId = GetSelectedServerId();
             var sinceUtc = DateTime.UtcNow.AddHours(-hoursBack);
 
-            var alerts = await _dataService.GetAlertHistoryAsync(sinceUtc, serverId);
+            var alerts = await _dataService.GetAlertHistoryAsync(sinceUtc, serverId, RowCap);
 
             if (_filterManager != null)
             {
@@ -108,7 +116,10 @@ public partial class AlertsHistoryTab : UserControl
 
             var displayCount = AlertsDataGrid.Items.Count;
             NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AlertCountIndicator.Text = displayCount > 0 ? $"{displayCount} alert(s)" : "";
+            AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+            /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
+            _lastReadRowCount = alerts.Count;
+            AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -242,7 +253,7 @@ public partial class AlertsHistoryTab : UserControl
         }
 
         _filterManager?.SetFilter(e.FilterState);
-        AlertCountIndicator.Text = AlertsDataGrid.Items.Count > 0 ? $"{AlertsDataGrid.Items.Count} alert(s)" : "";
+        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert(s)");
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)
