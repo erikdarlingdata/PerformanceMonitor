@@ -162,13 +162,20 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void ASlicerWithNoDataShowsItsTextOnTheChartCanvas_NotOverTheHeader_AndDropsThePreviousBars()
     {
-        var (text, cleared) = OnStaThread(() =>
+        var (before, text, cleared) = OnStaThread(() =>
         {
             var slicer = new PerformanceMonitorLite.Controls.TimeRangeSlicerControl();
+            var start = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+            var buckets = Enumerable.Range(0, 6)
+                .Select(i => new PerformanceMonitor.Common.TimeSliceBucket { BucketTime = start.AddHours(i), Value = i + 1 })
+                .ToList();
+            slicer.LoadData(buckets, "Total CPU (ms)", start, start.AddHours(6));
+            var held = slicer.SelectionStartUtc;
             slicer.ShowEmpty("No query statistics in the selected time window.");
-            return (slicer.EmptyText, slicer.SelectionStartUtc);
+            return (held, slicer.EmptyText, slicer.SelectionStartUtc);
         });
 
+        Assert.NotNull(before);
         Assert.Equal("No query statistics in the selected time window.", text);
         Assert.Null(cleared);
 
@@ -240,6 +247,54 @@ public class ServerTabEmptyStateAndNamesTests
         Assert.Equal("example-sql-01", peerName);
         Assert.Equal(System.Windows.Automation.Peers.AutomationControlType.Group, controlType);
         Assert.Contains("<controls:OverviewCardBorder", RepoFile("Lite/MainWindow.xaml"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EmptyState_ClearOfBaseline_PutsTheTextNearTheTop_AndTheDefaultStaysCentered()
+    {
+        var (centered, clear) = OnStaThread(() =>
+        {
+            var host = new Grid();
+            var plain = new Border();
+            host.Children.Add(plain);
+            EmptyState.Show(plain, isEmpty: true, "No blocking in the selected time window.");
+            var plainText = EmptyTexts(host).Single();
+
+            var host2 = new Grid();
+            var chart = new Border();
+            host2.Children.Add(chart);
+            EmptyState.Show(chart, isEmpty: true, "No blocking in the selected time window.", clearOfBaseline: true);
+            var clearText = EmptyTexts(host2).Single();
+            return ((plainText.VerticalAlignment, plainText.Margin.Top), (clearText.VerticalAlignment, clearText.Margin.Top));
+        });
+
+        Assert.Equal(VerticalAlignment.Center, centered.Item1);
+        Assert.Equal(0d, centered.Item2);
+        Assert.Equal(VerticalAlignment.Top, clear.Item1);
+        Assert.True(clear.Item2 > 0d, "the text sits on the zero line again");
+
+        foreach (var file in new[] { "Lite/Controls/ServerTab.Charts.cs", "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Blocking.cs" })
+        {
+            var source = RepoFile(file);
+            Assert.Contains("\"No blocking in the selected time window.\", clearOfBaseline: true)", source, StringComparison.Ordinal);
+            Assert.Contains("\"No deadlocks in the selected time window.\", clearOfBaseline: true)", source, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding LogicalReads, StringFormat='{}{0:N0}'}\" Width=\"136\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding PhysicalReads, StringFormat='{}{0:N0}'}\" Width=\"141\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding CleanupState}\" Width=\"106\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}\" Width=\"156\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding SkippedLowWaterMark, StringFormat='{}{0:N0}'}\" Width=\"171\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding DailyWriteOpsSaved}\" Width=\"166\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Header=\"Query Preview\" Width=\"350\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding AvgLogicalReads, StringFormat='{}{0:N0}'}\" Width=\"161\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding CpuCount, StringFormat='{}{0:N0}'}\" Width=\"131\"")]
+    [InlineData("Lite/Controls/JobHistoryTab.xaml", "Binding=\"{Binding RunStatusDesc}\" Width=\"100\"")]
+    public void TheClippedColumns_KeepTheirWiderWidths(string file, string column)
+    {
+        Assert.Contains(column, RepoFile(file), StringComparison.Ordinal);
     }
 
     [Fact]
