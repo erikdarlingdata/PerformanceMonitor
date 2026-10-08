@@ -93,6 +93,18 @@ public sealed class WebClickthroughStaleStateTests
     }
 
     [Fact]
+    public void AStaleAvailabilityGroupCard_SaysNoCurrentData_AndAFreshOneDoesNot()
+    {
+        var r = Run("agStale");
+        var stale = Texts(r.GetProperty("stale")).Single();
+        Assert.StartsWith("Stale: no current data. ", stale, StringComparison.Ordinal);
+        Assert.Contains("last collected", stale, StringComparison.Ordinal);
+        var fresh = Texts(r.GetProperty("fresh")).Single();
+        Assert.DoesNotContain("Stale", fresh, StringComparison.Ordinal);
+        Assert.Contains("collected just now", fresh, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheWaitStatsTab_AsksForTheSpinlockAndLatchListsOnce_NotOncePerPanel()
     {
         /* The Spinlock Stats grid and the Spinlock Trend picker (and the latch pair) read the same tool with the
