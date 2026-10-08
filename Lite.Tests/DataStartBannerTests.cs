@@ -393,6 +393,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     {
         T result = default!;
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try { result = body(); }

@@ -287,6 +287,7 @@ FROM generate_series($3::timestamp, $4::timestamp, $5::interval) AS t", connecti
     private static void OnStaThread(Action body)
     {
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try { body(); }

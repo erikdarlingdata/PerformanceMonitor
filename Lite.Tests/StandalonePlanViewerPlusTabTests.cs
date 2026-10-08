@@ -287,6 +287,7 @@ public sealed class StandalonePlanViewerPlusTabTests
     private static void OnStaThread(Action<Rig> body)
     {
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try
