@@ -188,6 +188,11 @@ public sealed class FleetRankedServer
 
     public int ServerId { get; init; }
     public string DisplayName { get; init; } = "";
+
+    /// <summary>What a screen reader announces for a Needs Attention row: UI Automation names a list row by its item's text, and the
+    /// default text is the type name ("PerformanceMonitor.Darling.Viewer.FleetRankedServer").</summary>
+    public override string ToString() => DisplayName;
+
     public FleetHealthBand Band { get; init; }
 
     /// <summary>The composite worst-first ordering score (band rank + severity magnitude + incident tiebreak).</summary>

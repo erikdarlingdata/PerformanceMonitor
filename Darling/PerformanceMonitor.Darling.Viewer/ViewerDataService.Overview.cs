@@ -675,6 +675,11 @@ public sealed class ServerSummaryItem
     private static readonly SolidColorBrush s_unknownBrush = MakeBrush("#888888");
 
     public string DisplayName { get; set; } = "";
+
+    /// <summary>What a screen reader announces for an Overview card: UI Automation names a list item by its text, and the default text is
+    /// the type name ("PerformanceMonitor.Darling.Viewer.ServerSummaryItem").</summary>
+    public override string ToString() => DisplayName;
+
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
     public bool? IsOnline { get; set; }
