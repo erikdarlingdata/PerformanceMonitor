@@ -48,11 +48,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// would admit? Both are index probes — every hypertable carries its time index and every materialization
 /// its <c>bucket</c> index — so the scan is a few hundred probes per aggregate whatever the tables weigh. The
 /// scan's SQL has to fence them to keep them that way (#3933, <see cref="MaterializationHoleScanSql"/>): written
-/// bare, the planner joined each one over its whole relation. The materialization probe is an index probe only
-/// on UNCOMPRESSED chunks: a compressed chunk has no index on a batch's bucket range, so each probe reads that
-/// chunk's compressed heap. Below the materialization's compressed boundary the scan therefore reads the buckets
-/// the materialization holds once, as a set, and probes only at and above it (#5521,
-/// <see cref="MaterializationHoleScanSplitSql"/>), with the same holes.
+/// bare, the planner joined each one over its whole relation.
 /// The aggregate's WHERE is applied to the source probe (<see cref="MaterializationHoleSourceFilterFor"/>) so a
 /// bucket whose every source row the aggregate rejects — a restart hour on an interval-honest successor — is
 /// not read as a hole and refreshed on every start for nothing. Buckets below the floor are the backfill's
@@ -301,11 +297,6 @@ public static partial class TimescaleSupport
     /// a SubPlan once per bucket with the chunk it needs picked at run time. The candidate buckets are fenced the
     /// same way, so the source is probed only for the buckets the materialization probe found empty. Measured
     /// with the old text as the oracle: the same buckets, in the same order, on every target.</para>
-    ///
-    /// <para><b>This is the statement for a materialization with no compressed chunk (#5521).</b> The probe is
-    /// cheap only on an uncompressed chunk, where it is an index seek. The scan runs this text when the
-    /// materialization has no compressed chunk reaching into the window, or when that could not be read, and
-    /// <see cref="MaterializationHoleScanSplitSql"/> otherwise (<see cref="ScanHolesAsync"/> picks).</para>
     /// </summary>
     public static string MaterializationHoleScanSql(MaterializationHoleTarget target, (string Schema, string Name) materialization)
     {
@@ -326,113 +317,6 @@ WHERE EXISTS (
     AND   s.{target.SourceTimeColumn} < c.bucket + $3::interval{sourceFilter}
     OFFSET 0)
 ORDER BY c.bucket";
-    }
-
-    /// <summary>
-    /// The compressed boundary of one materialization hypertable (#5521): the newest <c>range_end</c> of any of its
-    /// COMPRESSED chunks, as a naive-UTC timestamp, or NULL when none is compressed. Read off
-    /// <c>timescaledb_information.chunks</c>, the public view the rest of the store reads chunk state from, and
-    /// keyed by the materialization hypertable's own schema and name (the view does not know a continuous
-    /// aggregate by its view name). <c>AT TIME ZONE 'UTC'</c> collapses the view's <c>timestamptz</c> to the
-    /// store's naive-UTC discipline, whatever the session zone says. <c>$1</c> is the schema, <c>$2</c> the name.
-    /// </summary>
-    internal const string CompressedMaterializationBoundarySql = @"
-SELECT MAX(ch.range_end) AT TIME ZONE 'UTC'
-FROM timescaledb_information.chunks AS ch
-WHERE ch.hypertable_schema = $1
-AND   ch.hypertable_name = $2
-AND   ch.is_compressed";
-
-    /// <summary>
-    /// The hole scan for a materialization that has compressed chunks (#5521), which returns exactly the buckets
-    /// <see cref="MaterializationHoleScanSql"/> returns: <c>$1</c>/<c>$2</c>/<c>$3</c> as there, plus <c>$4</c>,
-    /// the compressed boundary (<see cref="CompressedMaterializationBoundarySql"/>). Candidate buckets BELOW the
-    /// boundary are tested against the buckets the materialization holds, read ONCE as a set; candidate buckets AT
-    /// or above it keep the per-bucket index probe. The raw <c>EXISTS</c> then filters the candidates of both
-    /// parts, unchanged.
-    ///
-    /// <para><b>Why the probe cannot stay on compressed chunks.</b> On a compressed chunk <c>m.bucket = b.bucket</c>
-    /// becomes a <c>Seq Scan</c> of the chunk's compressed heap filtered on <c>_ts_meta_min_1</c> /
-    /// <c>_ts_meta_max_1</c>, which no index covers: the compressed chunk's index is on the segment-by column and
-    /// the <c>_ts_meta_v2_*</c> columns. So every candidate bucket reads that chunk's heap until it finds a batch
-    /// that covers it, and a bucket the materialization is missing reads all of it. Bounding the probe by
-    /// <c>server_id</c> or writing it as a range gives the same scan (measured on a rig, #5521). The set read is one
-    /// pass over each compressed chunk's heap, however many buckets fall in it. It stops at the boundary because a
-    /// plain <c>DISTINCT bucket</c> over an UNCOMPRESSED chunk costs more than its index probes do.</para>
-    ///
-    /// <para><b>Same answers by construction.</b> A bucket is a hole when it is a series point the materialization
-    /// has no row for, and the set read holds every materialization bucket in <c>[$1, min($2, $4))</c>, so
-    /// "not in the set" is "no row" for every series point below <c>$4</c>. The boundary only decides cost: it
-    /// need not coincide with any chunk's state. <c>NOT EXISTS</c> (not <c>NOT IN</c>) keeps a NULL bucket from
-    /// hiding a hole. The probe below the boundary never runs: the second arm filters on <c>b.bucket &gt;= $4</c>
-    /// before the fenced probe, and the first arm has no per-bucket probe at all.</para>
-    /// </summary>
-    public static string MaterializationHoleScanSplitSql(MaterializationHoleTarget target, (string Schema, string Name) materialization)
-    {
-        var filter = MaterializationHoleSourceFilterFor(target.CreateSql);
-        var sourceFilter = filter.Length == 0 ? string.Empty : $"\n    AND   {filter}";
-        var relation = $"{QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)}";
-
-        return $@"
-WITH present AS MATERIALIZED (
-    SELECT DISTINCT m.bucket
-    FROM {relation} AS m
-    WHERE m.bucket >= $1::timestamp
-    AND   m.bucket <= $2::timestamp
-    AND   m.bucket < $4::timestamp
-)
-SELECT c.bucket
-FROM (
-    SELECT b.bucket
-    FROM generate_series($1::timestamp, $2::timestamp, $3::interval) AS b(bucket)
-    WHERE b.bucket < $4::timestamp
-    AND   NOT EXISTS (SELECT 1 FROM present AS p WHERE p.bucket = b.bucket)
-    UNION ALL
-    SELECT b.bucket
-    FROM generate_series($1::timestamp, $2::timestamp, $3::interval) AS b(bucket)
-    WHERE b.bucket >= $4::timestamp
-    AND   NOT EXISTS (SELECT 1 FROM {relation} AS m WHERE m.bucket = b.bucket OFFSET 0)
-    OFFSET 0
-) AS c
-WHERE EXISTS (
-    SELECT 1 FROM collect.{target.Source} AS s
-    WHERE s.{target.SourceTimeColumn} >= c.bucket
-    AND   s.{target.SourceTimeColumn} < c.bucket + $3::interval{sourceFilter}
-    OFFSET 0)
-ORDER BY c.bucket";
-    }
-
-    /// <summary>
-    /// The compressed boundary of <paramref name="materialization"/> (<see cref="CompressedMaterializationBoundarySql"/>),
-    /// or <c>null</c> when none of its chunks is compressed, when TimescaleDB's chunk view is not there (a plain
-    /// PostgreSQL store), or when the read fails for any reason a database can refuse it (permissions, a timeout).
-    /// <c>null</c> sends the caller to <see cref="MaterializationHoleScanSql"/> unchanged, so a failed boundary
-    /// read costs the old price and never a wrong answer or a failed scan. A cancelled token still throws. The
-    /// view is looked up with <c>to_regclass</c> first so a plain store is a quiet <c>null</c> rather than a
-    /// server-logged <c>42P01</c> on every scan.
-    /// </summary>
-    internal static async Task<DateTime?> ReadCompressedMaterializationBoundaryAsync(
-        NpgsqlConnection connection, (string Schema, string Name) materialization, CancellationToken cancellationToken)
-    {
-        try
-        {
-            using var guard = new NpgsqlCommand("SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL", connection) { CommandTimeout = SetupTimeoutSeconds };
-            if (await guard.ExecuteScalarAsync(cancellationToken) is not true)
-            {
-                return null;
-            }
-
-            using var read = new NpgsqlCommand(CompressedMaterializationBoundarySql, connection) { CommandTimeout = SetupTimeoutSeconds };
-            read.Parameters.AddWithValue(materialization.Schema);
-            read.Parameters.AddWithValue(materialization.Name);
-            return await read.ExecuteScalarAsync(cancellationToken) is DateTime boundary
-                ? DateTime.SpecifyKind(boundary, DateTimeKind.Unspecified)
-                : null;
-        }
-        catch (NpgsqlException)
-        {
-            return null;
-        }
     }
 
     /// <summary>
@@ -1308,35 +1192,16 @@ ORDER BY c.bucket";
         return holes.Count == 0;
     }
 
-    /// <summary>
-    /// The hole buckets of one aggregate over <c>[from, to]</c> inclusive, oldest first.
-    ///
-    /// <para><b>The compressed part is read as a set, the rest probed (#5521).</b> When the materialization has
-    /// compressed chunks that reach into the window (<see cref="ReadCompressedMaterializationBoundaryAsync"/>),
-    /// the scan is <see cref="MaterializationHoleScanSplitSql"/>: buckets below the boundary are tested against
-    /// one read of the buckets the materialization holds, buckets at or above it keep the per-bucket probe.
-    /// With no compressed chunk, a boundary at or below <paramref name="from"/> (every bucket of the window is
-    /// at or above it), a missing chunk view or a failed boundary read, it is
-    /// <see cref="MaterializationHoleScanSql"/> unchanged. Both return the same buckets.</para>
-    /// </summary>
-    internal static async Task<List<DateTime>> ScanHolesAsync(
+    /// <summary>The hole buckets of one aggregate over <c>[from, to]</c> inclusive, oldest first.</summary>
+    private static async Task<List<DateTime>> ScanHolesAsync(
         NpgsqlConnection connection, MaterializationHoleTarget target, (string Schema, string Name) materialization,
         DateTime from, DateTime to, CancellationToken cancellationToken)
     {
         var holes = new List<DateTime>();
-        var boundary = await ReadCompressedMaterializationBoundaryAsync(connection, materialization, cancellationToken);
-        var split = boundary is DateTime compressedThrough && compressedThrough > from;
-        using var scan = new NpgsqlCommand(
-            split ? MaterializationHoleScanSplitSql(target, materialization) : MaterializationHoleScanSql(target, materialization), connection)
-        { CommandTimeout = SetupTimeoutSeconds };
+        using var scan = new NpgsqlCommand(MaterializationHoleScanSql(target, materialization), connection) { CommandTimeout = SetupTimeoutSeconds };
         scan.Parameters.AddWithValue(DateTime.SpecifyKind(from, DateTimeKind.Unspecified));
         scan.Parameters.AddWithValue(DateTime.SpecifyKind(to, DateTimeKind.Unspecified));
         scan.Parameters.AddWithValue(target.BucketWidth);
-        if (split)
-        {
-            scan.Parameters.AddWithValue(DateTime.SpecifyKind(boundary!.Value, DateTimeKind.Unspecified));
-        }
-
         await using var reader = await scan.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
