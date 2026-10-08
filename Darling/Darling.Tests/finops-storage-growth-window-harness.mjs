@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { pickRange, pickerText, pickerItems, pickerButton, withDocumentListeners } from "./web-picker-driver.mjs";
 
 const jsDir = process.argv[2];
 
@@ -53,11 +54,11 @@ class FakeNode {
 }
 
 globalThis.Node = FakeNode;
-globalThis.document = {
+globalThis.document = withDocumentListeners({
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
-};
+});
 
 const fetches = [];
 let body = "{}";
@@ -91,7 +92,7 @@ try {
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const dbBody = { databases: { status: "ok", database_count: 1, truncated: false, rows: [{ database_name: "Alpha", current_size_mb: 10 }] } };
   const objBody = (days) => ({ database: { status: "ok" }, objects: { status: "ok", window_days: days, object_count: 0, truncated: false, days: [], rows: [] } });
-  const seen = () => fetches.map(paramsOf).map((p) => ({ view: p.view, hours: p.hours, database_name: p.database_name ?? null, limit: p.limit ?? null }));
+  const seen = () => fetches.filter((u) => String(u).includes("get_finops")).map(paramsOf).map((p) => ({ view: p.view, hours: p.hours, database_name: p.database_name ?? null, limit: p.limit ?? null }));
   const out = {};
 
   // The databases level: no window picker, 24 hours.
@@ -99,45 +100,49 @@ try {
   fetches.length = 0;
   let root = tab.build("srv-a", {});
   await settle();
-  out.databases = { reads: seen(), selects: findAll(root, "select").length };
+  out.databases = { reads: seen(), selects: pickerButton(root, "Window") ? 1 : 0 };
 
   // Open the database: the objects read at the default window (30 days = 720 hours), with the picker.
   body = JSON.stringify(objBody(30));
   fetches.length = 0;
   findText(root, "button", "Show objects").handlers.click();
   await settle();
-  let select = findAll(root, "select")[0];
-  out.objects = { reads: seen(), options: select.children.map((o) => o.attrs.value), value: select.value };
+  // #5562 R5: the Compact rolling-only picker, whole days (the heatmap has one column per day), reach 2160 hours for this view.
+  out.objects = {
+    reads: seen(),
+    options: pickerItems(root, "Window").filter((i) => !i.disabled).map((i) => i.name),
+    disabled: pickerItems(root, "Window").filter((i) => i.disabled).map((i) => i.name + ": " + i.why),
+    value: pickerText(root, "Window"),
+    refused: { hours: pickRange(root, "Window", "36h"), calendar: pickRange(root, "Window", "last month"), tooLong: pickRange(root, "Window", "120d") },
+  };
 
   // Pick 90 days, then 7 days: each re-reads with days * 24.
   for (const days of [90, 7]) {
     fetches.length = 0;
     body = JSON.stringify(objBody(days));
-    select = findAll(root, "select")[0];
-    select.value = String(days);
-    select.handlers.change();
+    pickRange(root, "Window", days + "d");
     await settle();
-    out["picked" + days] = { reads: seen(), value: findAll(root, "select")[0].value };
+    out["picked" + days] = { reads: seen(), value: pickerText(root, "Window") };
   }
 
   // The poll rebuilds the tab for the same server: one read with the picked window, picker still on it.
   fetches.length = 0;
   root = tab.build("srv-a", {});
   await settle();
-  out.rebuilt = { reads: seen(), value: findAll(root, "select")[0].value };
+  out.rebuilt = { reads: seen(), value: pickerText(root, "Window") };
 
   // Another server starts at the databases level.
   body = JSON.stringify(dbBody);
   fetches.length = 0;
   root = tab.build("srv-b", {});
   await settle();
-  out.other = { reads: seen(), selects: findAll(root, "select").length };
+  out.other = { reads: seen(), selects: pickerButton(root, "Window") ? 1 : 0 };
   // ... and its own objects read starts at 30 days.
   body = JSON.stringify(objBody(30));
   fetches.length = 0;
   findText(root, "button", "Show objects").handlers.click();
   await settle();
-  out.otherObjects = { reads: seen(), value: findAll(root, "select")[0].value };
+  out.otherObjects = { reads: seen(), value: pickerText(root, "Window") };
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

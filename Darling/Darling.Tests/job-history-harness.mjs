@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { pickRange, pickerText, pickerItems, popupShape, withDocumentListeners } from "./web-picker-driver.mjs";
 
 const jsDir = process.argv[2];
 
@@ -88,11 +89,11 @@ class FakeNode {
 }
 
 globalThis.Node = FakeNode;
-globalThis.document = {
+globalThis.document = withDocumentListeners({
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
-};
+});
 
 const fetches = [];
 let historyBody = "{}";
@@ -129,8 +130,8 @@ try {
 
   const run = {
     runs: [
-      { run_time: "2026-03-01T10:00:00Z", server: "srv-a", job_name: "Nightly", category: "Maintenance", step: "(Job outcome)", status: "Failed", duration_seconds: 5, duration_formatted: "00:00:05", retries: 0, last_success: null, message: "<b>boom</b>" },
-      { run_time: "2026-03-01T09:00:00Z", server: "srv-b", job_name: "Backup", category: "Backup", step: "1: Full", status: "Succeeded", duration_seconds: 9, duration_formatted: "00:00:09", retries: 0, last_success: null, message: "" },
+      { run_time: new Date(Date.now() - 10 * 60000).toISOString(), server: "srv-a", job_name: "Nightly", category: "Maintenance", step: "(Job outcome)", status: "Failed", duration_seconds: 5, duration_formatted: "00:00:05", retries: 0, last_success: null, message: "<b>boom</b>" },
+      { run_time: new Date(Date.now() - 20 * 60000).toISOString(), server: "srv-b", job_name: "Backup", category: "Backup", step: "1: Full", status: "Succeeded", duration_seconds: 9, duration_formatted: "00:00:09", retries: 0, last_success: null, message: "" },
     ],
     shown: 2, truncated: false, window_truncated: false,
   };
@@ -141,7 +142,8 @@ try {
   const out = {};
   const snapshot = (root) => ({
     calls: historyCalls(),
-    selects: Object.fromEntries(["Server", "Window", "Status", "Category", "Rows"].map((l) => [l, byLabel(root, l).value])),
+    selects: Object.fromEntries(["Server", "Status", "Category", "Rows"].map((l) => [l, byLabel(root, l).value])),
+    window: pickerText(root, "Window"),
     job: byLabel(root, "Job name").value,
     jobFocused: byLabel(root, "Job name").focused,
     categories: byLabel(root, "Category").children.map((o) => o.attrs.value),
@@ -167,6 +169,33 @@ try {
   jobBox.handlers.focus();
   await settle();
   out.picked = snapshot(main);
+
+  // The shared time range picker (#5562): a rolling length reads whole hours back, a finished range also sends its end as as_of
+  // (the reader bounds the runs by it before the row limit), a length past the reach is refused with the reason, and a sub-hour
+  // length is read as the whole hour and trimmed at its start.
+  fetches.length = 0;
+  out.range = {};
+  out.range.past30d = pickRange(main, "Window", "30d");
+  await settle();
+  out.range.past30dCalls = historyCalls().length;
+  fetches.length = 0;
+  pickRange(main, "Window", "2h");
+  await settle();
+  out.range.twoHours = { calls: historyCalls().map((c) => c.q), text: pickerText(main, "Window") };
+  fetches.length = 0;
+  pickRange(main, "Window", "yesterday");
+  await settle();
+  out.range.yesterday = { calls: historyCalls().map((c) => c.q), text: pickerText(main, "Window") };
+  fetches.length = 0;
+  historyBody = JSON.stringify({ ...run, runs: [{ ...run.runs[0], run_time: new Date(Date.now() - 5 * 60000).toISOString() }, { ...run.runs[1], run_time: new Date(Date.now() - 50 * 60000).toISOString() }] });
+  pickRange(main, "Window", "30m");
+  await settle();
+  out.range.thirtyMinutes = { calls: historyCalls().map((c) => c.q), shown: all(main, "div").filter((d) => d.className === "muted").map((d) => d.textContent) };
+  historyBody = JSON.stringify(run);
+  out.range.items = pickerItems(main, "Window").filter((i) => i.disabled).map((i) => i.name);
+  out.range.shape = popupShape(main, "Window");
+  pickRange(main, "Window", "1d");
+  await settle();
 
   // The poll rebuilds the page: the same choices, the typed text and the focus come back.
   fetches.length = 0;

@@ -33,7 +33,10 @@ public sealed class AlertHistoryRangePageTests
         Assert.DoesNotContain("hours_back: 24", page);
         Assert.DoesNotContain("limit: 200 }", page);
         Assert.Contains("readTool(\"get_alert_history\", readParams())", page);
-        Assert.Contains("hours_back: choices.hours", page);
+        // #5562: the range is the shared picker's spec, read as of each read; a finished range also sends its end.
+        Assert.Contains("const w = windowOfSpec(choices.spec);", page);
+        Assert.Contains("hours_back: w ? w.hours : DEFAULT_HOURS", page);
+        Assert.Contains("as_of: w ? w.asOf : null", page);
         Assert.Contains("limit: choices.limit", page);
         Assert.Contains("server_name: choices.server || null", page);
         Assert.Contains("include_dismissed: choices.dismissed ? \"true\" : null", page);
@@ -45,9 +48,14 @@ public sealed class AlertHistoryRangePageTests
     public void NoWindowOrLimitIsOfferedThatTheToolOrTheDispatchLayerRefuses()
     {
         var page = Page();
-        var hours = System.Text.RegularExpressions.Regex.Matches(page, "\\{ hours: (\\d+), label").Select(m => int.Parse(m.Groups[1].Value)).ToList();
-        Assert.Equal(new[] { 1, 4, 24, 168 }, hours);
-        Assert.True(hours.Max() <= PerformanceMonitor.Common.McpHelpers.MaxHoursBack);
+        // #5562 R8: no hand-listed windows and no "All". The picker takes its reach from the catalog's max_hours for the read, which is
+        // the 168 hours the read's validator accepts, so a longer range is greyed out with the reason and never clamped. The alert table
+        // keeps 90 days (AlertHistoryRetentionDays, DarlingRetention.cs), but the web read stops at the common reach (R2).
+        Assert.DoesNotContain("WINDOW_CHOICES", page);
+        Assert.Contains("read: \"get_alert_history\"", page);
+        Assert.Contains("pageRangePicker({", page);
+        Assert.Equal(PerformanceMonitor.Common.McpHelpers.MaxHoursBack, PerformanceMonitor.Darling.Service.WebReadReach.All["get_alert_history"].MaxHours);
+        Assert.Equal(90, PerformanceMonitor.Darling.Storage.DarlingRetentionHorizons.AlertHistoryRetentionDays);
 
         var limits = System.Text.RegularExpressions.Regex.Match(page, "const LIMIT_CHOICES = \\[([0-9, ]+)\\]").Groups[1].Value
             .Split(',').Select(s => int.Parse(s.Trim())).ToList();
@@ -118,7 +126,15 @@ public sealed class AlertHistoryRangePageTests
         Assert.Equal("1000", Get(dismissed, "limit"));
         Assert.Equal("srv-b", Get(dismissed, "server_name"));
 
-        Assert.Equal("1,4,24,168", string.Join(",", r.GetProperty("windowOptions").EnumerateArray().Select(e => e.GetString())));
+        // The popup offers the short presets and the calendar periods within 7 days; the longer ones are greyed out, never clamped.
+        Assert.Equal("Past 5 minutes,Past 15 minutes,Past 30 minutes,Past hour,Past 4 hours,Past day,Past 2 days,Past week,Today,Yesterday,Week to Date,Previous Week",
+            string.Join(",", r.GetProperty("windowOptions").EnumerateArray().Select(e => e.GetString())));
+        Assert.Equal("Past 30 days,Month to Date,Previous Month,Year to Date,Previous Year",
+            string.Join(",", r.GetProperty("windowGreyed").EnumerateArray().Select(e => e.GetString())));
+        Assert.Equal("This page's reads reach at most 7 days back.", r.GetProperty("refused").GetString());
+        // A finished range sends its end as as_of; a shorter-than-an-hour range reads the whole hour.
+        Assert.EndsWith("Z", Get(r.GetProperty("finished"), "as_of"));
+        Assert.Equal("1", Get(r.GetProperty("thirtyMinutes"), "hours_back"));
         Assert.Equal("200,500,1000", string.Join(",", r.GetProperty("limitOptions").EnumerateArray().Select(e => e.GetString())));
         Assert.Equal(",srv-a,srv-b", string.Join(",", r.GetProperty("serverOptions").EnumerateArray().Select(e => e.GetString())));
     }
@@ -138,7 +154,7 @@ public sealed class AlertHistoryRangePageTests
         }
 
         var shown = r.GetProperty("shown");
-        Assert.Equal("4", shown.GetProperty("window").GetString());
+        Assert.Equal("Past 4 hours", shown.GetProperty("window").GetString());
         Assert.Equal("500", shown.GetProperty("limit").GetString());
         Assert.Equal("srv-a", shown.GetProperty("server").GetString());
         Assert.True(shown.GetProperty("dismissed").GetBoolean());
@@ -184,7 +200,10 @@ public sealed class AlertHistoryRangePageTests
     [Fact]
     public void TheRangePickerSaysTheWebReadsAtMostSevenDays()
     {
-        Assert.Contains("The web reads at most 7 days", Page());
+        // #5562: the picker greys out what the read cannot reach and says why (the catalog's max_hours), so the page needs no hand-written
+        // "at most 7 days" tooltip; the reach is the read's own 168 hours.
+        Assert.DoesNotContain("The web reads at most 7 days of alert history, so there is no All choice.", Page());
+        Assert.Contains("the web read stops at the common 7 day reach", Page());
     }
 
     [Fact]

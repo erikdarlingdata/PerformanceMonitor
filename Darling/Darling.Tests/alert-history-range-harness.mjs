@@ -7,6 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { pickRange, pickerText, pickerItems, popupShape, withDocumentListeners } from "./web-picker-driver.mjs";
 
 class FakeNode {
   constructor(tag) {
@@ -38,7 +39,7 @@ class FakeNode {
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = withDocumentListeners({ createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) });
 globalThis.location = { hash: "#/alerts" };
 
 const jsDir = process.argv[2];
@@ -93,12 +94,17 @@ try {
       const main = newMain();
       await renderAlerts(main);
       out.first = readsOf().pop();
-      urls.length = 0; await pick(byLabel(main, "Time range"), 168); out.window = readsOf().pop();
+      urls.length = 0; pickRange(main, "Time range", "168h"); await settle(); out.window = readsOf().pop();
       urls.length = 0; await pick(byLabel(main, "Row limit"), 1000); out.limit = readsOf().pop();
       urls.length = 0; await pick(byLabel(main, "Server"), "srv-b"); out.server = readsOf().pop();
       const cb = checkbox(main);
       urls.length = 0; cb.checked = true; cb.fire("change"); await settle(); out.dismissed = readsOf().pop();
-      out.windowOptions = byLabel(main, "Time range").children.map((o) => o.attrs.value);
+      out.windowOptions = pickerItems(main, "Time range").filter((i) => !i.disabled).map((i) => i.name);
+      out.windowGreyed = pickerItems(main, "Time range").filter((i) => i.disabled).map((i) => i.name);
+      out.windowShape = popupShape(main, "Time range");
+      out.refused = pickRange(main, "Time range", "30d");
+      urls.length = 0; pickRange(main, "Time range", "yesterday"); await settle(); out.finished = readsOf().pop();
+      urls.length = 0; pickRange(main, "Time range", "30m"); await settle(); out.thirtyMinutes = readsOf().pop();
       out.limitOptions = byLabel(main, "Row limit").children.map((o) => o.attrs.value);
       out.serverOptions = byLabel(main, "Server").children.map((o) => o.attrs.value);
     },
@@ -106,7 +112,7 @@ try {
       alertsReply = { alerts: [row(1)], truncated: false };
       const first = newMain();
       await renderAlerts(first);
-      await pick(byLabel(first, "Time range"), 4);
+      pickRange(first, "Time range", "4h"); await settle();
       await pick(byLabel(first, "Row limit"), 500);
       await pick(byLabel(first, "Server"), "srv-a");
       const cb = checkbox(first); cb.checked = true; cb.fire("change"); await settle();
@@ -117,7 +123,7 @@ try {
       urls.length = 0; await renderAlerts(second);
       out.back = readsOf();
       out.shown = {
-        window: byLabel(second, "Time range").value, limit: byLabel(second, "Row limit").value,
+        window: pickerText(second, "Time range"), limit: byLabel(second, "Row limit").value,
         server: byLabel(second, "Server").value, dismissed: checkbox(second).checked,
       };
     },
@@ -169,11 +175,11 @@ try {
       out.before = metrics(main);
       // a narrower window: the oldest row leaves, a newer one lands first, one lands in the middle
       alertsReply = { alerts: [row(0), row(1), row(2), row(3)], truncated: false };
-      await pick(byLabel(main, "Time range"), 4);
+      pickRange(main, "Time range", "4h"); await settle();
       out.after = metrics(main);
       out.keptNode = bodyRows(main)[1] === keep;
       alertsReply = { alerts: [row(3)], truncated: false };
-      await pick(byLabel(main, "Time range"), 1);
+      pickRange(main, "Time range", "1h"); await settle();
       out.shrunk = metrics(main);
     },
     async mute() {

@@ -254,7 +254,7 @@ public sealed class FinOpsTabStorageGrowthPageTests
     {
         var tab = Tab();
         var imports = Regex.Matches(tab, "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../util.js", "./gate.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../util.js", "./gate.js", "./window.js" }));
         Assert.Contains("./gate.js", imports);
         var names = Regex.Match(tab, "import \\{([^}]*)\\} from \"../../util.js\"").Groups[1].Value.Split(',').Select(n => n.Trim());
         var body = tab.Substring(tab.IndexOf("const HOURS", System.StringComparison.Ordinal));
