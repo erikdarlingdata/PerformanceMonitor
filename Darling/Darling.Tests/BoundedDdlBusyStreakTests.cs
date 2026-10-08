@@ -93,7 +93,8 @@ public sealed class BoundedDdlBusyStreakTests
         Assert.True(start > 0);
         var body = text.Substring(start, text.IndexOf("\n    }\n", start, StringComparison.Ordinal) - start);
         Assert.Contains("BusyStreaks.RecordBusy(what", body, StringComparison.Ordinal);
-        Assert.Equal(2, body.Split("BusyStreaks.Clear(what", StringSplitOptions.None).Length - 1);
+        /* Applied, Failed, and (#5574) a relation that is gone: a chunk dropped by retention must not leave its streak behind. */
+        Assert.Equal(3, body.Split("BusyStreaks.Clear(what", StringSplitOptions.None).Length - 1);
         Assert.Contains("LogWarning", body, StringComparison.Ordinal);
     }
 }

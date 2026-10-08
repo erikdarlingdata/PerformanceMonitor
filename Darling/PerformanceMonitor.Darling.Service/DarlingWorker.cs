@@ -10104,8 +10104,9 @@ AND   j.hypertable_name = '{relation}'", connection))
                loop on its own connection and the service's stopping token, not a step: the rewrite of a large store's chunk
                takes minutes, and a step would hold this pass (and the sweep loop that awaits it) for them. Starting it costs
                nothing here (no database work, and nothing when a run is already going); a converged store's run is two
-               catalog reads and it ends. Hourly only: the start path does not call it, so a restart is not held, and the
-               first :30 tick starts it. TimescaleDB-gated like the steps that need it. */
+               catalog reads and it ends. Hourly pass only: the start path does not call it, so a restart is not held; the
+               first hourly pass, about 30 s after a start (its stamp seeds at MinValue, #3812/#3817), starts it, and
+               every hourly pass after. TimescaleDB-gated like the steps that need it. */
             if (timescaleAvailable)
             {
                 StartPerfmonRegroupDrain(cancellationToken);
