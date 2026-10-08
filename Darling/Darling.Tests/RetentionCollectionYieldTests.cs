@@ -546,6 +546,24 @@ public sealed class RetentionCollectionYieldTests
     }
 
     [Fact]
+    public void ABudgetStopIsNormalControlFlow_TheWarmUpAfterTheDrainStillRuns()
+    {
+        /* #5585's warm-up runs for the interval tables whose purge deleted rows, and a pass stopped part-way through a
+           table did delete rows. The stop must therefore fall through to the run record and the warm-up: no return
+           and no throw between the budget's log line and the warm-up call. */
+        var source = ReadSource("DarlingRetention.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var stopLog = source.IndexOf("if (yieldGate is { StoppedOnBudget: true })", StringComparison.Ordinal);
+        var warmUp = source.IndexOf("QueryStoreIntervalFloorWarmUp.RunAfterDrainAsync(", StringComparison.Ordinal);
+        Assert.True(stopLog > 0 && warmUp > stopLog, "the budget's log line must come before the warm-up call");
+
+        var between = source[stopLog..warmUp];
+        Assert.DoesNotContain("return ", between, StringComparison.Ordinal);
+        Assert.DoesNotContain("throw ", between, StringComparison.Ordinal);
+        Assert.DoesNotContain("throw;", between, StringComparison.Ordinal);
+        Assert.Contains("LogRetentionRunAsync", between, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Worker_BothPurgeCallersPassTheSignal()
     {
         var source = ReadWorkerSource().Replace("\r\n", "\n", StringComparison.Ordinal);
@@ -591,9 +609,12 @@ public sealed class RetentionCollectionYieldTests
         };
     }
 
-    private static string ReadWorkerSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    private static string ReadWorkerSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
+        ReadSource("DarlingWorker.cs", thisFile);
+
+    private static string ReadSource(string fileName, [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
     {
-        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", fileName);
         for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
         {
             var candidate = Path.Combine(dir.FullName, relative);
