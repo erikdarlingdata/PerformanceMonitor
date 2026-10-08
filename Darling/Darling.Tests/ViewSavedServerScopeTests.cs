@@ -82,4 +82,46 @@ public sealed class ViewSavedServerScopeTests
         if (!TryRun(out var r)) return;
         Assert.Equal("All", r.GetProperty(scenario).GetString());
     }
+
+    // ---- W4b: a view with no server variable whose every panel filters to one server (custom view 3's shape) ----
+
+    [Fact]
+    public void AViewWhoseEveryPanelFiltersToOneServer_OpensOnThatServer()
+    {
+        if (!TryRun(out var r)) return;
+        Assert.Equal("sql2025", r.GetProperty("panelServerOfWholeView").GetString());
+        Assert.Equal(new[] { "sql2025" }, Names(r.GetProperty("panelSeed")));
+        // an explicit server variable still decides first; no panel server leaves the fleet
+        Assert.Equal(new[] { "sql2022" }, Names(r.GetProperty("panelSeedVariableWins")));
+        Assert.Equal("All", r.GetProperty("panelSeedNone").GetString());
+        Assert.Contains("every panel is set to SQL2025", r.GetProperty("noteOnServer").GetString());
+    }
+
+    [Theory]
+    [InlineData("panelServerMixed")]
+    [InlineData("panelServerOnePanelUnfiltered")]
+    [InlineData("panelServerTwoServerFilters")]
+    [InlineData("panelServerInOp")]
+    [InlineData("panelServerNotInFleet")]
+    [InlineData("panelServerNoComposed")]
+    public void APanelSetThatIsNotOneServerEverywhere_HasNoPanelServer(string scenario)
+    {
+        if (!TryRun(out var r)) return;
+        Assert.Equal(JsonValueKind.Null, r.GetProperty(scenario).ValueKind);
+    }
+
+    [Fact]
+    public void ChoosingAnotherServer_ReplacesThePanelsServerFilter_InsteadOfEmptyingThem()
+    {
+        if (!TryRun(out var r)) return;
+        // still on the panels' server: the panel runs as saved (both filters kept)
+        Assert.Equal(2, r.GetProperty("underSame").GetInt32());
+        // another server, or All servers: only the server filter goes, the other filters stay
+        Assert.Equal(new[] { "database" }, Names(r.GetProperty("underOther")));
+        Assert.Equal(0, r.GetProperty("underAll").GetInt32());
+        // a panel that is not composed passes through, and read panels do not stop a view from having a panel server
+        Assert.Equal("get_x", r.GetProperty("underReadPanel").GetProperty("read").GetString());
+        Assert.Equal("sql2025", r.GetProperty("panelServerReadPanelsIgnored").GetString());
+        Assert.Contains("Showing your pick instead of SQL2025", r.GetProperty("noteOnOther").GetString());
+    }
 }

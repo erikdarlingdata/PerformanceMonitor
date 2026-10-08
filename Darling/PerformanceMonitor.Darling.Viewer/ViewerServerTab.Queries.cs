@@ -420,6 +420,15 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
+    /// What the Query Store Regressions grid says when it has no rows. An empty answer is not always "nothing got worse": the read
+    /// compares the range with the 7 days before it, so a range as long as the stored history (Last 7 days on a store that holds about
+    /// a week of Query Store data) has no earlier data to compare with and lists nothing, while Last 24 hours on the same store does.
+    /// The words say so, instead of the bare "No data for the selected time range.".
+    /// </summary>
+    internal const string QueryStoreRegressionsEmptyText =
+        "No regressions to show. Each query is compared with the 7 days before the selected range, so a range that reaches back to the start of the stored Query Store data has nothing earlier to compare with.";
+
+    /// <summary>
     /// Raises or hides the "Showing since" banner of the Query Store Regressions grid (#4966). The read compares the range with
     /// the baseline of the 7 days before it, so the notice keys on that EARLIER window: a server added two days ago covers the
     /// range whole but has two days of baseline, not seven, and a note compared with the range's own start would stay silent. The
