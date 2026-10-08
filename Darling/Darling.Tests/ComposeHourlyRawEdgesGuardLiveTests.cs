@@ -401,6 +401,69 @@ public sealed class ComposeHourlyRawEdgesGuardLiveTests
         return row["value"]!.GetValue<double>() * 1000.0;
     }
 
+    /// <summary>#5525: the hourly-plus-raw-edges statement scoped by server id returns the rows the same statement scoped by
+    /// <c>server_name</c> returned. The edges route was pinned on text only, and its raw comparison goes through the by-id scope on both
+    /// sides, so this runs the route's own SQL both ways on the planted store.</summary>
+    [Fact]
+    public async Task TheHourlyEdgesRoute_ScopedById_ReturnsTheRowsItReturnedScopedByName()
+    {
+        await using var store = await StoreAsync();
+        await SeedMixedAsync(store);
+
+        var outcome = await RunAsync(store, PanelByDatabase, ServerA);
+        Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
+        AssertHybridTaken(outcome.Payload!);
+
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(store.DataSource, store.Ct);
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(PanelByDatabase)!, Array.Empty<string>());
+        Assert.True(parseError is null, parseError);
+        var candidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, store.Anchor, store.WindowStart, store.WindowEnd, rollups, coverage);
+        Assert.NotNull(candidate);
+        var scope = new[] { ServerA };
+        var context = new ComposeRunContext(
+            scope, store.WindowStart, store.WindowEnd, ComposeRunContext.NoVariables, rollups, store.Anchor, coverage,
+            HourlyEdges: new ComposeHourlyEdgesVerdict(candidate!.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, scope));
+        var (compiled, compileError) = ComposeCompiler.Compile(plan!, context);
+        Assert.True(compileError is null, compileError);
+        Assert.Contains(Hybrid, compiled!.Sql, StringComparison.Ordinal);
+
+        const string byId = "f.server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($3)))";
+        Assert.Contains(byId, compiled.Sql, StringComparison.Ordinal);
+        var byName = compiled.Sql.Replace(byId, "f.server_name = ANY($3)", StringComparison.Ordinal);
+        Assert.DoesNotContain("collect.servers", byName, StringComparison.Ordinal);
+
+        var idRows = await RowsAsync(store, compiled.Sql, compiled);
+        var nameRows = await RowsAsync(store, byName, compiled);
+        Assert.NotEmpty(idRows);
+        Assert.Equal(nameRows, idRows);
+        Assert.Equal(hybridRows(outcome.Payload!), JsonNode.Parse(idRows)!.ToJsonString());
+    }
+
+    private static async Task<string> RowsAsync(Store store, string sql, ComposeCompiled compiled)
+    {
+        await using var connection = await store.DataSource.OpenConnectionAsync(store.Ct);
+        await using var command = new NpgsqlCommand(sql, connection);
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = parameter.NpgsqlDbType, Value = parameter.Value });
+        }
+
+        var rows = new JsonArray();
+        await using var reader = await command.ExecuteReaderAsync(store.Ct);
+        while (await reader.ReadAsync(store.Ct))
+        {
+            var row = new JsonObject();
+            for (var i = 0; i < reader.FieldCount; i++)
+            {
+                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : DarlingWebEndpoints.DbValueToJson(reader.GetValue(i));
+            }
+
+            rows.Add(row);
+        }
+
+        return rows.ToJsonString();
+    }
+
     /// <summary>Runs the panel through the runner and through a raw compile of the same window, and returns both payloads'
     /// rows: the runner's payload, and the raw rows as a JSON array.</summary>
     private static async Task<(JsonObject Hybrid, JsonArray Raw)> RunBothAsync(Store store, string panelJson, string? scope = null, bool relativeWindow = false)

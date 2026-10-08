@@ -140,7 +140,10 @@ public sealed class IntervalRollupCountGuardLiveTests
                 $"INSERT INTO collect.query_stats_hour_ledger (server_id, server_name, bucket, n) VALUES ({ServerGhost}, '{NameGhost}', '2026-01-05 01:00:00', 5)", ct);
             Assert.Equal(0L, await GuardAsync(connection, scope, ct));
             Assert.Equal(1L, await GuardAsync(connection, null, ct));
-            Assert.Equal(1L, await GuardAsync(connection, new[] { NameGhost }, ct));
+            /* The ghost server has no registry row, so the by-id scope cannot see it (#5525): only the runner's unregistered-name arm
+               ($4) matches it on the row's stored name, exactly as the panel read does. */
+            Assert.Equal(0L, await GuardAsync(connection, new[] { NameGhost }, ct));
+            Assert.Equal(1L, await GuardAsync(connection, new[] { NameGhost }, ct, unregistered: new[] { NameGhost }));
 
             /* A ledger count above the rollup's fails, and a recount heals both: it sets the pair to raw's count and deletes
                the ghost row, which has no raw rows. */
@@ -191,6 +194,73 @@ public sealed class IntervalRollupCountGuardLiveTests
         }
     }
 
+    /// <summary>
+    /// #5525: the guard proves the rollup over the scope the panel read takes. A server renamed in the registry keeps its earlier
+    /// hours under the earlier name, in both the ledger and the rollup; the read, scoped by id, takes them, so the guard must compare
+    /// them. Scoped by the current name alone (the old shape) it saw only the hours stored under that name and passed a short
+    /// rollup hour of the earlier name.
+    /// </summary>
+    [Fact]
+    public async Task TheGuard_ComparesARenamedServersEarlierNameHours_ById()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live count-guard test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PrepareStoreAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            const int renamed = -944105;
+            await DarlingMcpTestData.RegisterServerAsync(connection, renamed, "GuardBeforeRename", ct);
+
+            /* Three hours under the earlier name, then the registry row is renamed and one more hour is written under the new name. */
+            for (var h = 0; h < 3; h++)
+            {
+                await PlantAsync(connection, ct, renamed, "GuardBeforeRename", H1.AddHours(h).AddMinutes(10), 3600, "0xGR1");
+            }
+
+            await ExecuteAsync(connection, $"UPDATE collect.servers SET server_name = 'GuardAfterRename' WHERE server_id = {renamed}", ct);
+            await PlantAsync(connection, ct, renamed, "GuardAfterRename", H1.AddHours(2).AddMinutes(40), 3600, "0xGR2");
+
+            await RefreshAsync(connection, H1, H2, ct);
+            await RecountAsync(connection, ct);
+            await QueryStatsLedgerSeed.SetCountedSinceAsync(connection, H1, ct);
+
+            var scope = new[] { "GuardAfterRename" };
+            Assert.Equal(0L, await GuardAsync(connection, scope, ct));
+
+            /* One more row of the earlier name in a middle hour, counted into the ledger the way the writer counts it, after the
+               rollup refreshed: the earlier name's (server, hour) pair now disagrees. The scope names only the CURRENT name, and the
+               guard must still see the pair, because the panel read takes the server's rows under both names. */
+            await PlantAsync(connection, ct, renamed, "GuardBeforeRename", H1.AddHours(1).AddMinutes(50), 3600, "0xGR1");
+            await RecountAsync(connection, ct);
+            Assert.Equal(1L, await GuardAsync(connection, scope, ct));
+            Assert.Equal(1L, await GuardAsync(connection, null, ct));
+
+            await RefreshAsync(connection, H1, H2, ct);
+            Assert.Equal(0L, await GuardAsync(connection, scope, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                Assert.Equal(0L, Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt)));
+            });
+        }
+    }
+
     /// <summary>Migrates the scratch store, makes the hourly rollup, stops the TimescaleDB scheduler and registers the three servers.</summary>
     private static async Task PrepareStoreAsync(NpgsqlConnection connection, CancellationToken ct)
     {
@@ -209,10 +279,12 @@ public sealed class IntervalRollupCountGuardLiveTests
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
     }
 
-    /// <summary>The guard over <c>[from, to)</c>, the three-hour window by default.</summary>
-    private static async Task<long> GuardAsync(NpgsqlConnection connection, string[]? servers, CancellationToken ct, DateTime? from = null, DateTime? to = null)
+    /// <summary>The guard over <c>[from, to)</c>, the three-hour window by default. <paramref name="unregistered"/> binds the runner's
+    /// unregistered-name list (<c>$4</c>) the way the panel runner does: only when the run has any.</summary>
+    private static async Task<long> GuardAsync(
+        NpgsqlConnection connection, string[]? servers, CancellationToken ct, DateTime? from = null, DateTime? to = null, string[]? unregistered = null)
     {
-        await using var command = new NpgsqlCommand(IntervalRollupCountGuard.QueryStatsSql, connection);
+        await using var command = new NpgsqlCommand(IntervalRollupCountGuard.SqlFor(unregistered is { Length: > 0 }), connection);
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = from ?? H1 });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = to ?? H2 });
         command.Parameters.Add(new NpgsqlParameter
@@ -220,6 +292,11 @@ public sealed class IntervalRollupCountGuardLiveTests
             NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
             Value = servers is null ? DBNull.Value : servers,
         });
+        if (unregistered is { Length: > 0 })
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = unregistered });
+        }
+
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct));
     }
 

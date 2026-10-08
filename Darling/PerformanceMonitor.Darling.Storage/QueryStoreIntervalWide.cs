@@ -409,7 +409,7 @@ FROM batch_rows AS b;";
        by offset, before touching this. */
     /* The clamp (ClampedStart) is the read's lower bound AT and ABOVE raw's chunk floor. Below that floor the
        table is the only record left, and ResolveReadAsync extends the bound down to
-       ExactBelowFloorStart = max(window start, filled_since, table floor + one day) and no further: those are the
+       ExactBelowFloorStart = max(window start, filled_since, table floor + PurgeEdgeMargin (26 h)) and no further: those are the
        three bounds under which the table provably holds what raw held before its purge.
        There is no per-server probe on this table: of its two secondary btrees, idx_query_store_interval_wide_first_exec
        leads with first_execution_time, and the wide btree on (server_id, first_execution_time) (#4952,
@@ -441,38 +441,21 @@ LEFT JOIN collect.query_store_interval_wide_coverage AS c
   ON c.server_id = $1;";
 
     /// <summary>
-    /// The floors, from TimescaleDB's catalog (metadata, never a scan), exactly as
-    /// <see cref="QueryStoreIntervalLatest.ChunkFloorsSql"/>: raw's oldest chunk, and this table's when
-    /// TimescaleDB's catalog carries it as a hypertable. It does not today — this table is engine-plain, per its
-    /// migration's own comment — so the <c>table_is_hypertable</c> arm is defensive, matching V143's.
+    /// Raw's floor, from TimescaleDB's catalog (metadata, never a scan), exactly as
+    /// <see cref="QueryStoreIntervalLatest.RawChunkFloorSql"/>: raw's oldest chunk (NULL when raw is not a
+    /// hypertable). This table's floor is never read from the catalog (#5541): the table is engine-plain, per its
+    /// migration's own comment, and retention purges it with a sliced DELETE that leaves emptied chunks listed, so a
+    /// catalog floor would sit far below the real one and move the rule toward the table.
     /// </summary>
-    public const string ChunkFloorsSql = @"
+    public const string RawChunkFloorSql = @"
 SELECT
-    (
-        SELECT
-            MIN(ch.range_start) AT TIME ZONE 'UTC'
-        FROM timescaledb_information.chunks AS ch
-        WHERE ch.hypertable_schema = 'collect'
-        AND   ch.hypertable_name = 'query_store_stats'
-    ) AS raw_floor,
-    EXISTS
-    (
-        SELECT
-            1
-        FROM timescaledb_information.hypertables AS h
-        WHERE h.hypertable_schema = 'collect'
-        AND   h.hypertable_name = 'query_store_interval_wide'
-    ) AS table_is_hypertable,
-    (
-        SELECT
-            MIN(ch.range_start) AT TIME ZONE 'UTC'
-        FROM timescaledb_information.chunks AS ch
-        WHERE ch.hypertable_schema = 'collect'
-        AND   ch.hypertable_name = 'query_store_interval_wide'
-    ) AS table_floor;";
+    MIN(ch.range_start) AT TIME ZONE 'UTC' AS raw_floor
+FROM timescaledb_information.chunks AS ch
+WHERE ch.hypertable_schema = 'collect'
+AND   ch.hypertable_name = 'query_store_stats';";
 
-    /// <summary>The table's floor for one server where the table is a plain heap (today, always): its oldest
-    /// interval.</summary>
+    /// <summary>The table's floor <c>H</c> for one server: its oldest interval. Always this read (#5541): the purge
+    /// deletes oldest first on <c>first_execution_time</c>, so every deleted row is below the remaining minimum.</summary>
     public const string PlainTableFloorSql = @"
 SELECT
     MIN(t.first_execution_time)
@@ -524,10 +507,10 @@ SELECT EXISTS
     public static readonly TimeSpan GridWideMinWindow = TimeSpan.FromHours(12);
 
     /// <summary>
-    /// How far below the window start clause 3 still allows the table (V143's clause 3 restated: "B is the
-    /// window minus a day, and an interval spans at most a day"). One Query Store runtime-stats interval can
-    /// span up to a day, so an interval that STARTED up to a day before the window can still have executions
-    /// inside it. Restated here (rather than referencing <c>PgFactCollector.QueryPerf.PlanRegressionSkewMarginDays</c>)
+    /// How long one Query Store runtime-stats interval can span (V143's clause 3 restated: "B is the window minus
+    /// a day, and an interval spans at most a day"), so an interval that STARTED up to a day before the window can
+    /// still have executions inside it. Clause 3 of <see cref="UseTable"/> no longer uses it alone (#5541): it is
+    /// one term of <see cref="PurgeEdgeMargin"/>. Restated here (rather than referencing <c>PgFactCollector.QueryPerf.PlanRegressionSkewMarginDays</c>)
     /// because the viewer does not reference the service assembly (#1661 / #2530).
     /// </summary>
     public static readonly TimeSpan IntervalSpanMargin = TimeSpan.FromDays(1);
@@ -682,9 +665,16 @@ FROM (
     /// <item>Coverage exists (<paramref name="filledSince"/> is not null) and there is no pending batch.</item>
     /// <item><c>filledSince &lt;= max(R, S)</c> (<paramref name="rawFloor"/>, <paramref name="windowStart"/>):
     /// the table holds every snapshot raw's own read would, and may hold more (the ruled window extension).</item>
-    /// <item><c>R &gt;= H</c> or <c>S - 1 day &gt;= H</c> (<paramref name="tableFloor"/>,
-    /// <see cref="IntervalSpanMargin"/>): raw holds no history the table has dropped, or every interval the
-    /// window needs starts inside the table. A NULL <paramref name="tableFloor"/> means the table holds nothing
+    /// <item><c>R &gt;= H + <see cref="PurgeEdgeMargin"/></c> or <c>S - <see cref="PurgeEdgeMargin"/> &gt;= H</c>
+    /// (<paramref name="tableFloor"/>): raw holds no snapshot of an interval the table has dropped, or every
+    /// interval the raw read can count for the window starts inside the table. This read counts a snapshot by
+    /// <c>collection_time</c> alone (no <c>last_execution_time</c> filter, unlike the Latest rule), so a snapshot
+    /// collected at or after <c>S</c> can belong to an interval that began down to <c>S - PurgeEdgeMargin</c>, which
+    /// is why the second arm uses the whole margin and not one interval length (#5541). The margin is there because the two purge on different
+    /// columns (#5541): raw drops a snapshot by <c>collection_time</c>, the table drops an interval by
+    /// <c>first_execution_time</c>, and a snapshot lands in raw up to <see cref="PurgeEdgeMargin"/> after its interval
+    /// began. With <c>R</c> only at or above <c>H</c>, raw can still hold a snapshot of an interval that began below
+    /// <c>H</c> and that the table dropped. A NULL <paramref name="tableFloor"/> means the table holds nothing
     /// for the server, and clause 2 already refuses that case.</item>
     /// <item>A literal <paramref name="literalWindowEnd"/> (a custom range, MCP <c>as_of</c>) must be at or
     /// after <paramref name="appliedThrough"/>. NULL means an open end (a preset), which skips this clause
@@ -721,8 +711,8 @@ FROM (
 
         if (tableFloor is DateTime h)
         {
-            var skewFloor = windowStart - IntervalSpanMargin;
-            if (!((rawFloor is DateTime floor && floor >= h) || skewFloor >= h))
+            var edgeFloor = windowStart - PurgeEdgeMargin;
+            if (!((rawFloor is DateTime floor && floor >= h + PurgeEdgeMargin) || edgeFloor >= h))
             {
                 return false;
             }
@@ -991,7 +981,7 @@ FROM (
     /// <list type="bullet">
     /// <item><paramref name="filledSince"/>: the coverage claim starts there and is never backdated, and a gap
     /// check restarts it above a hole (<see cref="ResetCoverageSql"/>).</item>
-    /// <item><paramref name="tableFloor"/> + <see cref="IntervalSpanMargin"/>: the 9-day purge deletes row by
+    /// <item><paramref name="tableFloor"/> + <see cref="PurgeEdgeMargin"/>: the 9-day purge deletes row by
     /// row on <c>first_execution_time</c>, so a row whose interval began before the table floor is gone even when
     /// its <c>collection_time</c> is inside the window.</item>
     /// <item><paramref name="windowStart"/>: never read before the window asked for.</item>
@@ -1047,13 +1037,13 @@ FROM (
     }
 
     /// <summary>
-    /// The inputs <see cref="ResolveReadAsync"/> reads that do not depend on the server: the three floors of
-    /// <see cref="ChunkFloorsSql"/>, which takes no parameter and reads TimescaleDB's catalog for the whole store.
+    /// The inputs <see cref="ResolveReadAsync"/> reads that do not depend on the server: the raw floor of
+    /// <see cref="RawChunkFloorSql"/>, which takes no parameter and reads TimescaleDB's catalog for the whole store.
     /// (<see cref="ReadSourceInputsSql"/>'s coverage and pending columns, <see cref="PlainTableFloorSql"/>,
     /// <see cref="HasLegacyRowSql"/> and the cadence probe all filter on the server, so they stay per server.)
     /// A caller that resolves many servers for one window passes one <see cref="StoreWideInputsCache"/> to each call.
     /// </summary>
-    public sealed record StoreWideInputs(DateTime? RawFloor, bool TableIsHypertable, DateTime? TableFloor);
+    public sealed record StoreWideInputs(DateTime? RawFloor);
 
     /// <summary>
     /// A per-check holder for <see cref="StoreWideInputs"/>. <see cref="ResolveReadAsync"/> fills it the first
@@ -1111,7 +1101,7 @@ FROM (
             }
 
             /* Review D4R H1: clauses 4 and 5 need no table floor at all, so check them before the two
-               remaining round trips (ChunkFloorsSql's metadata read and, worse, PlainTableFloorSql's
+               remaining round trips (RawChunkFloorSql's metadata read and, worse, PlainTableFloorSql's
                unindexed server-wide scan). A short window or a literal end before appliedThrough can only
                ever land on "raw" (UseTable's own tail), so failing here saves both queries. */
             if (windowEnd - windowStart < minWindow || (literalWindowEnd is DateTime e && e < appliedThrough))
@@ -1120,30 +1110,22 @@ FROM (
             }
 
             DateTime? rawFloor = null;
-            DateTime? tableFloor = null;
-            var tableIsHypertable = false;
             if (hasTimescale && storeWide?.Value is StoreWideInputs cached)
             {
                 rawFloor = cached.RawFloor;
-                tableIsHypertable = cached.TableIsHypertable;
-                tableFloor = cached.TableFloor;
             }
             else if (hasTimescale)
             {
-                await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
-                await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
-                await reader.ReadAsync(cancellationToken);
-                rawFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
-                tableIsHypertable = reader.GetBoolean(1);
-                tableFloor = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+                await using var floors = new NpgsqlCommand(RawChunkFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                rawFloor = await floors.ExecuteScalarAsync(cancellationToken) as DateTime?;
                 if (storeWide is not null)
                 {
-                    storeWide.Value = new StoreWideInputs(rawFloor, tableIsHypertable, tableFloor);
+                    storeWide.Value = new StoreWideInputs(rawFloor);
                 }
             }
 
             /* Clause 2 (filledSince <= max(rawFloor, windowStart)) needs only rawFloor, already in hand from
-               ChunkFloorsSql's metadata read (or never set, on a non-Timescale store) — never the table floor.
+               RawChunkFloorSql's metadata read (or never set, on a non-Timescale store) — never the table floor.
                An upgraded store whose claim doesn't cover the window yet fails here, before PlainTableFloorSql's
                scan, instead of after it. */
             if (filledSince > ClampedStart(rawFloor, windowStart))
@@ -1151,9 +1133,9 @@ FROM (
                 return new WideReadPlan(false, windowStart, windowStart, null);
             }
 
-            if (!tableIsHypertable)
+            DateTime? tableFloor;
+            await using (var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds })
             {
-                await using var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
                 plain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                 tableFloor = await plain.ExecuteScalarAsync(cancellationToken) as DateTime?;
             }

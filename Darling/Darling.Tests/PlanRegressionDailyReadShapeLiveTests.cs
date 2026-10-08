@@ -36,8 +36,8 @@ namespace Darling.Tests;
 /// server's; the test asserts what holds with that index (it does not scan the whole table, it keeps rows read under a
 /// bound set by the open days, and the day half reads <c>plan_regression_daily</c> through its unique index) and writes the
 /// rows read, the rows returned and the blocks touched to <c>DARLING_5448_SHAPE_OUT</c> when that is set, which is where the
-/// numbers in the PR come from. On a hypertable (the table is converted by hand: the product does not partition it yet,
-/// though <c>QueryStoreIntervalLatest.ChunkFloorsSql</c> already has the arm for it) the live half scans only the chunks
+/// numbers in the PR come from. On a hypertable (the table is converted by hand: the product does not partition it, and the read gate
+/// takes the table floor from the per-server minimum either way, #5541) the live half scans only the chunks
 /// at or above the live floor.</para>
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only to

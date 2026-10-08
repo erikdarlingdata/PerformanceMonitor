@@ -45,8 +45,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// collector's append-only COPY writes and its whole-row retention; a live pin in the runner change records that dependency
 /// (#4605).</para>
 /// <para>Every instant is bound: <c>$1</c> is the start, inclusive, and <c>$2</c> the end, exclusive, both naive UTC
-/// <c>timestamp</c>; <c>$3</c> is a <c>text[]</c> of server names, or NULL for every server. Both sides filter on
-/// <c>server_name</c> per row. The coverage test compares the store-wide <c>counted_since</c> with <c>$1</c>, so a window that
+/// <c>timestamp</c>; <c>$3</c> is a <c>text[]</c> of server names, or NULL for every server. Both sides take the scope the
+/// panel read takes (<see cref="ServerScopeSql.Predicate"/>, #5525): the <c>server_id</c> of every registry row that carries one of
+/// the names, so a renamed server's hours under its earlier name are proven too, not only the hours stored under its current name.
+/// When the runner found scoped names that the registry does not hold, <see cref="SqlFor"/> adds <c>$4</c>, a <c>text[]</c> of them,
+/// and each side also matches those on the row's stored <c>server_name</c>. The coverage test compares the store-wide <c>counted_since</c> with <c>$1</c>, so a window that
 /// starts exactly at <c>counted_since</c> is covered; a missing state row yields NULL, which is not <c>&lt;= $1</c>, so it reads as
 /// uncovered. The comparison sits in the branch taken only for a covered window, so an uncovered window never runs it.</para>
 /// </summary>
@@ -55,13 +58,20 @@ public static class IntervalRollupCountGuard
     /// <summary>The result that says the ledger does not cover the window (<c>counted_since</c> is after its start, or the state row is missing): the guard cannot pass it and the read stays on raw. It is not a mismatch count, so the caller notes it apart from a failed comparison.</summary>
     public const long UncoveredResult = -1;
 
-    /// <summary>The number of (server, hour) pairs in <c>[$1, $2)</c> whose ledger count differs from the hourly rollup's <c>sum(sample_count)</c>, or <see cref="UncoveredResult"/> when the ledger does not cover the window; 0 means the guard passed.</summary>
-    public const string QueryStatsSql = @"
+    /// <summary>The number of (server, hour) pairs in <c>[$1, $2)</c> whose ledger count differs from the hourly rollup's <c>sum(sample_count)</c>, or <see cref="UncoveredResult"/> when the ledger does not cover the window; 0 means the guard passed. The scope binds <c>$3</c> only: use <see cref="SqlFor"/> when the run has unregistered names (<c>$4</c>).</summary>
+    public static readonly string QueryStatsSql = SqlFor(withUnregisteredServers: false);
+
+    /// <summary><see cref="QueryStatsSql"/>, with the unregistered-name arm (<c>$4</c>, a <c>text[]</c>) when <paramref name="withUnregisteredServers"/> is true. The FULL JOIN keys on (server_id, server_name, bucket) in both forms, so a pair whose rows sit under an earlier name is compared on its own.</summary>
+    public static string SqlFor(bool withUnregisteredServers)
+    {
+        var scope = "$3::text[] IS NULL OR " + ServerScopeSql.Predicate(string.Empty, "$3", withUnregisteredServers ? "$4" : null);
+        return $@"
 WITH l AS (SELECT server_id, server_name, bucket, n FROM collect.query_stats_hour_ledger
-           WHERE bucket >= $1 AND bucket < $2 AND ($3::text[] IS NULL OR server_name = ANY($3))),
+           WHERE bucket >= $1 AND bucket < $2 AND ({scope})),
      c AS (SELECT server_id, server_name, bucket, sum(sample_count) AS n FROM collect.query_stats_interval_hourly
-           WHERE bucket >= $1 AND bucket < $2 AND ($3::text[] IS NULL OR server_name = ANY($3)) GROUP BY 1, 2, 3),
+           WHERE bucket >= $1 AND bucket < $2 AND ({scope}) GROUP BY 1, 2, 3),
      m AS (SELECT count(*) AS n FROM l FULL JOIN c USING (server_id, server_name, bucket) WHERE l.n IS DISTINCT FROM c.n)
 SELECT CASE WHEN (SELECT counted_since FROM collect.query_stats_hour_ledger_state WHERE id = 1) <= $1
             THEN (SELECT n FROM m) ELSE -1 END;";
+    }
 }

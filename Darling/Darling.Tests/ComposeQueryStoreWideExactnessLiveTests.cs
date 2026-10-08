@@ -346,7 +346,7 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
             };
 
         /* An anchor interval 45 days before windowStart (mirrors QueryStoreIntervalWideGridLiveTests'
-           SeedGridAsync): pushes this server's table floor comfortably past clause 3's IntervalSpanMargin
+           SeedGridAsync): pushes this server's table floor comfortably past clause 3's PurgeEdgeMargin
            check, so windowStart itself can sit exactly on the seeded span without the gate refusing on table
            floor alone. Outside the compared window, so it never appears in either side's rows. */
         var anchor = windowStart.AddDays(-45);

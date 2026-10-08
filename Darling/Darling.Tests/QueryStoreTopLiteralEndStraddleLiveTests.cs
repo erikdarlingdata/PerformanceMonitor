@@ -200,10 +200,10 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
         /* Clause 3's own floor control: UseTable's tableFloor is MIN(first_execution_time) across the WHOLE
            server, not just this identity, and clause 3 refuses unless raw's chunk floor or WindowStart minus
-           IntervalSpanMargin ("skewFloor") reaches at or past it. Left with only the 7001 identity below, the
-           table's floor sits at day0 (WindowStart + 1h) - AFTER skewFloor (WindowStart - 1 day) - so clause 3
+           PurgeEdgeMargin ("edgeFloor") reaches at or past it. Left with only the 7001 identity below, the
+           table's floor sits at day0 (WindowStart + 1h) - AFTER edgeFloor (WindowStart - 26 h) - so clause 3
            alone refuses even the open-end positive control, before clause 4 is ever reached. A second,
-           unrelated identity anchored at or before skewFloor pulls the server's table floor down there, so
+           unrelated identity anchored at or before edgeFloor pulls the server's table floor down there, so
            clause 3 passes and only clause 4 (LiteralEnd vs applied_through) can still refuse the straddle read. */
         var floorAnchorFirst = WindowStart.AddDays(-2);
         var floorAnchor = new QueryStoreCollector.Row
