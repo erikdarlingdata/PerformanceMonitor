@@ -143,11 +143,11 @@ VALUES ($1, $2, $3, $4, $5, 7, 1, 'ROWS', $6, 'D:\data.mdf', 20480, 10000, TRUE,
 
     private static Fact One(List<Fact> facts, string key) => Assert.Single(facts, f => f.Key == key);
 
-    private static async Task<string> DrillDownJsonAsync(NpgsqlDataSource postgres, AnalysisContext context, string rootFactKey)
+    private static async Task<string> DrillDownJsonAsync(NpgsqlDataSource postgres, AnalysisContext context, string rootFactKey, double severity = 0.3)
     {
         var finding = new AnalysisFinding
         {
-            ServerId = ServerId, RootFactKey = rootFactKey, StoryPath = rootFactKey, PathKeys = [rootFactKey], Severity = 0.3,
+            ServerId = ServerId, RootFactKey = rootFactKey, StoryPath = rootFactKey, PathKeys = [rootFactKey], Severity = severity,
         };
         await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
         return JsonSerializer.Serialize(finding.DrillDown);
@@ -241,15 +241,15 @@ VALUES ($1, $2, $3, $4, $5, 7, 1, 'ROWS', $6, 'D:\data.mdf', 20480, 10000, TRUE,
     }
 
     private static Task SeedRegressionAsync(NpgsqlConnection c, CancellationToken ct, DateTime end, string db, long planId, string hash,
-        long avgCpu, DateTime firstExec, DateTime lastExec) =>
+        long avgCpu, DateTime firstExec, DateTime lastExec, long queryId = 101) =>
         ExecAsync(c, ct, @"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
      first_execution_time, last_execution_time, query_text, query_hash, execution_count, avg_cpu_time_us,
      avg_duration_us, query_plan_hash, is_forced_plan, force_failure_count, runtime_stats_interval_id)
-VALUES ($1,$2,$3,$4,$5,101,$6,'Regular',$7,$8,'SELECT 1','0xQH',100,$9,$9,$10,FALSE,0,$6)",
+VALUES ($1,$2,$3,$4,$5,$11,$6,'Regular',$7,$8,'SELECT 1','0xQH',100,$9,$9,$10,FALSE,0,$6)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(end), ServerId, ServerName, db, planId,
-            DarlingMcpTestData.Naive(firstExec), DarlingMcpTestData.Naive(lastExec), avgCpu, hash);
+            DarlingMcpTestData.Naive(firstExec), DarlingMcpTestData.Naive(lastExec), avgCpu, hash, queryId);
 
     [Fact]
     public async Task PlanRegression_DropsTheSecondaryDatabase()
@@ -269,6 +269,44 @@ VALUES ($1,$2,$3,$4,$5,101,$6,'Regular',$7,$8,'SELECT 1','0xQH',100,$9,$9,$10,FA
             Assert.Equal(1.0, One(facts, "PLAN_REGRESSION").Metadata["offender_count"]);
             Assert.NotEmpty(context.PlanRegressionOffenders!);
             Assert.All(context.PlanRegressionOffenders!, o => Assert.Equal("StandDb", o.DatabaseName));
+        });
+    }
+
+    /// <summary>
+    /// L1 (round 1): the regressed-queries drill-down filters the secondary database in its source CTE, BEFORE its LIMIT 5, as
+    /// Lite's twin does. The pass where the fact did not run has no offender list, so every query is read; when the secondary
+    /// database holds the five worst regressions, a filter applied after the LIMIT would leave nothing for the primary's own.
+    /// </summary>
+    [Fact]
+    public async Task TheRegressedQueriesDrillDown_FiltersTheSecondaryDatabaseBeforeItsLimit()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            var end = Now();
+            await SeedAgAsync(c, ct, end.AddMinutes(-1));
+            for (var q = 0; q < 5; q++)
+            {
+                var queryId = 201 + q;
+                await SeedRegressionAsync(c, ct, end, "SecDb", planId: queryId * 10 + 1, hash: "0xGOOD", avgCpu: 100_000, firstExec: end.AddDays(-6), lastExec: end.AddDays(-5), queryId: queryId);
+                await SeedRegressionAsync(c, ct, end, "SecDb", planId: queryId * 10 + 2, hash: "0xBAD", avgCpu: 5_000_000, firstExec: end.AddDays(-1), lastExec: end, queryId: queryId);
+            }
+            foreach (var queryId in new long[] { 101, 102 })
+            {
+                await SeedRegressionAsync(c, ct, end, "StandDb", planId: queryId * 10 + 1, hash: "0xGOOD", avgCpu: 100_000, firstExec: end.AddDays(-6), lastExec: end.AddDays(-5), queryId: queryId);
+                await SeedRegressionAsync(c, ct, end, "StandDb", planId: queryId * 10 + 2, hash: "0xBAD", avgCpu: 1_200_000, firstExec: end.AddDays(-1), lastExec: end, queryId: queryId);
+            }
+
+            /* No fact ran, so PlanRegressionOffenders is null; the set itself is resolved as a pass would. */
+            var context = Context(end);
+            context.CancellationToken = ct;
+            await PgSecondaryReplicaScope.EnsureAsync(postgres, context, logger: null);
+            Assert.Null(context.PlanRegressionOffenders);
+
+            var json = await DrillDownJsonAsync(postgres, context, "PLAN_REGRESSION", severity: 0.6);
+            using var doc = JsonDocument.Parse(json);
+            var rows = doc.RootElement.GetProperty("regressed_queries").EnumerateArray().ToList();
+            Assert.Equal(2, rows.Count);
+            Assert.All(rows, r => Assert.Equal("StandDb", r.GetProperty("database").GetString()));
         });
     }
 
@@ -350,6 +388,75 @@ VALUES ($1, $2, $3, $4, 'StandDb', $5, $2, 0.72, 0.55, 'config', 'DB_CONFIG', 'A
             {
                 Assert.Equal(AgReplicaScope.SkippedNote(1), withNote.RootElement.GetProperty("secondary_replica_note").GetString());
             }
+        });
+    }
+
+    private static Task PlantWaitAsync(NpgsqlConnection c, CancellationToken ct, DateTime at, long waitMs) => ExecAsync(c, ct, @"
+INSERT INTO wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms)
+VALUES ($1, $2, $3, $4, 'AN5558_WAIT', 50, $5)", CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, waitMs);
+
+    /// <summary>The note from wherever the answer's shape puts it: the root of a data-bearing answer, or the hints of a miss.</summary>
+    private static string? NoteOf(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var carrier = root.TryGetProperty("secondary_replica_note", out _) ? root : root.GetProperty("hints");
+        var note = carrier.GetProperty("secondary_replica_note");
+        return note.ValueKind == JsonValueKind.Null ? null : note.GetString();
+    }
+
+    /// <summary>
+    /// M4 (round 1): analyze_server carries the same note get_analysis_findings does, under the same field name, always present
+    /// and null when nothing is skipped; the service keeps the sentence the pass used. Lite's twin is in
+    /// <c>SecondaryReplicaMcpAnalysisTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task AnalyzeServer_CarriesTheNote_OnlyWhenThisNodeHoldsASecondaryCopy()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 };
+
+            Assert.Null(NoteOf(await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4)));
+            Assert.Null(service.LastSecondaryReplicaNote);
+
+            await SeedAgAsync(c, ct, Now().AddMinutes(-1));
+            var answer = await DarlingMcpTools.AnalyzeServer(service, postgres, ServerName, 4);
+            Assert.Equal(AgReplicaScope.SkippedNote(1), NoteOf(answer));
+            Assert.Equal(AgReplicaScope.SkippedNote(1), service.LastSecondaryReplicaNote);
+
+            using var doc = JsonDocument.Parse(answer);
+            if (doc.RootElement.GetProperty("status").GetString() == "empty")
+                Assert.Contains(AgReplicaScope.SkippedNote(1)!, doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>M4 (round 1): compare_analysis carries one note per window, each from the role at that window's own end.</summary>
+    [Fact]
+    public async Task CompareAnalysis_CarriesOneNotePerWindow_EachFromItsOwnRole()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            var now = Now();
+            var baselineEnd = now.AddHours(-24);
+
+            /* Secondary when the baseline window ended, primary after a failover by the time the comparison window ends. */
+            await SeedAgAsync(c, ct, baselineEnd.AddMinutes(-1));
+            await SeedAgAsync(c, ct, now.AddMinutes(-1), localRole: "PRIMARY");
+            await PlantWaitAsync(c, ct, baselineEnd.AddHours(-1), 500_000L);
+            await PlantWaitAsync(c, ct, now.AddHours(-1), 900_000L);
+
+            var answer = await DarlingMcpTools.CompareAnalysis(
+                new DarlingAnalysisService(postgres) { MinimumDataHours = 0 }, postgres, ServerName, 4, 28, cancellationToken: ct);
+
+            using var doc = JsonDocument.Parse(answer);
+            var root = doc.RootElement;
+            var (baseline, comparison) = root.TryGetProperty("baseline", out var b)
+                ? (b.GetProperty("secondary_replica_note"), root.GetProperty("comparison").GetProperty("secondary_replica_note"))
+                : (root.GetProperty("hints").GetProperty("baseline_secondary_replica_note"), root.GetProperty("hints").GetProperty("comparison_secondary_replica_note"));
+            Assert.Equal(AgReplicaScope.SkippedNote(1), baseline.GetString());
+            Assert.Equal(JsonValueKind.Null, comparison.ValueKind);
         });
     }
 }

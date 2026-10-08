@@ -103,11 +103,15 @@ public static class PgSecondaryReplicaScope
         NpgsqlConnection connection, string table, int serverId, DateTime asOf, CancellationToken cancellationToken)
     {
         /* The table name is a constant of this class, never input. */
+        /* The lower bound is the freshness limit: an older snapshot is stale and yields the empty set anyway
+           (AgReplicaScope.IsFresh), so the bound changes no answer but lets the hypertable exclude old chunks. */
         using var cmd = new NpgsqlCommand(
-            "SELECT MAX(collection_time) FROM " + table + " WHERE server_id = $1 AND collection_time <= $2", connection)
+            "SELECT MAX(collection_time) FROM " + table
+            + " WHERE server_id = $1 AND collection_time <= $2 AND collection_time >= $3", connection)
         { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(serverId);
         cmd.Parameters.AddWithValue(asOf);
+        cmd.Parameters.AddWithValue(asOf - AgReplicaScope.SnapshotFreshness);
         var value = await cmd.ExecuteScalarAsync(cancellationToken);
         return value is DateTime at ? DateTime.SpecifyKind(at, DateTimeKind.Utc) : null;
     }

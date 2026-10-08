@@ -170,17 +170,38 @@ public sealed class AnalysisContextSecondaryScopeSourceScanTests
         var missing = new List<string>();
         var sites = 0;
 
+        /* The end of the member a construction sits in: the next closing brace at member indentation (4 spaces).
+           Each site is judged on its own text, so a second context in a file that already ensures a variable of the
+           same name cannot borrow the first one's call. */
+        var memberEnd = new Regex(@"\n    \}[ \t]*\n", RegexOptions.CultureInvariant);
+
         foreach (var file in ProductSources(root))
         {
-            var text = File.ReadAllText(file);
+            var text = File.ReadAllText(file).Replace("\r\n", "\n");
             foreach (Match m in construction.Matches(text))
             {
                 sites++;
                 var close = text.IndexOf("};", m.Index, StringComparison.Ordinal);
                 var initializer = close < 0 ? text[m.Index..] : text[m.Index..close];
+                var end = memberEnd.Match(text, m.Index);
+                var member = end.Success ? text[m.Index..end.Index] : text[m.Index..];
                 var name = m.Groups["name"].Value;
                 var inInitializer = initializer.Contains("SecondaryReplicaDatabases", StringComparison.Ordinal);
-                var ensured = name.Length > 0 && Regex.IsMatch(text, @"SecondaryReplicaScope\.EnsureAsync\([^)]*\b" + Regex.Escape(name) + @"\b");
+                var ensured = name.Length > 0 && Regex.IsMatch(member, @"SecondaryReplicaScope\.EnsureAsync\([^)]*\b" + Regex.Escape(name) + @"\b");
+
+                /* A context handed straight to AnalyzeAsync(context) is resolved by that overload, provided the overload
+                   itself ensures the set it receives (checked on the same file's declaration, so the hand-off cannot
+                   be a loophole). */
+                if (!inInitializer && !ensured && name.Length > 0 && Regex.IsMatch(member, @"\bAnalyzeAsync\(\s*" + Regex.Escape(name) + @"\s*\)"))
+                {
+                    var overload = Regex.Match(text, @"AnalyzeAsync\(AnalysisContext (?<p>\w+)\)");
+                    if (overload.Success)
+                    {
+                        var overloadEnd = memberEnd.Match(text, overload.Index);
+                        var body = overloadEnd.Success ? text[overload.Index..overloadEnd.Index] : text[overload.Index..];
+                        ensured = Regex.IsMatch(body, @"SecondaryReplicaScope\.EnsureAsync\([^)]*\b" + overload.Groups["p"].Value + @"\b");
+                    }
+                }
                 if (!inInitializer && !ensured)
                 {
                     var line = text[..m.Index].Count(c => c == '\n') + 1;

@@ -47,8 +47,8 @@ internal static class SecondaryReplicaScope
             using var connection = duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
 
-            var replicaTime = await NewestAsync(connection, "ag_replica_states", serverId, asOfUtc, cancellationToken);
-            var databaseTime = await NewestAsync(connection, "ag_database_replica_states", serverId, asOfUtc, cancellationToken);
+            var replicaTime = await NewestAsync(connection, "v_ag_replica_states", serverId, asOfUtc, cancellationToken);
+            var databaseTime = await NewestAsync(connection, "v_ag_database_replica_states", serverId, asOfUtc, cancellationToken);
             if (!AgReplicaScope.IsFresh(replicaTime, asOfUtc) || !AgReplicaScope.IsFresh(databaseTime, asOfUtc))
                 return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -57,7 +57,7 @@ internal static class SecondaryReplicaScope
             {
                 cmd.CommandText = @"
 SELECT ag_name, replica_server_name, role_desc, is_local
-FROM ag_replica_states
+FROM v_ag_replica_states
 WHERE server_id = $1
 AND   collection_time = $2";
                 cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -80,7 +80,7 @@ AND   collection_time = $2";
             {
                 cmd.CommandText = @"
 SELECT ag_name, database_name, is_local
-FROM ag_database_replica_states
+FROM v_ag_database_replica_states
 WHERE server_id = $1
 AND   collection_time = $2";
                 cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -109,9 +109,13 @@ AND   collection_time = $2";
     {
         using var cmd = connection.CreateCommand();
         /* The table name is a constant of this class, never input. */
-        cmd.CommandText = "SELECT MAX(collection_time) FROM " + table + " WHERE server_id = $1 AND collection_time <= $2";
+        /* The lower bound is the freshness limit: a snapshot older than that is stale and yields the empty set
+           anyway (AgReplicaScope.IsFresh), so the bound changes no answer but lets the view prune its Parquet files. */
+        cmd.CommandText = "SELECT MAX(collection_time) FROM " + table
+            + " WHERE server_id = $1 AND collection_time <= $2 AND collection_time >= $3";
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(asOfUtc, DateTimeKind.Unspecified) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(asOfUtc - AgReplicaScope.SnapshotFreshness, DateTimeKind.Unspecified) });
         var value = await cmd.ExecuteScalarAsync(cancellationToken);
         return value is DateTime at ? DateTime.SpecifyKind(at, DateTimeKind.Utc) : null;
     }

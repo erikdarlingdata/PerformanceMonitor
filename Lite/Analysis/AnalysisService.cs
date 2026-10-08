@@ -114,6 +114,15 @@ public class AnalysisService
     /// <summary>See <see cref="LastFactCount"/>: of those facts, how many scored above zero.</summary>
     public int? LastFactsScored { get; private set; }
 
+    /// <summary>
+    /// #5558: the one-sentence note naming how many databases the last pass left to the primary replica because this
+    /// node holds only a secondary copy of them in an availability group, or null when none were skipped (and when
+    /// the pass never reached the set). Carried out like <see cref="LastWindowCoverage"/>, because a short or empty
+    /// findings list cannot say it: without the note, "nothing found" reads as a clean bill of health for databases
+    /// the pass never looked at.
+    /// </summary>
+    public string? LastSecondaryReplicaNote { get; private set; }
+
     /// <param name="retentionDaysForCollector">#1757: resolves a collector's configured retention so the
     /// baseline provider can warn when a source table is retained for less than the baseline window. Optional
     /// — null simply disables that warning, which is why every existing caller keeps working unchanged.</param>
@@ -218,10 +227,6 @@ public class AnalysisService
         /* Filled once per pass at the one door every path goes through. */
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(context.ServerId);
 
-        /* #5558: the databases this node holds only as a secondary copy, at the window's end (so an AsOf pass
-           uses the role at that time). Fails open: any unknown leaves it empty. */
-        await SecondaryReplicaScope.EnsureAsync(_duckDb, context);
-
         IsAnalyzing = true;
         InsufficientDataMessage = null;
         WindowEmptyMessage = null;
@@ -230,6 +235,7 @@ public class AnalysisService
         LastCollectionFamilyCount = 0;
         LastFactCount = null;
         LastFactsScored = null;
+        LastSecondaryReplicaNote = null;
 
         try
         {
@@ -243,6 +249,13 @@ public class AnalysisService
                build + insert) carries no check on purpose — by then the expensive work is paid
                for and finishing is what preserves it. */
             context.CancellationToken.ThrowIfCancellationRequested();
+
+            /* #5558: the databases this node holds only as a secondary copy, at the window's end (so an AsOf pass
+               uses the role at that time). Fails open: any unknown leaves it empty. Inside the try and after
+               IsAnalyzing, so an abandonment (a budget that runs out while the read waits on the store lock) takes
+               the #2412/#2443 path below instead of escaping the pass, and the guard window does not widen. */
+            await SecondaryReplicaScope.EnsureAsync(_duckDb, context);
+            LastSecondaryReplicaNote = AgReplicaScope.SkippedNote(context.SecondaryReplicaDatabases);
 
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
@@ -619,7 +632,9 @@ public class AnalysisService
             TimeRangeStart = timeRangeEnd.AddHours(-1),
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            /* #5558: audit_config reads only server-level facts, so no AG read is paid for (Darling parity). */
+            SecondaryReplicaDatabases = SecondaryReplicaScope.NoneSkipped
         };
 
         try

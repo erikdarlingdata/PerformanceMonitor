@@ -148,11 +148,11 @@ public sealed class FinOpsRecommendationsSecondaryReplicaLiveTests
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
 
-        /* No snapshots: no note, and the MCP payload keeps its old shape. */
+        /* No snapshots: no note, and the MCP payload carries the field as null. */
         var (plainRows, plainNote) = await viewer.GetRecommendationsWithNoteAsync(ServerId, 1000m, ct);
         Assert.Null(plainNote);
         var plainRead = await FinOpsAsync(dataSource, ct);
-        Assert.False(plainRead.TryGetProperty("secondary_databases_note", out _));
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, plainRead.GetProperty("secondary_replica_note").ValueKind);
 
         /* A stale secondary snapshot (a collector that stopped hours ago) vouches for nothing. */
         await SeedAgAsync(scratch.ConnectionString, "SECONDARY", TimeSpan.FromHours(6), ct, "ArchiveA");
@@ -168,7 +168,7 @@ public sealed class FinOpsRecommendationsSecondaryReplicaLiveTests
         Assert.Contains(plainRows, r => r.Finding.Contains("idle database", StringComparison.Ordinal));
 
         var payload = await FinOpsAsync(dataSource, ct);
-        Assert.Equal(AgReplicaScope.SkippedNote(1), payload.GetProperty("secondary_databases_note").GetString());
+        Assert.Equal(AgReplicaScope.SkippedNote(1), payload.GetProperty("secondary_replica_note").GetString());
         Assert.DoesNotContain(payload.GetProperty("recommendations").EnumerateArray(),
             r => r.GetProperty("finding").GetString()!.Contains("idle database", StringComparison.Ordinal));
     }

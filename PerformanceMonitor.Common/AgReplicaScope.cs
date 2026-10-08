@@ -37,6 +37,11 @@ public readonly record struct AgDatabaseMembership(string AgName, string Databas
 /// SECONDARY. No rows, stale rows, a NULL role or <c>is_local</c>, RESOLVING, a standalone database and an engine
 /// without the AG views all skip nothing. The role is per group: two groups on one instance can have different
 /// primaries, so <c>server_properties.ag_replica_role</c> (one value per instance) is never used.</para>
+///
+/// <para><b>Distributed Availability Groups.</b> On a distributed AG's forwarder, a database is the local PRIMARY of
+/// its own (second-level) group and a SECONDARY under the distributed group. A database with any non-secondary local
+/// role is kept, so the forwarder skips nothing and reports the replicated findings, as a primary does. That is
+/// deliberate (fail open): do not "fix" it by treating the distributed group's secondary role as decisive.</para>
 /// </summary>
 public static class AgReplicaScope
 {

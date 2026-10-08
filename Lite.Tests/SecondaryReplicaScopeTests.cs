@@ -323,17 +323,7 @@ public sealed class SecondaryReplicaFactTests : IClassFixture<SharedDuckDbFixtur
     {
         var end = Now();
 
-        /* The local role is PRIMARY for the group. */
-        await SeedAsync(async c => { await SeedDatabasesAsync(c, end); await SeedAgAsync(c, end.AddMinutes(-1), secondaryRole: "PRIMARY"); });
-        var (primary, primaryContext) = await FactsAsync(end);
-        Assert.Empty(primaryContext.SecondaryReplicaDatabases!);
-        Assert.Equal(3, primary["DB_CONFIG"].Metadata["database_count"]);
-    }
-
-    [Fact]
-    public async Task WithNoAgRows_OrStaleOnes_NothingIsSkipped()
-    {
-        var end = Now();
+        /* No AG rows at all. */
         await SeedAsync(c => SeedDatabasesAsync(c, end));
         var (noRows, noRowsContext) = await FactsAsync(end);
         Assert.Empty(noRowsContext.SecondaryReplicaDatabases!);
@@ -344,6 +334,57 @@ public sealed class SecondaryReplicaFactTests : IClassFixture<SharedDuckDbFixtur
         var (stale, staleContext) = await FactsAsync(end);
         Assert.Empty(staleContext.SecondaryReplicaDatabases!);
         Assert.Equal(3, stale["DB_CONFIG"].Metadata["database_count"]);
+
+        /* A fresh snapshot whose local role is PRIMARY for the group. */
+        await SeedAsync(c => SeedAgAsync(c, end.AddMinutes(-1), secondaryRole: "PRIMARY"));
+        var (primary, primaryContext) = await FactsAsync(end);
+        Assert.Empty(primaryContext.SecondaryReplicaDatabases!);
+        Assert.Equal(3, primary["DB_CONFIG"].Metadata["database_count"]);
+    }
+
+    [Fact]
+    public async Task TheRoleIsReadFromTheArchive_WhenTheHotTablesHoldNoAgRows()
+    {
+        var end = Now();
+        var dir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(Path.Combine(dir, "archive"));
+        try
+        {
+            var dbPath = Path.Combine(dir, "test.duckdb");
+            using var initializer = new DuckDbInitializer(dbPath);
+            await initializer.InitializeAsync();
+
+            /* The AG snapshot an AsOf or compare window reaches once archival has moved it to Parquet (after 7 days, or
+               all of it at the 512 MB reset): the hot tables are empty afterwards, only the v_ views still see it. */
+            var at = end.AddDays(-10);
+            using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+            {
+                await connection.OpenAsync(TestContext.Current.CancellationToken);
+                await SeedAgAsync(connection, at);
+                foreach (var table in new[] { "ag_replica_states", "ag_database_replica_states" })
+                {
+                    var parquet = Path.Combine(dir, "archive", "20260101_0000_" + table + ".parquet").Replace("\\", "/");
+                    await ExecAsync(connection, $"COPY {table} TO '{parquet}' (FORMAT PARQUET)");
+                    await ExecAsync(connection, $"DELETE FROM {table}");
+                }
+            }
+
+            await initializer.CreateArchiveViewsAsync();
+
+            var archived = await SecondaryReplicaScope.ReadAsync(initializer, ServerId, at.AddMinutes(1), CancellationToken.None);
+            Assert.Equal(["SecDb"], archived.ToArray());
+
+            /* A bare-table read finds nothing there, which is the bug this pins: it would have skipped nothing. */
+            using var bare = new DuckDBConnection($"Data Source={dbPath}");
+            await bare.OpenAsync(TestContext.Current.CancellationToken);
+            using var count = bare.CreateCommand();
+            count.CommandText = "SELECT COUNT(*) FROM ag_replica_states";
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
     }
 
     [Fact]
@@ -392,10 +433,12 @@ public sealed class SecondaryReplicaFactTests : IClassFixture<SharedDuckDbFixtur
         await SeedAsync(async c =>
         {
             await SeedAgAsync(c, end.AddMinutes(-1));
-            foreach (var (db, grownMb) in new[] { ("SecDb", 900m), ("StandDb", 500m) })
+            /* SecDb also gains the largest lock-wait time, so the contention anomaly (node-local, never filtered) has a
+               secondary-copy database to name. */
+            foreach (var (db, grownMb, lockWaitMs) in new[] { ("SecDb", 900m, 900_000L), ("StandDb", 500m, 200_000L) })
             {
                 await SeedObjectAsync(c, end.AddDays(-1), db, 100m);
-                await SeedObjectAsync(c, end, db, 100m + grownMb);
+                await SeedObjectAsync(c, end, db, 100m + grownMb, lockWaitMs);
             }
             for (var d = 1; d <= 5; d++)
                 await ExecAsync(c, "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1,$2,$3,'n',$2,10,0)",
@@ -409,6 +452,9 @@ public sealed class SecondaryReplicaFactTests : IClassFixture<SharedDuckDbFixtur
 
         var growth = Assert.Single(anomalies, f => f.Key == "ANOMALY_OBJECT_GROWTH");
         Assert.Equal("StandDb", growth.DatabaseName);
+
+        var contention = Assert.Single(anomalies, f => f.Key == "ANOMALY_OBJECT_CONTENTION");
+        Assert.Equal("SecDb", contention.DatabaseName);
     }
 
     private static Task SeedRegressionAsync(DuckDBConnection c, DateTime end, string db, long planId, string hash, long avgCpu,
@@ -421,12 +467,12 @@ INSERT INTO query_store_stats
 VALUES ($1,$2,$3,'n',$4,101,$5,'Regular',$6,$7,'SELECT 1','0xQH',100,$8,$8,$9,false,0)",
             Interlocked.Decrement(ref s_id), end, ServerId, db, planId, firstExec, lastExec, avgCpu, hash);
 
-    private static Task SeedObjectAsync(DuckDBConnection c, DateTime at, string db, decimal reservedMb) =>
+    private static Task SeedObjectAsync(DuckDBConnection c, DateTime at, string db, decimal reservedMb, long lockWaitMs = 0) =>
         ExecAsync(c, @"
 INSERT INTO index_object_stats
     (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id,
      schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows,
      user_seeks, user_scans, user_lookups, user_updates, row_lock_wait_in_ms, index_lock_promotion_count)
-VALUES ($1,$2,$3,'n',$4,$5,7,'dbo',100,'Big',1,'PK_Big','CLUSTERED',$6,$6,1000,0,0,0,0,0,0)",
-            Interlocked.Decrement(ref s_id), at, ServerId, at.AddDays(-10), db, reservedMb);
+VALUES ($1,$2,$3,'n',$4,$5,7,'dbo',100,'Big',1,'PK_Big','CLUSTERED',$6,$6,1000,0,0,0,0,$7,0)",
+            Interlocked.Decrement(ref s_id), at, ServerId, at.AddDays(-10), db, reservedMb, lockWaitMs);
 }

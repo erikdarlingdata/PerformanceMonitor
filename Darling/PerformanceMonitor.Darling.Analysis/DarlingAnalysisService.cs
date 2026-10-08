@@ -222,6 +222,15 @@ public sealed class DarlingAnalysisService
     public int? LastFactsScored { get; private set; }
 
     /// <summary>
+    /// #5558: the one-sentence note naming how many databases the last pass left to the primary replica because this
+    /// node holds only a secondary copy of them in an availability group, or null when none were skipped (and when
+    /// the pass never reached the set). Carried out like <see cref="LastWindowCoverage"/>, because a short or empty
+    /// findings list cannot say it: without the note, "nothing found" reads as a clean bill of health for databases
+    /// the pass never looked at.
+    /// </summary>
+    public string? LastSecondaryReplicaNote { get; private set; }
+
+    /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
     /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
     /// catch and the classifier said it was not an abandonment.
@@ -386,6 +395,7 @@ public sealed class DarlingAnalysisService
         LastFactCount = null;
         LastFactsScored = null;
         EndedEarlyAs = null;
+        LastSecondaryReplicaNote = AgReplicaScope.SkippedNote(context.SecondaryReplicaDatabases); /* #5558 */
 
         try
         {

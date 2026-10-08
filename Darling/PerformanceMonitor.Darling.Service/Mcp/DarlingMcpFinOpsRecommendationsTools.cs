@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpFinOpsRecommendationsTools
 {
     private const string RecommendationsGuide =
-        " est_savings_usd_month is a rough monthly USD estimate rounded to cents; null when the check gives none or no monthly cost is set (monthly_cost_usd null, cost_reason 'monthly cost not set'). severity and confidence are High, Medium or Low. finding and detail are English text with numbers in invariant format (1,234.5; a percent reads '20 %'). skipped_checks names each check whose read failed: its rows are absent, not clean. An empty recommendations list with no skipped_checks means no check found anything. secondary_databases_note appears only when this server holds a secondary copy of some database in an availability group: idle, dev/test, TDE and compression findings leave those databases out (the primary reports them), and the low IO latency finding keeps them.";
+        " est_savings_usd_month is a rough monthly USD estimate rounded to cents; null when the check gives none or no monthly cost is set (monthly_cost_usd null, cost_reason 'monthly cost not set'). severity and confidence are High, Medium or Low. finding and detail are English text with numbers in invariant format (1,234.5; a percent reads '20 %'). skipped_checks names each check whose read failed: its rows are absent, not clean. An empty recommendations list with no skipped_checks means no check found anything. secondary_replica_note is null unless this server holds a secondary copy of some database in an availability group, and then names how many were left out: idle, dev/test, TDE and compression findings leave those databases out (the primary reports them), and the low IO latency finding keeps them.";
 
     [McpServerTool(Name = "get_finops_recommendations"), Description(
         "FinOps recommendations for one server: the cost and right-sizing findings the desktop Recommendations tab shows, High severity first. Mixed fixed windows ending now (CPU 24 hours and 7 days; memory, jobs and file I/O 7 days; edition and database facts from the latest snapshot); UTC; no hours_back, limit or as_of. At most about 21 rows. <<GUIDE>>" + RecommendationsGuide)]
@@ -108,18 +108,17 @@ public sealed class DarlingMcpFinOpsRecommendationsTools
         string? secondaryNote = null)
     {
         var hasCost = monthly > 0m;
-        /* #5558: secondary_databases_note is written only when the node holds a secondary copy of some database, so every other
-           server's payload keeps its old shape. It sits after skipped_checks, before the rows. */
-        var envelope = new Dictionary<string, object?>
+        return new
         {
-            ["server"] = server,
-            ["monthly_cost_usd"] = hasCost ? monthly : (decimal?)null,
-            ["cost_reason"] = hasCost ? null : "monthly cost not set",
-            ["recommendation_count"] = rows.Count,
-            ["skipped_checks"] = skipped,
+            server,
+            monthly_cost_usd = hasCost ? monthly : (decimal?)null,
+            cost_reason = hasCost ? null : "monthly cost not set",
+            recommendation_count = rows.Count,
+            skipped_checks = skipped,
+            /* #5558: the same field name and the same rule as every other MCP note (get_analysis_findings, analyze_server,
+               compare_analysis): always present, null when this node holds no secondary copy. */
+            secondary_replica_note = secondaryNote,
+            recommendations = rows.Select(RecommendationRow).ToList(),
         };
-        if (secondaryNote != null) envelope["secondary_databases_note"] = secondaryNote;
-        envelope["recommendations"] = rows.Select(RecommendationRow).ToList();
-        return envelope;
     }
 }
