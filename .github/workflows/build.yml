@@ -855,10 +855,41 @@ jobs:
         if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
+      # #5459 cut 3b: the PostgreSQL shards run EVERY Darling.Tests class, with a live store, whenever the Darling
+      # gate matches (the same .github/darling-paths-filter.yml the darling-pg job reads). This no-store pass would
+      # repeat their non-live classes, so while the shards run it keeps only the Stage=Guard classes. Where the gate
+      # does not match (a Lite-only change, a root build file) and on a release it still runs the whole suite.
+      # .github/scripts/ci-select.py holds the rule (darling_scope); the replay of the failure corpus checks it.
+      - name: Detect the Darling PostgreSQL gate
+        id: darling-gate
+        if: github.event_name != 'release' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true')
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: .github/darling-paths-filter.yml
+
+      - name: Decide the Darling test scope
+        id: darling-scope
+        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GATE: ${{ steps.darling-gate.outputs.darling }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/ci-select.py darling-scope --event "${EVENT_NAME}" --gate "${GATE:-false}" | tee -a "$GITHUB_OUTPUT"
+
       - name: Run Darling tests
         id: darling-tests
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
+        env:
+          DARLING_SCOPE_FILTER: ${{ steps.darling-scope.outputs.filter }}
+        shell: pwsh
+        run: |
+          # An empty filter is the whole suite; `-trait Stage=Guard` is the Guard stage alone.
+          $scopeArgs = @($env:DARLING_SCOPE_FILTER -split ' ' | Where-Object { $_ })
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @scopeArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease fails
       # while any statement-column census entry or watched writer is pending, in every normal Darling

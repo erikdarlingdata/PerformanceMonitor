@@ -2820,13 +2820,13 @@ public class CrossAppGuardCiGateTests
             Assert.Contains(flag, scope, StringComparison.Ordinal);
         }
 
-        var script = File.ReadAllText(Path.Combine(RepoRoot(), ".github", "scripts", "ci-select.py"));
+        var script = File.ReadAllText(Path.Combine(RepoRoot(), ".github", "scripts", "ci-select.py")).Replace("\r\n", "\n");
         var ladder = new[]
         {
             "if lite or core or root or linked:\n        return \"full\"",
             "if reads and event != \"pull_request\":\n        return \"full\"",
             "if reads:\n        return \"reads\"",
-            "return \"none\"",
+            "    return \"reads\"\n    return \"none\"",
         };
         var position = -1;
         foreach (var rung in ladder)

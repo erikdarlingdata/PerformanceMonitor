@@ -177,6 +177,20 @@ class Rules:
 # The decisions.
 # ---------------------------------------------------------------------------------------------------------
 
+def darling_scope(event: str, runs: bool, shards_run: bool) -> str:
+    """What the build job's no-store "Run Darling tests" step runs: full, guard (only the Stage=Guard classes) or none.
+
+    The PostgreSQL shards run every Darling.Tests class, with a live store, whenever the Darling gate
+    (.github/darling-paths-filter.yml) matches. The no-store pass would repeat their non-live classes, so while the
+    shards run it keeps only the Guard stage (cut 3b of #5459; the replay finds no failing class it stops covering).
+    A release always runs the whole suite."""
+    if not runs:
+        return "none"
+    if event != "release" and shards_run:
+        return "guard"
+    return "full"
+
+
 def lite_scope(event: str, lite: bool, core: bool, root: bool, reads: bool, linked: bool) -> str:
     """How much of the Lite suite a pull request runs: full, reads (only Reads=Darling classes) or none."""
     if lite or core or root or linked:
@@ -216,7 +230,7 @@ def decide(files: list[str], event: str, rules: Rules) -> dict:
         "build_installer_tests": build_installer,
         "build_dashboard_tests": build_dashboard,
         "build_darling_tests": build_darling,
-        "darling_scope": "full" if build_darling else "none",
+        "darling_scope": darling_scope(event, build_darling, pg_run),
         "darling_pg": pg_run,
         "darling_linux": release or a["gate_darling"],
         "lite_mode": mode,
@@ -287,7 +301,9 @@ def class_selected(suite: str, traits: set[str], d: dict) -> bool:
     if suite == "darling":
         if guard and d["guard_run"]:
             return True
-        return d["build_darling_tests"] or d["darling_pg"] or d["tree_guards"]
+        # The build job's no-store pass runs the whole suite (full) or only the Guard stage; the shards run every class.
+        return d["darling_scope"] == "full" or d["darling_pg"] or d["tree_guards"] \
+            or (d["darling_scope"] == "guard" and guard)
     if suite == "lite":
         if guard and d["guard_run"]:
             return True
@@ -377,6 +393,10 @@ def main(argv: list[str]) -> int:
     for k in ("lite", "core", "root", "reads", "linked"):
         ls.add_argument(f"--{k}", default="false")
 
+    ds = sub.add_parser("darling-scope", help="what the build job's no-store Darling pass runs (workflow step)")
+    ds.add_argument("--event", required=True)
+    ds.add_argument("--gate", default="false", help="the Darling PostgreSQL gate's answer (darling-paths-filter.yml)")
+
     dc = sub.add_parser("decide", help="print every decision for a list of changed files")
     dc.add_argument("--event", default="pull_request")
     dc.add_argument("files", nargs="*")
@@ -390,6 +410,11 @@ def main(argv: list[str]) -> int:
         run = mode == "full" or (mode == "reads" and args.shard == "0")
         print(f"mode={mode}")
         print(f"run={'true' if run else 'false'}")
+        return 0
+    if args.cmd == "darling-scope":
+        scope = darling_scope(args.event, True, args.event != "release" and _bool(args.gate))
+        print(f"scope={scope}")
+        print("filter=" + ("-trait Stage=Guard" if scope == "guard" else ""))
         return 0
     if args.cmd == "decide":
         print(json.dumps(decide(args.files, args.event, Rules()), indent=1))
