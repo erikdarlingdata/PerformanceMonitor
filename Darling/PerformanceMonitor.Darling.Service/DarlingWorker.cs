@@ -11605,19 +11605,25 @@ AND   j.hypertable_name = '{relation}'", connection))
             await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
         }
 
+        /* #5495: the eighth tenant, same contract — its own method, its own catch-all, one awaited statement. The hourly
+           PostgreSQL I/O rollup needs no TimescaleDB (its tables are plain), so it sits outside the gate and runs on every
+           store shape. It sits BEFORE the module-map refresh and the PLAN_REGRESSION builder, not after them: the pins keep
+           the plan-regression builder, which can run up to a 10-minute tick, as the last await, with the refresh directly
+           before it, so the rollup (budget-bounded to 2 minutes) goes ahead of both and a fault in it skips nothing. */
+        await BuildPgIoStatsHourlyAsync(stoppingToken);
+
         /* #4605: the sixth tenant, same contract — its own method, its own catch-all, one awaited statement.
            It sits AFTER the gate rather than inside it because it needs no TimescaleDB: procedure_stats and
            module_map are plain tables on every store shape, and the daily refresh already runs on all of them.
-           It comes last so a store still being converged, or a summary builder that ran out its budget, is
-           never made to wait behind it, and a fault here skips nothing above. */
+           It comes after the gate and the I/O rollup so a store still being converged, or a summary builder that ran
+           out its budget, is never made to wait behind it, and a fault here skips nothing above. */
         await RefreshModuleMapRecentAsync(stoppingToken);
 
         /* #5448: the seventh tenant, same contract — its own method, its own catch-all, one awaited statement, LAST.
            The PLAN_REGRESSION per-day totals builder needs no TimescaleDB either (collect.plan_regression_daily and
-           its built table are plain tables), so it sits outside the gate, after the module-map refresh: a builder
+           its built table are plain tables), so it sits outside the gate, directly after the module-map refresh: a builder
            that runs out its budget never makes the cheaper tenants above it wait, and a fault here skips nothing. */
         await BuildPlanRegressionDailyAsync(stoppingToken);
-        await BuildPgIoStatsHourlyAsync(stoppingToken);
     }
 
     /// <summary>

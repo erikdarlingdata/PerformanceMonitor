@@ -146,6 +146,24 @@ public sealed class PgIoStatsHourlyTests
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         Assert.Contains("await BuildPgIoStatsHourlyAsync(stoppingToken);", worker, StringComparison.Ordinal);
         Assert.Contains("PgIoStatsHourlyBuilder.RunTickAsync(", worker, StringComparison.Ordinal);
+        /* Its place in the tick: awaited once, outside the TimescaleDB gate, and BEFORE the module-map refresh. The plan-regression builder
+           (up to a 10-minute tick) stays the last await with the refresh directly before it - the pins in DarlingModuleMapRecentRefreshLiveTests
+           and PlanRegressionDailyBuilderLiveTests say so - so the rollup must not be appended after it. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(worker);
+        var tickStart = code.IndexOf("private async Task RunStoreMaintenanceTickAsync(CancellationToken stoppingToken)", StringComparison.Ordinal);
+        Assert.True(tickStart >= 0, "could not locate RunStoreMaintenanceTickAsync");
+        var tickEnd = code.IndexOf("private async Task RefreshModuleMapRecentAsync(CancellationToken stoppingToken)", tickStart, StringComparison.Ordinal);
+        Assert.True(tickEnd > tickStart, "could not bound RunStoreMaintenanceTickAsync");
+        var tick = code[tickStart..tickEnd];
+        const string Rollup = "await BuildPgIoStatsHourlyAsync(stoppingToken);";
+        const string Refresh = "await RefreshModuleMapRecentAsync(stoppingToken);";
+        Assert.Equal(1, tick.Split(Rollup).Length - 1);
+        Assert.Equal(1, code.Split(Rollup).Length - 1);
+        var rollupAt = tick.IndexOf(Rollup, StringComparison.Ordinal);
+        var refreshAt = tick.IndexOf(Refresh, StringComparison.Ordinal);
+        Assert.True(refreshAt > rollupAt, "the I/O rollup is awaited before the module-map refresh");
+        Assert.True(string.IsNullOrWhiteSpace(tick[(rollupAt + Rollup.Length)..refreshAt]), "nothing sits between the I/O rollup and the module-map refresh");
+        Assert.True(rollupAt > tick.IndexOf("else", StringComparison.Ordinal), "the I/O rollup sits after the gated if/else, outside the TimescaleDB gate");
 
         var retention = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs");
         Assert.Contains("PgIoStatsHourlyBuilder.PruneSql", retention, StringComparison.Ordinal);
