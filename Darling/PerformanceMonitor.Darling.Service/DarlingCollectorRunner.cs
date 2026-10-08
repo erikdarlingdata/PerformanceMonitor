@@ -7142,16 +7142,22 @@ RETURNING s.state_key";
     /// Set on the throttled path, which runs for every database-scoped collector on every cycle. Only
     /// forming the verdict is worth an Information line; re-reading it is not.
     /// </param>
-    private List<string> FallbackDatabaseList(ServerRuntime server, string? targetDb, string reason, bool quiet = false)
+    internal List<string> FallbackDatabaseList(ServerRuntime server, string? targetDb, string reason, bool quiet = false)
     {
         var fallback = SingleDbOrEmpty(targetDb);
 
         if (fallback.Count == 0)
         {
+            /* #5498: the firewall comes first. 40615 means the server's firewall did not allow the client's IP
+               address, which a server-level block causes; a missing database setting never does. The
+               set-a-database advice is only the fix for the master-only case (a login allowed into a user
+               database but not master). Text only: the fallback itself is unchanged. */
             throw new InvalidOperationException(
                 $"{reason}, and this connection has no target database to fall back to (it resolves to " +
-                $"master). Set a database for '{server.Config.DisplayName}' so database-scoped collectors " +
-                $"have something to read.");
+                $"master). If the error is 40615, the Azure firewall did not allow this client's IP address: " +
+                $"add a firewall rule for it, either a server-level rule or a database-level rule in master. If this login can open " +
+                $"a user database but not master, set a database for '{server.Config.DisplayName}' so " +
+                $"database-scoped collectors have something to read.");
         }
 
         if (quiet)

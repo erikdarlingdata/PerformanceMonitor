@@ -349,7 +349,7 @@ public sealed class DarlingSelfAlertTests
     /* ---------------- collection-stopped edge ---------------- */
 
     [Fact]
-    public async Task CollectionStopped_FiresOnce_ThenCooldownSuppresses_ThenReFires()
+    public async Task CollectionStopped_FiresOnce_AndTheCooldownDoesNotRepeatIt()
     {
         var h = new Harness();
         var e = h.Build();
@@ -367,10 +367,11 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* After the cooldown the standing condition re-fires. */
+        /* #5489: a state alert. The cooldown passing does not repeat a standing outage (connection_refire_minutes
+           does, and it is off here); this pinned a repeat every cooldown before. */
         h.Now = h.Now.AddMinutes(5);
         await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: true, "no recent collection", Ct);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
