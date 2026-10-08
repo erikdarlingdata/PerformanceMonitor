@@ -17,8 +17,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /* #1776 own-store: this class mints its own scratch database through ScratchPostgres and touches nothing on the
-   shared one. The managed role names are cluster-wide, so it shares the live-postgres collection with the other
-   classes that provision them, and it skips when a set of those names already exists on the rig. */
+   shared one. The managed role names are cluster-wide, so it runs in the pg-cluster-roles collection (#5602), alone,
+   with the other classes that provision them, and it skips when a set of those names already exists on the rig. */
 
 /// <summary>
 /// The store's own password rules, as the roles that meet them. The shipped provisioning batch runs whole on a scratch
@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// to neither, so a configuration-file seed and --add-server keep working, and a row already in the table is never
 /// touched. Each scenario runs against the managed batch's text and against the self-managed script's.
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class StoreServerPasswordRulesLiveTests
 {
     private const string ReferenceSentence = "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
