@@ -71,8 +71,10 @@ internal static class FinOpsServerChoice
     /// <see cref="PostgresNotCollected"/> for every sub-tab that reads one server's SQL Server data; a sub-tab that
     /// reads the whole fleet (<paramref name="crossServer"/>, Server Inventory) always runs.
     /// </summary>
-    internal static string? NotCollectedLine(DarlingServer? server, bool crossServer) =>
-        !crossServer && server is { IsPostgres: true } ? PostgresNotCollected : null;
+    internal static string? NotCollectedLine(DarlingServer? server, bool crossServer)
+    {
+        return !crossServer && server != null && server.IsPostgres ? PostgresNotCollected : null;
+    }
 
     /// <summary>The reader's <c>include_removed</c> flag for the Server Inventory "Show removed servers" checkbox: on only when checked, off when unchecked or unset.</summary>
     internal static bool IncludeRemoved(bool? showRemovedChecked) => showRemovedChecked == true;
