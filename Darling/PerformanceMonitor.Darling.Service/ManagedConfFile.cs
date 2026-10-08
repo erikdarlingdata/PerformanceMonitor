@@ -95,6 +95,13 @@ internal static class ManagedConfFile
     /// Every value <see cref="Render"/> needs, gathered by the caller (<c>DarlingManagedPostgres</c>, which
     /// alone holds the Windows-only readers) so this type and <see cref="Render"/> stay pure and portable: no
     /// P/Invoke, no file I/O, callable from a plain unit test with literal numbers.
+    ///
+    /// <para><paramref name="InForceMaxWalSizeMb"/> (#5459) is the <c>max_wal_size</c> the file already on disk
+    /// carries, in whole MB, or null when there is no such file, it is a hand edit, or it has no whole-MB figure.
+    /// <see cref="RenderBody"/> keeps that rung while it is still within the verdict tolerance of the free-space
+    /// reading (<see cref="DarlingManagedPostgres.IsWalSizeWithinDriftOf"/>), so a volume standing next to a
+    /// ladder edge does not render a different body from one start to the next. It is an input rather than
+    /// something <see cref="RenderBody"/> reads, to keep the render pure: the same inputs, the same bytes.</para>
     /// </summary>
     internal readonly record struct RenderInputs(
         int FormulaVersion,
@@ -108,7 +115,8 @@ internal static class ManagedConfFile
         long DataVolumeTotalBytes,
         bool DataVolumeAuthoritative,
         int Port,
-        string? EffectivePreloadList);
+        string? EffectivePreloadList,
+        long? InForceMaxWalSizeMb = null);
 
     /// <summary>One parse of an existing <see cref="FileName"/>: whether it carries a recognizable
     /// <see cref="BodyHashPrefix"/> line at all, the hash it declares, and the body text that line's hash is
@@ -206,7 +214,7 @@ internal static class ManagedConfFile
         if (inputs.DataVolumeAuthoritative)
         {
             blocks.Append(DarlingManagedPostgres.BuildWalSizingConfAppend(
-                inputs.DataVolumeFreeBytes, inputs.DataVolumeTotalBytes, inputs.PostgresMajor));
+                inputs.DataVolumeFreeBytes, inputs.DataVolumeTotalBytes, inputs.PostgresMajor, inputs.InForceMaxWalSizeMb));
         }
 
         /* v13 (#3899): the preload list is the MERGE of what's in force plus timescaledb and
@@ -386,6 +394,33 @@ internal static class ManagedConfFile
         }
 
         return new ParsedManagedConf(false, null, normalized);
+    }
+
+    /// <summary>
+    /// The <c>max_wal_size</c> an existing <see cref="FileName"/> carries, in whole MB (#5459), for
+    /// <see cref="RenderInputs.InForceMaxWalSizeMb"/>. Null for a hand edit (<see cref="IsHandEdited"/>), which
+    /// never has its values carried forward, and for a file with no <c>max_wal_size</c> line or one that is not
+    /// a whole number of megabytes (v4's fixed <c>4GB</c>, which the file carries when no disk reading was
+    /// authoritative).
+    /// </summary>
+    internal static long? ReadInForceMaxWalSizeMb(string existingFileText)
+    {
+        if (IsHandEdited(existingFileText))
+        {
+            return null;
+        }
+
+        var (_, values) = ReduceToLastOccurrence(ParseExisting(existingFileText).Body);
+        if (!values.TryGetValue("max_wal_size", out var value))
+        {
+            return null;
+        }
+
+        var match = System.Text.RegularExpressions.Regex.Match(
+            value, @"^(\d{1,9})MB$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return match.Success
+            ? long.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
+            : null;
     }
 
     /// <summary>
