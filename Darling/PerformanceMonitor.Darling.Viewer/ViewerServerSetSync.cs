@@ -37,8 +37,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// leaves it too.</para>
 ///
 /// <para><b>A rebuild keeps what each picker shows.</b> <see cref="PickerSelectionAfterReload"/> picks the server
-/// that the Recommendations and FinOps pickers show after their lists are rebuilt. The reload calls it for both,
-/// and the FinOps tab calls it when it re-reads the registry on opening.</para>
+/// that the Recommendations picker shows after its list is rebuilt. The FinOps picker follows the same keep-or-sidebar
+/// rule through <see cref="FinOpsServerChoice.Selection"/>, which also skips PostgreSQL targets when it must choose.</para>
 /// </summary>
 internal static class ViewerServerSetSync
 {

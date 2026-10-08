@@ -97,7 +97,7 @@ public partial class FinOpsTab : UserControl
     /// selector). Suppresses SelectionChanged during population. With <paramref name="keepSelection"/>, the
     /// selector keeps its server while that server is in the list; otherwise, or once it is gone, it takes
     /// <paramref name="sidebarServerId"/>, the shell's sidebar server, as the initial load does
-    /// (<see cref="ViewerServerSetSync.PickerSelectionAfterReload"/>). The shell drives the first load once the
+    /// (<see cref="FinOpsServerChoice.Selection"/>: the same keep-or-sidebar rule as the other pickers, but it never falls to a PostgreSQL target while a SQL Server target is listed). The shell drives the first load once the
     /// tab becomes visible.
     /// </summary>
     public void SetServers(IReadOnlyList<DarlingServer> servers, int? sidebarServerId, bool keepSelection = true)
