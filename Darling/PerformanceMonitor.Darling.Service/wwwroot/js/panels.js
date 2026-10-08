@@ -1080,10 +1080,6 @@ export function navigateServer(serverName) {
   location.hash = "#/server/" + encodeURIComponent(serverName);
 }
 
-/**
- * Map a collector/status STRING (already computed server-side) to a severity CSS class — this is coloring a
- * pre-computed label, not re-deriving a band from raw metrics (R1: the browser never re-computes thresholds).
- */
 /** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in
     name order: the order a person reading the grid wants, instead of A to Z. A new array; the rows are not changed. */
 export function worstFirst(rows) {
@@ -1111,6 +1107,10 @@ export function newestFirst(key) {
       .map((x) => x.row);
 }
 
+/**
+ * Map a collector/status STRING (already computed server-side) to a severity CSS class — this is coloring a
+ * pre-computed label, not re-deriving a band from raw metrics (R1: the browser never re-computes thresholds).
+ */
 export function statusToSev(status) {
   switch (String(status || "").toUpperCase()) {
     case "HEALTHY":
