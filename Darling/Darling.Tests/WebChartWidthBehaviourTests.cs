@@ -337,6 +337,9 @@ public sealed class WebChartWidthBehaviourTests
             Assert.All(Labels(name), l => Assert.Matches(@"^\d\d:\d\d [AP]M$", l));
         }
 
+        // the width estimate counts the zone suffix: the same window and width carry fewer, wider-spaced labels with the zone
+        Assert.True(Labels("fallBack600").Length < Labels("sameOffset600").Length, "the zone suffix did not thin the labels at 600 px");
+
         foreach (var width in new[] { 360, 600, 2000 })
         {
             var fit = d.GetProperty("fit" + width);
