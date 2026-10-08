@@ -214,4 +214,19 @@ public sealed class WebRenderSettleTests
         Assert.True(guard > tick, "schedulerTick lost its hidden-or-paused return");
         Assert.True(settle < guard, "the settle check must run before the hidden-or-paused return, or a render that finishes there never settles");
     }
+
+    /// <summary>Review round (L9): the footer's "Updated" time moves only when the render's reads settled without an error. A poll
+    /// whose reads failed keeps the last good time (the red strip shows the failure); the next clean poll stamps again.</summary>
+    [Fact]
+    public void AFailedPoll_KeepsTheLastGoodUpdatedTime_AndACleanOneMovesIt()
+    {
+        if (!TryRun("failedPoll", out var run)) return;
+
+        var first = run.GetProperty("first").GetProperty("pageUpdatedAt").GetInt64();
+        var failed = run.GetProperty("failed").GetProperty("pageUpdatedAt").GetInt64();
+        var recovered = run.GetProperty("recovered").GetProperty("pageUpdatedAt").GetInt64();
+        Assert.True(first > 0);
+        Assert.Equal(first, failed);
+        Assert.True(recovered > first);
+    }
 }

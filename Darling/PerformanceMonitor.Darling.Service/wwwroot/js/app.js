@@ -36,7 +36,7 @@
  * list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, isSessionExpired, onSessionExpired } from "./util.js";
+import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, readErrorCount, isSessionExpired, onSessionExpired } from "./util.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
@@ -558,13 +558,19 @@ function markPageRenderStart(routeName, isPoll) {
   }
   pageRendering = true;
   pageRenderStart = Date.now();
+  pageRenderErrorsAtStart = readErrorCount();
   pageNextRefreshAt = Infinity;
 }
+
+/* The read-error count when the current render began; a render whose reads raised it ended with a red strip. */
+let pageRenderErrorsAtStart = 0;
 
 function settlePageRender(now) {
   pageRendering = false;
   pageLastRenderMs = now - pageRenderStart;
-  notePageUpdated(now);
+  /* The footer says the page is current only when this render's reads settled without an error: a poll that failed keeps the last
+     good time, and the red strip on the page is the failure's own notice. */
+  if (readErrorCount() === pageRenderErrorsAtStart) notePageUpdated(now);
   scheduleNextPageRefresh(now);
 }
 

@@ -124,4 +124,46 @@ public sealed class ViewSavedServerScopeTests
         Assert.Equal("sql2025", r.GetProperty("panelServerReadPanelsIgnored").GetString());
         Assert.Contains("Showing your pick instead of SQL2025", r.GetProperty("noteOnOther").GetString());
     }
+
+    // ---- review round (L6, L7): an explicit server variable decides first; "your pick" only when the reader picked; one eq only ----
+
+    [Theory]
+    [InlineData("panelSeedVariableAll")]
+    [InlineData("panelSeedVariableReference")]
+    [InlineData("panelSeedVariableUnknown")]
+    public void AnExplicitServerVariable_AllIncluded_DecidesBeforeThePanelServerSeeds(string scenario)
+    {
+        if (!TryRun(out var r)) return;
+        Assert.Equal("All", r.GetProperty(scenario).GetString());
+        // a variable of another dimension is not a server variable: the panels' server still seeds
+        Assert.Equal(new[] { "sql2025" }, Names(r.GetProperty("panelSeedOtherDimensionVariable")));
+    }
+
+    [Fact]
+    public void TheNoteSaysYourPick_OnlyWhenTheReaderPicked_AndNamesTheViewsOwnSettingOtherwise()
+    {
+        if (!TryRun(out var r)) return;
+        Assert.Contains("Showing your pick instead of SQL2025", r.GetProperty("noteOnOther").GetString());
+        var variableNote = r.GetProperty("noteOnOtherNotPicked").GetString()!;
+        Assert.DoesNotContain("your pick", variableNote, System.StringComparison.Ordinal);
+        Assert.Contains("this view's own setting", variableNote, System.StringComparison.Ordinal);
+        Assert.Contains("SQL2025", variableNote, System.StringComparison.Ordinal);
+
+        var flags = r.GetProperty("pickedFlags");
+        Assert.False(flags.GetProperty("fresh").GetBoolean());
+        Assert.False(flags.GetProperty("variable").GetBoolean());
+        Assert.True(flags.GetProperty("remembered").GetBoolean());
+        Assert.False(flags.GetProperty("rememberedHoursOnly").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("panelServerEqPlusIn")]
+    [InlineData("panelServerEqPlusNeq")]
+    public void APanelWithAnyServerFilterBesidesTheOneEq_HasNoPanelServer(string scenario)
+    {
+        if (!TryRun(out var r)) return;
+        Assert.Equal(JsonValueKind.Null, r.GetProperty(scenario).ValueKind);
+        // a filter on another dimension beside the eq is fine
+        Assert.Equal("sql2025", r.GetProperty("panelServerEqPlusOtherDimension").GetString());
+    }
 }
