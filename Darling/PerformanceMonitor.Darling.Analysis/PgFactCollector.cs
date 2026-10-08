@@ -315,6 +315,7 @@ public sealed partial class PgFactCollector : IFactCollector
         PlanRegressionSql,
         PlanRegressionTableSql,
         PlanRegressionDailySql,
+        PlanRegressionMixedSql,
         BadActorSql,
         PerfmonSql,
         MemoryClerkSql,

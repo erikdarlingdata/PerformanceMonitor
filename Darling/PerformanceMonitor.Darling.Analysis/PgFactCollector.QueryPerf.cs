@@ -308,7 +308,7 @@ ORDER BY worker_ratio DESC";
     /// slice, then <c>plan_agg</c> over it. <see cref="PlanRegressionSuffix"/> is shared with
     /// <see cref="PlanRegressionTableSql"/>, so the two reads cannot drift above <c>plan_agg</c>.
     /// </summary>
-    private const string PlanRegressionRawPrefix = @"
+    private const string PlanRegressionRawDedupedCte = @"
 WITH deduped AS
 (
     -- Collapse incremental re-collections of the same open runtime-stats interval:
@@ -379,7 +379,13 @@ WITH deduped AS
     AND   collection_time >= $3
     GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
 ),
-plan_agg AS
+";
+
+    /// <summary>
+    /// <c>plan_agg</c> over <c>deduped</c> (the raw prefix's second half, byte-identical, split off for #5513): the raw
+    /// read and <see cref="PlanRegressionMixedSql"/> both end in it, so the two cannot drift.
+    /// </summary>
+    private const string PlanRegressionPlanAggOverDeduped = @"plan_agg AS
 (
     -- Execution-weighted per-exec cost per plan_id, per replica. Keeping replica_role in the grain all
     -- the way down is what makes the wider dedup key an improvement rather than a blend: were it dropped
@@ -399,6 +405,110 @@ plan_agg AS
         MAX(force_failure_count) AS force_failure_count
     FROM deduped
     GROUP BY database_name, query_id, plan_id, replica_role
+),
+";
+
+    private const string PlanRegressionRawPrefix = PlanRegressionRawDedupedCte + PlanRegressionPlanAggOverDeduped;
+
+    /// <summary>
+    /// PLAN_REGRESSION over the table for the part of the window its coverage claim holds and raw rows for the rest
+    /// (#5513), chosen by <see cref="QueryStoreIntervalLatest.DecideSource"/> when the table alone is refused
+    /// (<see cref="QueryStoreIntervalLatest.UseTable"/>) but the table still speaks for most of the window. It was 46% of
+    /// a 43-server store's passes: each of them dedups the whole 15-day raw slice, 48,000 blocks and 8 seconds a call,
+    /// for a window the table already holds all but the last day or two of.
+    ///
+    /// <para><b>The same function of the same snapshots as <see cref="PlanRegressionSql"/>.</b> <c>deduped</c> groups two
+    /// sets of snapshots TOGETHER by the raw read's own key and picks the newest of each group by the raw read's own order,
+    /// <c>(collection_time DESC, execution_count DESC)</c>: the raw snapshots the table does not stand in for, and the table
+    /// rows that do. A table row stands in for the raw snapshots of its interval collected at or after <c>$4</c>
+    /// (<c>filled_since</c>, no lower than raw holds, so the table's reach below raw's purge is not taken) whose interval is
+    /// not one the table purged (<c>first_execution_time &gt;= $5</c>). The table row IS the interval's newest snapshot, so
+    /// it outranks any older raw snapshot of the same interval that falls in the group (an interval open across the edge);
+    /// an interval with no table row (closed before the claim, or older than the purge) has only its raw snapshots.
+    /// A raw snapshot with no <c>first_execution_time</c> is never one the table represents, so it is always read from
+    /// raw.</para>
+    ///
+    /// <para>Parameters: $1 server_id, $2 the raw read's <c>last_execution_time</c> bound, $3 its <c>collection_time</c> bound
+    /// and the first-execution bound for the table's chunks, $4 where the table's coverage starts, $5 the table's
+    /// first-execution floor, $6 the raw part's upper bound: no snapshot the raw part has to read is collected after it
+    /// (the larger of $4 and an interval plus the skew margin above $5), bare so a hypertable excludes the newer chunks.
+    /// The table side carries <c>execution_type_desc</c> only by construction (it holds Regular rows only).</para>
+    /// </summary>
+    public const string PlanRegressionMixedSql = PlanRegressionMixedPrefix + PlanRegressionPlanAggOverDeduped + PlanRegressionSuffix;
+
+    private const string PlanRegressionMixedPrefix = @"
+WITH deduped AS
+(
+    -- #5513: the raw read's deduped CTE over the union of the raw snapshots the table does not stand in for and the
+    -- table's own rows. The aggregates are the raw read's, line for line: the table row of an interval is its newest
+    -- snapshot, so it wins the group on collection_time; an interval with no table row keeps only its raw snapshots.
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        replica_role,
+        runtime_stats_interval_id,
+        first_execution_time,
+        (array_agg(query_plan_hash ORDER BY collection_time DESC, execution_count DESC))[1] AS query_plan_hash,
+        (array_agg(execution_count ORDER BY collection_time DESC, execution_count DESC))[1] AS execution_count,
+        (array_agg(avg_cpu_time_us ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_cpu_time_us,
+        (array_agg(avg_duration_us ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_duration_us,
+        (array_agg(last_execution_time ORDER BY collection_time DESC, execution_count DESC))[1] AS last_execution_time,
+        (array_agg(is_forced_plan ORDER BY collection_time DESC, execution_count DESC))[1] AS is_forced_plan,
+        (array_agg(force_failure_count ORDER BY collection_time DESC, execution_count DESC))[1] AS force_failure_count
+    FROM
+    (
+        -- Raw snapshots the table does not stand in for: collected before the table's coverage starts, or of an interval
+        -- the table purged (or one it cannot hold: no first_execution_time). $3 and $6 are bare parameters on the
+        -- partitioning column, so a hypertable keeps only the chunks between them.
+        SELECT
+            database_name,
+            query_id,
+            plan_id,
+            replica_role,
+            runtime_stats_interval_id,
+            first_execution_time,
+            collection_time,
+            query_plan_hash,
+            execution_count,
+            avg_cpu_time_us,
+            avg_duration_us,
+            last_execution_time,
+            is_forced_plan,
+            force_failure_count
+        FROM v_query_store_stats
+        WHERE server_id = $1
+        AND   execution_type_desc = 'Regular'
+        AND   last_execution_time >= $2
+        AND   collection_time >= $3
+        AND   collection_time < $6
+        AND   (collection_time < $4 OR first_execution_time IS NULL OR first_execution_time < $5)
+
+        UNION ALL
+
+        -- The table: each row is its interval's newest snapshot, for the snapshots the claim holds.
+        SELECT
+            database_name,
+            query_id,
+            plan_id,
+            replica_role,
+            runtime_stats_interval_id,
+            first_execution_time,
+            collection_time,
+            query_plan_hash,
+            execution_count,
+            avg_cpu_time_us,
+            avg_duration_us,
+            last_execution_time,
+            is_forced_plan,
+            force_failure_count
+        FROM query_store_interval_latest
+        WHERE server_id = $1
+        AND   last_execution_time >= $2
+        AND   collection_time >= $4
+        AND   first_execution_time >= $5
+    ) AS snapshots
+    GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
 ),
 ";
 
@@ -675,9 +785,14 @@ LIMIT 20";
                 context.TimeRangeStart.AddDays(-(PlanRegressionWindowDays + PlanRegressionSkewMarginDays)));
 
             /* #3953: the latest-snapshot interval table where its coverage holds everything this read would read,
-               raw otherwise. Decided once here and recorded, so the drill-down reads the same source. */
-            var readsTable = await QueryStoreIntervalLatest.ReadsTableAsync(
+               raw otherwise. Decided once here and recorded, so the drill-down reads the same source.
+               #5513: a third answer, the table for the part of the window its claim holds and raw rows for the rest.
+               It returns raw's own answer, so the drill-down is told "raw" for it and reads the raw SQL it always read:
+               the same rows, and no third drill-down shape. */
+            var source = await QueryStoreIntervalLatest.ResolveReadSourceAsync(
                 connection, context.ServerId, collectionBound, FactCommandTimeoutSeconds, _logger, context.CancellationToken);
+            var readsTable = source.Kind == QueryStoreIntervalLatest.PlanRegressionReadKind.Table;
+            var readsMixed = source.Kind == QueryStoreIntervalLatest.PlanRegressionReadKind.Mixed;
             context.PlanRegressionReadsIntervalTable = readsTable;
 
             /* #5448: the closed days that are fully built, only when the table is the source. Any failure is an empty
@@ -717,7 +832,7 @@ LIMIT 20";
             var readsDays = builtDays.Count > 0;
 
             using var cmd = new NpgsqlCommand(
-                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)
+                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : readsMixed ? PlanRegressionMixedSql : PlanRegressionSql, connection, snapshot)
             { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             if (readsDays)
@@ -740,6 +855,14 @@ LIMIT 20";
                 {
                     /* $4, the table's partitioning column: the same value, bare, for the same reason. */
                     cmd.Parameters.AddWithValue(collectionBound);
+                }
+                else if (readsMixed)
+                {
+                    /* #5513: $4 where the table's coverage starts, $5 its first-execution floor, $6 the raw part's upper
+                       bound. Each one a bare parameter, so a hypertable excludes chunks while it plans. */
+                    cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, source.CoveredFrom);
+                    cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, source.FirstExecutionFloor);
+                    cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, source.RawUpperBound);
                 }
             }
 

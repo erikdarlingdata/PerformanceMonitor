@@ -106,7 +106,7 @@ public sealed class PlanRegressionDailyBoundaryTests
         Assert.Contains("BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead", fact, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION READ ONLY", fact, StringComparison.Ordinal);
         Assert.Contains("connection, snapshot, context.ServerId, windowFloor", fact, StringComparison.Ordinal);
-        Assert.Contains("readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)", fact, StringComparison.Ordinal);
+        Assert.Contains("readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : readsMixed ? PlanRegressionMixedSql : PlanRegressionSql, connection, snapshot)", fact, StringComparison.Ordinal);
 
         var sql = PgFactCollector.PlanRegressionDailySql;
         Assert.Contains("l.first_execution_time >= $4::timestamp", sql, StringComparison.Ordinal);

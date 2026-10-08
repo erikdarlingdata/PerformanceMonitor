@@ -111,10 +111,11 @@ public sealed class PgFactCollectorTests
     {
         /* 32 collect methods (31 fact readers plus the #3538 coverage witness), one query each, plus
            the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery, plus
-           PLAN_REGRESSION's #3953 table twin and #5448 daily-totals twin: the plan-regression method runs one of
-           three reads per server, and Lite has no store for the second or the third (its DuckDB keeps no
-           latest-snapshot interval table). */
-        Assert.Equal(LiteCollectMethodSurface.Length + 3, PgFactCollector.AllSql.Count);
+           PLAN_REGRESSION's #3953 table twin, #5448 daily-totals twin and #5513 mixed twin: the plan-regression
+           method runs one of four reads per server, and Lite has no store for the second, third or fourth (its
+           DuckDB keeps no latest-snapshot interval table). */
+        Assert.Equal(LiteCollectMethodSurface.Length + 4, PgFactCollector.AllSql.Count);
+        Assert.Contains(PgFactCollector.PlanRegressionMixedSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionDailySql, PgFactCollector.AllSql);
         Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotSql, PgFactCollector.AllSql);
@@ -254,11 +255,11 @@ public sealed class PgFactCollectorTests
         {
             if (sql.Contains("any_value", StringComparison.OrdinalIgnoreCase))
             {
-                /* The three PLAN_REGRESSION reads (#3953: raw, and its interval-table twin; #5448: the daily-totals twin),
+                /* The four PLAN_REGRESSION reads (#3953: raw, and its interval-table twin; #5448: the daily-totals twin; #5513: the mixed twin),
                    and nothing else. */
                 Assert.True(
                     sql == PgFactCollector.PlanRegressionSql || sql == PgFactCollector.PlanRegressionTableSql
-                        || sql == PgFactCollector.PlanRegressionDailySql,
+                        || sql == PgFactCollector.PlanRegressionDailySql || sql == PgFactCollector.PlanRegressionMixedSql,
                     "any_value() outside the PLAN_REGRESSION reads:\n" + sql);
             }
         }

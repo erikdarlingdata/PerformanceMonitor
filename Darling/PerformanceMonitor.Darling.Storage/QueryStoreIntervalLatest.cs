@@ -400,12 +400,122 @@ WHERE t.server_id = $1;";
         return (rawFloor is DateTime floor && floor >= h) || rawBound >= h;
     }
 
+    /// <summary>Which read a PLAN_REGRESSION pass runs (#5513).</summary>
+    public enum PlanRegressionReadKind
+    {
+        /// <summary>The shipped raw read.</summary>
+        Raw,
+
+        /// <summary>The table alone: <see cref="UseTable"/> holds.</summary>
+        Table,
+
+        /// <summary>
+        /// The table for the part of the window its claim covers and raw rows for the rest (#5513). It returns the raw
+        /// read's own answer over the same snapshots (see <see cref="DecideSource"/>).
+        /// </summary>
+        Mixed,
+    }
+
+    /// <summary>
+    /// The decision and, for <see cref="PlanRegressionReadKind.Mixed"/>, the edges of the part the table speaks for.
+    /// </summary>
+    /// <param name="Kind">The read to run.</param>
+    /// <param name="CoveredFrom">
+    /// Mixed only: the table's rows stand in for raw snapshots with <c>collection_time</c> at or after this. It is
+    /// <c>max(filled_since, raw's reading floor)</c>, so the table never reaches below what raw holds and the answer stays raw's.
+    /// </param>
+    /// <param name="FirstExecutionFloor">
+    /// Mixed only: the table's rows stand in only for intervals whose <c>first_execution_time</c> is at or after this (its
+    /// purge removes older intervals, which raw may still hold).
+    /// </param>
+    /// <param name="RawUpperBound">
+    /// Mixed only: no raw snapshot the raw part has to read is collected at or after this. It is the larger of
+    /// <paramref name="CoveredFrom"/> and the table's first-execution floor plus an interval (a day) and the skew margin
+    /// (a day), so the raw part stays inside the chunks that matter.
+    /// </param>
+    public readonly record struct PlanRegressionSource(
+        PlanRegressionReadKind Kind,
+        DateTime CoveredFrom,
+        DateTime FirstExecutionFloor,
+        DateTime RawUpperBound)
+    {
+        /// <summary>The shipped raw read.</summary>
+        public static PlanRegressionSource Raw => new(PlanRegressionReadKind.Raw, default, default, default);
+
+        /// <summary>The table alone.</summary>
+        public static PlanRegressionSource Table => new(PlanRegressionReadKind.Table, default, default, default);
+    }
+
+    /// <summary>
+    /// How far above the table's first-execution floor a raw snapshot of an older interval can be collected (#5513): the
+    /// interval itself spans at most a day, and the monitored clock can run a day ahead of the store's (the same margin
+    /// <see cref="PlanRegressionDaily.PlanRegressionSkewMarginDays"/> gives the chunk bound).
+    /// </summary>
+    internal const int MixedRawSpanDays = 1 + PlanRegressionDaily.PlanRegressionSkewMarginDays;
+
+    /// <summary>
+    /// (#5513) <see cref="UseTable"/> says "all or nothing", and a store in steady state fails it for reasons that leave
+    /// most of the window covered: a coverage claim that restarted a day or two ago (a gap, a purged pending batch, a
+    /// server added or upgraded recently), or a table whose purge has just moved its floor above the window's bound. Each
+    /// of those used to send the whole 15-day slice through the raw dedup. This picks <see cref="PlanRegressionReadKind.Mixed"/>
+    /// there: the table where the claim holds, raw rows for the remainder, grouped TOGETHER so an interval that straddles
+    /// the edge is deduplicated by the raw read's own order and keeps its newest snapshot.
+    ///
+    /// <para><b>Why it returns the raw read's answer.</b> A table row stands in only for snapshots it represents: those
+    /// with <c>collection_time &gt;= CoveredFrom</c> (the claim, and no lower than raw holds, so the table's extension below
+    /// raw's purge is not taken) of intervals the table has not purged (<c>first_execution_time &gt;= FirstExecutionFloor</c>).
+    /// Every other raw snapshot is read from raw. For an interval with a table row, that row IS its newest snapshot, so it
+    /// outranks the older raw snapshots in the same group; for an interval without one, raw is read as before.</para>
+    ///
+    /// <para>Pending batches, no coverage row, and an empty table for the server still choose raw: nothing is covered.</para>
+    /// </summary>
+    public static PlanRegressionSource DecideSource(DateTime? filledSince, bool hasPending, DateTime? rawFloor, DateTime rawBound, DateTime? tableFloor)
+    {
+        if (UseTable(filledSince, hasPending, rawFloor, rawBound, tableFloor))
+        {
+            return PlanRegressionSource.Table;
+        }
+
+        if (filledSince is not DateTime f || hasPending || tableFloor is not DateTime h)
+        {
+            return PlanRegressionSource.Raw;
+        }
+
+        var rawReadsFrom = rawFloor is DateTime r && r > rawBound ? r : rawBound;
+        var coveredFrom = f > rawReadsFrom ? f : rawReadsFrom;
+
+        /* The table has purged nothing raw still holds when clause 3 of the rule holds, and then no interval is raw-only. */
+        var tablePurgedNothingRawHolds = (rawFloor is DateTime floor && floor >= h) || rawBound >= h;
+        var firstExecutionFloor = tablePurgedNothingRawHolds ? rawBound : h;
+
+        var spanEnd = firstExecutionFloor.AddDays(MixedRawSpanDays);
+        return new PlanRegressionSource(
+            PlanRegressionReadKind.Mixed, coveredFrom, firstExecutionFloor, spanEnd > coveredFrom ? spanEnd : coveredFrom);
+    }
+
     /// <summary>
     /// Decides the PLAN_REGRESSION source for one server and pass. <paramref name="rawBound"/> is the raw read's own
     /// <c>collection_time</c> bound (<c>$3</c>). Any fault picks raw: the raw SQL is the shipped read, so the worst a
-    /// broken decision can cost is today's behaviour.
+    /// broken decision can cost is today's behaviour. True only for the table alone; <see cref="ResolveReadSourceAsync"/>
+    /// has the mixed answer too (#5513).
     /// </summary>
     public static async Task<bool> ReadsTableAsync(
+        NpgsqlConnection connection,
+        int serverId,
+        DateTime rawBound,
+        int commandTimeoutSeconds,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        var source = await ResolveReadSourceAsync(connection, serverId, rawBound, commandTimeoutSeconds, logger, cancellationToken);
+        return source.Kind == PlanRegressionReadKind.Table;
+    }
+
+    /// <summary>
+    /// <see cref="ReadsTableAsync"/>'s decision with the third answer (#5513): <see cref="PlanRegressionReadKind.Mixed"/>,
+    /// the table where its claim holds and raw rows for the rest. Same inputs, same fault rule (any fault picks raw).
+    /// </summary>
+    public static async Task<PlanRegressionSource> ResolveReadSourceAsync(
         NpgsqlConnection connection,
         int serverId,
         DateTime rawBound,
@@ -430,7 +540,10 @@ WHERE t.server_id = $1;";
 
             if (filledSince is null || hasPending)
             {
-                return false;
+                logger?.LogDebug(
+                    "PLAN_REGRESSION source for server {ServerId}: raw ({Why})",
+                    serverId, filledSince is null ? "no coverage row" : "pending batches");
+                return PlanRegressionSource.Raw;
             }
 
             DateTime? rawFloor = null;
@@ -453,16 +566,16 @@ WHERE t.server_id = $1;";
                 tableFloor = await plain.ExecuteScalarAsync(cancellationToken) as DateTime?;
             }
 
-            var useTable = UseTable(filledSince, hasPending, rawFloor, rawBound, tableFloor);
+            var source = DecideSource(filledSince, hasPending, rawFloor, rawBound, tableFloor);
             logger?.LogDebug(
-                "PLAN_REGRESSION source for server {ServerId}: {Source} (coverage since {FilledSince:o}; raw floor {RawFloor:o}; raw bound {RawBound:o}; table floor {TableFloor:o})",
-                serverId, useTable ? "interval table" : "raw", filledSince, rawFloor, rawBound, tableFloor);
-            return useTable;
+                "PLAN_REGRESSION source for server {ServerId}: {Source} (coverage since {FilledSince:o}; raw floor {RawFloor:o}; raw bound {RawBound:o}; table floor {TableFloor:o}; table covers from {CoveredFrom:o})",
+                serverId, source.Kind, filledSince, rawFloor, rawBound, tableFloor, source.CoveredFrom);
+            return source;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(ex, "PLAN_REGRESSION source decision failed for server {ServerId}; reading raw", serverId);
-            return false;
+            return PlanRegressionSource.Raw;
         }
     }
 
