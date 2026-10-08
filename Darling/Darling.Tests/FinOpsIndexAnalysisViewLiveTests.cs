@@ -50,13 +50,17 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdC, ServerNameC, ct);
 
         var anchor = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
+        /* #5496: sqlserver_start_time is the target's LOCAL wall clock and the reader compares it with the host's local now, so
+           both start times come from ONE local reading. Seeding the long-uptime start from the UTC anchor made the uptime 399
+           between 00:00 UTC and local midnight on a zone behind UTC (the golden twin carries the same fix). */
+        var localNow = DateTime.Now;
         var old = anchor.AddDays(-3).AddHours(2);
         var recent = anchor.AddDays(-1).AddHours(2);
         const string props = "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, engine_edition, product_version, sqlserver_start_time) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
         await DarlingMcpTestData.ExecAsync(connection, ct, props,
-            CollectionIdGenerator.Next(), recent, ServerIdA, ServerNameA, "Standard Edition", 2, "16.0.1000.6", DateTime.Now.AddDays(-5).AddHours(-1));
+            CollectionIdGenerator.Next(), recent, ServerIdA, ServerNameA, "Standard Edition", 2, "16.0.1000.6", localNow.AddDays(-5).AddHours(-1));
         await DarlingMcpTestData.ExecAsync(connection, ct, props,
-            CollectionIdGenerator.Next(), recent, ServerIdC, ServerNameC, "Standard Edition", 2, "16.0.1000.6", anchor.AddDays(-400));
+            CollectionIdGenerator.Next(), recent, ServerIdC, ServerNameC, "Standard Edition", 2, "16.0.1000.6", DateTime.SpecifyKind(localNow.Date.AddDays(-400), DateTimeKind.Unspecified));
 
         foreach (var (id, name) in new[] { (ServerIdA, ServerNameA), (ServerIdC, ServerNameC) })
         {
