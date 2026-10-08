@@ -63,7 +63,7 @@ public partial class ProcedureHistoryWindow : Window
         _planActions = new PlanNavigationController(
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
-                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
+                this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
             (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite"),
@@ -84,7 +84,8 @@ public partial class ProcedureHistoryWindow : Window
     {
         try
         {
-            _historyData = await _dataService.GetProcedureStatsHistoryAsync(_serverId, _databaseName, _schemaName, _objectName, _hoursBack);
+            /* #5457: off the UI thread: the read takes the store read lock, which an archive or compaction pass can hold. */
+            _historyData = await System.Threading.Tasks.Task.Run(() => _dataService.GetProcedureStatsHistoryAsync(_serverId, _databaseName, _schemaName, _objectName, _hoursBack));
             /* #4766: the grid words each row's times in this window's own zone, as the chart and the summary below do,
                not in whichever server's tab is selected when the row is drawn (this window stays open after another
                tab is selected). The columns that hold the server's own wall clock are converted on the opening tab's
@@ -114,12 +115,13 @@ public partial class ProcedureHistoryWindow : Window
 
             /* #5449: the chart also plots a 0 for each collector run that stored nothing for this procedure, so a quiet
                minute is a 0 as it is on an older store, not a gap. The grid and summary keep the stored rows. */
-            _chartData = await _dataService.GetProcedureStatsHistoryChartRowsAsync(_serverId, _historyData);
+            var historyForChart = _historyData;
+            _chartData = await System.Threading.Tasks.Task.Run(() => _dataService.GetProcedureStatsHistoryChartRowsAsync(_serverId, historyForChart));
             UpdateChart();
         }
         catch (Exception ex)
         {
-            SummaryText.Text = $"Error loading history: {ex.Message}";
+            SummaryText.Text = $"Error loading history: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
     }
 
@@ -267,7 +269,7 @@ public partial class ProcedureHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

@@ -123,6 +123,24 @@ public sealed class StatusBarBehaviourTests
         Assert.Contains("Database: 5.0 GB (stale)", Items(stale));
     }
 
+    /// <summary>
+    /// W3/W10 of the morning walk: the footer's "Updated" time stayed at the first load on the server, FinOps and
+    /// Job History pages, with auto-refresh on or after "Reload this page now", because it came only from the
+    /// shell's fleet read. It now follows the page's own latest load, and a later fleet poll does not pull it back.
+    /// </summary>
+    [Fact]
+    public void TheUpdatedTime_FollowsThePagesOwnLatestLoad()
+    {
+        if (!TryRun("pageUpdated", out var r)) return;
+        var stamp = r.GetProperty("stamp").GetString()!;
+        string[] Strings(string name) => r.GetProperty(name).EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!).ToArray();
+
+        Assert.Contains("Updated T", Strings("before"));
+        Assert.Contains("Updated " + stamp, Strings("afterPage"));
+        Assert.Contains("Updated " + stamp, Strings("afterNextFleetPoll"));
+        Assert.DoesNotContain("Updated T", Strings("afterNextFleetPoll"));
+    }
+
     [Theory]
     [InlineData("pingFails")]
     [InlineData("sessionFails")]

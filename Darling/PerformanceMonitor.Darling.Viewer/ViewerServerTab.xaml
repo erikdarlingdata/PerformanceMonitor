@@ -2915,22 +2915,22 @@
                         <DataGridTextColumn Binding="{Binding StartTimeLocal}" Width="150" SortMemberPath="StartTime">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StartTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Start Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding CurrentDurationFormatted}" Width="120" SortMemberPath="CurrentDurationSeconds">
+                        <DataGridTextColumn Binding="{Binding CurrentDurationFormatted}" Width="150" SortMemberPath="CurrentDurationSeconds">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Current Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="110" SortMemberPath="AvgDurationSeconds">
+                        <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="130" SortMemberPath="AvgDurationSeconds">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding P95DurationFormatted}" Width="110" SortMemberPath="P95DurationSeconds">
+                        <DataGridTextColumn Binding="{Binding P95DurationFormatted}" Width="130" SortMemberPath="P95DurationSeconds">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="P95DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="P95 Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding PercentOfAverageFormatted}" Width="100" SortMemberPath="PercentOfAverage">
+                        <DataGridTextColumn Binding="{Binding PercentOfAverageFormatted}" Width="125" SortMemberPath="PercentOfAverage">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PercentOfAverageFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="% of Average" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding RunningLongDisplay}" Width="90">
+                        <DataGridTextColumn Binding="{Binding RunningLongDisplay}" Width="125">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunningLongDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Running Long" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding SuccessfulRunCount}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                        <DataGridTextColumn Binding="{Binding SuccessfulRunCount}" ElementStyle="{StaticResource NumericCell}" Width="190">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SuccessfulRunCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Successful Runs (30d)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
                         <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>

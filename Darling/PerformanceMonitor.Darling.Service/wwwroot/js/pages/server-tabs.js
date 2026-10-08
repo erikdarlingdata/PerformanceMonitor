@@ -4530,8 +4530,14 @@ const JOB_HISTORY_COLUMNS = [
   { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
   { key: "retries", label: "Retries", format: "int" },
   { key: "last_success", label: "Last Success", format: "time" },
-  { key: "message", label: "Message", wrap: true },
+  { key: "message", label: "Message", wrap: true, render: jobMessageCell },
 ];
+
+/* The same squeeze as the Job History page's Message column (W2): a readable width, the first 3 lines, and the whole text on hover. */
+function jobMessageCell(r) {
+  const text = r && r.message != null ? String(r.message) : "";
+  return el("div", { class: "jh-message", title: text || null, text });
+}
 
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },

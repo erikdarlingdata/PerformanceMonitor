@@ -51,19 +51,21 @@ public static class SettingsSaveReport
     /// <param name="alertsValid">Whether every alert box validated.</param>
     /// <param name="mcpValid">Whether the MCP port validated and could be bound.</param>
     /// <param name="webhooksValid">Whether the generic webhook configuration validated.</param>
+    /// <param name="memoryLimitValid">Whether the DuckDB memory limit box was inside its range (#5457).</param>
     public static SettingsSaveOutcome Classify(
         bool documentWritten,
         bool mcpChanged,
         bool alertsValid,
         bool mcpValid,
-        bool webhooksValid)
+        bool webhooksValid,
+        bool memoryLimitValid = true)
     {
         if (!documentWritten)
         {
             return SettingsSaveOutcome.NothingWritten;
         }
 
-        if (!alertsValid || !mcpValid || !webhooksValid)
+        if (!alertsValid || !mcpValid || !webhooksValid || !memoryLimitValid)
         {
             return SettingsSaveOutcome.WrittenWithObjections;
         }

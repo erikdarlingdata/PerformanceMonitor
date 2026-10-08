@@ -23,6 +23,15 @@ public sealed partial class ViewerDataService
     /// <c>collection_time = MAX(...)</c> self-subquery), ordered by current duration descending. All the
     /// derived columns (avg/p95/percent-of-average/is-running-long) are collector-side, so the read is
     /// a plain projection.
+    ///
+    /// <para>The snapshot counts only while it is the collector's CURRENT answer. The collector writes no row when no job
+    /// is running, so the newest <c>running_jobs</c> row can be weeks old, and the tab then listed a job that ended long
+    /// ago as running now. The collector's latest SUCCESSFUL run (<c>collection_log</c>, which records a SUCCESS with
+    /// zero rows for a run that found nothing) decides: a run that stored rows means the newest snapshot is that run's;
+    /// a run that stored none means nothing is running, unless a snapshot newer than that log row exists (the Darling
+    /// service stamps the log row when the run ends, after its rows are stored). A server with no such log row keeps the
+    /// newest snapshot. The same text as the MCP tool's <c>DarlingJobReader.RunningJobsSql</c> and Lite's
+    /// <c>GetRunningJobsAsync</c>.</para>
     /// $1 server_id.
     /// </summary>
     public const string RunningJobsSql = """
@@ -44,6 +53,33 @@ public sealed partial class ViewerDataService
             SELECT MAX(collection_time)
             FROM v_running_jobs
             WHERE server_id = $1
+        )
+        AND   (
+            NOT EXISTS
+            (
+                SELECT 1
+                FROM collection_log
+                WHERE server_id = $1
+                AND   collector_name = 'running_jobs'
+                AND   status = 'SUCCESS'
+            )
+            OR EXISTS
+            (
+                SELECT 1
+                FROM
+                (
+                    SELECT collection_time, rows_collected
+                    FROM collection_log
+                    WHERE server_id = $1
+                    AND   collector_name = 'running_jobs'
+                    AND   status = 'SUCCESS'
+                    ORDER BY collection_time DESC
+                    LIMIT 1
+                ) AS last_run
+                WHERE last_run.rows_collected IS NULL
+                OR    last_run.rows_collected > 0
+                OR    v_running_jobs.collection_time > last_run.collection_time
+            )
         )
         ORDER BY current_duration_seconds DESC
         """;

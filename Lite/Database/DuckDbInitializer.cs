@@ -815,8 +815,15 @@ public partial class DuckDbInitializer : IDisposable
             /* No key for query_store_stats: its rows are cumulative snapshots of an interval, the open interval is
                read again every cycle by design, and every reader takes the latest snapshot per interval or plan. */
             /* sysjobhistory.instance_id: a unique monotonic IDENTITY per server that survives
-               sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark. */
-            ["job_history"] = "server_id, instance_id",
+               sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark.
+               run_datetime is in the key so DuckDB can run a reader's run_datetime filter BELOW the window
+               (#5457): DuckDB moves a filter under a window only when the filter reads nothing but PARTITION BY
+               columns. Keyed on (server_id, instance_id) alone, every Job History read sorted the server's whole
+               archive, message text included, before it could drop a row: on a 30-server store that took a
+               per-server read from 0.7 s to 11 s and ran Lite's 1 GB cap out of memory. It does not change
+               which copies collapse: run_datetime is worked out on the server from the msdb row's own run_date
+               and run_time, which never change for an instance_id, so every copy of a run carries the same value. */
+            ["job_history"] = "server_id, instance_id, run_datetime",
             /* The default trace's EventSequence is unique within a trace; pairing it with event_time
                (the StartTime watermark) keeps events distinct across the server restarts that reset
                EventSequence, and groups identical re-collected rows (NULLs included) for dedup. */
@@ -842,7 +849,7 @@ public partial class DuckDbInitializer : IDisposable
     ///   complaint — uncapped, buffer pool grows toward 80% of system RAM).
     ///   ArchiveService raises this temporarily for parquet COPY operations,
     ///   which need more headroom due to a DuckDB pre-reservation behavior.
-    /// - threads=<see cref="MainConnectionThreads"/> (min(8, processors), #5381): bounds the per-thread buffers of a wide read.
+    /// - threads=<see cref="MainConnectionThreads"/> (min(8, processors, memory limit / 256 MB), #5381, #5457): bounds the per-thread buffers of a wide read.
     /// - parquet_metadata_cache is deliberately left at DuckDB's default, off (#5377). Measured on DuckDB
     ///   1.5.5, turning it on cut the bind of a 518-file union_by_name read from about 140 ms to about 45 ms,
     ///   and a file replaced at the same path (compaction's swap, the Query Store repair) still read its new
@@ -860,18 +867,45 @@ public partial class DuckDbInitializer : IDisposable
     /// failed five measured wide reads (Query Store and query stats text over a multi-day archive) with
     /// out-of-memory; at 2 GB and <see cref="MainConnectionThreads"/> threads every measured read passes and the
     /// worst peak is 1,100 MB. Every place that puts the limit back after lowering or raising it (the trim
-    /// cycle, <c>ArchiveService.WithRaisedCopyMemoryLimit</c>) restores to THIS constant, never a literal.
+    /// cycle, <c>ArchiveService.WithRaisedCopyMemoryLimit</c>) restores to THIS property (the user's setting), never a literal.
     /// Compaction's own in-memory 4 GB instance and the data importer's plain connection are separate DuckDB
     /// instances and do not use it.
     /// </summary>
-    internal const string MainConnectionMemoryLimit = "2GB";
+    internal static string MainConnectionMemoryLimit => $"{ConfiguredMemoryLimitGb}GB";
 
     /// <summary>
-    /// The main connection's <c>threads</c> (#5381): min(8, logical processors), at least 1. Unset, DuckDB used
-    /// every core, and on a 32-core machine five reads that pass at 8 threads ran out of memory at 1 GB because
-    /// each thread holds its own buffers. Measured at 2 GB: 8 threads, all reads pass, worst peak 1,100 MB.
+    /// The user's DuckDB memory limit in whole GB (#5457, owner ruling 2026-10-08), set once at startup from
+    /// settings.json by <c>DuckDbMemoryLimitSetting.LoadAtStartup</c>. Defaults to
+    /// <see cref="DuckDbMemoryLimitSetting.DefaultGb"/> (2 GB, #5381). <c>memory_limit</c> belongs to a DuckDB
+    /// instance, so a value changed in Settings takes effect at the next start.
     /// </summary>
-    internal static readonly int MainConnectionThreads = Math.Max(1, Math.Min(8, Environment.ProcessorCount));
+    internal static int ConfiguredMemoryLimitGb { get; set; } = Services.DuckDbMemoryLimitSetting.DefaultGb;
+
+    /// <summary>
+    /// The main connection's <c>threads</c> (#5381, #5457): derived from the memory setting by
+    /// <see cref="ThreadsFor"/>, min(8, logical processors, memory limit / 256 MB), at least 1. Unset, DuckDB used
+    /// every core, and on a 32-core machine five reads that pass at 8 threads ran out of memory at 1 GB because
+    /// each thread holds its own buffers. It follows <see cref="ConfiguredMemoryLimitGb"/> (the resting limit),
+    /// so it is fixed for the life of the process: the trim cycle (which only moves memory_limit to 64 MB and
+    /// back) and the COPY raise (memory_limit up to the larger of 4 GB and the setting, then back) never touch it.
+    /// </summary>
+    internal static int MainConnectionThreads =>
+        ThreadsFor(ConfiguredMemoryLimitGb, Environment.ProcessorCount);
+
+    /// <summary>The most threads the main connection uses, whatever the memory setting or core count.</summary>
+    internal const int MainConnectionThreadCap = 8;
+
+    /// <summary>
+    /// Memory each DuckDB thread gets at the limit (256 MB, double DuckDB's documented 125 MB per-thread minimum),
+    /// so the 2 GB default is exactly the 8-thread cap and the 1 GB minimum runs 4 threads. Measured on the
+    /// Lite store (Job History over 20 weeks and the top-queries read over 90 days, 32 cores, 1 GB and 4 GB):
+    /// 4 and 8 threads took the same time, while 16 and 32 threads were slower and peaked 20-70% higher in
+    /// memory, so a raised memory setting does not raise the thread count past the cap.
+    /// </summary>
+    internal const int MainConnectionMemoryPerThreadMb = 256;
+
+    internal static int ThreadsFor(int memoryGb, int cores) =>
+        Math.Max(1, Math.Min(Math.Min(MainConnectionThreadCap, cores), memoryGb * 1024 / MainConnectionMemoryPerThreadMb));
 
     /// <summary>
     /// Ensures the database exists and all tables are created, then opens the sentinel (#4262).

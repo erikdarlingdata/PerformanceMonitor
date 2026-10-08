@@ -187,7 +187,7 @@ public static class AppLogger
     {
         if (!IsEnabled(LogLevel.Warning)) return;
 
-        Log("WARN", source, message);
+        Log("WARN", source, WithDuckDbOutOfMemoryHint(message, null));
     }
 
     public static void Error(string source, string message, Exception? ex = null) =>
@@ -215,7 +215,8 @@ public static class AppLogger
 
         if (ex != null)
         {
-            Log("ERROR", source, $"{message} | {ex.GetType().Name}: {ex.Message}");
+            /* The hint rides on the first line only, so a chain holding the DuckDB error at any depth gets it once. */
+            Log("ERROR", source, WithDuckDbOutOfMemoryHint($"{message} | {ex.GetType().Name}: {ex.Message}", ex));
             Log("ERROR", source, $"Stack: {ex.StackTrace}");
 
             /* Log all inner exceptions recursively */
@@ -243,8 +244,68 @@ public static class AppLogger
         }
         else
         {
-            Log("ERROR", source, message);
+            Log("ERROR", source, WithDuckDbOutOfMemoryHint(message, null));
         }
+    }
+
+    /// <summary>
+    /// DuckDB's exact out-of-memory prefix. Deliberately not <c>DuckDbMemoryLimitSetting.IsOutOfMemory</c>: that
+    /// test is broad on purpose for the surfaces that show an error, but a monitored SQL Server's own memory
+    /// errors ("There is insufficient system memory ...") must not be told to raise a DuckDB setting (#5457).
+    /// </summary>
+    private const string DuckDbOutOfMemoryText = "Out of Memory Error:";
+
+    /// <summary>
+    /// Appends <see cref="DuckDbMemoryLimitSetting.OutOfMemoryHint"/> once to a WARN or ERROR line that is a
+    /// DuckDB out-of-memory error, so the roughly 85 catch blocks that only log the raw message still name the
+    /// setting (#5457). A line that already holds the hint (<see cref="DuckDbMemoryLimitSetting.Describe"/>'s
+    /// own text) is left alone, and the hint does not itself contain DuckDB's prefix, so it cannot recurse.
+    /// Never throws: logging must not be the reason a read fails.
+    /// </summary>
+    private static string WithDuckDbOutOfMemoryHint(string message, Exception? ex)
+    {
+        try
+        {
+            if (message == null || message.Contains(DuckDbMemoryLimitSetting.HintMarker, StringComparison.Ordinal))
+            {
+                return message!;
+            }
+
+            if (!message.Contains(DuckDbOutOfMemoryText, StringComparison.Ordinal) && !ChainHasDuckDbOutOfMemory(ex))
+            {
+                return message;
+            }
+
+            return $"{message} {DuckDbMemoryLimitSetting.OutOfMemoryHint(Database.DuckDbInitializer.ConfiguredMemoryLimitGb)}";
+        }
+        catch
+        {
+            return message;
+        }
+    }
+
+    private static bool ChainHasDuckDbOutOfMemory(Exception? ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e.Message.Contains(DuckDbOutOfMemoryText, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (e is AggregateException agg)
+            {
+                foreach (var inner in agg.InnerExceptions)
+                {
+                    if (ChainHasDuckDbOutOfMemory(inner))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     public static void Debug(string source, string message)

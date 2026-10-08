@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -130,6 +132,141 @@ VALUES
             Assert.Equal("hot-C", await ScalarAsync<string>(connection,
                 "SELECT message FROM v_job_history WHERE instance_id = 300"));
         }
+    }
+
+    /// <summary>
+    /// #5457: run_datetime is part of the job_history dedup key, so an archived copy and a live copy of one run,
+    /// which carry the same non-NULL run_datetime (it is decoded from the msdb row's own run_date and run_time),
+    /// still collapse to one row, and the live copy wins. Rows with a NULL run_datetime still group together
+    /// (the older test above inserts none).
+    /// </summary>
+    [Fact]
+    public async Task VJobHistory_CollapsesAnArchivedAndALiveCopyOfOneRunWithTheSameRunDatetime()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const string Columns = @"
+    (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name,
+     job_enabled, step_id, run_status, run_datetime, run_duration_seconds, retries_attempted, message)";
+
+        using (var connection = await OpenAsync())
+        {
+            var archived = "INSERT INTO job_history" + Columns + @"
+VALUES
+    (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', 100, 'j', 'Job', true, 0, 1, TIMESTAMP '2025-12-31 23:10:00', 10, 0, 'archived-A'),
+    (2, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', 200, 'j', 'Job', true, 0, 1, TIMESTAMP '2025-12-31 23:20:00', 10, 0, 'archived-B'),
+    (3, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', 300, 'j', 'Job', true, 0, 1, NULL, 10, 0, 'archived-NULL')";
+            var recollected = "INSERT INTO job_history" + Columns + @"
+VALUES
+    (11, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', 200, 'j', 'Job', true, 0, 1, TIMESTAMP '2025-12-31 23:20:00', 10, 0, 'hot-B'),
+    (12, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', 300, 'j', 'Job', true, 0, 1, NULL, 10, 0, 'hot-NULL'),
+    (13, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', 400, 'j', 'Job', true, 0, 1, TIMESTAMP '2026-05-31 23:50:00', 10, 0, 'hot-D')";
+            await StageArchiveAndRecollectAsync(connection, "job_history", archived, recollected);
+        }
+
+        await initializer.CreateArchiveViewsAsync();
+
+        using (var connection = await OpenAsync())
+        {
+            /* Four logical runs, not six: 200 (same non-NULL run_datetime) and 300 (NULL run_datetime) collapse. */
+            Assert.Equal(4, await ScalarAsync<int>(connection, "SELECT COUNT(*) FROM v_job_history"));
+            Assert.Equal(1, await ScalarAsync<int>(connection,
+                "SELECT MAX(c) FROM (SELECT COUNT(*) AS c FROM v_job_history GROUP BY server_id, instance_id)"));
+            Assert.Equal("hot-B", await ScalarAsync<string>(connection,
+                "SELECT message FROM v_job_history WHERE instance_id = 200"));
+            Assert.Equal("hot-NULL", await ScalarAsync<string>(connection,
+                "SELECT message FROM v_job_history WHERE instance_id = 300"));
+            Assert.Equal("archived-A", await ScalarAsync<string>(connection,
+                "SELECT message FROM v_job_history WHERE instance_id = 100"));
+        }
+    }
+
+    /// <summary>
+    /// #5457: DuckDB moves a filter below a window only when the filter reads nothing but PARTITION BY columns.
+    /// With the dedup keyed on (server_id, instance_id) alone, a Job History read's run_datetime filter stayed
+    /// ABOVE the window, so every read loaded and sorted the server's whole archive (message text included)
+    /// before it could drop a row: 11 s and ~0.7 GB per server read on a 30-server store, past Lite's memory
+    /// cap on a larger one. run_datetime in the key lets the filter reach the table and parquet scans. This pins
+    /// the plan shape of the predicate pair the Job History readers use.
+    /// </summary>
+    [Fact]
+    public async Task VJobHistory_RunDatetimeFilterRunsBelowTheDedupAndReachesBothScans()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        const string Columns = @"
+    (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name,
+     job_enabled, step_id, run_status, run_datetime, run_duration_seconds, retries_attempted, message)";
+
+        using (var connection = await OpenAsync())
+        {
+            var archived = "INSERT INTO job_history" + Columns + @"
+VALUES
+    (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', 100, 'j', 'Job', true, 0, 1, TIMESTAMP '2025-12-31 23:10:00', 10, 0, 'archived-A'),
+    (2, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', 101, 'j', 'Job', true, 0, 1, TIMESTAMP '2025-06-01 00:00:00', 10, 0, 'archived-old')";
+            var recollected = "INSERT INTO job_history" + Columns + @"
+VALUES
+    (11, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', 400, 'j', 'Job', true, 0, 1, TIMESTAMP '2026-05-31 23:50:00', 10, 0, 'hot-D'),
+    (12, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', 401, 'j', 'Job', true, 0, 1, TIMESTAMP '2025-11-15 00:00:00', 10, 0, 'hot-old')";
+            await StageArchiveAndRecollectAsync(connection, "job_history", archived, recollected);
+        }
+
+        await initializer.CreateArchiveViewsAsync();
+
+        using (var connection = await OpenAsync())
+        {
+            /* Each side holds one row before the cutoff and one after it, so DuckDB can neither prove from the file or
+               table statistics that nothing matches (the scan becomes an EMPTY_RESULT node with no filter to pin)
+               nor that everything does (the filter is dropped from the scan). */
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"EXPLAIN (FORMAT JSON)
+SELECT * FROM v_job_history WHERE run_datetime >= TIMESTAMP '2025-12-01 00:00:00' AND server_id = 1";
+            string planJson;
+            using (var reader = await cmd.ExecuteReaderAsync(TestContext.Current.CancellationToken))
+            {
+                Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+                planJson = reader.GetString(1);
+            }
+
+            var filtersOnRunDatetime = new List<string>();
+            var scansWithRunDatetime = new List<string>();
+            var scansWithoutRunDatetime = new List<string>();
+            using var doc = JsonDocument.Parse(planJson);
+            foreach (var root in doc.RootElement.EnumerateArray())
+                WalkPlan(root, filtersOnRunDatetime, scansWithRunDatetime, scansWithoutRunDatetime);
+
+            Assert.True(filtersOnRunDatetime.Count == 0,
+                "run_datetime must be pushed below the dedup window, but a FILTER node still reads it above the dedup: "
+                + string.Join(" | ", filtersOnRunDatetime) + "\n" + planJson);
+            /* Both the hot table scan and the parquet scan carry it. */
+            Assert.True(scansWithoutRunDatetime.Count == 0,
+                "a scan under the dedup does not carry the run_datetime filter: "
+                + string.Join(" | ", scansWithoutRunDatetime) + "\n" + planJson);
+            Assert.True(scansWithRunDatetime.Count >= 2,
+                "expected the table scan and the parquet scan to both carry the run_datetime filter, saw "
+                + scansWithRunDatetime.Count + "\n" + planJson);
+        }
+    }
+
+    private static void WalkPlan(
+        JsonElement node, List<string> filtersOnRunDatetime, List<string> scansWith, List<string> scansWithout)
+    {
+        var name = node.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+        string extra = node.TryGetProperty("extra_info", out var e) ? e.GetRawText() : "";
+        if (name == "FILTER" && extra.Contains("run_datetime", StringComparison.Ordinal))
+            filtersOnRunDatetime.Add(extra);
+        if (name is "SEQ_SCAN" or "READ_PARQUET" or "TABLE_SCAN")
+        {
+            if (extra.Contains("run_datetime>=", StringComparison.Ordinal))
+                scansWith.Add(name);
+            else
+                scansWithout.Add(name + " " + extra);
+        }
+        if (node.TryGetProperty("children", out var children))
+            foreach (var child in children.EnumerateArray())
+                WalkPlan(child, filtersOnRunDatetime, scansWith, scansWithout);
     }
 
     [Fact]

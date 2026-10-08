@@ -25,7 +25,7 @@ let bar = null;
 const statusbar = {};
 const context = vm.createContext({
   console,
-  Date: { now: () => clock.t },
+  Date: class extends Date { static now() { return clock.t; } },
   Set, Number, isFinite, Promise, JSON,
   el,
   mount: (_p, nodes) => { bar = flat(nodes); },
@@ -46,7 +46,7 @@ const context = vm.createContext({
   },
 });
 const clock = { t: 1_000_000 };
-vm.runInContext(source + "\nthis.updateStatusBar = updateStatusBar;", context);
+vm.runInContext(source + "\nthis.updateStatusBar = updateStatusBar; this.notePageUpdated = notePageUpdated;", context);
 
 const fleet = { cards: [{ healthy_collector_count: 3, failed_collector_count: 1 }], total_servers: 1, generated_at: "T" };
 const settle = () => new Promise((r) => setTimeout(r, 20));
@@ -83,6 +83,16 @@ run.storeFailsAfterGood = async () => {
   return { items: await poll() };
 };
 run.pingFails = async () => { sc.ping = new Error("net"); return { items: await poll() }; };
+// W3/W10: the footer's Updated time follows the page's own load, not the fleet roll-up's generated_at.
+run.pageUpdated = async () => {
+  const before = await poll();
+  clock.t += 5 * 60 * 1000;
+  context.notePageUpdated(clock.t);
+  await settle();
+  const afterPage = texts();
+  const afterNextFleetPoll = await poll();
+  return { before, afterPage, afterNextFleetPoll, stamp: new Date(clock.t).toISOString() };
+};
 run.sessionFails = async () => { sc.session = new Error("net"); return { items: await poll() }; };
 
 if (!run[scenario]) throw new Error("unknown scenario " + scenario);
