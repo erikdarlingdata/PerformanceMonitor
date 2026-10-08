@@ -487,18 +487,20 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
                 var logger = new CapturingTestLogger();
                 await DarlingRetention.PurgeAsync(timingOut, timescaleAvailable: false, logger, ct);
 
+                /* The data first, because it is the proof: exactly the committed first batch is gone and the locked
+                   row's batch rolled back. The old whole-day statement removes 0 rows here (its first slice holds
+                   the locked row), so this fails on it with 2,000 left instead of 1,000. */
+                Assert.Equal(expired - 1_000, await CountAsync(
+                    connection, table.Qualified, "first_execution_time < now() AT TIME ZONE 'UTC' - " + Days(table.HorizonDays), ct));
+                Assert.Equal(inside, await CountAsync(
+                    connection, table.Qualified, "first_execution_time >= now() AT TIME ZONE 'UTC' - " + Days(table.HorizonDays), ct));
+
                 /* The halving is logged, and the failure carries the rows that did land. */
                 Assert.Contains("retrying at", logger.Joined, StringComparison.Ordinal);
                 Assert.Contains($"Purge batch of {table.Name} at cap {DarlingRetention.IntervalDeleteRowCap}", logger.Joined, StringComparison.Ordinal);
                 Assert.Contains(
                     $"Retention purge failed for {table.Name} after removing 1000 row(s)",
                     logger.Joined, StringComparison.Ordinal);
-
-                /* Consistent: exactly the committed first batch is gone; the locked row's batch rolled back. */
-                Assert.Equal(expired - 1_000, await CountAsync(
-                    connection, table.Qualified, "first_execution_time < now() AT TIME ZONE 'UTC' - " + Days(table.HorizonDays), ct));
-                Assert.Equal(inside, await CountAsync(
-                    connection, table.Qualified, "first_execution_time >= now() AT TIME ZONE 'UTC' - " + Days(table.HorizonDays), ct));
             }
 
             await transaction.RollbackAsync(ct);

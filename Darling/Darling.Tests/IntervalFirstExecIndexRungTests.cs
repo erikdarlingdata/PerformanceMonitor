@@ -135,47 +135,12 @@ public sealed class IntervalFirstExecIndexRungTests
         }
     }
 
-    /// <summary>
-    /// The production purge's plan (<see cref="DarlingRetention.CursoredRowCappedDeleteSql"/>, the row-capped
-    /// cursor form the interval tables run since #5569; the first batch of a pass has no cursor) against the
-    /// migrated schema uses the new index for its ordered scan: no Seq Scan on the table. Seeded with rows
-    /// spanning two days. The cursored form's own bound is pinned in
-    /// <c>QueryStoreIntervalPurgeRowCappedTests</c>.
-    /// </summary>
-    [Fact]
-    public async Task ThePurgesPlan_UsesTheIndex_NoSeqScan()
-    {
-        var baseConnectionString = ConnectionString;
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the V153 purge-plan pin.");
-
-        var ct = TestContext.Current.CancellationToken;
-
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        var bodySucceeded = false;
-        try
-        {
-            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-            await connection.OpenAsync(ct);
-            await PgMigrations.MigrateAsync(connection, ct);
-
-            await SeedIntervalLatestAsync(connection, ct, rowCount: 2000);
-            await ExecAsync(connection, ct, "VACUUM ANALYZE collect.query_store_interval_latest");
-
-            var sql = DarlingRetention.CursoredRowCappedDeleteSql(
-                "collect.query_store_interval_latest", "first_execution_time", 500, hasCursor: false);
-            var plan = await ExplainAsync(connection, ct, sql, new DateTime(2026, 1, 3, 0, 0, 0, DateTimeKind.Unspecified));
-
-            Assert.DoesNotContain("Seq Scan", plan, StringComparison.Ordinal);
-            Assert.Contains("idx_query_store_interval_latest_first_exec", plan, StringComparison.Ordinal);
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
-        }
-    }
+    /* The purge's plan test that lived here ran the old one-day-slice statement, which the interval tables no
+       longer execute (#5569). The production statement is the row-capped cursor form, and its plan (ordered scan
+       of this index, no Seq Scan, no Sort, the cursor bound in the Index Cond) is pinned at a realistic row count
+       by QueryStoreIntervalPurgeRowCappedTests.ThePurgesPlan_IsAnOrderedIndexScan_NoSeqScan_NoSort: at the 2,000
+       rows this class seeds the planner correctly prefers a Sort over a Seq Scan, so a plan pin here proves
+       nothing about production. */
 
     /// <summary>
     /// The read gate's per-server floor (<see cref="QueryStoreIntervalLatest.PlainTableFloorSql"/>) also
