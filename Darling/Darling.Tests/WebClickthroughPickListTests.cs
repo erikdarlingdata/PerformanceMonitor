@@ -150,6 +150,56 @@ public sealed class WebClickthroughPickListTests
     }
 
     [Fact]
+    public void APanelThatSaysHideWhenNotCollected_IsNotDrawnOnANotCollectedAnswer_AndOneThatDoesNotSayItIs()
+    {
+        var r = Run("panelHide");
+        Assert.True(r.GetProperty("hidingHidden").GetBoolean());
+        Assert.False(r.GetProperty("keepingHidden").GetBoolean());
+    }
+
+    [Fact]
+    public void AColumnMarkedPlain_ShowsPlainText_AndAnUnmarkedOneShowsTheRawText()
+    {
+        var r = Run("plainCell");
+        Assert.Contains("widen the time range", Strings(r.GetProperty("plain")).Single());
+        Assert.DoesNotContain("hours_back", Strings(r.GetProperty("plain")).Single());
+        Assert.Contains("hours_back", Strings(r.GetProperty("raw")).Single());
+    }
+
+    [Fact]
+    public void TheCollectorGridsMessageColumns_ArePlain_AndTheQueryStorePageTextNamesNoTool()
+    {
+        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        foreach (var key in new[] { "last_error", "note_summary", "output_finding", "regression_finding" })
+        {
+            Assert.Matches("key: \"" + key + "\"[^}]*plain: true", tabs);
+        }
+
+        Assert.DoesNotContain("which is what get_query_trend", tabs, StringComparison.Ordinal);
+        Assert.DoesNotContain("no query_store_health capture", tabs, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AGridThatNamesOrderRows_OpensInThatOrder_AndWorstFirstRanksFailingBeforeHealthyBeforeNotApplicable()
+    {
+        var r = Run("gridOrder");
+        Assert.Equal(new[] { "c_fail", "d_warn", "a_ok", "b_ok", "a_gated" }, Strings(r.GetProperty("worst")));
+        Assert.Equal(new[] { "2026-10-03", "2026-10-02", "2026-10-01" }, Strings(r.GetProperty("newest")));
+        Assert.Equal(Strings(r.GetProperty("worst")), Strings(r.GetProperty("drawn")));
+        Assert.Equal(new[] { "b_ok", "a_gated", "c_fail", "a_ok", "d_warn" }, Strings(r.GetProperty("drawnPlain")));
+    }
+
+    [Fact]
+    public void TheTabs_HideInstanceCpuOnANotCollectedAnswer_ListCollectorsWorstFirst_AndTheCalendarNewestFirst()
+    {
+        var r = Run("tabs");
+        Assert.Equal(new[] { true }, r.GetProperty("cpuPanels").EnumerateArray().Select(x => x.GetBoolean()).ToArray());
+        Assert.Equal(new[] { "c_fail", "a_ok", "b_ok" }, Strings(r.GetProperty("pgCollectors")));
+        Assert.Equal(new[] { "c_fail", "a_ok", "b_ok" }, Strings(r.GetProperty("sqlCollectors")));
+        Assert.Equal(new[] { "2026-10-03", "2026-10-02", "2026-10-01" }, Strings(r.GetProperty("calendar")));
+    }
+
+    [Fact]
     public void CollectorCounts_WrittenWithUnderscores_ReadAsWords_AndLoneNamesAreKept()
     {
         string[] inputs =

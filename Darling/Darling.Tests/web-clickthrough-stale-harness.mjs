@@ -80,10 +80,11 @@ globalThis.document = {
 };
 
 const fetches = [];
+let agPayload = {};
 globalThis.fetch = async (url, init) => {
   fetches.push(String(url));
   await new Promise((r) => setTimeout(r, 5));
-  const raw = JSON.stringify({});
+  const raw = JSON.stringify(String(url).includes("/api/ag") ? agPayload : {});
   return { status: 200, ok: true, text: async () => raw };
 };
 
@@ -100,6 +101,7 @@ try {
     util: await load("util.js"),
     tabs: await load(path.join("pages", "server-tabs.js")),
     fleet: await load(path.join("pages", "fleet.js")),
+    ag: await load(path.join("pages", "ag.js")),
   };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
@@ -128,6 +130,23 @@ const scenarios = {
     offline: chips(modules.fleet.metricBands(card({ is_online: false }))),
     online: chips(modules.fleet.metricBands(card({ last_collection: iso(1000) }))),
   }),
+  agStale: async () => {
+    /* The Availability Groups card subtitle of a group the page was told is stale, and of a fresh one. */
+    const group = (over) => ({
+      group_name: "AG1", server_name: "SRV1", collection_time: iso(12 * 86400000), severity: "Unknown",
+      replicas: [], databases: [], ...over,
+    });
+    const subtitles = async (g) => {
+      agPayload = { generated_at: iso(0), availability_groups: [g] };
+      const root = new FakeNode("main");
+      await modules.ag.renderAg(root);
+      return all(root, (n) => String(n.className).includes("status-line")).map((n) => ({ text: n.textContent }));
+    };
+    return {
+      stale: await subtitles(group({ is_stale: true })),
+      fresh: await subtitles(group({ is_stale: false, collection_time: iso(1000), severity: "Healthy" })),
+    };
+  },
   waits: async () => {
     const tab = modules.tabs.SERVER_TABS.find((t) => t.id === "waits");
     const root = new FakeNode("main");
