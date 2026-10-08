@@ -15,8 +15,8 @@ using System.Text.Json;
 using PerformanceMonitor.Ui;
 using Xunit;
 
-/* This file is compiled into Darling.Tests and Lite.Tests (a linked Compile item), so both test assemblies pin the
-   shared picker model; the namespace is the same in each. */
+/* Darling.Tests covers the shared picker model (Lite and the Viewer both reference PerformanceMonitor.Ui).
+   Lite.Tests does not compile this file: a linked Darling file must be named in build.yml's Lite path filter. */
 namespace Darling.Tests;
 
 /// <summary>

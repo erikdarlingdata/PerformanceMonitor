@@ -1,0 +1,109 @@
+<UserControl x:Class="PerformanceMonitor.Ui.TimeRangePicker"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="Root"
+             Focusable="False">
+    <!--
+      Shared time range picker (#5562): a button naming the range, the resolved start, end and zone beside it, and a
+      popup with the short presets, the calendar periods, a text box that previews what it parsed before Apply, and a
+      calendar for picking a range. Themed through the shared brush keys (Background, Foreground, Border, Accent...)
+      that both apps' Dark, Light and Cool Breeze dictionaries define, so it follows the theme with no code.
+    -->
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <Button x:Name="PickerButton"
+                Click="PickerButton_Click"
+                Padding="10,4"
+                MinHeight="26"
+                HorizontalContentAlignment="Left"
+                AutomationProperties.Name="Time range">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock x:Name="ButtonText" VerticalAlignment="Center"/>
+                <TextBlock Text="&#x25BE;" Margin="8,0,0,0" VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundDimBrush}"/>
+            </StackPanel>
+        </Button>
+
+        <StackPanel x:Name="DetailPanel" Margin="10,0,0,0" VerticalAlignment="Center">
+            <TextBlock x:Name="ResolvedText"
+                       Foreground="{DynamicResource ForegroundDimBrush}"
+                       VerticalAlignment="Center"
+                       AutomationProperties.Name="Resolved time range"/>
+            <TextBlock x:Name="NoteText"
+                       Foreground="{DynamicResource WarningTextBrush}"
+                       FontSize="11"
+                       Visibility="Collapsed"
+                       TextWrapping="Wrap"
+                       MaxWidth="460"/>
+        </StackPanel>
+
+        <Popup x:Name="PickerPopup"
+               PlacementTarget="{Binding ElementName=PickerButton}"
+               Placement="Bottom"
+               StaysOpen="False"
+               AllowsTransparency="True"
+               PopupAnimation="Fade"
+               Opened="PickerPopup_Opened"
+               Closed="PickerPopup_Closed">
+            <Border Background="{DynamicResource BackgroundBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="10"
+                    Margin="0,2,8,8"
+                    PreviewKeyDown="PopupRoot_PreviewKeyDown"
+                    TextElement.Foreground="{DynamicResource ForegroundBrush}"
+                    TextElement.FontFamily="Segoe UI">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="10" ShadowDepth="2" Opacity="0.35"/>
+                </Border.Effect>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="12"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Left: the presets. -->
+                    <StackPanel Grid.Column="0" Width="196">
+                        <TextBlock Text="Past" FontWeight="SemiBold" Margin="0,0,0,4"
+                                   Foreground="{DynamicResource ForegroundDimBrush}"/>
+                        <WrapPanel x:Name="RollingPanel"/>
+                        <TextBlock Text="Calendar" FontWeight="SemiBold" Margin="0,10,0,4"
+                                   Foreground="{DynamicResource ForegroundDimBrush}"/>
+                        <StackPanel x:Name="PeriodPanel"/>
+                    </StackPanel>
+
+                    <!-- Right: type a range, see what it parsed, or pick days on the calendar. -->
+                    <StackPanel Grid.Column="2" Width="300">
+                        <TextBlock Text="Type a range" FontWeight="SemiBold" Margin="0,0,0,4"
+                                   Foreground="{DynamicResource ForegroundDimBrush}"/>
+                        <TextBox x:Name="InputBox"
+                                 Padding="6,4"
+                                 TextChanged="InputBox_TextChanged"
+                                 KeyDown="InputBox_KeyDown"
+                                 AutomationProperties.Name="Type a time range"
+                                 ToolTip="45m, 3 days, last month, Oct 1 - Oct 2, 1:00 am - 7:00 am, since 10/1, 1790852543 - 1791457343"/>
+                        <TextBlock x:Name="EchoText"
+                                   Margin="0,6,0,0"
+                                   MinHeight="34"
+                                   TextWrapping="Wrap"
+                                   Foreground="{DynamicResource ForegroundDimBrush}"/>
+                        <Calendar x:Name="PickCalendar"
+                                  Margin="0,6,0,0"
+                                  HorizontalAlignment="Left"
+                                  SelectionMode="SingleRange"
+                                  FirstDayOfWeek="Monday"
+                                  SelectedDatesChanged="PickCalendar_SelectedDatesChanged"
+                                  AutomationProperties.Name="Pick days on a calendar"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                            <Button x:Name="CancelButton" Content="Cancel" Padding="12,4" Margin="0,0,6,0" Click="CancelButton_Click"/>
+                            <Button x:Name="ApplyButton" Content="Apply" Padding="14,4" IsEnabled="False" Click="ApplyButton_Click"
+                                    Background="{DynamicResource AccentBrush}"
+                                    Foreground="{DynamicResource AccentForegroundBrush}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Popup>
+    </StackPanel>
+</UserControl>
