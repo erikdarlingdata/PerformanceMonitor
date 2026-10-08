@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 WORKFLOW = os.path.join(ROOT, ".github", "workflows", "build.yml")
@@ -554,6 +555,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         if any(matches(p, f) for p in keep_full):
             return _full(f"{f} is a keep-full file")
     live = [f for f in effective if not any(matches(p, f) for p in doc_patterns)]
+    live_names = set(live)
 
     known: set[str] = {u for u in universe if isinstance(u, str)}
     parsed: dict[str, dict[str, tuple[set[str], set[str]]]] = {}
@@ -574,11 +576,18 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         else:
             return _full("test map unreadable")
 
+    docs_changed = [f for f in effective if f not in live_names]
+
     def text_hit(cls: str) -> bool:
         g = globs.get(cls)
         if g == "tree":
             return bool(live)
-        return isinstance(g, list) and any(matches(p, f) for p in g for f in live)
+        if not isinstance(g, list):
+            return False
+        # A class that reads a documentation file by name (the migration ladder reads CHANGELOG.md) is selected by a
+        # change to exactly that file; the documentation allowlist only keeps wildcard patterns from matching it.
+        return (any(matches(p, f) for p in g for f in live)
+                or any(p == f for p in g if "*" not in p for f in docs_changed))
 
     new_classes = any(cls not in parsed.get(suite, {}) for suite, found in discovered.items() for cls in found)
     for f in live:
@@ -648,14 +657,18 @@ def selection_args(rules: Rules) -> dict:
     return {"keep_full": tuple(dict.fromkeys(keep)), "doc_patterns": tuple(rules.build["docs"])}
 
 
-def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, quiet: bool = False) -> int:
+def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, quiet: bool = False,
+               misses_out: "str | None" = None) -> int:
     """Like replay(), but asks the map: would each failing class of each corpus row have been selected, taking the map
-    as current (no drift, no age check)? Returns the miss count. Reports only; the caller does not fail on it yet."""
+    as current (no drift, no age check)? Returns the miss count. Reports only; the caller does not fail on it yet.
+    The printed list is capped at 40; `misses_out` names a file that gets EVERY miss as one JSON row per line
+    (date, event, head_sha, suite, class, changed_files), so none goes unclassified (#5459)."""
     extra = selection_args(Rules())
     accepted = load_accepted()
     tree = scan_classes(root)
     rows = checked = misses = full_rows = accepted_seen = 0
     missed: list[str] = []
+    rows_out: list[dict] = []
     with open(corpus, encoding="utf-8") as fh:
         for line in fh:
             if not line.strip():
@@ -678,12 +691,80 @@ def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, 
                 misses += 1
                 missed.append(f"{row['date']} {row['head_sha'][:10]} {cls} files={len(row['changed_files'])}"
                               f" e.g. {row['changed_files'][0]}")
+                rows_out.append({"date": row["date"], "event": row["event"], "head_sha": row["head_sha"],
+                                 "suite": suite, "class": cls, "changed_files": row["changed_files"]})
     if not quiet:
         print(f"map replay: {rows} rows ({full_rows} FULL), {checked} failing classes checked, {accepted_seen} accepted, "
               f"{misses} misses (reported, not failing yet)")
         for m in missed[:40]:
             print("MAP-MISS", m)
+        if len(missed) > 40:
+            print(f"... {len(missed) - 40} more misses not printed; --misses-out FILE lists every one")
+    if misses_out:
+        with open(misses_out, "w", encoding="utf-8", newline="\n") as out:
+            for r in rows_out:
+                out.write(json.dumps(r, sort_keys=True) + "\n")
     return misses
+
+
+def shadow_summary(result: dict) -> str:
+    """The step-summary text of a shadow run: how many classes the map would have run, and the estimated seconds."""
+    lines = ["### Test map shadow (#5459): nothing was skipped, every shard ran everything", ""]
+    if result.get("full"):
+        lines.append(f"Selection: FULL ({result.get('reason') or 'no reason given'}).")
+        return "\n".join(lines) + "\n"
+    lines += ["Estimated seconds are the nightly's instrumented times, so they read high.", "",
+              "| suite | selected classes | of | estimated seconds |", "|---|---|---|---|"]
+    for suite in sorted(result.get("selected", {})):
+        lines.append(f"| {suite} | {len(result['selected'][suite])} | {result['total'].get(suite, 0)} | "
+                     f"{result['seconds'].get(suite, 0):.0f} |")
+    for suite in sorted(result.get("why", {})):
+        counts: dict[str, int] = {}
+        for reason in result["why"][suite].values():
+            counts[reason] = counts.get(reason, 0) + 1
+        lines.append(f"- {suite} by reason: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    return "\n".join(lines) + "\n"
+
+
+def failed_classes(reports: str) -> "tuple[dict[str, set[str]], dict[str, int]]":
+    """The classes with a failed test in the shards' xunit reports under `reports`, one subfolder per uploaded
+    artifact (`darling-tests-timing-N`, `lite-tests-timing-N`). Returns ({suite: {Class}}, {suite: report count})."""
+    failed: dict[str, set[str]] = {"darling": set(), "lite": set()}
+    seen: dict[str, int] = {"darling": 0, "lite": 0}
+    if not os.path.isdir(reports):
+        return failed, seen
+    for dirpath, _, names in os.walk(reports):
+        rel = os.path.relpath(dirpath, reports).replace("\\", "/")
+        suite = "darling" if rel.startswith("darling") else "lite" if rel.startswith("lite") else ""
+        if not suite:
+            continue
+        for name in names:
+            if not name.endswith(".xml"):
+                continue
+            seen[suite] += 1
+            try:
+                for _, el in ET.iterparse(os.path.join(dirpath, name), events=("end",)):
+                    if el.tag == "test" and (el.get("result") or "").lower() == "fail":
+                        failed[suite].add(re.split(r"[.+/]", el.get("type") or "")[-1])
+                    el.clear()
+            except (ET.ParseError, OSError):
+                seen[suite] -= 1  # an unreadable report counts as no report
+    return failed, seen
+
+
+def shadow_row(selection: "dict | None", failed: "dict[str, set[str]]", seen: "dict[str, int]", meta: dict) -> dict:
+    """One JSONL row per run: the selection's size and the classes that failed although it would not have run them.
+    A FULL (or missing) selection selects every class, so it can have no miss."""
+    sel = selection if isinstance(selection, dict) else _full("no selection was written")
+    misses: list[dict] = []
+    if not sel.get("full"):
+        for suite in sorted(failed):
+            chosen = set(sel.get("selected", {}).get(suite, []))
+            misses += [{"suite": suite, "class": c} for c in sorted(failed[suite]) if c not in chosen]
+    return {"v": 1, **meta, "full": bool(sel.get("full")), "reason": sel.get("reason", ""),
+            "selected": {s: len(v) for s, v in sel.get("selected", {}).items()},
+            "total": sel.get("total", {}), "seconds": sel.get("seconds", {}),
+            "reports": seen, "failed": {s: sorted(v) for s, v in failed.items()}, "misses": misses}
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -699,6 +780,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--replay", action="store_true", help="replay the failure corpus against today's rules")
     ap.add_argument("--corpus", default=CORPUS)
     ap.add_argument("--map", help="with --replay: also replay the corpus against this class-to-file map (reports only)")
+    ap.add_argument("--misses-out", help="with --map: write every map miss, one JSON row per line, to this file")
     sub = ap.add_subparsers(dest="cmd")
 
     ls = sub.add_parser("lite-scope", help="how much of the Lite suite a leg runs (workflow step)")
@@ -729,13 +811,21 @@ def main(argv: list[str]) -> int:
     ms.add_argument("--drift-file", help="the drift as one path per line, instead of --base (`-` for none)")
     ms.add_argument("--root", default=ROOT, help="the tree whose test classes are listed (default: this repository)")
     ms.add_argument("--files-from", help="the changed files as one path per line, in place of the arguments")
+    ms.add_argument("--out", help="also write the selection JSON to this file (stdout keeps the notice and the JSON)")
+    ms.add_argument("--summary", help="also write the shadow step-summary markdown to this file")
     ms.add_argument("files", nargs="*")
+
+    sc = sub.add_parser("shadow-check", help="classes that failed but a map selection would not have run (workflow step)")
+    sc.add_argument("--selection", help="the JSON map-select --out wrote; missing or unreadable counts as FULL")
+    sc.add_argument("--reports", required=True, help="a folder with one subfolder per timing artifact")
+    sc.add_argument("--out", required=True, help="the one-row JSONL file to write")
+    sc.add_argument("--meta", default="{}", help="JSON object merged into the row (run, sha, pr...)")
 
     args = ap.parse_args(argv)
     if args.replay:
         misses = replay(args.corpus)
         if args.map:
-            map_replay(load_map(args.map), args.corpus)  # reports; does not fail the replay yet
+            map_replay(load_map(args.map), args.corpus, misses_out=args.misses_out)  # reports; does not fail the replay yet
         return 1 if misses else 0
     if args.cmd == "map-select":
         files = list(args.files)
@@ -751,10 +841,41 @@ def main(argv: list[str]) -> int:
                 drift = [ln.strip() for ln in fh if ln.strip()]
         elif args.base and isinstance(test_map, dict) and isinstance(test_map.get("sha"), str):
             drift = git_drift(test_map["sha"], args.base)
-        result = map_select(test_map, files, drift, scan_classes(args.root), event=args.event, **selection_args(Rules()))
+        discovered = scan_classes(args.root)
+        if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
+            # The map holds the suites the nightly instruments (darling, lite). The deprecated suites in the tree
+            # are not in it and no shard runs them as a test-map class, so they are not "new classes".
+            discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
+        result = map_select(test_map, files, drift, discovered, event=args.event, **selection_args(Rules()))
         if result["full"]:
             print(f"::notice::test map: running everything ({result['reason']})")
         print(json.dumps(result, indent=1))
+        if args.out:
+            with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(result, fh)
+        if args.summary:
+            with open(args.summary, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(shadow_summary(result))
+        return 0
+    if args.cmd == "shadow-check":
+        selection = None
+        if args.selection:
+            try:
+                with open(args.selection, encoding="utf-8") as fh:
+                    selection = json.load(fh)
+            except (OSError, ValueError):
+                selection = None
+        failed, seen = failed_classes(args.reports)
+        try:
+            meta = json.loads(args.meta)
+        except ValueError:
+            meta = {}
+        row = shadow_row(selection, failed, seen, meta if isinstance(meta, dict) else {})
+        with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+        for m in row["misses"]:
+            print(f"::notice title=Shadow miss::{m['suite']} {m['class']} failed and the test map would not have run it")
+        print(f"shadow-check: full={row['full']} misses={len(row['misses'])} reports={row['reports']}")
         return 0
     if args.cmd == "lite-scope":
         mode = lite_scope(args.event, _bool(args.lite), _bool(args.core), _bool(args.root), _bool(args.reads),

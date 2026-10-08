@@ -3086,10 +3086,20 @@ public class CrossAppGuardCiGateTests
                 .Where(line => !line.TrimStart().StartsWith('#'))
                 .ToArray();
 
-            var downloads = code.Count(line => line.Contains("gh run download", StringComparison.Ordinal));
+            // build.yml has two: the Lite shard packer's timings and (#5459, shadow mode) the nightly's test map. The
+            // second reads a NIGHTLY run, never a build.yml run, so a cancelled push run cannot starve it, and its
+            // selection is not used to skip anything.
+            var downloadLines = code.Where(line => line.Contains("gh run download", StringComparison.Ordinal)).ToArray();
+            var downloads = downloadLines.Length;
             Assert.True(
-                downloads == (name == "build.yml" ? 1 : 0),
-                $"{name} has {downloads} 'gh run download' line(s); only build.yml's Lite shard step may have one, and exactly one.");
+                downloads == (name == "build.yml" ? 2 : 0),
+                $"{name} has {downloads} 'gh run download' line(s); only build.yml may have them, one for the Lite shard step and one for the shadow-mode test map.");
+            if (name == "build.yml")
+            {
+                Assert.Single(downloadLines, line => line.Contains("--pattern 'lite-tests-timing-*'", StringComparison.Ordinal));
+                Assert.Single(downloadLines, line => line.Contains("-n test-map ", StringComparison.Ordinal));
+            }
+
             Assert.True(
                 !code.Any(line => line.TrimStart().StartsWith("run-id:", StringComparison.Ordinal)),
                 $"{name} downloads another run's artifacts through a run-id input; the cancel-in-progress argument in build.yml names only the Lite shard packer.");
@@ -3103,7 +3113,10 @@ public class CrossAppGuardCiGateTests
            build the same test projects, each naming the Guard job's output and no run-id (the loop above pins that). A
            fourth use, or one that names anything else, is a second reader the cancel-in-progress argument does not cover. */
         var buildCode = string.Join('\n', build.Split('\n').Where(l => !l.TrimStart().StartsWith('#')));
-        Assert.Equal(3, Regex.Matches(buildCode, "download-artifact").Count);
+        /* Two more (#5459, shadow mode): the shadow-check job fetches THIS run's selection and THIS run's shard reports.
+           Same run, no run-id (the loop above pins that), so a cancelled run's output is never read by another run. */
+        Assert.Equal(5, Regex.Matches(buildCode, "download-artifact").Count);
+        Assert.Equal(2, Regex.Matches(JobBlock(build, "shadow-check"), "uses: actions/download-artifact@v6").Count);
         foreach (var jobKey in new[] { "darling-pg", "darling-tree-guards", "lite-tests" })
         {
             var fetch = StepBlock(JobBlock(build, jobKey), "Fetch the Guard job's build of the test project");

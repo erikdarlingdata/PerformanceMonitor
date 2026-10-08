@@ -60,6 +60,13 @@ FILE_EXT = {"cs", "js", "css", "xaml", "sql", "ps1", "yml", "yaml", "json", "htm
             "md", "xml", "sh", "py", "psm1", "psd1", "txt", "config", "svg", "resx", "mjs", "conf", "ini", "cmd", "bat"}
 MAX_BASENAME_MATCHES = 25
 MAX_TOOL_FILES = 6
+MEMBER_REF = re.compile(r"\b([A-Z][A-Za-z0-9_]{2,})\.([A-Z][A-Za-z0-9_]{2,})\b")
+MAX_MEMBER_FILES = 5  # `Type.Member` of a partial type: the files that declare the member, when there are this few
+MAX_NAMED_PARTIALS = 12
+MAX_OVERFLOW_FILES = 60  # a class that would be a hole may take the files of a type declared in more files than the cap
+# A repo path written in a comment or doc cref (`Lite/Analysis/AnomalyDetector.cs:120`): the author names the file the
+# class pins, so a change to it selects the class (#5459 slice 4, the Darling/Lite twin pairs).
+COMMENT_PATH = re.compile(r"(?<![\w./\-])((?:[\w.\-]+/)+[\w\-]+\.[A-Za-z]{1,8})\b")
 TEST_DIR = re.compile(r"(^|/)[\w.]*Tests?/")
 SKIP_DIRS = ("bin/", "obj/", "node_modules/")
 
@@ -233,10 +240,12 @@ class Repo:
             self.by_basename.setdefault(f.rsplit("/", 1)[-1], []).append(f)
         self.types: dict[str, set[str]] = {}
         self.tools: dict[str, set[str]] = {}
+        self.cs_words: dict[str, frozenset[str]] = {}  # the identifiers of each .cs file, for the `Type.Member` rule
         for f in self.tracked:
             if not f.endswith(".cs"):
                 continue
             text = read_text(root, f)
+            self.cs_words[f] = frozenset(re.findall(r"\w+", text))
             for name in TYPE_DECL.findall(text):
                 self.types.setdefault(name, set()).add(f)
             if not TEST_DIR.search(f):
@@ -276,6 +285,7 @@ def analyze_source(text: str, repo: Repo, own_file: str, own_types: set[str]) ->
     reads = bool(TEXT_READ.search(text))
     literals = [unescape(m) for m in LITERAL.findall(text)]
     candidates = list(literals)
+    candidates += [m for m in COMMENT_PATH.findall(text) if m.rsplit(".", 1)[-1] in FILE_EXT]
     for run in RUN.findall(text):
         parts = [unescape(x) for x in LITERAL.findall(run)]
         if all(PATHLIKE.match(p) for p in parts):
@@ -313,8 +323,64 @@ def type_files(text: str, repo: Repo, own_file: str, own_types: set[str], max_fi
         files = repo.types.get(name)
         if files and len(files) <= max_files:
             found |= files
+        elif files:
+            # A partial type declared in many files: the files named after it (`Foo.cs`, `Foo.Plans.cs`) are the ones
+            # a test that names the type most plausibly pins; the rest come only through coverage or `Type.Member`.
+            named = {f for f in files if f.rsplit("/", 1)[-1].startswith(name + ".") and f != own_file}
+            found |= named if len(named) <= MAX_NAMED_PARTIALS else {f for f in named if f.endswith("/" + name + ".cs")}
     found.discard(own_file)
     return found
+
+
+def member_files(text: str, repo: Repo, own_file: str, max_files: int) -> set[str]:
+    """`Type.Member` where Type is a partial type declared in more than `max_files` files: the files of Type that
+    mention Member, when that is at most MAX_MEMBER_FILES. A test that pins a const SQL string of a partial class
+    (`ViewerDataService.CollectionHealthSql`) runs no code in it, so coverage never sees the file."""
+    found: set[str] = set()
+    for typ, member in set(MEMBER_REF.findall(text)):
+        files = repo.types.get(typ)
+        if not files or len(files) <= max_files:
+            continue
+        hits = {f for f in files if f != own_file and member in repo.cs_words.get(f, ())}
+        if 0 < len(hits) <= MAX_MEMBER_FILES:
+            found |= hits
+    return found
+
+
+def overflow_type_files(text: str, repo: Repo, own_file: str, own_types: set[str], max_files: int) -> set[str]:
+    """Files of the types the type-name rule dropped for being declared in more than `max_files` files (partial
+    classes). Only a class that would otherwise be a hole takes them: more files, never fewer."""
+    found: set[str] = set()
+    for name in set(IDENT.findall(text)):
+        if name in own_types:
+            continue
+        files = repo.types.get(name)
+        if files and len(files) > max_files:
+            found |= files
+    found.discard(own_file)
+    return found
+
+
+def test_references(root: str, repo: Repo) -> dict[str, set[str]]:
+    """Test class name -> the test source files that name it (another file than its own). A class named in a test
+    file is pinned by it, so a change to that file selects the class: the Darling and Lite twin tests name each other
+    in crefs and comments, and a sibling class in the same live store is named by the class that extends it."""
+    decl_files: dict[str, set[str]] = {}
+    texts: dict[str, str] = {}
+    for rel in repo.tracked:
+        if not rel.endswith(".cs") or not any(rel.startswith(d + "/") for d in SUITE_DIRS.values()):
+            continue
+        text = read_text(root, rel)
+        texts[rel] = text
+        for cls in CLASS_DECL.findall(text):
+            decl_files.setdefault(cls, set()).add(rel)
+    refs: dict[str, set[str]] = {}
+    for rel, text in texts.items():
+        for name in set(IDENT.findall(text)):
+            own = decl_files.get(name)
+            if own and rel not in own:
+                refs.setdefault(name, set()).add(rel)
+    return refs
 
 
 def xaml_siblings(path: str, repo: Repo) -> set[str]:
@@ -342,6 +408,7 @@ def build_map(root: str, tracked: list[str], shards: dict[str, list[dict]], sha:
               max_ident_files: int) -> tuple[dict, dict]:
     """Returns (the map, the facts the summary prints)."""
     repo = Repo(root, tracked)
+    refs = test_references(root, repo)
     suites = {}
     patterns_out: dict[str, "list[str] | str"] = {}
     used: set[str] = set()
@@ -372,11 +439,14 @@ def build_map(root: str, tracked: list[str], shards: dict[str, list[dict]], sha:
             own_types = set(TYPE_DECL.findall(text))
             guard = bool(GUARD_MARKER.search(text))
             info = analyze_source(text, repo, rel, own_types)
-            idents = type_files(text, repo, rel, own_types, max_ident_files)
+            idents = type_files(text, repo, rel, own_types, max_ident_files) | member_files(text, repo, rel, max_ident_files)
+            over = overflow_type_files(text, repo, rel, own_types, max_ident_files)
             for cls in decls:
-                s = sources.setdefault(cls, {"own": set(), "ident": set(), "patterns": {}, "tree": False, "guard": False})
+                s = sources.setdefault(cls, {"own": set(), "ident": set(), "patterns": {}, "tree": False, "guard": False,
+                                             "overflow": set()})
                 s["own"].add(rel)
                 s["ident"] |= idents
+                s["overflow"] |= over
                 s["guard"] = s["guard"] or guard
                 s["tree"] = s["tree"] or info["tree"]
                 for pat in info["patterns"]:
@@ -397,13 +467,21 @@ def build_map(root: str, tracked: list[str], shards: dict[str, list[dict]], sha:
             ident = set(src["ident"]) if src else set()
             files |= ident
             files -= set(own)
+            pats: "list[str] | str" = []
+            if src and not src["guard"]:
+                named_by = sorted(refs.get(cls, set()) - set(own))
+                pats = "tree" if src["tree"] else list(dict.fromkeys(list(src["patterns"]) + named_by))
+                # A class that would be a hole (no product file, no pattern) takes the files of the partial types it
+                # names, however many there are; past the cap it reads the tree. More files, never fewer.
+                if not pats and not any(not TEST_DIR.search(f) for f in files) and src["overflow"]:
+                    if len(src["overflow"]) <= MAX_OVERFLOW_FILES:
+                        files |= src["overflow"] - set(own)
+                    else:
+                        pats = "tree"
             used.update(files)
             used.update(own)
             entry = {"own": own, "files": sorted(files), "seconds": round(m["seconds"], 3)}
             entries[cls] = entry
-            pats: "list[str] | str" = []
-            if src and not src["guard"]:
-                pats = "tree" if src["tree"] else list(src["patterns"])
             if pats:
                 key = patterns_out.get(cls)
                 if pats == "tree" or key == "tree":
