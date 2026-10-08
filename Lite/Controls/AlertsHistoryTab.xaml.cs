@@ -63,9 +63,12 @@ public partial class AlertsHistoryTab : UserControl
     {
         InitializeComponent();
         RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened */
-        /* R8: "All" is a span as long as the alert log is kept (3 months on Lite, RetentionService.ArchiveRetentionMonths), through
-           the shared control's longest choice, as the Darling Viewer's Alert History does. */
-        RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice(DateTime.UtcNow), "All");
+        /* #5562 M1: typed times and calendar periods are read in the zone the Time column is worded in (the display mode), as the
+           Darling Viewer's Alert History does with its display zone. */
+        RangePicker.ZoneProvider = () => ServerTimeHelper.CurrentDisplayZone;
+        /* R8: "All" is a span of 365 days, longer than anything Lite keeps (archive files are deleted by whole month, 3 months
+           back, so rows older than 3 months survive until their month's file goes), through the shared control's longest choice. */
+        RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, "All");
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }

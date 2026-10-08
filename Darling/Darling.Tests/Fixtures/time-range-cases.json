@@ -971,11 +971,11 @@
    "input": "today",
    "now": "2026-10-08T04:02:00Z",
    "zone": "America/New_York",
-   "start": null,
-   "end": null,
-   "live": null,
-   "echo": null,
-   "error": "too_short"
+   "start": "2026-10-08T04:00:00Z",
+   "end": "2026-10-08T04:02:00Z",
+   "live": true,
+   "echo": "2m  Oct 8, 12:00 am - Oct 8, 12:02 am (UTC-04:00)",
+   "error": null
   },
   {
    "name": "end before start",

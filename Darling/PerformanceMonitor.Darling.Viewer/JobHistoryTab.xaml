@@ -70,7 +70,7 @@
                        Foreground="{DynamicResource ForegroundBrush}"/>
             <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <!-- #5562: the shared time range picker. 30 days is the "1mo" preset; 90 days and a year are typed ("90d", "365d"). -->
+            <!-- #5562: the shared time range picker. 30 days is the "1mo" preset, a year is the longest choice ("Last Year", 365 days), 90 days is typed ("90d"). -->
             <ui:TimeRangePicker x:Name="TimeRangePickerControl" Compact="True" VerticalAlignment="Center"
                                 RangeChanged="TimeRangePicker_RangeChanged"/>
             <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"

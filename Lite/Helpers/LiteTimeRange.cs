@@ -30,6 +30,7 @@ internal static class LiteTimeRange
     {
         picker.Compact = true;
         picker.RollingUnit = unit;
+        picker.ZoneProvider = () => ServerTimeHelper.CurrentDisplayZone; /* #5562 M1: the tooltip words the range in the zone the grid beside it uses */
     }
 
     /// <summary>The range a fresh install opens on: the old default of four hours.</summary>
@@ -98,20 +99,21 @@ internal static class LiteTimeRange
     }
 
     /// <summary>
-    /// The longest span Alert History offers (#5562 R8; the old "All" item is gone): a typed length equal to how long Lite keeps
-    /// the alert log, 365 days at most. The alert log is archived like every signal table and its archive files are deleted
-    /// <see cref="RetentionService.ArchiveRetentionMonths"/> months back (RetentionService.cs:34), so on Lite that is 3 months,
-    /// 89 to 92 days at <paramref name="utcNow"/>, rounded up to whole days.
+    /// The longest span Alert History offers (#5562 R8; the old "All" item is gone): 365 days. It covers everything Lite keeps:
+    /// the alert log is archived like every signal table and its archive files are deleted by whole month,
+    /// <see cref="RetentionService.ArchiveRetentionMonths"/> months back, so rows older than 3 months survive until their month's
+    /// file goes, and a 3-month span would hide them. The parser has no year unit, so "1y" cannot be typed; this choice is the way to it.
     /// </summary>
-    internal static TimeSpan AlertHistoryLongest(DateTime utcNow)
-    {
-        var kept = utcNow - utcNow.AddMonths(-RetentionService.ArchiveRetentionMonths);
-        var days = Math.Ceiling(kept.TotalDays);
-        return TimeSpan.FromDays(Math.Min(days, 365));
-    }
+    internal static TimeSpan AlertHistoryLongest { get; } = TimeSpan.FromDays(365);
 
-    /// <summary>The longest choice as the shared control's extra rolling choice (<c>SetLongestChoice</c>), the Viewer's "All" at Lite's retention.</summary>
-    internal static TimeRangeSpec AlertHistoryLongestChoice(DateTime utcNow) => TimeRangeSpec.Relative(AlertHistoryLongest(utcNow));
+    /// <summary>The longest choice as the shared control's extra rolling choice (<c>SetLongestChoice</c>), the Viewer's "All" at Lite's reach.</summary>
+    internal static TimeRangeSpec AlertHistoryLongestChoice { get; } = TimeRangeSpec.Relative(AlertHistoryLongest);
+
+    /// <summary>
+    /// The longest span Job History offers (#5562 R8): 365 days, the old "Last Year", on both desktops. The parser has no year
+    /// unit, so this choice is the only way to a year.
+    /// </summary>
+    internal static TimeRangeSpec JobHistoryLongestChoice { get; } = TimeRangeSpec.Relative(TimeSpan.FromDays(365));
 
     /// <summary>True when <paramref name="range"/> carries its own instants rather than 'the last N hours'.</summary>
     internal static bool HasExplicitInstants(ResolvedTimeRange range) => range.Spec.WholeHours is not > 0;
@@ -129,18 +131,6 @@ internal static class LiteTimeRange
         }
 
         return TimeRangePresets.FromLegacyHours(legacyHours) is { } legacy ? legacy : Default;
-    }
-
-    /// <summary>A drill window under the model's 5-minute floor, centred and widened to it; anything longer is returned as it was.</summary>
-    internal static (DateTime fromUtc, DateTime toUtc) AtLeastMinimumSpan(DateTime fromUtc, DateTime toUtc)
-    {
-        if (toUtc - fromUtc >= TimeRangeSpec.MinimumSpan)
-        {
-            return (fromUtc, toUtc);
-        }
-
-        var mid = fromUtc + (toUtc - fromUtc) / 2;
-        return (mid - TimeRangeSpec.MinimumSpan / 2, mid + TimeRangeSpec.MinimumSpan / 2);
     }
 
     /// <summary>A preset or calendar period persists; a typed fixed or 'since' range does not (a window that ended two days ago is worse than none).</summary>

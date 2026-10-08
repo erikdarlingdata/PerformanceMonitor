@@ -74,25 +74,71 @@ public sealed class ViewerTimeRangeWindowTests
     [Fact]
     public void ARangeThatCannotResolveYet_FallsBackToTwentyFourHours()
     {
-        // Midnight plus one minute: Today is under the 5-minute floor.
-        var justAfterMidnight = new DateTime(2026, 10, 8, 4, 1, 0, DateTimeKind.Unspecified);
-        var (start, end, live) = ViewerTimeRangeWindow.Window(TimeRangeSpec.ForPeriod(CalendarPeriod.Today), justAfterMidnight, Eastern);
+        // A since-range whose start has not happened yet cannot resolve: the Viewer's historical 24 hours stands in.
+        var nowUtc = new DateTime(2026, 10, 8, 4, 1, 0, DateTimeKind.Unspecified);
+        var (start, end, live) = ViewerTimeRangeWindow.Window(TimeRangeSpec.SinceInstant(nowUtc.AddHours(1)), nowUtc, Eastern);
 
         Assert.Equal(TimeSpan.FromHours(24), end - start);
         Assert.True(live);
     }
 
     [Fact]
+    public void TodayInItsFirstMinutes_ReadsMidnightToNow_NeverAnotherRange()
+    {
+        // 00:01 in New York: exempt from the 5-minute floor (seat ruling), so it reads 00:00 to now.
+        var justAfterMidnight = new DateTime(2026, 10, 8, 4, 1, 0, DateTimeKind.Unspecified);
+        var (start, end, live) = ViewerTimeRangeWindow.Window(TimeRangeSpec.ForPeriod(CalendarPeriod.Today), justAfterMidnight, Eastern);
+
+        Assert.Equal(new DateTime(2026, 10, 8, 4, 0, 0), start);
+        Assert.Equal(justAfterMidnight, end);
+        Assert.True(live);
+    }
+
+    [Theory]
+    [InlineData("Queries", "Query Store by Duration", "query_store")]
+    [InlineData("Queries", "Active Queries", "query_snapshots")]
+    [InlineData("Queries", null, "query_stats")]
+    [InlineData("Blocking", "Current Waits", "waiting_tasks")]
+    [InlineData("Blocking", "Blocked Process Reports", "blocked_process_report")]
+    [InlineData("Memory", "Memory Clerks", "memory_clerks")]
+    [InlineData("CPU", "CPU Scheduler", "cpu_scheduler_stats")]
+    [InlineData("Wait Stats", "anything", "wait_stats")]
+    public void TheMainCollector_FollowsTheSubTabOnScreen_AsLiteDoes(string tab, string? sub, string expected)
+    {
+        Assert.Equal(expected, ViewerTimeRangeWindow.MainCollectorFor(tab, sub));
+        Assert.True(PerformanceMonitor.Collectors.CollectorScheduleDefaults.All.ContainsKey(expected));
+    }
+
+    [Theory]
+    [InlineData("400000mo")]
+    [InlineData("1000000d")]
+    [InlineData("999999w")]
+    public void ACorruptPreferenceRange_FallsBackToTheIndexWithoutThrowing(string corrupt)
+    {
+        /* #5562 review H1: a hand-edited viewer-preferences.json used to throw OverflowException from Load() at startup. */
+        var prefs = new ViewerPreferences { DefaultTimeRange = corrupt, DefaultTimeRangeIndex = 1 }.Normalize();
+        Assert.Equal("4h", prefs.DefaultTimeRange);
+        Assert.Equal(1, prefs.DefaultTimeRangeIndex);
+    }
+
+    [Fact]
+    public void JobHistory_LongestChoice_IsAYear()
+    {
+        Assert.Equal(TimeSpan.FromDays(365), ViewerTimeRangeWindow.JobHistoryLongestChoice.Span);
+        Assert.False(TimeRangeSpec.TryFromId("1y", out _));
+    }
+
+    [Fact]
     public void ApplyToAll_SendsACalendarPeriodAsTheInstantsItNames_AndLeavesARollingRangeAlone()
     {
         var rolling = TimeRangeSpec.Relative(TimeSpan.FromHours(4));
-        Assert.Same(rolling, ViewerTimeRangeWindow.ForBroadcast(rolling, Now, Eastern));
+        Assert.Same(rolling, TimeRangePresets.ForBroadcast(rolling, Now, Eastern));
 
-        var today = ViewerTimeRangeWindow.ForBroadcast(TimeRangeSpec.ForPeriod(CalendarPeriod.Today), Now, Eastern);
+        var today = TimeRangePresets.ForBroadcast(TimeRangeSpec.ForPeriod(CalendarPeriod.Today), Now, Eastern);
         Assert.Equal(TimeRangeKind.Since, today.Kind);
         Assert.Equal(new DateTime(2026, 10, 8, 4, 0, 0), today.StartUtc);
 
-        var yesterday = ViewerTimeRangeWindow.ForBroadcast(TimeRangeSpec.ForPeriod(CalendarPeriod.Yesterday), Now, Eastern);
+        var yesterday = TimeRangePresets.ForBroadcast(TimeRangeSpec.ForPeriod(CalendarPeriod.Yesterday), Now, Eastern);
         Assert.Equal(TimeRangeKind.Fixed, yesterday.Kind);
         Assert.Equal(new DateTime(2026, 10, 7, 4, 0, 0), yesterday.StartUtc);
         Assert.Equal(new DateTime(2026, 10, 8, 4, 0, 0), yesterday.EndUtc);

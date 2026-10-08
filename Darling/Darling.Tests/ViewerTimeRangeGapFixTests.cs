@@ -256,18 +256,6 @@ public sealed class ViewerTimeRangeGapFixTests
 
     // ── R6: Job History's end bound, applied before the row cap ──
 
-    [Fact]
-    public void TheJobHistoryTab_HandsAFinishedRangesEndToTheRead_AndNoLongerTrimsOnTheClient()
-    {
-        var tab = Code("JobHistoryTab.xaml.cs");
-        Assert.Matches(@"GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap,\s*untilUtc:\s*windowIsLive \? null : windowEndUtc\)", tab);
-        Assert.DoesNotContain("windowEndUtc).ToList()", tab, StringComparison.Ordinal);
-        Assert.DoesNotContain("ran < windowEndUtc", tab, StringComparison.Ordinal);
-
-        var read = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(ViewerFile("ViewerDataService.JobHistory.cs"), "GetJobHistoryAsync"));
-        Assert.Contains("new JobHistoryFilter(UntilUtc: until.AddTicks(-TimeSpan.TicksPerMicrosecond))", read, StringComparison.Ordinal);
-    }
-
     private const int EndBoundServer = -556_201;
     private const long EndBoundIdBase = 5_562_000_000L;
 

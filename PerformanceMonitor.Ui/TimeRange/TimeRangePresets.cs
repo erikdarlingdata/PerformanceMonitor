@@ -46,9 +46,26 @@ public static class TimeRangePresets
     };
 
     /// <summary>The range the old hour lists meant: 1, 4, 12, 24 and 168 hours, and any other whole number of hours. <c>null</c> for zero or less.</summary>
-    /// <remarks>24 hours is "1d" and 168 is "1w": the same instants, the id the new lists use.</remarks>
+    /// <remarks>24 hours is "1d" and 168 is "1w": the same instants, the id the new lists use. Also <c>null</c> past the 100-year relative limit (#5562 review: a corrupt settings value threw OverflowException).</remarks>
     public static TimeRangeSpec? FromLegacyHours(int hours)
-        => hours <= 0 ? null : TimeRangeSpec.Relative(TimeSpan.FromHours(hours));
+        => hours <= 0 || hours > TimeRangeSpec.MaxRelative.TotalHours ? null : TimeRangeSpec.Relative(TimeSpan.FromHours(hours));
+
+    /// <summary>What "Apply to All" sends for a held range (#5562, M2; Lite and the Viewer share this). A relative range and a fixed or
+    /// since range go as they are (every tab then windows on the same period, as #4766 settled). A calendar period is resolved ONCE
+    /// here, in the source tab's zone, and sent as the instants it names - or as a since range while it still runs (Today) - because
+    /// each tab draws its own server's clock and "Today" would otherwise mean a different day on each. A period that cannot be
+    /// resolved right now goes as it is.</summary>
+    public static TimeRangeSpec ForBroadcast(TimeRangeSpec spec, DateTime nowUtc, TimeZoneInfo zone)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        ArgumentNullException.ThrowIfNull(zone);
+        if (spec.Kind != TimeRangeKind.Calendar || !spec.TryResolve(nowUtc, zone, out var range, out _) || range is null)
+        {
+            return spec;
+        }
+
+        return range.IsLive ? TimeRangeSpec.SinceInstant(range.StartUtc) : TimeRangeSpec.FixedRange(range.StartUtc, range.EndUtc);
+    }
 
     /// <summary>The length of a calendar period at <paramref name="nowUtc"/> in <paramref name="zone"/> ("3d", "7h 1m"), or <c>null</c> when the period is shorter than the minimum right now (Today just after midnight).</summary>
     public static string? CurrentLength(TimeRangeSpec spec, DateTime nowUtc, TimeZoneInfo zone)

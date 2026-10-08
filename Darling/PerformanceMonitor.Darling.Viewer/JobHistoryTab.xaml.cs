@@ -52,6 +52,8 @@ public partial class JobHistoryTab : UserControl
            one click away in the picker's presets (1w, 1mo) and a typed "90d". */
         TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
+        /* R8: the old "Last Year" (365 days). The parser has no year unit, so "1y" cannot be typed; this choice is the way to a year. */
+        TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.JobHistoryLongestChoice, "Last Year");
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }

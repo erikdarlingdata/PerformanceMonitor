@@ -136,16 +136,6 @@ public sealed class ServerTabHeldRangeTests
         Assert.Equal(TimeSpan.FromHours(-5), server.GetUtcOffset(DateTime.SpecifyKind(At(11, 1, 6, 30), DateTimeKind.Utc)));
     }
 
-    [Fact]
-    public void ADrillWindowUnderTheFiveMinuteFloor_IsCentredAndHeldAtFiveMinutes()
-    {
-        var (from, to) = LiteTimeRange.AtLeastMinimumSpan(At(10, 8, 12, 0), At(10, 8, 12, 2));
-        Assert.Equal((At(10, 8, 11, 58).AddSeconds(30), At(10, 8, 12, 3).AddSeconds(30)), (from, to));
-
-        var longer = (At(10, 8, 12, 0), At(10, 8, 12, 30));
-        Assert.Equal(longer, LiteTimeRange.AtLeastMinimumSpan(longer.Item1, longer.Item2));
-    }
-
     // ── Settings: the legacy hours key keeps working, default_time_range is optional ──
 
     [Theory]
@@ -164,9 +154,22 @@ public sealed class ServerTabHeldRangeTests
     [Theory]
     [InlineData(0)]
     [InlineData(-3)]
+    [InlineData(int.MaxValue)]
+    [InlineData(300_000_000)]
     public void ANonsenseLegacyValue_OpensOnFourHours(int hours)
     {
         Assert.Equal("4h", LiteTimeRange.FromSettings(null, hours).Id);
+    }
+
+    [Theory]
+    [InlineData("400000mo")]
+    [InlineData("1000000d")]
+    [InlineData("999999w")]
+    public void ACorruptRangeId_FallsBackWithoutThrowing(string id)
+    {
+        /* #5562 review H1: a hand-edited settings.json used to throw OverflowException when a server tab was built. */
+        Assert.Equal("4h", LiteTimeRange.FromSettings(id, 0).Id);
+        Assert.Equal("1d", LiteTimeRange.FromSettings(id, 24).Id);
     }
 
     [Fact]

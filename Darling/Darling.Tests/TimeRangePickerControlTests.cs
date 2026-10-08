@@ -74,9 +74,14 @@ public sealed class TimeRangePickerControlTests
             var raised = false;
             picker.RangeChanged += (_, _) => raised = true;
 
-            Assert.False(picker.Select(TimeRangeSpec.ForPeriod(CalendarPeriod.Today)));
+            Assert.False(picker.Select(TimeRangeSpec.Relative(TimeSpan.FromMinutes(4))));
             Assert.False(raised);
             Assert.Equal("4h", picker.Value.Id);
+
+            /* A calendar period is exempt from the floor: Today at 00:02 is held, never replaced by another range. */
+            Assert.True(picker.Select(TimeRangeSpec.ForPeriod(CalendarPeriod.Today)));
+            Assert.True(raised);
+            Assert.Equal("today", picker.Value.Id);
         });
     }
 

@@ -115,8 +115,50 @@ public sealed class TimeRangeModelTests
         Assert.Equal("7d", TimeRangePresets.CurrentLength(TimeRangeSpec.ForPeriod(CalendarPeriod.PreviousWeek), Now, NewYork));
         Assert.Equal("30d", TimeRangePresets.CurrentLength(TimeRangeSpec.ForPeriod(CalendarPeriod.PreviousMonth), Now, NewYork));
         Assert.Equal("365d", TimeRangePresets.CurrentLength(TimeRangeSpec.ForPeriod(CalendarPeriod.PreviousYear), Now, NewYork));
-        // Just after midnight Today is under the minimum, so it has no length to show.
-        Assert.Null(TimeRangePresets.CurrentLength(TimeRangeSpec.ForPeriod(CalendarPeriod.Today), new DateTime(2026, 10, 8, 4, 2, 0), NewYork));
+        // Just after midnight Today is exempt from the 5-minute floor (seat ruling): it reads 00:00 to now, never another range.
+        Assert.Equal("2m", TimeRangePresets.CurrentLength(TimeRangeSpec.ForPeriod(CalendarPeriod.Today), new DateTime(2026, 10, 8, 4, 2, 0), NewYork));
+        // Exactly at midnight nothing has happened yet, so a zero-length period is still refused.
+        Assert.Null(TimeRangePresets.CurrentLength(TimeRangeSpec.ForPeriod(CalendarPeriod.Today), new DateTime(2026, 10, 8, 4, 0, 0), NewYork));
+    }
+
+    [Theory]
+    [InlineData("400000mo")]
+    [InlineData("1000000d")]
+    [InlineData("999999w")]
+    [InlineData("1000000h")]
+    public void AnId_PastTheHundredYearLimit_IsNotAnIdAndNeverThrows(string id)
+    {
+        // #5562 review H1: a hand-edited settings value used to overflow TimeSpan and crash startup.
+        Assert.False(TimeRangeSpec.TryFromId(id, out var spec));
+        Assert.Null(spec);
+    }
+
+    [Fact]
+    public void AnId_AtTheLimit_StillParses()
+    {
+        Assert.True(TimeRangeSpec.TryFromId("36500d", out var spec));
+        Assert.Equal(TimeSpan.FromDays(36500), spec!.Span);
+        Assert.False(TimeRangeSpec.TryFromId("36501d", out _));
+    }
+
+    [Theory]
+    [InlineData(int.MaxValue)]
+    [InlineData(300_000_000)]
+    [InlineData(876_001)]
+    public void LegacyHours_PastTheLimit_AreNull_NotAnOverflow(int hours)
+    {
+        Assert.Null(TimeRangePresets.FromLegacyHours(hours));
+    }
+
+    [Fact]
+    public void ACalendarPeriodIsExemptFromTheFloor_ButARelativeOrFixedRangeIsNot()
+    {
+        var justAfterMidnight = new DateTime(2026, 10, 8, 4, 2, 0);
+        Assert.True(TimeRangeSpec.ForPeriod(CalendarPeriod.Today).TryResolve(justAfterMidnight, NewYork, out var today, out _));
+        Assert.Equal(new DateTime(2026, 10, 8, 4, 0, 0), today!.StartUtc);
+        Assert.Equal(justAfterMidnight, today.EndUtc);
+        Assert.False(TimeRangeSpec.FixedRange(justAfterMidnight.AddMinutes(-2), justAfterMidnight).TryResolve(justAfterMidnight, NewYork, out _, out var error));
+        Assert.Equal("too_short", error!.Code);
     }
 
     [Fact]

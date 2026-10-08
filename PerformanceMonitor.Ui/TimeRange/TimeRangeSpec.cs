@@ -66,7 +66,7 @@ public sealed record TimeRangeError(string Code, string Message);
 ///
 /// <para>Rules (settled, #5562): relative lengths are real elapsed time; calendar periods use the display zone's
 /// wall-clock boundaries, a boundary being the earliest instant labelled at or after the wall midnight, so
-/// consecutive periods tile with no gap or overlap; no range is shorter than <see cref="MinimumSpan"/>; there is no
+/// consecutive periods tile with no gap or overlap; no typed or relative range is shorter than <see cref="MinimumSpan"/> (a calendar period is exempt: Today at 00:02 reads 00:00 to now); there is no
 /// upper cap here (a tab reads what its data holds).</para>
 /// </summary>
 public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
@@ -75,7 +75,7 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
     public static readonly TimeSpan MinimumSpan = TimeSpan.FromMinutes(5);
 
     /// <summary>The longest relative length the model resolves; past it a count is refused as a typing slip.</summary>
-    private static readonly TimeSpan MaxRelative = TimeSpan.FromDays(36500);
+    internal static readonly TimeSpan MaxRelative = TimeSpan.FromDays(36500);
 
     private TimeRangeSpec(TimeRangeKind kind)
     {
@@ -143,7 +143,7 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
 
     /// <summary>
     /// The instants this range means at <paramref name="nowUtc"/> in <paramref name="zone"/>, or the reason it
-    /// cannot be used (shorter than <see cref="MinimumSpan"/>, ends before it starts, reaches back too far).
+    /// cannot be used (shorter than <see cref="MinimumSpan"/> unless it is a calendar period, ends before it starts, reaches back too far).
     /// </summary>
     public bool TryResolve(DateTime nowUtc, TimeZoneInfo zone, out ResolvedTimeRange? range, out TimeRangeError? error)
     {
@@ -199,7 +199,10 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
             return false;
         }
 
-        if (end - start < MinimumSpan)
+        /* A calendar period is exempt from the floor (#5562, seat ruling): "Today" at 00:02 reads 00:00 to now and the "collected
+           every N min" note explains a sparse chart; no other range is ever substituted. The floor applies to typed spans and
+           custom start/end only. A period that has not started (zero length) is still refused. */
+        if (Kind == TimeRangeKind.Calendar ? end <= start : end - start < MinimumSpan)
         {
             error = new TimeRangeError("too_short", ShortMessage(end - start));
             return false;
@@ -263,17 +266,25 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
         }
 
         var unit = text.Substring(unitAt);
-        TimeSpan span;
+        double minutesPerUnit;
         switch (unit)
         {
-            case "m": span = TimeSpan.FromMinutes(count); break;
-            case "h": span = TimeSpan.FromHours(count); break;
-            case "d": span = TimeSpan.FromDays(count); break;
-            case "w": span = TimeSpan.FromDays(7d * count); break;
-            case "mo": span = TimeSpan.FromDays(30d * count); break;
+            case "m": minutesPerUnit = 1d; break;
+            case "h": minutesPerUnit = 60d; break;
+            case "d": minutesPerUnit = 1440d; break;
+            case "w": minutesPerUnit = 7d * 1440d; break;
+            case "mo": minutesPerUnit = 30d * 1440d; break;
             default: return false;
         }
 
+        // #5562 review: a hand-edited settings value like "400000mo" overflowed TimeSpan and threw at startup. A span past the parser's
+        // own limit is not a saved id, so the caller falls back to its default instead of throwing.
+        if (count * minutesPerUnit > MaxRelative.TotalMinutes)
+        {
+            return false;
+        }
+
+        var span = TimeSpan.FromMinutes(count * minutesPerUnit);
         spec = Relative(span);
         return true;
     }

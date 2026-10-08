@@ -7,14 +7,17 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
@@ -25,9 +28,10 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #5562 gaps the first Lite pass left: FinOps pickers are rolling only (R5), Job History and Alert History read a real END
-/// bound ahead of their row caps (R6), Alert History's longest choice is the alert log's retention (R8), the sample note
+/// bound ahead of their row caps (R6), the longest choices are 365 days (R8), the sample note
 /// names the main collector of the sub-tab on screen (R3), and every banner site feeds the picker's data start (R7).
 /// </summary>
+[Collection("server-time-helper")]
 public sealed class LiteTimeRangeGapTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly DuckDbInitializer _duckDb;
@@ -152,18 +156,6 @@ VALUES
         Assert.All(unbounded, r => Assert.StartsWith("after_", r.JobId)); /* the old shape spent the whole cap after the end */
     }
 
-    [Fact]
-    public void JobHistoryTab_PassesTheRangeEndToTheRead_AndTheEndIsExclusive()
-    {
-        var tab = LiteFile(Path.Combine("Controls", "JobHistoryTab.xaml.cs"));
-        var sql = LiteFile(Path.Combine("Services", "LocalDataService.JobHistory.cs"));
-
-        Assert.Contains("GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc)", tab, StringComparison.Ordinal);
-        Assert.Contains("LiteTimeRange.BoundsOf(RangePicker, 24, nowUtc)", tab, StringComparison.Ordinal);
-        Assert.Equal(2, Regex.Matches(sql, @"\{endClause\}").Count); /* job_stats and base, both ahead of the LIMIT */
-        Assert.Contains("run_datetime < $5", sql, StringComparison.Ordinal);
-    }
-
     // ---- Alert History: start and exclusive end, Dismiss All scope ----
 
     private async Task InsertAlertAsync(DateTime alertTimeUtc, string metric)
@@ -210,18 +202,67 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
 
     // ---- R8: Alert History's longest choice ----
 
-    [Theory]
-    [InlineData(2026, 10, 8, 92)] /* Jul 8 to Oct 8 */
-    [InlineData(2026, 3, 1, 90)]  /* Dec 1 to Mar 1 */
-    [InlineData(2026, 6, 1, 92)]  /* Mar 1 to Jun 1 */
-    public void AlertHistoryLongest_IsTheAlertLogsRetentionInDays(int year, int month, int day, int days)
+    [Fact]
+    public void AlertHistoryLongest_IsAYear_BecauseLiteKeepsRowsPastThreeMonths()
     {
-        var now = new DateTime(year, month, day, 0, 0, 0, DateTimeKind.Utc);
-        Assert.Equal(TimeSpan.FromDays(days), LiteTimeRange.AlertHistoryLongest(now));
-        Assert.Equal(TimeRangeSpec.Relative(TimeSpan.FromDays(days)), LiteTimeRange.AlertHistoryLongestChoice(now));
+        /* Archive files are deleted by whole month, 3 months back (RetentionService.OldestRetainedInstant), so a row older than
+           3 months survives until its month's file goes: a 3-month "All" would hide it. */
         Assert.Equal(3, RetentionService.ArchiveRetentionMonths);
-        Assert.True(LiteTimeRange.AlertHistoryLongest(now) <= TimeSpan.FromDays(365));
+        Assert.Equal(TimeSpan.FromDays(365), LiteTimeRange.AlertHistoryLongest);
+        Assert.Equal(TimeRangeSpec.Relative(TimeSpan.FromDays(365)), LiteTimeRange.AlertHistoryLongestChoice);
+        Assert.Equal(TimeRangeSpec.Relative(TimeSpan.FromDays(365)), LiteTimeRange.JobHistoryLongestChoice);
 
+        /* The parser has no year unit, so no text may claim "1y" can be typed. */
+        Assert.False(TimeRangeSpec.TryFromId("1y", out _));
+    }
+
+    [Fact]
+    public void JobHistoryZone_IsTheZoneTheGridWordsItsRowsIn_SoYesterdayMeansTheGridsYesterday()
+    {
+        /* #5562 M1: all servers are worded in UTC, one server in its own clock (its last read's, else its open tab's, else the machine's). */
+        var eastern = ServerClock.Resolve("Eastern Standard Time", -300);
+        var now = new DateTime(2026, 10, 8, 2, 0, 0, DateTimeKind.Unspecified);
+        var yesterday = TimeRangeSpec.ForPeriod(CalendarPeriod.Yesterday);
+
+        var allServers = JobHistoryTab.JobHistoryZone(null, new Dictionary<int, ServerClock> { [7] = eastern }, null);
+        Assert.Equal(TimeZoneInfo.Utc, allServers);
+        Assert.True(yesterday.TryResolve(now, allServers, out var inUtc, out _));
+        Assert.Equal(new DateTime(2026, 10, 7, 0, 0, 0), inUtc!.StartUtc);
+        Assert.Equal(new DateTime(2026, 10, 8, 0, 0, 0), inUtc.EndUtc);
+
+        var oneServer = JobHistoryTab.JobHistoryZone(7, new Dictionary<int, ServerClock> { [7] = eastern }, null);
+        Assert.True(yesterday.TryResolve(now, oneServer, out var inEastern, out _));
+        Assert.Equal(new DateTime(2026, 10, 6, 4, 0, 0), inEastern!.StartUtc);
+        Assert.Equal(new DateTime(2026, 10, 7, 4, 0, 0), inEastern.EndUtc);
+
+        /* No read yet for this server: its open tab's clock, then the machine's. */
+        var viaTab = JobHistoryTab.JobHistoryZone(7, new Dictionary<int, ServerClock>(), new Dictionary<int, ServerClock> { [7] = eastern });
+        Assert.True(yesterday.TryResolve(now, viaTab, out var viaTabRange, out _));
+        Assert.Equal(inEastern.StartUtc, viaTabRange!.StartUtc);
+        Assert.Equal(TimeZoneInfo.Local, JobHistoryTab.JobHistoryZone(7, null, null));
+    }
+
+    [Fact]
+    public void TheAlertAndFinOpsPickers_ReadInTheDisplayModesZone()
+    {
+        var eastern = ServerClock.Resolve("Eastern Standard Time", -300);
+        var mode = ServerTimeHelper.CurrentDisplayMode;
+        var clock = ServerTimeHelper.ActiveServerClock;
+        try
+        {
+            ServerTimeHelper.ActiveServerClock = eastern;
+            ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+            Assert.Equal(TimeZoneInfo.Utc, ServerTimeHelper.CurrentDisplayZone);
+            ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+            Assert.Equal(TimeZoneInfo.Local, ServerTimeHelper.CurrentDisplayZone);
+            ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+            Assert.Equal(eastern.AsTimeZone().BaseUtcOffset, ServerTimeHelper.CurrentDisplayZone.BaseUtcOffset);
+        }
+        finally
+        {
+            ServerTimeHelper.ActiveServerClock = clock;
+            ServerTimeHelper.CurrentDisplayMode = mode;
+        }
     }
 
     // ---- R3: the sample note names the sub-tab's main collector ----
@@ -323,7 +364,7 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
         /* The central funnel feeds for every relation, and the tab points the picker at the page on screen. */
         var refresh = LiteFile(Path.Combine("Controls", "ServerTab.Refresh.cs"));
         Assert.DoesNotContain("if (relation == QueryWindowRelation.QueryStats)\n        {\n            RangePicker.DataStartUtc", refresh, StringComparison.Ordinal);
-        Assert.Contains("RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice(", LiteFile(Path.Combine("Controls", "AlertsHistoryTab.xaml.cs")), StringComparison.Ordinal);
+        Assert.Contains("RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, ", LiteFile(Path.Combine("Controls", "AlertsHistoryTab.xaml.cs")), StringComparison.Ordinal);
         Assert.Contains("CorrelatedLanes.DataStartFound +=", LiteFile(Path.Combine("Controls", "ServerTab.xaml.cs")), StringComparison.Ordinal);
     }
 

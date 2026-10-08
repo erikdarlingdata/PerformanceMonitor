@@ -368,15 +368,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         }
     }
 
+    /// <summary>Raised with the data start the blocking lane's note chose (#5562 R7), so the tab's picker can name it. Null when the note found none.</summary>
+    internal event Action<DateTime?>? DataStartFound;
+
     /// <summary>
     /// Raises or hides the blocking chart's "Showing since" note (#4966). The chart's two series, blocking and deadlocks, are
     /// event counts: an empty stretch before a series starts reads as "nothing happened". A window of 90 minutes or less
     /// starts no probe (<see cref="ServerTab.ProbeWindowFloorOrNullAsync"/>). The text goes through the shared banner step in
     /// the lanes' own clock (<c>_displayZone</c>, which is the tab's <c>GetPickerZone</c>), to the second.
     /// </summary>
-    /// <summary>Raised with the data start the blocking lane's note chose (#5562 R7), so the tab's picker can name it. Null when the note found none.</summary>
-    internal event Action<DateTime?>? DataStartFound;
-
     private async Task ShowBlockingLaneDataStartAsync(
         DateTime startUtc, DateTime endUtc, IReadOnlyList<TrendPoint> blockingBars, IReadOnlyList<TrendPoint> deadlockBars)
     {

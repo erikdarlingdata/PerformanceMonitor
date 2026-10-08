@@ -210,9 +210,8 @@ public partial class ServerTab : UserControl
     private void SetDrillDownTimeRange(DateTime fromUtc, DateTime toUtc)
     {
         /* The drill's window is held as the instants it names (#4766, #5562): a fixed range, which the picker shows in the
-           display zone. The model refuses anything under 5 minutes, so a narrower drill is centred and held at 5 minutes
-           (the drilled grid itself still reads the exact pair it was handed). */
-        (fromUtc, toUtc) = LiteTimeRange.AtLeastMinimumSpan(fromUtc, toUtc);
+           display zone. It is held exactly as handed and never widened (R3): every drill caller passes 15 minutes or more. */
+        _probedFloors.Clear();
 
         // Hold it without triggering a refresh (Value raises no RangeChanged; the flag covers a handler that might)
         _suppressRangeRefresh = true;

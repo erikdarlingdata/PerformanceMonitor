@@ -17,14 +17,14 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>
 /// The pure half of the Viewer's time range (#5562): how a <see cref="TimeRangeSpec"/> the shared picker holds becomes
 /// the naive-UTC window every inner tab reads, the whole hours the few integer readers still take, the legacy
-/// preset index old preference files hold, what "Apply to All" sends, and which collector a tab's chart is fed by (for
+/// preset index old preference files hold, and which collector a tab's chart is fed by (for
 /// the picker's "collected every N minutes" note). Nothing here reads the clock, the zone or a control, so a test pins
 /// each rule without a window (a <c>ViewerServerTab</c> needs the app's resources and cannot be built in a test).
 /// </summary>
 internal static class ViewerTimeRangeWindow
 {
-    /// <summary>The window a range that cannot be resolved right now (Today in its first minutes, which is under the
-    /// 5-minute floor) falls back to: the Viewer's historical 24 hours, so no surface is ever window-less.</summary>
+    /// <summary>The window a range that cannot be resolved right now (a 'since' start that has not happened yet; a calendar
+    /// period is exempt from the 5-minute floor) falls back to: the Viewer's historical 24 hours, so no surface is ever window-less.</summary>
     internal static readonly TimeSpan FallbackSpan = TimeSpan.FromHours(24);
 
     /// <summary>The window to read now: the range's start and end as naive UTC, and whether the end slides with the
@@ -81,22 +81,6 @@ internal static class ViewerTimeRangeWindow
             _ => ViewerPreferences.DefaultTimeRangeIndexValue,
         };
 
-    /// <summary>What "Apply to All" sends for a held range. A relative range and a fixed or since range go as they are
-    /// (every tab then windows on the same period, as #4766 settled). A calendar period is resolved ONCE here, in the
-    /// source tab's zone, and sent as the instants it names - or as a since range while it still runs (Today) - because
-    /// each tab draws its own server's clock and "Today" would otherwise mean a different day on each. A period that
-    /// cannot be resolved right now goes as it is.</summary>
-    internal static TimeRangeSpec ForBroadcast(TimeRangeSpec spec, DateTime nowUtc, TimeZoneInfo zone)
-    {
-        ArgumentNullException.ThrowIfNull(spec);
-        if (spec.Kind != TimeRangeKind.Calendar || !spec.TryResolve(nowUtc, zone, out var range, out _) || range is null)
-        {
-            return spec;
-        }
-
-        return range.IsLive ? TimeRangeSpec.SinceInstant(range.StartUtc) : TimeRangeSpec.FixedRange(range.StartUtc, range.EndUtc);
-    }
-
     /// <summary>The collector that feeds the first chart of a top-level inner tab, by the tab's header, or null for a tab
     /// that has no single main collector (it then shows no sample-interval note). Names are
     /// <see cref="CollectorScheduleDefaults"/> keys.</summary>
@@ -112,6 +96,47 @@ internal static class ViewerTimeRangeWindow
         "Blocking" => "blocked_process_report",
         _ => null,
     };
+
+    /// <summary>The collector behind the page on screen (#5562 L3): the top-level tab's header and, for a tab that holds sub-tabs, the
+    /// selected sub-tab's, as Lite's <c>LiteTimeRange.MainCollectorFor</c> does, so Queries &gt; Query Store names the 5-minute
+    /// collector and Blocking &gt; Current Waits the waiting-tasks one. A sub-tab with no entry here, or none, falls back to the
+    /// top-level tab's collector (<see cref="MainCollectorFor(string?)"/>).</summary>
+    internal static string? MainCollectorFor(string? innerTabHeader, string? subTabHeader)
+    {
+        var bySubTab = innerTabHeader switch
+        {
+            "Queries" => subTabHeader switch
+            {
+                "Performance Trends" => "query_stats",
+                "Active Queries" => "query_snapshots",
+                "Top Queries by Duration" => "query_stats",
+                "Top Procedures by Duration" => "procedure_stats",
+                "Query Store by Duration" => "query_store",
+                "Plan Corrections" => "plan_correction",
+                "Query Heatmap" => "query_stats",
+                _ => null,
+            },
+            "CPU" => subTabHeader == "CPU Scheduler" ? "cpu_scheduler_stats" : null,
+            "Memory" => subTabHeader switch
+            {
+                "Memory Clerks" => "memory_clerks",
+                "Memory Grants" => "memory_grant_stats",
+                "Plan Cache" => "plan_cache_stats",
+                "Memory Pressure Events" => "memory_pressure_events",
+                _ => null,
+            },
+            "Blocking" => subTabHeader switch
+            {
+                "Current Waits" => "waiting_tasks",
+                "Deadlocks" => "deadlocks",
+                "Blocking Stats" => "deadlocks",
+                _ => null,
+            },
+            _ => null,
+        };
+
+        return bySubTab ?? MainCollectorFor(innerTabHeader);
+    }
 
     /// <summary>How often <paramref name="collector"/> actually runs on this server: its fleet or per-server schedule
     /// override if there is one, else the shipped default (<see cref="CollectorScheduleDefaults"/>). Null for a collector
@@ -132,6 +157,10 @@ internal static class ViewerTimeRangeWindow
     /// past it), and never longer than a year when that retention is raised. A longer range would only read the same rows.</summary>
     internal static TimeRangeSpec AlertHistoryLongestChoice { get; } =
         TimeRangeSpec.Relative(TimeSpan.FromDays(Math.Min(DarlingRetentionHorizons.AlertHistoryRetentionDays, 365)));
+
+    /// <summary>The longest choice Job History offers (#5562 R8): 365 days, the old "Last Year", the same on Lite. The parser has no
+    /// year unit, so this choice is the way to a year.</summary>
+    internal static TimeRangeSpec JobHistoryLongestChoice { get; } = TimeRangeSpec.Relative(TimeSpan.FromDays(365));
 
     /// <summary>The range a newly-opened tab starts on, from the persisted preference (a string id wins; the legacy
     /// index stands in for a file written before the string existed).</summary>

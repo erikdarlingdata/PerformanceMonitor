@@ -43,7 +43,11 @@ public partial class JobHistoryTab : UserControl
     public JobHistoryTab()
     {
         InitializeComponent();
-        RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened; '1mo' is the old 30 days, '90d' or '1y' can be typed */
+        RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened; '1mo' is the old 30 days, '90d' can be typed */
+        /* R8: the old "Last Year" (365 days). The parser has no year unit, so "1y" cannot be typed; this choice is the way to a year. */
+        RangePicker.SetLongestChoice(LiteTimeRange.JobHistoryLongestChoice, "Last Year");
+        /* #5562 M1: typed times and calendar periods are read in the zone the grid words its rows in (see PickerZone). */
+        RangePicker.ZoneProvider = PickerZone;
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
@@ -80,6 +84,42 @@ public partial class JobHistoryTab : UserControl
     /// "Showing since" note names the oldest run of a page this full (#4966).</summary>
     internal const int RowCap = 2000;
 
+    /// <summary>The clocks the last read worked each server's window on (<see cref="LocalDataService.GetJobHistoryWithClocksAsync"/>), kept so the picker can word a single server's range in the same clock.</summary>
+    private readonly Dictionary<int, ServerClock> _readClocks = new();
+
+    /// <summary>
+    /// The zone the picker reads typed times and calendar periods in (#5562 M1): the zone the grid words its rows in. For one
+    /// server that is its wall clock (the clock its last read used, else its open tab's, else this machine's, the chain
+    /// <see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/> follows); for All Servers it is UTC, since the rows
+    /// sit on different servers' clocks (<see cref="ShowDataStartNoteAsync"/>).
+    /// </summary>
+    internal static TimeZoneInfo JobHistoryZone(int? serverId, IReadOnlyDictionary<int, ServerClock>? readClocks, IReadOnlyDictionary<int, ServerClock>? openTabClocks)
+    {
+        if (serverId is not int one)
+        {
+            return TimeZoneInfo.Utc;
+        }
+
+        if (readClocks is not null && readClocks.TryGetValue(one, out var read))
+        {
+            return read.AsTimeZone();
+        }
+
+        if (openTabClocks is not null && openTabClocks.TryGetValue(one, out var tab))
+        {
+            return tab.AsTimeZone();
+        }
+
+        return TimeZoneInfo.Local;
+    }
+
+    private TimeZoneInfo PickerZone()
+    {
+        /* The open tabs' clocks are only asked for when the last read has none for this server (they are UI objects). */
+        var serverId = GetSelectedServerId();
+        return JobHistoryZone(serverId, _readClocks, serverId is int id && !_readClocks.ContainsKey(id) ? _openTabClocks?.Invoke() : null);
+    }
+
     private async System.Threading.Tasks.Task LoadJobsAsync()
     {
         if (_dataService == null) return;
@@ -104,6 +144,11 @@ public partial class JobHistoryTab : UserControl
 
             var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc));
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
+            foreach (var (id, readClock) in readClocks)
+            {
+                _readClocks[id] = readClock;
+            }
 
             /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
                config layer knows one, so the Server column and filter speak the same names as every

@@ -40,7 +40,7 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// Raised when the user clicks "Apply to All": MainWindow broadcasts the held range to every other open server
-    /// tab (<see cref="ViewerTimeRangeWindow.ForBroadcast"/>: a calendar period goes as the instants it names). The
+    /// tab (<see cref="TimeRangePresets.ForBroadcast"/>: a calendar period goes as the instants it names). The
     /// source tab is carried so the broadcast can skip it (it already holds the range).
     /// </summary>
     public event Action<ViewerServerTab, TimeRangeSpec>? ApplyTimeRangeRequested;
@@ -165,6 +165,42 @@ public partial class ViewerServerTab
     /// and on every refresh, so a range that slides with now shows the window it is reading.</summary>
     private void RefreshRangePicker() => RangePicker.Refresh();
 
+    /// <summary>The main collector of the page on screen: the inner tab's header and, when that tab holds a sub-tab control, the
+    /// selected sub-tab's (<see cref="ViewerTimeRangeWindow.MainCollectorFor(string?, string?)"/>). Never widens the range.</summary>
+    private string? CurrentMainCollector()
+    {
+        if (InnerTabs?.SelectedItem is not TabItem top)
+        {
+            return null;
+        }
+
+        string? sub = null;
+        if (top.Content is DependencyObject content && FindFirstTabControl(content) is { SelectedItem: TabItem selected })
+        {
+            sub = selected.Header as string;
+        }
+
+        return ViewerTimeRangeWindow.MainCollectorFor(top.Header as string, sub);
+    }
+
+    private static TabControl? FindFirstTabControl(DependencyObject parent)
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(parent))
+        {
+            if (child is TabControl tabs)
+            {
+                return tabs;
+            }
+
+            if (child is DependencyObject next && FindFirstTabControl(next) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// Sets the picker's "collected every N minutes" note (#5562 R3) from the main collector of the inner tab on screen and
     /// that collector's ACTUAL interval on this server (the schedule overrides, else the shipped default). A read that
@@ -174,7 +210,7 @@ public partial class ViewerServerTab
     {
         try
         {
-            var collector = ViewerTimeRangeWindow.MainCollectorFor((InnerTabs?.SelectedItem as TabItem)?.Header as string);
+            var collector = CurrentMainCollector();
             if (!string.Equals(collector, _noteCollector, StringComparison.Ordinal))
             {
                 /* A different top-level tab: the data-start note belonged to the last tab's surface, so it clears here and
@@ -288,7 +324,7 @@ public partial class ViewerServerTab
     {
         /* A calendar period goes as the instants it names in THIS tab's zone, a fixed range as its held instants: every
            other tab draws them in its own server's zone, so all of them window on the same period (#4766, #5562). */
-        ApplyTimeRangeRequested?.Invoke(this, ViewerTimeRangeWindow.ForBroadcast(RangePicker.Value, DateTime.UtcNow, TabDisplayZone));
+        ApplyTimeRangeRequested?.Invoke(this, TimeRangePresets.ForBroadcast(RangePicker.Value, DateTime.UtcNow, TabDisplayZone));
     }
 
     // ── Time-display mode (Server / Local / UTC) ─────────────────────────────────────
@@ -419,7 +455,7 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// Applies a range chosen on another server tab (the "Apply to All" broadcast). The range arrives as a spec whose
-    /// instants are already fixed where they must be (<see cref="ViewerTimeRangeWindow.ForBroadcast"/>): this tab holds
+    /// instants are already fixed where they must be (<see cref="TimeRangePresets.ForBroadcast"/>): this tab holds
     /// it and draws it in ITS zone, so every tab windows on the same period whatever its server's clock (#4766). Sets
     /// the picker under the suppress guard so the copy doesn't cascade multiple reloads, then, when this is the
     /// visible tab, drives exactly one reload of its active inner tab. A hidden tab holds the range and reloads when it

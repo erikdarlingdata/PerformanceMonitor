@@ -38,9 +38,10 @@ public partial class ServerTab : UserControl
 {
     /// <summary>
     /// The range the toolbar picker holds, resolved against the clock now (#5562). A live range (the last 5 minutes,
-    /// 'Today', 'since ...') slides with every call. When the held range cannot be used at this moment ('Today' in the
-    /// first minutes after midnight is under the 5-minute floor) the last window that did resolve keeps being read, so
-    /// a refresh never reads nothing; with none yet, the default of four hours.
+    /// 'Today', 'since ...') slides with every call. A calendar period is exempt from the 5-minute floor ('Today' at
+    /// 00:02 reads 00:00 to now; the sample note explains a sparse chart). When the held range cannot be used at this moment
+    /// (a 'since' start that has not happened yet) the last window that did resolve keeps being read, so a refresh never
+    /// reads nothing; with none yet, the default of four hours.
     /// </summary>
     private ResolvedTimeRange CurrentRange()
     {
@@ -214,11 +215,18 @@ public partial class ServerTab : UserControl
     /// Holds <paramref name="spec"/> on this tab as if the user picked it (used by Apply to All): the picker redraws, and its
     /// RangeChanged handler persists the choice and refreshes. A range this tab cannot use right now is left as it was.
     /// </summary>
-    public void SetTimeRange(TimeRangeSpec spec) => RangePicker.Select(spec);
+    public void SetTimeRange(TimeRangeSpec spec)
+    {
+        _probedFloors.Clear();
+        RangePicker.Select(spec);
+    }
 
     private void ApplyTimeRangeToAll_Click(object sender, RoutedEventArgs e)
     {
-        ApplyTimeRangeRequested?.Invoke(RangePicker.Value);
+        /* #5562 M2: a calendar period goes as the instants it names in THIS tab's zone, a fixed range as its held instants. Every
+           other tab resolves in its own server's clock in Server mode, so "Today" sent unresolved would be a different day on each
+           (#4766 settled that they window on the same period; the Viewer does the same through the same helper). */
+        ApplyTimeRangeRequested?.Invoke(TimeRangePresets.ForBroadcast(RangePicker.Value, DateTime.UtcNow, GetPickerZone()));
     }
 
     /* The _refreshTimer null guard in both handlers below is doing two jobs. It always absorbed the
@@ -400,6 +408,9 @@ public partial class ServerTab : UserControl
     {
         if (!IsLoaded || _suppressRangeRefresh) return;
 
+        /* L2: a probed floor is the first row inside the window it was probed for, so a held one names an older, shorter window
+           (or an older, longer one) once the range moves. Each page probes again on its own pass. */
+        _probedFloors.Clear();
         PersistSelectedTimeRange(e.Spec);
 
         await RefreshAllDataAsync();

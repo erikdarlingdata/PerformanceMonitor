@@ -292,9 +292,8 @@ public partial class ViewerServerTab : UserControl
             await UpdatePermissionDeniedBadgeAsync();
 
             /* #5562: redraw the picker's resolved range from the clock (a range that slides with now) and refresh its
-               "collected every N minutes" note for the inner tab on screen. Chrome: its own try/catch keeps it off the load path. */
+               "collected every N minutes" note (set for the page on screen in the load loop below, before each tab's load). */
             RefreshRangePicker();
-            await UpdateSampleIntervalAsync();
 
             do
             {
@@ -304,6 +303,9 @@ public partial class ViewerServerTab : UserControl
                 do
                 {
                     loadedTab = InnerTabs.SelectedIndex;
+                    /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
+                       at the top of the pass. */
+                    await UpdateSampleIntervalAsync();
                     await LoadInnerTabAsync(loadedTab);
                 }
                 while (InnerTabs.SelectedIndex != loadedTab);
