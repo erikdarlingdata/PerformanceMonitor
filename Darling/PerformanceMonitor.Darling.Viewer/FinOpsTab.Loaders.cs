@@ -133,6 +133,7 @@ public partial class FinOpsTab
             return;
         }
 
+        ApplyServerGate();
         await RefreshActiveSubTabAsync();
     }
 
@@ -142,6 +143,13 @@ public partial class FinOpsTab
     /// </summary>
     private async Task LoadFinOpsAsync()
     {
+        /* A PostgreSQL target has no SQL Server data for any single-server panel: run none of their reads (ApplyServerGate
+           shows the one line). Server Inventory lists the fleet and always runs. */
+        if (FinOpsServerChoice.NotCollectedLine(ServerSelector.SelectedItem as DarlingServer, crossServer: SelectedSubTabIsCrossServer) is not null)
+        {
+            return;
+        }
+
         switch (FinOpsSubTabControl.SelectedIndex)
         {
             case FinOpsDatabaseResourcesSubTabIndex:
@@ -183,6 +191,9 @@ public partial class FinOpsTab
                 break;
         }
     }
+
+    /// <summary>True while Server Inventory, the one sub-tab that reads the whole fleet rather than the picker's server, is the active sub-tab.</summary>
+    private bool SelectedSubTabIsCrossServer => FinOpsSubTabControl.SelectedIndex == FinOpsServerInventorySubTabIndex;
 
     // ── Utilization ──
 
@@ -337,9 +348,10 @@ public partial class FinOpsTab
         /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
            Database is the database's own. */
         data.HealthScore = data.ComputeHealthScore();
-        /* A window with no CPU sample has no CPU term (ComputeHealthScore leaves it out), and the tooltip says so. */
-        FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;
-        FinOpsHealthScoreText.Text = $"Health: {data.HealthScore}";
+        /* A window with no CPU sample has no score: the memory and storage terms alone would read a full 100 next to "No Data".
+           It shows a dash on a gray badge, and the tooltip says why. */
+        FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;
+        FinOpsHealthScoreText.Text = data.HealthScoreText;
         FinOpsHealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         FinOpsHealthScoreBorder.Visibility = Visibility.Visible;
     }
@@ -493,8 +505,9 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsIdleDatabasesAsync()
     {
-        var data = await _dataService.GetIdleDatabasesAsync(_server.ServerId);
+        var (covered, data) = await _dataService.GetIdleDatabaseReadAsync(_server.ServerId);
         _finopsIdleDbsFilterMgr!.UpdateData(data);
+        FinOpsIdleDatabasesNoDataMessage.Text = DarlingFinOpsOptimizationReader.IdleDatabasesEmptyText(covered);
         FinOpsIdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsIdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
     }
@@ -571,9 +584,14 @@ public partial class FinOpsTab
 
     // ── Server Inventory (cross-server) ──
 
+    /* Newest Server Inventory load wins: a read that finishes after a later one began is dropped (#5492 round 2). */
+    private readonly FinOpsLoadSequence _finopsInventoryLoads = new();
+
     private async Task LoadFinOpsServerInventoryAsync()
     {
-        var servers = await _dataService.GetServerInventoryAsync();
+        var token = _finopsInventoryLoads.Begin();
+        var includeRemoved = FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked);
+        var servers = await _dataService.GetServerInventoryAsync(includeRemoved);
 
         /* Overlay each server's collected metrics + compute the health score (mirrors Lite's
            LoadServerInventoryAsync minus the live query). memScore/storScore use Lite's inventory-path
@@ -582,6 +600,7 @@ public partial class FinOpsTab
            this loop used to need (#3016) existed only to bound how many PER-SERVER reads ran concurrently,
            and there is now exactly one read total. */
         var metrics = await _dataService.GetServerMetricsAsync();
+        if (!_finopsInventoryLoads.IsCurrent(token)) return;
         foreach (var item in servers)
         {
             if (metrics.TryGetValue(item.ServerId, out var row))
@@ -592,12 +611,12 @@ public partial class FinOpsTab
                 if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
             }
 
-            item.HealthScore = FinOpsInventoryFigures.HealthScore(item.AvgCpuPct);
+            item.HealthScore = FinOpsInventoryFigures.HealthScoreOrNull(item.AvgCpuPct);
         }
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);
         FinOpsNoServerInventoryMessage.Visibility = servers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsServerInventoryCountIndicator.Text = servers.Count > 0 ? $"{servers.Count} server(s)" : "";
+        FinOpsServerInventoryCountIndicator.Text = FinOpsServerChoice.InventoryCountText(servers.Count, includeRemoved);
     }
 
     // ── Refresh buttons + time-range combos (all route through the shell's overlap-guarded loop where they
@@ -611,6 +630,13 @@ public partial class FinOpsTab
     private async void FinOpsRefreshApplicationConnections_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsApplicationConnectionsAsync);
     private async void FinOpsRefreshHighImpact_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsHighImpactAsync);
     private async void FinOpsRefreshServerInventory_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsServerInventoryAsync);
+
+    /// <summary>Ticking or clearing "Show removed servers" reloads the list, and its "N server(s)" count follows the list it shows. Ignored until the tab is loaded, so the XAML's own initial state does not read.</summary>
+    private async void FinOpsShowRemoved_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        await RunFinOpsLoad(LoadFinOpsServerInventoryAsync);
+    }
     private async void FinOpsOptimizationRefresh_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsOptimizationAsync);
 
     private async void FinOpsResourceUsageTimeRange_Changed(object sender, SelectionChangedEventArgs e)

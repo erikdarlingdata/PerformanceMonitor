@@ -422,6 +422,76 @@ public sealed class GatedCollectorRowsLiveTests
         });
     }
 
+    private static async Task PlantHadrAsync(NpgsqlConnection c, int id, string server, bool hadr, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            """
+            INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, is_hadr_enabled)
+            VALUES ($1, $2, $3, $4, $5)
+            """, c);
+        cmd.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        cmd.Parameters.AddWithValue(id);
+        cmd.Parameters.AddWithValue(server);
+        cmd.Parameters.AddWithValue(hadr);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    [Fact]
+    public async Task ASqlServerWithoutAlwaysOn_ListsTheTwoAgCollectorsAsNotApplicable_AndOneWithAlwaysOnOrNoPropertiesDoesNot()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* Click-through 5: the two AG collectors run and log HEALTHY with zero rows on a SQL Server that has no
+               Always On. The server's latest properties row saying so turns them into not_collected rows. */
+            string[] ag = { "ag_database_replica_states", "ag_replica_states" };
+            async Task LogAllAsync(int id, string server)
+            {
+                await RegisterAsync(connection, id, server, MonitoredEngineKind.SqlServer, null, ct);
+                await LogAsync(connection, id, server, "wait_stats", 5, ct);
+                foreach (var name in ag) await LogAsync(connection, id, server, name, 5, ct);
+            }
+
+            async Task<JsonElement[]> RowsAsync(string server, bool full)
+            {
+                var (_, doc) = await HealthAsync(postgres, server, full, ct);
+                using (doc)
+                {
+                    return doc.RootElement.GetProperty("collectors").EnumerateArray().Select(r => r.Clone()).ToArray();
+                }
+            }
+
+            const int offId = 524_911;
+            await LogAllAsync(offId, "alwayson-off");
+            await PlantHadrAsync(connection, offId, "alwayson-off", false, ct);
+            const int onId = 524_912;
+            await LogAllAsync(onId, "alwayson-on");
+            await PlantHadrAsync(connection, onId, "alwayson-on", true, ct);
+            const int noneId = 524_913;
+            await LogAllAsync(noneId, "alwayson-unknown");
+
+            foreach (var full in new[] { false, true })
+            {
+                var off = await RowsAsync("alwayson-off", full);
+                Assert.Equal(1, off.Count(r => r.GetProperty("collector").GetString() == "wait_stats"));
+                foreach (var name in ag)
+                {
+                    var row = off.Single(r => r.GetProperty("collector").GetString() == name);
+                    Assert.Equal("not_collected", row.GetProperty("status").GetString());
+                    Assert.Equal(DarlingGatedCollectorRows.AlwaysOnOffMessage, row.GetProperty("message").GetString());
+                    Assert.Equal(new[] { "collector", "status", "message" }, row.EnumerateObject().Select(p => p.Name).ToArray());
+                }
+
+                foreach (var server in new[] { "alwayson-on", "alwayson-unknown" })
+                {
+                    var rows = await RowsAsync(server, full);
+                    Assert.Equal(3, rows.Length);
+                    Assert.DoesNotContain(rows, r => r.GetProperty("status").GetString() == "not_collected");
+                }
+            }
+        });
+    }
+
     [Fact]
     public async Task TheResponseSize_OnAPostgresServerWithEveryCollectorLogged_StaysUnderTheBudgetCeiling()
     {

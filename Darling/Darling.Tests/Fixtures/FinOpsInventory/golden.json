@@ -14,7 +14,7 @@
       "Metrics": {
         "AvgCpuPct": null,
         "StorageTotalGb": null,
-        "IdleDbCount": 0,
+        "IdleDbCount": null,
         "ProvisioningStatus": null
       }
     },
@@ -23,7 +23,7 @@
       "Metrics": {
         "AvgCpuPct": 7.0000000000000000,
         "StorageTotalGb": null,
-        "IdleDbCount": 0,
+        "IdleDbCount": null,
         "ProvisioningStatus": "OVER_PROVISIONED"
       }
     },
@@ -62,7 +62,7 @@
       "ProvisioningStatus": null,
       "HardwareUnavailableReason": null,
       "MonthlyCost": 1234.5,
-      "HealthScore": 0
+      "HealthScore": null
     },
     {
       "ServerId": 679936520,
@@ -88,7 +88,7 @@
       "ProvisioningStatus": null,
       "HardwareUnavailableReason": "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL DB) on this server.",
       "MonthlyCost": 0,
-      "HealthScore": 0
+      "HealthScore": null
     },
     {
       "ServerId": 797379853,
@@ -114,7 +114,7 @@
       "ProvisioningStatus": null,
       "HardwareUnavailableReason": null,
       "MonthlyCost": 0,
-      "HealthScore": 0
+      "HealthScore": null
     },
     {
       "ServerId": 696714139,
@@ -140,7 +140,7 @@
       "ProvisioningStatus": null,
       "HardwareUnavailableReason": "Azure SQL Database: memory, sockets, cores per socket and hyperthread ratio are the host\u0027s, not this database\u0027s. Logical CPUs is the database\u0027s own scheduler count; see its service objective for its vCores.",
       "MonthlyCost": 0,
-      "HealthScore": 0
+      "HealthScore": null
     }
   ]
 }

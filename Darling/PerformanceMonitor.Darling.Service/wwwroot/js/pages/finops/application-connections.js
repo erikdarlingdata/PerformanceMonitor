@@ -10,7 +10,8 @@
    CPU, reads and writes from get_finops (view application_connections) over a fixed 24-hour window. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { gatedEmptyStrip } from "./gate.js";
 
 const HOURS = 24;
 
@@ -55,7 +56,7 @@ export const tab = {
         const res = await readTool("get_finops", { server, view: "application_connections", hours: HOURS }, ctx && ctx.signal);
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         mount(body, [
           el("h3", { text: "Application Connections (24h)" }),

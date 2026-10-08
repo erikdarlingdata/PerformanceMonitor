@@ -1649,14 +1649,25 @@ public sealed class DarlingMcpDataTools
                input to the band: HealthStatus is classified from the shipped cadence inside the aggregate. */
             var runTimes = await DarlingCollectorRunTimeReader.ReadAsync(postgres, resolved.ServerId, rows, nowUtc, logger, cancellationToken);
 
-            var compactCount = full_detail ? 0 : rows.Count(IsCollectionHealthCompactEligible);
+            /* Click-through 5: on a SQL Server that does not have Always On, the two AG collectors run, find nothing and
+               log HEALTHY with zero rows, and the zero-output sentence then called a persistent zero something that "needs a
+               look". They are shown as not applicable instead (a not_collected row saying why), exactly where the server's
+               latest properties say Always On is off. A server with no properties row yet makes no claim. The rows still
+               feed the sweep arithmetic below: this only changes what the response lists. An AG collector whose band is not
+               HEALTHY keeps its real row (L5): a failing collector must keep its Last Error. */
+            var alwaysOnOff = await DarlingGatedCollectorRows.AlwaysOnOffAsync(postgres, resolved.ServerId, cancellationToken);
+            List<CollectorHealth> shownRows = alwaysOnOff
+                ? DarlingGatedCollectorRows.RowsShownWhenAlwaysOnOff(rows)
+                : rows;
+
+            var compactCount = full_detail ? 0 : shownRows.Count(IsCollectionHealthCompactEligible);
             /* #4198's second cut: a row that fails the predicate above used to keep the full ~30-field shape
                below regardless of full_detail. Measured on both SKUs' #4198 fixtures that alone could not clear
                the response budget -- the weight is 30+ small fields times every row that needs a look, which
                previewing free text cannot touch -- so that row now gets PartialCollectionHealthRow instead,
                unless full_detail=true asks for everything. */
-            var partialCount = full_detail ? 0 : rows.Count - compactCount;
-            var result = rows.Select(r =>
+            var partialCount = full_detail ? 0 : shownRows.Count - compactCount;
+            var result = shownRows.Select(r =>
             {
                 runTimes.TryGetValue(r.CollectorName, out var runTime);
                 return full_detail
@@ -1666,6 +1677,8 @@ public sealed class DarlingMcpDataTools
                         : (object)PartialCollectionHealthRow(r, runTime, uncutText ? int.MaxValue : ErrorMessagePreviewLength, uncutText ? int.MaxValue : OutputFindingPreviewLength);
             });
             result = result.Concat(await DarlingGatedCollectorRows.AppendAsync(postgres, resolved.ServerId, resolved.ServerName, rows, cancellationToken));
+            if (alwaysOnOff)
+                result = result.Concat(DarlingGatedCollectorRows.AlwaysOnOffRows(rows));
 
             static object FullCollectionHealthRow(CollectorHealth r, CollectorRunTimeReading? runTime) => new
             {

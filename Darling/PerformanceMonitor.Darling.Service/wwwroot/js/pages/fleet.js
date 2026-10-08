@@ -567,19 +567,31 @@ function groupControl() {
  *
  * Returns null (no sub-line) for a response with no coverage object or an empty fleet — nothing to qualify.
  */
-function deadlockCoverageSub(coverage) {
+export function deadlockCoverageSub(coverage) {
   if (!coverage || typeof coverage.servers_total !== "number" || coverage.servers_total <= 0) return null;
 
   const total = coverage.servers_total;
   const read = typeof coverage.servers_read === "number" ? coverage.servers_read : 0;
   const noun = total === 1 ? "server" : "servers";
 
-  return read >= total
-    ? { text: "read all " + fmtInt(total) + " " + noun, partial: false }
-    : { text: "read " + fmtInt(read) + " of " + fmtInt(total) + " " + noun, partial: true };
+  if (read >= total) return { text: "read all " + fmtInt(total) + " " + noun, partial: false };
+
+  /* Says why the line is short, in the words a reader of the fleet page uses: the tile counts deadlocks only on the
+     servers whose deadlock data could be read. */
+  const unread = total - read;
+  return {
+    text: "read " + fmtInt(read) + " of " + fmtInt(total) + " " + noun,
+    partial: true,
+    title:
+      "The deadlock count covers the " + fmtInt(read) + " " + (read === 1 ? "server" : "servers") + " whose deadlock data could be read. " +
+      "The other " + fmtInt(unread) + " " + (unread === 1 ? "server is" : "servers are") +
+      " not counted: " + (unread === 1 ? "its" : "their") +
+      " deadlock collection is off, refused, or has not run lately (for example a server that is offline), " +
+      "so a deadlock there would not show up in this number.",
+  };
 }
 
-function rollup(d) {
+export function rollup(d) {
   /* #3031: every tile's number is programmatically tied to the text that says what it counts. The label and
      the coverage sub-line carry stable ids and the number describes itself with them, so the figure and its
      meaning travel together for a consumer that reaches the number's node on its own rather than browsing
@@ -606,7 +618,7 @@ function rollup(d) {
       el("div", { class: "lbl", id: lblId, text: lbl }),
       /* The sub-line's colour tracks COVERAGE, not the tile's number severity: "read all 12 servers" under a
          red count is good news about a bad number and must not be painted as part of the alarm. */
-      sub ? el("div", { class: sub.partial ? "sub partial" : "sub", id: subId, text: sub.text }) : null,
+      sub ? el("div", { class: sub.partial ? "sub partial" : "sub", id: subId, text: sub.text, title: sub.title || null }) : null,
     ]);
   };
 
@@ -767,6 +779,23 @@ export function metricBands(c) {
     ? fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing"
     : "no collector banded yet";
   const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
+
+  /* #5489: a server whose newest collection is past the fleet's offline mark (is_online === false, the same
+     signal the Collectors chip above and the card's status line read) has no CURRENT reading. The values the
+     read still holds are the last ones collected, days ago: a 0% CPU, "ok" memory and 77 free threads off a
+     12-day-old row read as live health beside a CPU chart that says it has no data. So the five measurement
+     chips read "n/a" in the neutral Unknown tone, and each says when the last collection was. */
+  if (c.is_online === false) {
+    const staleDetail = c.last_collection ? "last collected " + relTime(c.last_collection) : "no recent collection";
+    return el("div", { class: "metric-bands stale" }, [
+      chip("CPU", "n/a", "Unknown", staleDetail),
+      chip("Threads", "n/a", "Unknown", staleDetail),
+      chip("Memory", "n/a", "Unknown", staleDetail),
+      chip("Blocking", "n/a", "Unknown", staleDetail),
+      chip("Deadlocks", "n/a", "Unknown", staleDetail),
+      chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+    ]);
+  }
 
   return el("div", { class: "metric-bands" }, [
     chip("CPU", cpuValue, c.cpu_severity, cpuDetail),

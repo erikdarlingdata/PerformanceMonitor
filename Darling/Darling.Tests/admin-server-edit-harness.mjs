@@ -1039,7 +1039,7 @@ try {
       serveTab();
       await mountPage(name);
       const before = main.children[2];
-      const row = name === "servers" ? "Alpha" : "cpu.threshold_percent";
+      const row = name === "servers" ? "Alpha" : "CPU: threshold (%)";
       let release;
       if (name === "servers") state.listGate = new Promise((r) => { release = r; });
       else state.gate = new Promise((r) => { release = r; });

@@ -40,7 +40,8 @@ public sealed class ViewerFinOpsOptimizationDelegatesTests
     }
 
     [Theory]
-    [InlineData("ViewerDataService.FinOps.Storage.cs", "GetIdleDatabasesAsync(", "DarlingFinOpsOptimizationReader.GetIdleDatabasesAsync(", "IdleDatabaseRow.From")]
+    /* The idle read is GetIdleDatabaseReadAsync (rows plus whether the last 7 UTC days are covered); GetIdleDatabasesAsync is a one-line wrapper over it. */
+    [InlineData("ViewerDataService.FinOps.Storage.cs", "GetIdleDatabaseReadAsync(int serverId", "DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(", "IdleDatabaseRow.From")]
     [InlineData("ViewerDataService.FinOps.Storage.cs", "GetTempdbSummaryAsync(", "DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(", "TempdbSummaryRow.From")]
     [InlineData("ViewerDataService.FinOps.Workload.cs", "GetWaitCategorySummaryAsync(", "DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(", "WaitCategorySummaryRow.From")]
     [InlineData("ViewerDataService.FinOps.Workload.cs", "GetExpensiveQueriesAsync(", "DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(", "ExpensiveQueryRow.From")]

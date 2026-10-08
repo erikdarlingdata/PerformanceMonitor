@@ -69,6 +69,13 @@ public sealed class PgPlanViewerBehaviourTests
         Assert.Equal("true", Str(r, "expanded"));
         Assert.Equal(0, r.GetProperty("fetches").GetInt32());
         Assert.False(r.GetProperty("preAfterHide").GetBoolean());
+        // The open panel is drawn full width under the row (plan-row.js), not inside the last column (click-through 1).
+        Assert.Equal("plan-cell plan-open", Str(r, "openClass"));
+        Assert.True(r.GetProperty("hasSpacer").GetBoolean());
+        Assert.Equal("plan-cell", Str(r, "closedClass"));
+        // One observer while the panel is open and none once it is closed (plan-row.js disconnects it).
+        Assert.Equal(1, r.GetProperty("observersOpen").GetInt32());
+        Assert.Equal(0, r.GetProperty("observersClosed").GetInt32());
     }
 
     [Fact]
