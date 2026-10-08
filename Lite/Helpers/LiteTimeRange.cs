@@ -21,21 +21,15 @@ namespace PerformanceMonitorLite.Helpers;
 /// </summary>
 internal static class LiteTimeRange
 {
-    /// <summary>The shortest FinOps list range: every FinOps read is whole hours back from now (#5562 R5).</summary>
-    internal static readonly TimeSpan FinOpsMinSpan = TimeSpan.FromHours(1);
-
-    /// <summary>The shortest heatmap window: the heatmap reads whole days.</summary>
-    internal static readonly TimeSpan FinOpsHeatmapMinSpan = TimeSpan.FromDays(1);
-
     /// <summary>
-    /// A FinOps picker (#5562 R5): compact, rolling only (no calendar period, no start-and-end, no 'since') and at least
-    /// <paramref name="minSpan"/>, because the read behind it is "hours back from now" and could not honor a finished range.
+    /// A FinOps picker (#5562 R5): compact and rolling only, in whole <paramref name="unit"/>s (<see cref="RollingUnitRule.Hour"/> for
+    /// a list, <see cref="RollingUnitRule.Day"/> for the heatmap), through the shared control's <c>RollingUnit</c>: the read behind it
+    /// is "N units back from now" and could not honor a finished range. The Darling Viewer's FinOps tab sets the same two units.
     /// </summary>
-    internal static void ConfigureFinOpsPicker(TimeRangePicker picker, TimeSpan minSpan)
+    internal static void ConfigureFinOpsPicker(TimeRangePicker picker, TimeSpan unit)
     {
         picker.Compact = true;
-        picker.RollingOnly = true;
-        picker.MinSpan = minSpan;
+        picker.RollingUnit = unit;
     }
 
     /// <summary>The range a fresh install opens on: the old default of four hours.</summary>
@@ -116,9 +110,8 @@ internal static class LiteTimeRange
         return TimeSpan.FromDays(Math.Min(days, 365));
     }
 
-    /// <summary>What to type for <see cref="AlertHistoryLongest"/>: "92d".</summary>
-    internal static string AlertHistoryLongestText(DateTime utcNow)
-        => ((int)AlertHistoryLongest(utcNow).TotalDays) + "d";
+    /// <summary>The longest choice as the shared control's extra rolling choice (<c>SetLongestChoice</c>), the Viewer's "All" at Lite's retention.</summary>
+    internal static TimeRangeSpec AlertHistoryLongestChoice(DateTime utcNow) => TimeRangeSpec.Relative(AlertHistoryLongest(utcNow));
 
     /// <summary>True when <paramref name="range"/> carries its own instants rather than 'the last N hours'.</summary>
     internal static bool HasExplicitInstants(ResolvedTimeRange range) => range.Spec.WholeHours is not > 0;

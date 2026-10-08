@@ -59,34 +59,18 @@ public sealed class LiteTimeRangeGapTests : IClassFixture<SharedDuckDbFixture>, 
     // ---- R5: FinOps pickers are rolling only ----
 
     [Fact]
-    public void RollingOnlyLimits_RefuseCalendarFixedAndSinceAndTooShort()
+    public void RollingUnitRule_RefusesCalendarFixedSinceAndTooShort_ForAFinOpsList()
     {
         var now = new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Unspecified);
-        var oneHour = TimeSpan.FromHours(1);
+        var hour = RollingUnitRule.Hour;
 
-        Assert.Null(TimeRangeLimits.Refusal(TimeRangeSpec.Relative(TimeSpan.FromHours(36)), rollingOnly: true, oneHour));
-        Assert.NotNull(TimeRangeLimits.Refusal(TimeRangeSpec.ForPeriod(CalendarPeriod.PreviousWeek), rollingOnly: true, oneHour));
-        Assert.NotNull(TimeRangeLimits.Refusal(TimeRangeSpec.FixedRange(now.AddDays(-3), now.AddDays(-2)), rollingOnly: true, oneHour));
-        Assert.NotNull(TimeRangeLimits.Refusal(TimeRangeSpec.SinceInstant(now.AddDays(-3)), rollingOnly: true, oneHour));
-        Assert.NotNull(TimeRangeLimits.Refusal(TimeRangeSpec.Relative(TimeSpan.FromMinutes(30)), rollingOnly: true, oneHour));
-        Assert.Null(TimeRangeLimits.Refusal(TimeRangeSpec.Relative(TimeSpan.FromHours(1)), rollingOnly: true, oneHour));
-
-        /* Not rolling only: a calendar period is fine, but the minimum span still refuses a short length. */
-        Assert.Null(TimeRangeLimits.Refusal(TimeRangeSpec.ForPeriod(CalendarPeriod.PreviousWeek), rollingOnly: false, oneHour));
-        Assert.NotNull(TimeRangeLimits.Refusal(TimeRangeSpec.Relative(TimeSpan.FromMinutes(30)), rollingOnly: false, oneHour));
-    }
-
-    [Fact]
-    public void RollingOnlyCoerce_ReadsAFinishedPeriodAsTheLengthFromItsStartToNow()
-    {
-        var now = new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Unspecified);
-        var spec = TimeRangeLimits.Coerce(TimeRangeSpec.ForPeriod(CalendarPeriod.Yesterday), rollingOnly: true, TimeSpan.FromHours(1), now, TimeZoneInfo.Utc);
-
-        Assert.Equal(TimeRangeKind.Relative, spec.Kind);
-        Assert.Equal(TimeSpan.FromHours(36), spec.Span); /* yesterday starts Oct 7 00:00, 36 hours before Oct 8 12:00 */
-        Assert.Equal(TimeSpan.FromHours(1), TimeRangeLimits.Coerce(TimeRangeSpec.Relative(TimeSpan.FromMinutes(15)), true, TimeSpan.FromHours(1), now, TimeZoneInfo.Utc).Span);
-        var held = TimeRangeSpec.Relative(TimeSpan.FromHours(4));
-        Assert.Same(held, TimeRangeLimits.Coerce(held, true, TimeSpan.FromHours(1), now, TimeZoneInfo.Utc));
+        Assert.True(RollingUnitRule.Admits(TimeRangeSpec.Relative(TimeSpan.FromHours(36)), hour));
+        Assert.False(RollingUnitRule.Admits(TimeRangeSpec.ForPeriod(CalendarPeriod.PreviousWeek), hour));
+        Assert.False(RollingUnitRule.Admits(TimeRangeSpec.FixedRange(now.AddDays(-3), now.AddDays(-2)), hour));
+        Assert.False(RollingUnitRule.Admits(TimeRangeSpec.SinceInstant(now.AddDays(-3)), hour));
+        Assert.False(RollingUnitRule.Admits(TimeRangeSpec.Relative(TimeSpan.FromMinutes(30)), hour));
+        Assert.False(RollingUnitRule.Admits(TimeRangeSpec.Relative(TimeSpan.FromHours(36)), RollingUnitRule.Day)); /* the heatmap takes whole days */
+        Assert.True(RollingUnitRule.Admits(TimeRangeSpec.Relative(TimeSpan.FromDays(30)), RollingUnitRule.Day));
     }
 
     [Fact]
@@ -97,12 +81,10 @@ public sealed class LiteTimeRangeGapTests : IClassFixture<SharedDuckDbFixture>, 
         var helper = LiteFile(Path.Combine("Helpers", "LiteTimeRange.cs"));
 
         Assert.Equal(5, Regex.Matches(xaml, @"<ui:TimeRangePicker [^>]*Compact=""True""").Count);
-        Assert.Equal(4, Regex.Matches(code, @"LiteTimeRange\.ConfigureFinOpsPicker\(\w+TimeRangePicker, LiteTimeRange\.FinOpsMinSpan\)").Count);
-        Assert.Contains("LiteTimeRange.ConfigureFinOpsPicker(ObjectHeatmapWindowPicker, LiteTimeRange.FinOpsHeatmapMinSpan)", code, StringComparison.Ordinal);
-        Assert.Contains("picker.RollingOnly = true;", helper, StringComparison.Ordinal);
+        Assert.Equal(4, Regex.Matches(code, @"LiteTimeRange\.ConfigureFinOpsPicker\(\w+TimeRangePicker, RollingUnitRule\.Hour\)").Count);
+        Assert.Contains("LiteTimeRange.ConfigureFinOpsPicker(ObjectHeatmapWindowPicker, RollingUnitRule.Day)", code, StringComparison.Ordinal);
+        Assert.Contains("picker.RollingUnit = unit;", helper, StringComparison.Ordinal);
         Assert.Contains("picker.Compact = true;", helper, StringComparison.Ordinal);
-        Assert.Equal(TimeSpan.FromHours(1), LiteTimeRange.FinOpsMinSpan);
-        Assert.Equal(TimeSpan.FromDays(1), LiteTimeRange.FinOpsHeatmapMinSpan);
     }
 
     // ---- R6: Job History end bound ahead of the cap ----
@@ -236,14 +218,10 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
     {
         var now = new DateTime(year, month, day, 0, 0, 0, DateTimeKind.Utc);
         Assert.Equal(TimeSpan.FromDays(days), LiteTimeRange.AlertHistoryLongest(now));
-        Assert.Equal(days + "d", LiteTimeRange.AlertHistoryLongestText(now));
+        Assert.Equal(TimeRangeSpec.Relative(TimeSpan.FromDays(days)), LiteTimeRange.AlertHistoryLongestChoice(now));
         Assert.Equal(3, RetentionService.ArchiveRetentionMonths);
         Assert.True(LiteTimeRange.AlertHistoryLongest(now) <= TimeSpan.FromDays(365));
 
-        /* It types into the picker's grammar as a rolling length. */
-        var parsed = TimeRangeParser.Parse(LiteTimeRange.AlertHistoryLongestText(now), now, TimeZoneInfo.Utc);
-        Assert.True(parsed.Ok);
-        Assert.Equal(days * 24, parsed.Spec!.WholeHours);
     }
 
     // ---- R3: the sample note names the sub-tab's main collector ----
@@ -345,6 +323,7 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
         /* The central funnel feeds for every relation, and the tab points the picker at the page on screen. */
         var refresh = LiteFile(Path.Combine("Controls", "ServerTab.Refresh.cs"));
         Assert.DoesNotContain("if (relation == QueryWindowRelation.QueryStats)\n        {\n            RangePicker.DataStartUtc", refresh, StringComparison.Ordinal);
+        Assert.Contains("RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice(", LiteFile(Path.Combine("Controls", "AlertsHistoryTab.xaml.cs")), StringComparison.Ordinal);
         Assert.Contains("CorrelatedLanes.DataStartFound +=", LiteFile(Path.Combine("Controls", "ServerTab.xaml.cs")), StringComparison.Ordinal);
     }
 

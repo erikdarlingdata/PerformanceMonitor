@@ -63,8 +63,9 @@ public partial class AlertsHistoryTab : UserControl
     {
         InitializeComponent();
         RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened */
-        /* R8: the old "All" item is a typed span as long as the alert log is kept (3 months on Lite, RetentionService.ArchiveRetentionMonths). */
-        RangePicker.ToolTip = $"Alerts are kept for {RetentionService.ArchiveRetentionMonths} months: type {LiteTimeRange.AlertHistoryLongestText(DateTime.UtcNow)} to see them all.";
+        /* R8: "All" is a span as long as the alert log is kept (3 months on Lite, RetentionService.ArchiveRetentionMonths), through
+           the shared control's longest choice, as the Darling Viewer's Alert History does. */
+        RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice(DateTime.UtcNow), "All");
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
