@@ -92,15 +92,27 @@ public sealed class PgIoStatsHourlyTests
         Assert.Contains("ORDER BY p.hour_start DESC", seed, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", seed, StringComparison.Ordinal);
         Assert.DoesNotContain("DISTINCT ON", seed, StringComparison.Ordinal);
+
+        /* The three key columns are nullable, so the probe needs a NULL-equal compare that an index can serve: array equality over the
+           same expression the V170 index holds. IS NOT DISTINCT FROM is not indexable and scanned back through every earlier rollup row
+           of a combination that was new or absent for a long time. */
+        Assert.Contains("ARRAY[p.backend_type, p.object_type, p.context] = ARRAY[cmb.backend_type, cmb.object_type, cmb.context]", seed, StringComparison.Ordinal);
+        Assert.DoesNotContain("IS NOT DISTINCT FROM", seed, StringComparison.Ordinal);
+        Assert.Contains("ON collect.pg_io_stats_hourly (server_id, (ARRAY[backend_type, object_type, context]), hour_start DESC)", PgIoStatsHourly.CreateSql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void TheGc_IsDrivenFromTheSmallStateTable_NotAScanOfTheWholeRollup()
     {
         var gc = PgIoStatsHourlyBuilder.GcSql.Replace("\r\n", "\n");
-        var first = gc[..gc.IndexOf(';', StringComparison.Ordinal)];
-        Assert.Contains("DELETE FROM collect.pg_io_stats_hourly WHERE server_id IN (SELECT", first, StringComparison.Ordinal);
-        Assert.Contains("FROM collect.pg_io_stats_hourly_state", first, StringComparison.Ordinal);
+        gc = gc.TrimEnd();
+
+        /* One statement, so one snapshot: a server disabled while it runs cannot lose its state row and keep its rollup rows. */
+        Assert.Equal(gc.Length - 1, gc.IndexOf(';', StringComparison.Ordinal));
+        Assert.StartsWith("WITH gone AS (", gc, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN", gc, StringComparison.Ordinal);
+        Assert.Contains("RETURNING server_id", gc, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM collect.pg_io_stats_hourly WHERE server_id IN (SELECT server_id FROM gone)", gc, StringComparison.Ordinal);
         Assert.DoesNotContain("pg_io_stats_hourly WHERE server_id NOT IN", gc, StringComparison.Ordinal);
     }
 
@@ -139,7 +151,9 @@ public sealed class PgIoStatsHourlyTests
         Assert.Contains("PgIoStatsHourlyBuilder.PruneSql", retention, StringComparison.Ordinal);
         Assert.Contains("\"pg_io_stats\"", retention, StringComparison.Ordinal);
 
-        /* The first fill is bounded by time, not by a count of builds: no new build starts after the budget, and the hard cap stays. */
+        /* The first fill is bounded by time, not by a count of builds: no new build starts after the budget, and a build still running
+           at the hard cap is cancelled (TheHardCap_... below). The budget is the only start cutoff, so there is no second one to keep in step. */
+        Assert.Null(typeof(PgIoStatsHourlyBuilder).GetField("StartCutoff", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
         Assert.Null(typeof(PgIoStatsHourlyBuilder).GetField("MaxBuildsPerTick"));
         Assert.Equal(TimeSpan.FromMinutes(2), PgIoStatsHourlyBuilder.TickBudget);
         Assert.True(PgIoStatsHourlyBuilder.TickBudget < PgIoStatsHourlyBuilder.MaxTickDuration);
@@ -357,6 +371,148 @@ AND   NOT (c.bt = 'startup' AND t < '{Ts(Late)}')";
 
             /* A window that starts after that hour does not need it, and is still served from the rollup. */
             Assert.Single(await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(start.AddHours(3)), Unspec(Now)));
+        });
+    }
+
+    [Fact]
+    public async Task ARebuildOfTheLateRowsHourAndTheNextHour_IsOneTransaction_SoAFailedNextHourLeavesNoDoubleCount()
+    {
+        await RunLiveAsync(async (scratch, connection, dataSource, ct) =>
+        {
+            /* The watermark is 11:00, so a tick rebuilds 09:00 and 10:00. A row dated 09:58 lands long after the hour closed (the hour's
+               last row was 09:55); 10:00's boundary difference was taken against 09:55. If 09:00 is rebuilt and committed and then
+               10:00 fails, the guard sees equal counts in both hours while 10:00 still holds the stale boundary difference, and a window over
+               both hours counts the 09:55 to 09:58 change twice. */
+            var start = Now.AddHours(-48);
+            await ExecAsync(connection,
+                "INSERT INTO collect.pg_io_stats (collection_id, collection_time, server_id, server_name, backend_type, object_type, context, "
+                + "reads, read_time_ms, writes, write_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, stats_reset, read_bytes, write_bytes, extend_bytes) "
+                + "SELECT 999999997, collection_time + interval '3 minutes', server_id, server_name, backend_type, object_type, context, "
+                + "reads + 1, read_time_ms + 1, writes, write_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, stats_reset, read_bytes, write_bytes, extend_bytes "
+                + "FROM collect.pg_io_stats WHERE server_id = 1 AND backend_type = 'client backend' AND context = 'normal' AND collection_time = '2026-03-20 09:55:00'", ct);
+            await ExecAsync(connection,
+                "CREATE FUNCTION collect.fail_planted_hour() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN "
+                + "IF NEW.hour_start = '2026-03-20 10:00' THEN RAISE EXCEPTION 'planted rollup build failure'; END IF; RETURN NEW; END $f$; "
+                + "CREATE TRIGGER fail_planted_hour BEFORE INSERT ON collect.pg_io_stats_hourly FOR EACH ROW EXECUTE FUNCTION collect.fail_planted_hour()", ct);
+
+            var failed = await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, ct);
+            Assert.Equal(1, failed.Failed);
+
+            var raw = await RowsAsync(connection, DarlingPgIoReader.PgIoSql, 1, Unspec(start), Unspec(Now), 1000);
+            Assert.NotEmpty(raw);
+            var viaReader = await DarlingPgIoReader.GetPgIoPageAsync(dataSource, 1, start, Now, 1000, ct);
+            Assert.Equal(long.Parse(raw[0].Split('|')[19], CultureInfo.InvariantCulture), viaReader.WindowTotalReads);
+            Assert.Equal(raw.Count, viaReader.Rows.Count);
+
+            /* Whatever the guard says, a stitched read it allows must equal raw. */
+            var span = await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(start), Unspec(Now));
+            if (span.Count == 1)
+            {
+                var parts = span[0].Split('|');
+                var stitched = await RowsAsync(connection, Fix(PgIoStatsHourly.StitchedReadSql), 1, Unspec(start), Unspec(Now), 1000,
+                    DateTime.Parse(parts[0], CultureInfo.InvariantCulture), DateTime.Parse(parts[1], CultureInfo.InvariantCulture));
+                Assert.Equal(raw, stitched);
+            }
+
+            /* The next good tick rebuilds both hours together and the rollup serves the window again. */
+            await ExecAsync(connection, "DROP TRIGGER fail_planted_hour ON collect.pg_io_stats_hourly", ct);
+            var healed = await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, ct);
+            Assert.Equal(0, healed.Failed);
+            span = await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(start), Unspec(Now));
+            Assert.Single(span);
+            var healedParts = span[0].Split('|');
+            var healedRead = await RowsAsync(connection, Fix(PgIoStatsHourly.StitchedReadSql), 1, Unspec(start), Unspec(Now), 1000,
+                DateTime.Parse(healedParts[0], CultureInfo.InvariantCulture), DateTime.Parse(healedParts[1], CultureInfo.InvariantCulture));
+            Assert.Equal(raw, healedRead);
+        });
+    }
+
+    [Fact]
+    public async Task TheHardCap_CancelsABuildThatIsRunning_AndItsHoursStayUnbuilt_AndLaterBuildsAreDeferred()
+    {
+        await RunLiveAsync(async (scratch, connection, dataSource, ct) =>
+        {
+            /* A first fill whose first build is held inside its insert: a trigger takes an advisory lock that this test owns (left alone the build ends at its 60 s statement_timeout, so the 20 s wait below fails unless the cap cancels it). The hard cap
+               is a token the test fires by hand once it sees the build waiting, so no wall-clock time passes. */
+            await ExecAsync(connection, "TRUNCATE collect.pg_io_stats_hourly, collect.pg_io_stats_hourly_state", ct);
+            await ExecAsync(connection,
+                "CREATE FUNCTION collect.hold_planted_hour() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN PERFORM pg_advisory_xact_lock(5495); RETURN NEW; END $f$; "
+                + "CREATE TRIGGER hold_planted_hour BEFORE INSERT ON collect.pg_io_stats_hourly FOR EACH ROW EXECUTE FUNCTION collect.hold_planted_hour()", ct);
+
+            /* The lock is a session lock on its own unpooled connection: closing it (the end of this test, or a failure) releases it. */
+            await using var holder = new NpgsqlConnection(scratch.ConnectionString + ";Pooling=false");
+            await holder.OpenAsync(ct);
+            await ExecAsync(holder, "SELECT pg_advisory_lock(5495)", ct);
+
+            using var cap = new CancellationTokenSource();
+            var tick = PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, () => TimeSpan.Zero, cap.Token, ct);
+            var waiting = false;
+            for (var attempt = 0; attempt < 600 && !waiting; attempt++)
+            {
+                waiting = (await RowsAsync(connection, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'"))[0] != "0";
+                if (!waiting)
+                {
+                    await Task.Delay(50, ct);
+                }
+            }
+
+            Assert.True(waiting, "the first build never reached its insert");
+            cap.Cancel();
+            var result = await tick.WaitAsync(TimeSpan.FromSeconds(20), ct);
+            Assert.Equal(new PgIoStatsHourlyBuilder.TickResult(0, 1, 0, 0), result);
+
+            /* The cancelled build rolled back: no rollup row, no state row, and the reader answers from raw. */
+            Assert.Equal("0", (await RowsAsync(connection, "SELECT count(*) FROM collect.pg_io_stats_hourly"))[0]);
+            Assert.Equal("0", (await RowsAsync(connection, "SELECT count(*) FROM collect.pg_io_stats_hourly_state"))[0]);
+            Assert.NotEmpty((await DarlingPgIoReader.GetPgIoPageAsync(dataSource, 1, Now.AddHours(-48), Now, 1000, ct)).Rows);
+
+            /* A cap that has already passed starts no build at all; the caller's own token still ends the tick. */
+            await ExecAsync(connection, "DROP TRIGGER hold_planted_hour ON collect.pg_io_stats_hourly", ct);
+            using var passed = new CancellationTokenSource();
+            passed.Cancel();
+            var late = await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, () => TimeSpan.Zero, passed.Token, ct);
+            Assert.Equal(0, late.Built);
+            Assert.Equal(0, late.Failed);
+            Assert.True(late.Deferred > 100);
+            Assert.Equal("0", (await RowsAsync(connection, "SELECT count(*) FROM collect.pg_io_stats_hourly"))[0]);
+            using var stopped = new CancellationTokenSource();
+            stopped.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, () => TimeSpan.Zero, CancellationToken.None, stopped.Token));
+
+            /* The next tick (no cap fired) builds the whole fill. */
+            var resumed = await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, () => TimeSpan.Zero, CancellationToken.None, ct);
+            Assert.Equal(0, resumed.Failed);
+            Assert.True(resumed.Built > 100);
+            Assert.Single(await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(Now.AddHours(-48)), Unspec(Now)));
+        }, build: false);
+    }
+
+    [Fact]
+    public async Task ACombinationWithNullKeyColumns_IsSeededAcrossAGapByTheArrayProbe_AndMatchesRaw()
+    {
+        await RunLiveAsync(async (scratch, connection, dataSource, ct) =>
+        {
+            /* 'bgwriter' has NULL object_type and context (the seed probe must match NULL to NULL): rows at 06:05 and 06:15, then nothing for
+               two hours, then 09:05 and 09:15. The 09:00 hour is seeded from 06:00's last row across the gap. */
+            await ExecAsync(connection,
+                "INSERT INTO collect.pg_io_stats (collection_id, collection_time, server_id, server_name, backend_type, reads, read_time_ms) VALUES "
+                + "(999999980, '2026-03-19 06:05:00', 1, 'srv1', 'bgwriter', 100, 100), (999999981, '2026-03-19 06:15:00', 1, 'srv1', 'bgwriter', 110, 110), "
+                + "(999999982, '2026-03-19 09:05:00', 1, 'srv1', 'bgwriter', 140, 140), (999999983, '2026-03-19 09:15:00', 1, 'srv1', 'bgwriter', 150, 150)", ct);
+            await ExecAsync(connection, "TRUNCATE collect.pg_io_stats_hourly, collect.pg_io_stats_hourly_state", ct);
+            await PgIoStatsHourlyBuilder.RunTickAsync(dataSource, Now, NullLogger.Instance, ct);
+            Assert.Equal("1", (await RowsAsync(connection, "SELECT count(*) FROM collect.pg_io_stats_hourly WHERE backend_type = 'bgwriter' AND hour_start = '2026-03-19 09:00' AND b_reads = 30"))[0]);
+
+            var start = new DateTime(2026, 3, 19, 5, 30, 0, DateTimeKind.Unspecified);
+            var end = Now.AddMinutes(-2);
+            var raw = await RowsAsync(connection, DarlingPgIoReader.PgIoSql, 1, Unspec(start), Unspec(end), 1000);
+            var span = await RowsAsync(connection, Fix(PgIoStatsHourly.GuardSql), 1, Unspec(start), Unspec(end));
+            Assert.Single(span);
+            var parts = span[0].Split('|');
+            var stitched = await RowsAsync(connection, Fix(PgIoStatsHourly.StitchedReadSql), 1, Unspec(start), Unspec(end), 1000,
+                DateTime.Parse(parts[0], CultureInfo.InvariantCulture), DateTime.Parse(parts[1], CultureInfo.InvariantCulture));
+            Assert.Contains(raw, r => r.StartsWith("bgwriter|", StringComparison.Ordinal));
+            Assert.Equal(raw, stitched);
         });
     }
 

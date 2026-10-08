@@ -37,7 +37,7 @@ public static class PgIoStatsHourly
     public const string Table = "collect.pg_io_stats_hourly";
     public const string StateTable = "collect.pg_io_stats_hourly_state";
 
-    /// <summary>Both tables and the key, as the V170 rung runs them. Idempotent. The tables are empty when created.</summary>
+    /// <summary>Both tables, the unique key and the seed index, as the V170 rung runs them. Idempotent. The tables are empty when created.</summary>
     public const string CreateSql = """
 CREATE TABLE IF NOT EXISTS collect.pg_io_stats_hourly
 (
@@ -62,15 +62,22 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats_hourly
     l_read_bytes numeric(28,0), l_write_bytes numeric(28,0), l_extend_bytes numeric(28,0)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_pg_io_stats_hourly ON collect.pg_io_stats_hourly (server_id, hour_start, backend_type, object_type, context) NULLS NOT DISTINCT;
+CREATE INDEX IF NOT EXISTS ix_pg_io_stats_hourly_combo ON collect.pg_io_stats_hourly (server_id, (ARRAY[backend_type, object_type, context]), hour_start DESC);
 CREATE TABLE IF NOT EXISTS collect.pg_io_stats_hourly_state (server_id integer PRIMARY KEY, first_hour timestamp NOT NULL, built_through timestamp NOT NULL);
 """;
 
     /// <summary>
     /// Builds one (server, hour): $1 server_id, $2 the hour start (naive UTC timestamp); returns the rows inserted. The caller
     /// deletes the hour's rows first, in the same transaction. Seeds each combination's difference from the newest EARLIER rollup row
-    /// (its <c>l_*</c>), so hours must be built in order from <c>first_hour</c>. The seed is one backward index probe per combination
-    /// of the hour being built (<c>ORDER BY hour_start DESC LIMIT 1</c> on the unique index), not a sort of every earlier rollup row of
-    /// the server: that sort made the first fill quadratic in the hours already built.
+    /// (its <c>l_*</c>), so hours must be built in order from <c>first_hour</c>. The seed is one index probe per combination
+    /// of the hour being built (<c>ORDER BY hour_start DESC LIMIT 1</c> on <c>ix_pg_io_stats_hourly_combo</c>), not a sort of every earlier
+    /// rollup row of the server: that sort made the first fill quadratic in the hours already built.
+    ///
+    /// <para><b>Why an array compare.</b> The three key columns are nullable, and a NULL must match a NULL (as <c>IS NOT DISTINCT FROM</c>
+    /// did), which no index can serve: a combination new to the server, or absent for many hours, scanned back through all the server's
+    /// earlier rollup rows. Array equality treats NULL elements as equal and is btree-indexable, so the probe compares
+    /// <c>ARRAY[backend_type, object_type, context]</c> and the index holds that same expression ahead of <c>hour_start</c>. The match
+    /// and the row chosen are the same: the unique index is NULLS NOT DISTINCT, so each hour has one row per combination.</para>
     /// </summary>
     public const string BuildHourSql = """
         WITH hr AS (
@@ -90,9 +97,7 @@ CREATE TABLE IF NOT EXISTS collect.pg_io_stats_hourly_state (server_id integer P
             CROSS JOIN LATERAL (
                 SELECT * FROM collect.pg_io_stats_hourly AS p
                 WHERE p.server_id = $1 AND p.hour_start < $2
-                AND   p.backend_type IS NOT DISTINCT FROM cmb.backend_type
-                AND   p.object_type  IS NOT DISTINCT FROM cmb.object_type
-                AND   p.context      IS NOT DISTINCT FROM cmb.context
+                AND   ARRAY[p.backend_type, p.object_type, p.context] = ARRAY[cmb.backend_type, cmb.object_type, cmb.context]
                 ORDER BY p.hour_start DESC
                 LIMIT 1
             ) AS s

@@ -28,7 +28,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// rollup row, and <c>built_through</c> (exclusive) moves to the end of each hour in the same transaction as its rows. An hour is
 /// closed once <see cref="CloseMarginMinutes"/> have passed its end. The first fill starts at the first whole hour after the server's
 /// oldest raw row, no earlier than <see cref="FillDays"/> back. Every tick also rebuilds the last <see cref="RebuildHours"/> built
-/// hours, so a late row inside that span is picked up. A later one leaves that hour's raw and rollup counts different, and the count
+/// hours, so a late row inside that span is picked up. Those hours are rebuilt in ONE transaction: a late row changes its hour's last
+/// row, which seeds the next hour's boundary difference, so rebuilding the hour alone (and the next one in a transaction of its own that
+/// can fail, be cancelled or find the lock busy) would leave a stale boundary difference beside a count the guard sees as equal, and
+/// a window over both hours would count the late row's change twice; one transaction commits both hours or neither, and the guard
+/// stays a plain count comparison. A later one leaves that hour's raw and rollup counts different, and the count
 /// guard sends a read back to the raw statement when the window spans that hour or starts in the hour after it (that hour's last row
 /// seeds the first rollup hour's boundary difference); a window that ends before the hour or starts after the next one does not need
 /// it. Until the hour ages out of retention the rollup row is never rebuilt, unlike V168's, which rebuilds on a late-row trigger.</para>
@@ -36,8 +40,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>First fill cost and its bound.</b> One hour costs 8 to 13 ms on the large store (90 combinations, one-minute cadence, about
 /// 5,400 raw rows), so a 31-day fill is 744 builds, about 6 to 10 s per server. Two bounds apply to a tick, both by time and neither by a
 /// count of builds: <see cref="TickBudget"/> (2 minutes: no new build starts after it, and the next tick continues from the watermark)
-/// and <see cref="MaxTickDuration"/> (10 minutes: the hard cap, which the budget can never exceed). A build that has started always
-/// finishes or times out (<see cref="BuildStatementTimeoutSeconds"/>). Nothing runs in the migration: V170 only creates empty tables.</para>
+/// and <see cref="MaxTickDuration"/> (10 minutes: the hard cap). A build that has started when the budget runs out finishes or times out
+/// (<see cref="BuildStatementTimeoutSeconds"/>); one still running when the hard cap passes is cancelled, rolls back, and its hours stay
+/// as they were (unbuilt, or the older rebuild), so reads of them stay on raw. Nothing runs in the migration: V170 only creates empty tables.</para>
 /// </summary>
 public static class PgIoStatsHourlyBuilder
 {
@@ -57,10 +62,11 @@ public static class PgIoStatsHourlyBuilder
     /// </summary>
     public static readonly TimeSpan TickBudget = TimeSpan.FromMinutes(2);
 
-    /// <summary>The hard cap: no new build starts after this, even if <see cref="TickBudget"/> is raised past it.</summary>
+    /// <summary>
+    /// The hard cap, from the start of the tick: a build still running when it passes is cancelled and rolled back, and no later build
+    /// starts. It bounds a build that is stuck (say, on a lock) past <see cref="TickBudget"/>, which only stops new builds from starting.
+    /// </summary>
     public static readonly TimeSpan MaxTickDuration = TimeSpan.FromMinutes(10);
-
-    private static readonly TimeSpan StartCutoff = TickBudget < MaxTickDuration ? TickBudget : MaxTickDuration;
 
     /// <summary>The server-side statement_timeout of each hour's build transaction.</summary>
     public const int BuildStatementTimeoutSeconds = 60;
@@ -92,14 +98,17 @@ ON CONFLICT (server_id) DO UPDATE SET built_through = EXCLUDED.built_through;
 """;
 
     /// <summary>
-    /// Removes the rollup and state rows of servers that are not enabled. Driven from the small state table (one row per server),
-    /// as V168's cleanup is driven from its built table: the rollup rows go by <c>server_id</c>, the leading column of the unique
-    /// index, instead of a scan of the whole rollup every hourly tick. The state row is written in the same transaction as a
-    /// server's first rollup row, so no rollup row exists without one.
+    /// Removes the rollup and state rows of servers that are not enabled, in ONE statement (one snapshot: a server disabled while it
+    /// runs cannot lose its state row and keep its rollup rows, which the next tick could no longer find). The state row goes first, in
+    /// a data-modifying CTE, and its <c>RETURNING</c> drives the rollup delete, so the rollup rows go by <c>server_id</c>, the leading
+    /// column of the unique index, instead of a scan of the whole rollup every hourly tick. The state row is written in the same
+    /// transaction as a server's first rollup row, so no rollup row exists without one.
     /// </summary>
     public const string GcSql = """
-DELETE FROM collect.pg_io_stats_hourly WHERE server_id IN (SELECT st.server_id FROM collect.pg_io_stats_hourly_state AS st WHERE st.server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled));
-DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled);
+WITH gone AS (
+    DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled) RETURNING server_id
+)
+DELETE FROM collect.pg_io_stats_hourly WHERE server_id IN (SELECT server_id FROM gone);
 """;
 
     /// <summary>The retention prune (`$1` the cutoff, naive UTC): rollup rows older than the raw table's retention.</summary>
@@ -113,13 +122,21 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
     private static DateTime FloorHour(DateTime value) => new(value.Year, value.Month, value.Day, value.Hour, 0, 0, DateTimeKind.Unspecified);
 
     /// <summary>
-    /// Builds one (server, hour) in its own transaction and moves the watermark to the hour's end (the new watermark never moves
-    /// back past an hour already built: a rebuild of an earlier hour keeps the later watermark). Returns the rows inserted, or null when the lock was not free.
+    /// Builds the given consecutive hours of one server, oldest first, in ONE transaction and moves the watermark to the last hour's
+    /// end (the new watermark never moves back past an hour already built: a rebuild of earlier hours keeps the later watermark). One
+    /// hour is the normal case; the tick passes the whole span of built hours it rebuilds, so a late row's hour and the hour after it,
+    /// whose boundary difference is seeded from that hour's last row, commit together or not at all. Returns the rows inserted, or null
+    /// when the lock was not free.
     /// </summary>
-    public static async Task<long?> BuildHourAsync(
-        NpgsqlConnection connection, int serverId, DateTime hourStart, DateTime firstHour, DateTime builtThrough, CancellationToken cancellationToken)
+    public static async Task<long?> BuildHoursAsync(
+        NpgsqlConnection connection, int serverId, IReadOnlyList<DateTime> hours, DateTime firstHour, DateTime builtThrough, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(hours);
+        if (hours.Count == 0)
+        {
+            return 0;
+        }
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using (var timeout = new NpgsqlCommand(StatementTimeoutSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
@@ -137,22 +154,24 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
             }
         }
 
-        await using (var delete = new NpgsqlCommand(DeleteHourSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        long inserted = 0;
+        foreach (var hourStart in hours)
         {
-            delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-            delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(hourStart) });
-            await delete.ExecuteNonQueryAsync(cancellationToken);
-        }
+            await using (var delete = new NpgsqlCommand(DeleteHourSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+            {
+                delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(hourStart) });
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-        long inserted;
-        await using (var build = new NpgsqlCommand(PgIoStatsHourly.BuildHourSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
-        {
+            await using var build = new NpgsqlCommand(PgIoStatsHourly.BuildHourSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             build.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
             build.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(hourStart) });
-            inserted = Convert.ToInt64(await build.ExecuteScalarAsync(cancellationToken));
+            inserted += Convert.ToInt64(await build.ExecuteScalarAsync(cancellationToken));
         }
 
-        var through = hourStart.AddHours(1) > builtThrough ? hourStart.AddHours(1) : builtThrough;
+        var lastEnd = hours[^1].AddHours(1);
+        var through = lastEnd > builtThrough ? lastEnd : builtThrough;
         await using (var mark = new NpgsqlCommand(MarkBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -172,9 +191,25 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
         return RunTickAsync(dataSource, nowUtc, logger, () => clock.Elapsed, cancellationToken);
     }
 
-    /// <summary><see cref="RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/> with the elapsed time supplied (a test seam).</summary>
+    /// <summary>
+    /// <see cref="RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/> with the elapsed time supplied (a test seam).
+    /// The hard cap is a timer of <see cref="MaxTickDuration"/> that starts here.
+    /// </summary>
     public static async Task<TickResult> RunTickAsync(
         NpgsqlDataSource dataSource, DateTime nowUtc, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
+    {
+        using var hardCap = new CancellationTokenSource(MaxTickDuration);
+        return await RunTickAsync(dataSource, nowUtc, logger, elapsed, hardCap.Token, cancellationToken);
+    }
+
+    /// <summary>
+    /// The tick, with both bounds supplied (a test seam): <paramref name="elapsed"/> is the budget's clock, and <paramref name="hardCap"/>
+    /// fires when <see cref="MaxTickDuration"/> has passed. When it fires, the build that is running is cancelled and rolled back
+    /// (counted as failed, logged, retried by the next tick), no later build starts (the rest of that server is left for the next tick, other servers' hours count as deferred), and the tick
+    /// returns normally; <paramref name="cancellationToken"/> still ends the tick with an <see cref="OperationCanceledException"/>.
+    /// </summary>
+    public static async Task<TickResult> RunTickAsync(
+        NpgsqlDataSource dataSource, DateTime nowUtc, ILogger logger, Func<TimeSpan> elapsed, CancellationToken hardCap, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(logger);
@@ -182,6 +217,8 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
 
         int built = 0, failed = 0, skipped = 0, deferred = 0;
         var ceiling = FloorHour(nowUtc.AddMinutes(-CloseMarginMinutes));
+        using var buildLink = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, hardCap);
+        var buildToken = buildLink.Token;
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using (var gc = new NpgsqlCommand(GcSql, connection) { CommandTimeout = CommandTimeoutSeconds })
@@ -209,7 +246,7 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
                 continue;
             }
 
-            DateTime firstHour, from;
+            DateTime firstHour, from, rebuildEnd;
             var through = builtThroughState ?? DateTime.MinValue;
             if (firstHourState is null || builtThroughState is null)
             {
@@ -218,6 +255,7 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
                 var start = FloorHour(oldestRaw.Value).AddHours(1);
                 firstHour = start > floor ? start : floor.AddHours(1);
                 from = firstHour;
+                rebuildEnd = from;
             }
             else
             {
@@ -227,27 +265,44 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
                 {
                     from = firstHour;
                 }
+
+                /* The built hours this tick rebuilds, [from, rebuildEnd), go in one transaction (see BuildHoursAsync). */
+                rebuildEnd = builtThroughState.Value < ceiling ? builtThroughState.Value : ceiling;
             }
 
-            for (var hour = from; hour < ceiling; hour = hour.AddHours(1))
+            for (var hour = from; hour < ceiling;)
             {
-                if (elapsed() >= StartCutoff)
+                var batchEnd = hour < rebuildEnd ? rebuildEnd : hour.AddHours(1);
+                var batch = new List<DateTime>();
+                for (var h = hour; h < batchEnd; h = h.AddHours(1))
                 {
-                    deferred++;
+                    batch.Add(h);
+                }
+
+                if (hardCap.IsCancellationRequested || elapsed() >= TickBudget)
+                {
+                    deferred += batch.Count;
+                    hour = batchEnd;
                     continue;
                 }
 
                 try
                 {
-                    if (await BuildHourAsync(connection, serverId, hour, firstHour, through, cancellationToken) is null)
+                    if (await BuildHoursAsync(connection, serverId, batch, firstHour, through, buildToken) is null)
                     {
                         skipped++;
                         break;
                     }
 
-                    built++;
-                    var end = hour.AddHours(1);
-                    through = end > through ? end : through;
+                    built += batch.Count;
+                    through = batchEnd > through ? batchEnd : through;
+                }
+                catch (OperationCanceledException) when (hardCap.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    failed++;
+                    logger.LogWarning("PostgreSQL I/O hourly rollup: the {Cap} hard cap on a tick passed while building server {ServerId} hour {Hour:yyyy-MM-dd HH:mm}; the build was cancelled and rolled back, the next tick retries it (long reads stay on raw rows)",
+                        MaxTickDuration, serverId, hour);
+                    break;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -256,6 +311,8 @@ DELETE FROM collect.pg_io_stats_hourly_state WHERE server_id NOT IN (SELECT serv
                         serverId, hour, ex.Message);
                     break;
                 }
+
+                hour = batchEnd;
             }
         }
 
