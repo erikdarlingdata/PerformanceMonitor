@@ -159,13 +159,19 @@ def cmd_unwrap_skips(args):
 
     Guards: a test is converted only when its failure text carries the skip token AND the plain run of the same
     test was a skip.  A test the plain run did not skip, or any other failure, stays a failure.  Nothing is
-    ever converted to a pass.  The original report is kept next to the result as `<name>.raw.xml`."""
-    plain_skips = set()
-    for _, el in ET.iterparse(args.plain, events=("end",)):
-        if el.tag == "test":
-            if (el.get("result") or "").lower() == "skip":
-                plain_skips.add(el.get("name"))
-            el.clear()
+    ever converted to a pass.  The original report is kept next to the result as `<name>.raw.xml`.
+
+    Without `--plain` (the map producer runs every class once, instrumented, and has no plain run to compare with)
+    a failure that carries the skip token is converted on the token alone.  Only `Assert.Skip*` writes that token,
+    and the producer reads coverage from the run, not the pass/fail counts, so this cannot hide a real failure."""
+    plain_skips = None  # None: no plain run to compare with (the map producer), so the skip token alone decides
+    if args.plain:
+        plain_skips = set()
+        for _, el in ET.iterparse(args.plain, events=("end",)):
+            if el.tag == "test":
+                if (el.get("result") or "").lower() == "skip":
+                    plain_skips.add(el.get("name"))
+                el.clear()
     tree = ET.parse(args.instr)
     converted = []
     kept = []
@@ -175,7 +181,7 @@ def cmd_unwrap_skips(args):
         message = failure_message(test)
         if SKIP_TOKEN not in message:
             continue
-        if test.get("name") not in plain_skips:
+        if plain_skips is not None and test.get("name") not in plain_skips:
             kept.append(test.get("name"))
             continue
         reason = message[message.index(SKIP_TOKEN) + len(SKIP_TOKEN):].split("\n", 1)[0].strip().rstrip(")")
@@ -483,7 +489,7 @@ def main(argv=None):
     sel.add_argument("--manifest", required=True)
     sel.set_defaults(func=cmd_select)
     unwrap = sub.add_parser("unwrap-skips")
-    unwrap.add_argument("--plain", required=True)
+    unwrap.add_argument("--plain", help="the plain run's xunit report; without it the skip token alone converts")
     unwrap.add_argument("--instr", required=True)
     unwrap.set_defaults(func=cmd_unwrap_skips)
     summ = sub.add_parser("summarize")
