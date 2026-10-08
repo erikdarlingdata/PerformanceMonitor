@@ -3321,7 +3321,10 @@ LIMIT 1";
             () => _timescaleAvailable,
             /* #5483: the server's effective database_states cadence, resolved live like the alert adapter's, so the
                gone-database check knows how old a snapshot may be. */
-            serverId => StoreConfigProvider.ResolveSchedule("database_states", serverId, _scheduleOverrides).FrequencyMinutes);
+            serverId => StoreConfigProvider.ResolveSchedule("database_states", serverId, _scheduleOverrides).FrequencyMinutes,
+            /* #5518: the same fence the runner's Query Store writes go through, so the candidate list is read from the
+               store only when a write named a database it does not hold, the cut chunk moved or it aged out. */
+            _queryStoreWriteFence);
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* #5450 proposal 2: the outbound heartbeat, on its own task and connection so a slow or dead URL never touches

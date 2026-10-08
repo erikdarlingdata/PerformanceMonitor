@@ -150,6 +150,10 @@ public sealed class QueryStoreBackfill
        gone-database check ignores it. Null = the one-hour floor alone (tests and any non-Darling host). */
     private readonly Func<int, int> _databaseStatesIntervalMinutes;
 
+    /// <summary>#5518: the store-write fence the candidate-list cache trusts. Null (a test, a host with no fence) means
+    /// no cache: every tick reads the list, as before.</summary>
+    private readonly QueryStoreWriteFence? _writeFence;
+
     /* #2164: the per-database text budget override in MB, read live like _capturePlans. Backfill slices
        carry the SAME nvarchar(max) query-text/plan-XML payload over the same link as a live tick, so the
        operator knob has to reach here too — a knob that only bounds the tick would leave the heavier of
@@ -164,8 +168,10 @@ public sealed class QueryStoreBackfill
         Func<bool>? capturePlans = null,
         Func<int>? textBudgetMb = null,
         Func<bool>? hasContinuousAggregates = null,
-        Func<int, int>? databaseStatesIntervalMinutes = null)
+        Func<int, int>? databaseStatesIntervalMinutes = null,
+        QueryStoreWriteFence? writeFence = null)
     {
+        _writeFence = writeFence;
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
@@ -607,6 +613,45 @@ public sealed class QueryStoreBackfill
         return CandidateSql;
     }
 
+    /// <summary>#5518: how long a cached cut-chunk list is trusted with no read. The fence makes the cache exact for
+    /// every write this service makes, so this bounds only a row some OTHER writer adds (a restore, a hand-run
+    /// INSERT): the list is then at most this stale, and a database missing from it only waits for the next read.</summary>
+    internal static readonly TimeSpan CandidateCacheMaxAge = TimeSpan.FromHours(1);
+
+    /// <summary>The clock the cache ages by; a test replaces it.</summary>
+    internal Func<DateTime> UtcNowForCandidateCache { get; set; } = static () => DateTime.UtcNow;
+
+    /// <summary>How many times the candidate list was READ from the store (not served from the cache). For the tests
+    /// that pin the cache.</summary>
+    internal int CandidateStoreReadsForTests => Volatile.Read(ref _candidateStoreReads);
+
+    private int _candidateStoreReads;
+
+    private sealed record CandidateCacheEntry(string Sql, List<string> Names, IReadOnlySet<string> NameSet, long Sequence, DateTime ReadAtUtc);
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, CandidateCacheEntry> _candidateCache = new();
+
+    /// <summary>#5518: true when a cached cut-chunk list still answers the read exactly. The statement text names the
+    /// cut chunk's start, so a new chunk (the cut moved) never matches. Within one chunk the list can only gain a
+    /// name, and every write this service makes records the names it writes in the fence BEFORE its transaction, so
+    /// a name outside the list written since the read invalidates it. The age bound covers writers outside the
+    /// fence.</summary>
+    private bool TryServeCandidatesFromCache(int serverId, string sql, out List<string> names)
+    {
+        names = [];
+        if (_writeFence is null
+            || !_candidateCache.TryGetValue(serverId, out var entry)
+            || !string.Equals(entry.Sql, sql, StringComparison.Ordinal)
+            || UtcNowForCandidateCache() - entry.ReadAtUtc >= CandidateCacheMaxAge
+            || _writeFence.WroteUnknownNameSince(serverId, entry.Sequence, entry.NameSet))
+        {
+            return false;
+        }
+
+        names = [.. entry.Names];
+        return true;
+    }
+
     /// <summary>Databases that shipped query_store rows since <paramref name="floorLimit"/>, unioned
     /// with every database a hole key already names — the backfill universe.
     ///
@@ -622,6 +667,11 @@ public sealed class QueryStoreBackfill
     /// newer than <paramref name="floorLimit"/> is either done or has never made first contact, and
     /// either way this tick has nothing to do for it.</para>
     ///
+    /// <para>#5518: the cut-chunk read costs an index search per chunk per database, so on a TimescaleDB store it is
+    /// kept per server and served again until a write names a database outside it, the cut chunk moves or
+    /// <see cref="CandidateCacheMaxAge"/> passes (<see cref="TryServeCandidatesFromCache"/>). The hole union below is
+    /// applied to the cached list every tick, so a new hole key is never held back.</para>
+    ///
     /// <para>#4772: a failed read logs one Warning for each run of failures
     /// (<see cref="QueryStoreBackfillReadFailureRuns"/>); <paramref name="serverLabel"/> names the server in it
     /// and falls back to the id.</para>
@@ -634,6 +684,23 @@ public sealed class QueryStoreBackfill
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             var sql = await ChooseCandidateSqlAsync(connection, floorLimit, cancellationToken);
+
+            /* #5518: only the cut-chunk read is cached. The floor-bound statement's window moves every tick, and the
+               plain-store walk is already a handful of index seeks. */
+            var cacheable = _writeFence is not null
+                && !string.Equals(sql, CandidateSql, StringComparison.Ordinal)
+                && !string.Equals(sql, WalkCandidateSql, StringComparison.Ordinal);
+            if (cacheable && TryServeCandidatesFromCache(serverId, sql, out var cached))
+            {
+                _readFailures.RecordSuccess(serverId);
+                return QueryStoreBackfillState.MergeHoleDatabases(cached, state);
+            }
+
+            /* Taken BEFORE the read: a write already in flight can commit after it, so a list read beside one is
+               returned but not kept. */
+            var nameSnapshot = cacheable ? _writeFence!.NameSnapshot(serverId) : default;
+            _candidateCache.TryRemove(serverId, out _);
+            Interlocked.Increment(ref _candidateStoreReads);
             using var command = new NpgsqlCommand(sql, connection);
             /* #2874: the enclosing BackfillSliceDeadline ABANDONS rather than cancels, so this is the only
                bound that reaches the statement. */
@@ -655,6 +722,12 @@ public sealed class QueryStoreBackfill
             }
 
             _readFailures.RecordSuccess(serverId);
+
+            if (cacheable && nameSnapshot.Quiet)
+            {
+                _candidateCache[serverId] = new CandidateCacheEntry(
+                    sql, [.. databases], new HashSet<string>(databases, StringComparer.Ordinal), nameSnapshot.Sequence, UtcNowForCandidateCache());
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
