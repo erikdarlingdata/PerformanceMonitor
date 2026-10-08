@@ -195,9 +195,10 @@ public partial class FinOpsTab : UserControl
                 : null;
             await Windows.PlanViewerWindow.ShowPlanAsync(owner, xml, label, qt, metadata);
         },
-        (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+        /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            async (db, qt, est, iso, ct) => LivePlanDisplay.Filter(await ActualPlanExecutor.ExecuteForActualPlanAsync(
             GetSelectedConnectionString() ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
-            productName: "SQL Server Performance Monitor Lite"),
+            productName: "SQL Server Performance Monitor Lite")),
         "the monitored server");
 
     private string? GetSelectedConnectionString()

@@ -64,9 +64,10 @@ public partial class ProcedureHistoryWindow : Window
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
                 this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
-            (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+            /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            async (db, qt, est, iso, ct) => LivePlanDisplay.Filter(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
-                productName: "SQL Server Performance Monitor Lite"),
+                productName: "SQL Server Performance Monitor Lite")),
             "the monitored server");
 
         _filterManager = new DataGridFilterManager<ProcedureStatsHistoryRow>(HistoryDataGrid);

@@ -530,7 +530,8 @@ public partial class ServerTab : UserControl
         {
             var connectionString = _credentialResolver.GetConnectionString(_server);
 
-            var actualPlanXml = await ActualPlanExecutor.ExecuteForActualPlanAsync(
+            /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            var actualPlanXml = LivePlanDisplay.Filter(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 connectionString,
                 databaseName ?? "",
                 queryText,
@@ -539,7 +540,7 @@ public partial class ServerTab : UserControl
                 isAzureSqlDb: false,
                 timeoutSeconds: 0,
                 _actualPlanCts.Token,
-                productName: "SQL Server Performance Monitor Lite");
+                productName: "SQL Server Performance Monitor Lite"));
 
             if (!string.IsNullOrEmpty(actualPlanXml))
             {
