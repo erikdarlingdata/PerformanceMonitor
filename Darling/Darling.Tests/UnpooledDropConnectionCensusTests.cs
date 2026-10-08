@@ -39,11 +39,18 @@ namespace Darling.Tests;
 ///
 /// <para><b>The second rule: quiesce before the drop.</b> The same ruling says TimescaleDB jobs are quiesced before every
 /// in-test drop, so a job worker is never running in a database while it is dropped. Every PostgreSQL <c>DROP DATABASE</c>
-/// site (the same sites, under the same <see cref="Exceptions"/>) must sit in a method that also calls
-/// <c>QuiesceTimescaleJobsAsync</c>, plain or <c>WITH (FORCE)</c> (the older census in
+/// site (the same sites, under the same <see cref="Exceptions"/>) must sit in a member that calls
+/// <c>QuiesceTimescaleJobsAsync</c> BEFORE the drop, plain or <c>WITH (FORCE)</c> (the older census in
 /// <see cref="ScratchPostgresQuiesceCensusTests"/> sees only the FORCE form). A method that cannot be dropping a database
 /// with jobs, because the test never created the extension in it and never ran a migration there, is named in
 /// <see cref="QuiesceExceptions"/> as <c>File.cs::Method</c> (or <c>File.cs</c> for the whole file) with its reason.</para>
+///
+/// <para><b>How a drop's member is found.</b> The census is a source scan with no parser package. A small brace walk over
+/// the file (comments and string literals blanked, so a brace or a call inside text is never read) finds the innermost
+/// method, constructor, local function, property or accessor body around the drop, at any indentation and with or without
+/// an access modifier; for an expression-bodied member or a field it is the declaration up to its own <c>;</c>. A region
+/// never spans two members, so a quiesce in a neighbour cannot excuse a drop. The quiesce counts only as a real call
+/// (not inside a string or a comment) and only when it comes before the drop in that member.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class UnpooledDropConnectionCensusTests
@@ -74,20 +81,296 @@ public sealed class UnpooledDropConnectionCensusTests
             "pm_test_enc1252 is a bare WIN1252 database made from template0, so it never holds the TimescaleDB extension.",
     };
 
-    private static readonly Regex DropStatement = new("DROP DATABASE", RegexOptions.Compiled);
+    /// <summary>Matches case-insensitively: T-SQL and PostgreSQL both accept <c>drop database</c>.</summary>
+    private static readonly Regex DropStatement = new("DROP DATABASE", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private const string QuiesceHelper = "QuiesceTimescaleJobsAsync";
+    /// <summary>A call to the quiesce helper, matched in code only (comments and string literals are blanked first).</summary>
+    private static readonly Regex QuiesceCall = new(@"\bQuiesceTimescaleJobsAsync\s*\(", RegexOptions.Compiled);
 
-    /// <summary>The method name on a member's declaration line: the identifier that sits right before the first <c>(</c>.</summary>
-    private static readonly Regex MethodName = new(@"(\w+)\s*\(", RegexOptions.Compiled);
+    /// <summary>
+    /// The member's name: the identifier right before the first <c>(</c> of its declaration, after attribute lists are
+    /// removed, with an optional generic argument list between (<c>Foo&lt;T&gt;(</c>).
+    /// </summary>
+    private static readonly Regex MethodName = new(@"(\w+)\s*(?:<[^()]*>)?\s*\(", RegexOptions.Compiled);
+
+    private static readonly Regex AttributeList = new(@"\[[^\]]*\]", RegexOptions.Compiled);
 
     private static readonly Regex Evidence = new(
         @"UnpooledAdminConnectionString\(|ExitDrainConnectionString\(|Pooling\s*=\s*false", RegexOptions.Compiled);
 
     private static readonly Regex OwnConnection = new(@"new NpgsqlConnection\(|LiveStoreCleanup\.RunAsync\(", RegexOptions.Compiled);
 
-    /// <summary>A member declaration at the class's own indent (four spaces), the line a method body is found from.</summary>
-    private static readonly Regex MemberStart = new(@"^    (?:\[|public |private |internal |protected |static |async |override )", RegexOptions.Compiled);
+    /// <summary>A type header: modifiers, then the keyword. A <c>where T : class</c> constraint on a method is not one.</summary>
+    private static readonly Regex TypeWord = new(@"^(?:\w+\s+)*?(?:class|struct|interface|record|enum|namespace|union)\b", RegexOptions.Compiled);
+
+    private static readonly Regex NewOrDelegateWord = new(@"\b(?:new|delegate)\b", RegexOptions.Compiled);
+
+    /// <summary>First words that open a block which is not a member: control flow and the like.</summary>
+    private static readonly HashSet<string> ControlWords = new(StringComparer.Ordinal)
+    {
+        "if", "else", "for", "foreach", "while", "do", "switch", "using", "lock", "try", "catch", "finally", "fixed",
+        "unsafe", "checked", "unchecked", "case", "default",
+    };
+
+    /// <summary>First words that start a statement which a <c>{</c> continues (<c>return x switch { ... }</c>): not a member.</summary>
+    private static readonly HashSet<string> StatementWords = new(StringComparer.Ordinal) { "return", "yield", "throw", "var" };
+
+    /// <summary>What a <c>{ ... }</c> block is, which decides where a member (the region a drop is judged in) starts and ends.</summary>
+    private enum FrameKind
+    {
+        /// <summary>The file itself.</summary>
+        Root,
+
+        /// <summary>A namespace, class, struct, interface, record or enum body.</summary>
+        Type,
+
+        /// <summary>A method, constructor, local function, property or accessor body, at any indentation.</summary>
+        Member,
+
+        /// <summary>A control-flow block (if, try, using, a bare block): the statement ends when it closes.</summary>
+        Control,
+
+        /// <summary>A lambda, an initializer, an interpolation hole: part of the statement around it.</summary>
+        Other,
+    }
+
+    private sealed class Frame
+    {
+        public Frame(FrameKind kind, int headerStart, int open, Frame? parent)
+        {
+            Kind = kind;
+            HeaderStart = headerStart;
+            Open = open;
+            StatementStart = open + 1;
+            Parent = parent;
+        }
+
+        public FrameKind Kind { get; }
+
+        public int HeaderStart { get; }
+
+        public int Open { get; }
+
+        public int Close { get; set; } = -1;
+
+        /// <summary>Where the statement being read at this block's own level started: just after the last <c>;</c>, or the last closed member, type or control block.</summary>
+        public int StatementStart { get; set; }
+
+        /// <summary>Open parentheses not yet closed at this block's own level; a <c>{</c> inside them is a lambda or an initializer.</summary>
+        public int Parens { get; set; }
+
+        public Frame? Parent { get; }
+    }
+
+    /// <summary>
+    /// One <c>DROP DATABASE</c> line: where it is, the member it sits in (<see cref="MemberText"/>, comments blanked,
+    /// whole member), the member's name, and whether a real call to the quiesce helper comes before the drop in that member.
+    /// </summary>
+    internal sealed record DropSite(int Line, string MemberName, string MemberText, bool QuiescedBefore);
+
+    /// <summary>
+    /// Every <c>DROP DATABASE</c> line in <paramref name="source"/> (case-insensitive, comments blanked first) with its
+    /// member. The member is the innermost method, constructor, local function, property or accessor body around the
+    /// line, at any indentation and with or without an access modifier; for an expression-bodied member or a field it
+    /// is the declaration up to its terminating <c>;</c>. It is never wider than that, so a quiesce in a neighbouring
+    /// member can never excuse a drop. The quiesce call is looked for in code only (comments and string literals are
+    /// blanked), and only before the drop.
+    /// </summary>
+    internal static List<DropSite> FindDropSites(string source)
+    {
+        var blanked = ScratchPostgresQuiesceCensusTests.BlankComments(source);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+
+        var drops = new List<(int Offset, int Line)>();
+        var lineStart = 0;
+        for (var line = 1; lineStart <= blanked.Length; line++)
+        {
+            var newline = blanked.IndexOf('\n', lineStart);
+            var lineEnd = newline < 0 ? blanked.Length : newline;
+            var found = DropStatement.Match(blanked, lineStart, lineEnd - lineStart);
+            if (found.Success)
+            {
+                drops.Add((found.Index, line));
+            }
+
+            lineStart = lineEnd + 1;
+        }
+
+        var root = new Frame(FrameKind.Root, 0, -1, null);
+        var top = root;
+        var snapshots = new List<(Frame Inner, int ContainerStatementStart, int Offset, int Line)>();
+        var next = 0;
+        for (var i = 0; i < code.Length; i++)
+        {
+            if (next < drops.Count && drops[next].Offset == i)
+            {
+                var container = top;
+                while (container.Kind is not (FrameKind.Type or FrameKind.Root))
+                {
+                    container = container.Parent!;
+                }
+
+                snapshots.Add((top, container.StatementStart, i, drops[next].Line));
+                next++;
+            }
+
+            switch (code[i])
+            {
+                case '(':
+                    top.Parens++;
+                    break;
+                case ')':
+                    if (top.Parens > 0)
+                    {
+                        top.Parens--;
+                    }
+
+                    break;
+                case ';':
+                    if (top.Parens == 0)
+                    {
+                        top.StatementStart = i + 1;
+                    }
+
+                    break;
+                case '{':
+                    var header = code.Substring(top.StatementStart, i - top.StatementStart);
+                    var kind = top.Parens > 0 ? FrameKind.Other : Classify(header);
+                    var firstCode = top.StatementStart;
+                    while (firstCode < i && char.IsWhiteSpace(code[firstCode]))
+                    {
+                        firstCode++;
+                    }
+
+                    top = new Frame(kind, firstCode, i, top);
+                    break;
+                case '}':
+                    if (top.Parent is not null)
+                    {
+                        top.Close = i;
+                        var closed = top;
+                        top = top.Parent;
+                        if (closed.Kind != FrameKind.Other)
+                        {
+                            top.StatementStart = i + 1;
+                        }
+                    }
+
+                    break;
+            }
+        }
+
+        var sites = new List<DropSite>();
+        foreach (var (inner, containerStatementStart, offset, line) in snapshots)
+        {
+            var member = inner;
+            while (member is not null && member.Kind != FrameKind.Member)
+            {
+                member = member.Parent;
+            }
+
+            int start;
+            int end;
+            if (member is not null)
+            {
+                start = member.HeaderStart;
+                end = member.Close >= 0 ? member.Close : code.Length - 1;
+            }
+            else
+            {
+                /* An expression-bodied member or a field: the declaration, up to the first ; that is not inside a nested block. */
+                start = containerStatementStart;
+                end = code.Length - 1;
+                var depth = 0;
+                for (var j = offset; j < code.Length; j++)
+                {
+                    if (code[j] == '{')
+                    {
+                        depth++;
+                    }
+                    else if (code[j] == '}')
+                    {
+                        if (depth == 0)
+                        {
+                            end = j;
+                            break;
+                        }
+
+                        depth--;
+                    }
+                    else if (code[j] == ';' && depth == 0)
+                    {
+                        end = j;
+                        break;
+                    }
+                }
+            }
+
+            start = Math.Min(start, offset);
+            end = Math.Max(end, offset);
+            var region = code.Substring(start, end - start + 1);
+            var declared = MethodName.Match(AttributeList.Replace(region, " "));
+            sites.Add(new DropSite(
+                line,
+                declared.Success ? declared.Groups[1].Value : string.Empty,
+                blanked.Substring(start, end - start + 1),
+                QuiesceCall.IsMatch(code.Substring(start, offset - start))));
+        }
+
+        return sites;
+    }
+
+    /// <summary>What the block opened by the <c>{</c> that follows <paramref name="header"/> is.</summary>
+    private static FrameKind Classify(string header)
+    {
+        var text = StripParentheses(AttributeList.Replace(header, " ")).Trim();
+        if (text.StartsWith("await ", StringComparison.Ordinal))
+        {
+            text = text[6..].TrimStart();
+        }
+
+        var first = Regex.Match(text, @"^\w+");
+        if (text.Length == 0 || (first.Success && ControlWords.Contains(first.Value)))
+        {
+            return FrameKind.Control;
+        }
+
+        if ((first.Success && StatementWords.Contains(first.Value))
+            || text.Contains('=', StringComparison.Ordinal)
+            || NewOrDelegateWord.IsMatch(text))
+        {
+            return FrameKind.Other;
+        }
+
+        return TypeWord.IsMatch(text) ? FrameKind.Type : FrameKind.Member;
+    }
+
+    /// <summary>The text with every parenthesised run (nested ones too) removed, parentheses included.</summary>
+    private static string StripParentheses(string text)
+    {
+        var sb = new System.Text.StringBuilder(text.Length);
+        var depth = 0;
+        foreach (var c in text)
+        {
+            if (c == '(')
+            {
+                depth++;
+            }
+            else if (c == ')')
+            {
+                if (depth > 0)
+                {
+                    depth--;
+                }
+            }
+            else if (depth == 0)
+            {
+                sb.Append(c);
+            }
+        }
+
+        return sb.ToString();
+    }
 
     /// <summary>
     /// Every drop site that breaks the rule, as <c>file:line</c>, and how many drop sites were looked at.
@@ -104,21 +387,13 @@ public sealed class UnpooledDropConnectionCensusTests
             }
 
             var blanked = ScratchPostgresQuiesceCensusTests.BlankComments(source);
-            var lines = blanked.Split('\n');
-            for (var i = 0; i < lines.Length; i++)
+            foreach (var site in FindDropSites(source))
             {
-                if (!DropStatement.IsMatch(lines[i]))
-                {
-                    continue;
-                }
-
                 sites++;
-                var (start, end) = MethodAround(lines, i);
-                var method = string.Join('\n', lines.Skip(start).Take(end - start + 1));
-                var ok = OwnConnection.IsMatch(method) ? Evidence.IsMatch(method) : Evidence.IsMatch(blanked);
+                var ok = OwnConnection.IsMatch(site.MemberText) ? Evidence.IsMatch(site.MemberText) : Evidence.IsMatch(blanked);
                 if (!ok)
                 {
-                    pooled.Add($"{name}:{i + 1}");
+                    pooled.Add($"{name}:{site.Line}");
                 }
             }
         }
@@ -127,8 +402,8 @@ public sealed class UnpooledDropConnectionCensusTests
     }
 
     /// <summary>
-    /// Every PostgreSQL drop site whose method never calls <c>QuiesceTimescaleJobsAsync</c> and is not in
-    /// <see cref="QuiesceExceptions"/>, as <c>file:line</c>, and how many drop sites were looked at.
+    /// Every PostgreSQL drop site that has no call to <c>QuiesceTimescaleJobsAsync</c> before it in its own member and is
+    /// not in <see cref="QuiesceExceptions"/>, as <c>file:line</c>, and how many drop sites were looked at.
     /// </summary>
     internal static (int Sites, List<string> Unquiesced) ScanForQuiesce(IEnumerable<(string Name, string Source)> files)
     {
@@ -142,53 +417,21 @@ public sealed class UnpooledDropConnectionCensusTests
                 continue;
             }
 
-            var blanked = ScratchPostgresQuiesceCensusTests.BlankComments(source);
-            var lines = blanked.Split('\n');
-            for (var i = 0; i < lines.Length; i++)
+            foreach (var site in FindDropSites(source))
             {
-                if (!DropStatement.IsMatch(lines[i]))
-                {
-                    continue;
-                }
-
                 sites++;
-                var (start, end) = MethodAround(lines, i);
-                var method = string.Join('\n', lines.Skip(start).Take(end - start + 1));
-                if (method.Contains(QuiesceHelper, StringComparison.Ordinal))
+                if (site.QuiescedBefore
+                    || QuiesceExceptions.ContainsKey(file)
+                    || (site.MemberName.Length > 0 && QuiesceExceptions.ContainsKey($"{file}::{site.MemberName}")))
                 {
                     continue;
                 }
 
-                var declared = MethodName.Match(lines[start]);
-                if (QuiesceExceptions.ContainsKey(file)
-                    || (declared.Success && QuiesceExceptions.ContainsKey($"{file}::{declared.Groups[1].Value}")))
-                {
-                    continue;
-                }
-
-                unquiesced.Add($"{name}:{i + 1}");
+                unquiesced.Add($"{name}:{site.Line}");
             }
         }
 
         return (sites, unquiesced);
-    }
-
-    /// <summary>The first and last line of the member that holds line <paramref name="index"/>: up to the nearest member start at four spaces, down to the next closing brace at four spaces.</summary>
-    private static (int Start, int End) MethodAround(string[] lines, int index)
-    {
-        var start = index;
-        while (start > 0 && !MemberStart.IsMatch(lines[start]))
-        {
-            start--;
-        }
-
-        var end = index;
-        while (end < lines.Length - 1 && !(lines[end].TrimEnd('\r') is "    }" or "    };"))
-        {
-            end++;
-        }
-
-        return (start, end);
     }
 
     [Fact]
@@ -249,11 +492,11 @@ public sealed class UnpooledDropConnectionCensusTests
             Assert.True(File.Exists(path), $"{parts[0]} is in QuiesceExceptions but is not in the test project; remove the entry.");
             Assert.False(Exceptions.ContainsKey(parts[0]), $"{parts[0]} is already skipped by Exceptions; remove the entry from QuiesceExceptions.");
             var text = File.ReadAllText(path);
-            Assert.True(text.Contains("DROP DATABASE", StringComparison.Ordinal),
+            Assert.True(text.Contains("DROP DATABASE", StringComparison.OrdinalIgnoreCase),
                 $"{parts[0]} no longer holds DROP DATABASE; remove {key} from QuiesceExceptions.");
             if (parts.Length > 1)
             {
-                Assert.True(text.Contains(parts[1] + "(", StringComparison.Ordinal),
+                Assert.True(Regex.IsMatch(text, @"\b" + Regex.Escape(parts[1]) + @"\s*(?:<[^()]*>)?\s*\("),
                     $"{parts[0]} no longer declares {parts[1]}; remove {key} from QuiesceExceptions.");
                 Assert.True(MethodStillSkipsQuiesce(parts[1], text),
                     $"{parts[1]} in {parts[0]} no longer holds a DROP DATABASE that skips the quiesce; remove {key} from QuiesceExceptions.");
@@ -261,28 +504,9 @@ public sealed class UnpooledDropConnectionCensusTests
         }
     }
 
-    /// <summary>True when <paramref name="method"/> in <paramref name="source"/> holds a drop and no quiesce call, so its allow-list entry is still needed.</summary>
-    private static bool MethodStillSkipsQuiesce(string method, string source)
-    {
-        var lines = ScratchPostgresQuiesceCensusTests.BlankComments(source).Split('\n');
-        for (var i = 0; i < lines.Length; i++)
-        {
-            if (!DropStatement.IsMatch(lines[i]))
-            {
-                continue;
-            }
-
-            var (start, end) = MethodAround(lines, i);
-            var declared = MethodName.Match(lines[start]);
-            if (declared.Success && declared.Groups[1].Value == method
-                && !string.Join('\n', lines.Skip(start).Take(end - start + 1)).Contains(QuiesceHelper, StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    /// <summary>True when <paramref name="method"/> in <paramref name="source"/> holds a drop with no quiesce call before it, so its allow-list entry is still needed.</summary>
+    private static bool MethodStillSkipsQuiesce(string method, string source) =>
+        FindDropSites(source).Any(site => site.MemberName == method && !site.QuiescedBefore);
 
     [Fact]
     public void ADropWithoutTheQuiesce_IsReported_AndOneWithItOrAnAllowListedOneIsNot()
@@ -327,6 +551,88 @@ public sealed class UnpooledDropConnectionCensusTests
         Assert.Equal(0, ScanForQuiesce([("DarlingCollectorRunnerTests.cs", plainBare)]).Sites);
     }
 
+    /// <summary>
+    /// The ways the quiesce rule once passed a drop it should have failed: a lowercase <c>drop database</c>, a quiesce call
+    /// that is only text (a string literal), a quiesce that comes after the drop, a member with no access modifier, a
+    /// local function at a deeper indent, and an expression-bodied neighbour that stretched a region over two members.
+    /// Each sample is a whole source file; the line number in each expectation is the drop line.
+    /// </summary>
+    [Fact]
+    public void TheQuiesceRule_CannotBePassedBy_ALowercaseDrop_AStringCall_ALateCall_OrANeighbouringMember()
+    {
+        const string lowercase =
+            "public class A\n{\n    public async Task Go()\n    {\n"
+            + "        await using var drop = new NpgsqlCommand($\"drop database if exists {n}\", admin);\n    }\n}\n";
+        /* The string also holds a } so a scan that reads literals as code would close the member early. */
+        const string quiesceInString =
+            "public class A\n{\n    public async Task Go()\n    {\n"
+            + "        var s = \"await ScratchPostgres.QuiesceTimescaleJobsAsync(cs, n); }\";\n"
+            + "        await using var drop = new NpgsqlCommand($\"DROP DATABASE IF EXISTS {n}\", admin);\n    }\n}\n";
+        const string quiesceAfterTheDrop =
+            "public class A\n{\n    public async Task Go()\n    {\n"
+            + "        await using var drop = new NpgsqlCommand($\"DROP DATABASE IF EXISTS {n}\", admin);\n"
+            + "        await ScratchPostgres.QuiesceTimescaleJobsAsync(cs, n);\n    }\n}\n";
+        /* The member above quiesces; the one with no access modifier does not, and one member must not excuse the other. */
+        const string noModifier =
+            "public class A\n{\n    public async Task Other()\n    {\n"
+            + "        await ScratchPostgres.QuiesceTimescaleJobsAsync(cs, n);\n    }\n\n"
+            + "    Task Go()\n    {\n        return Run($\"DROP DATABASE IF EXISTS {n}\");\n    }\n}\n";
+        /* The enclosing method quiesces, but the local function that drops does not. */
+        const string localFunctionWithout =
+            "public class A\n{\n    public async Task Go()\n    {\n"
+            + "        await ScratchPostgres.QuiesceTimescaleJobsAsync(cs, n);\n"
+            + "        async Task Drop()\n        {\n"
+            + "            await using var drop = new NpgsqlCommand($\"DROP DATABASE IF EXISTS {n}\", admin);\n        }\n"
+            + "        await Drop();\n    }\n}\n";
+        const string localFunctionWith =
+            "public class A\n{\n    public async Task Go()\n    {\n"
+            + "        async Task Drop()\n        {\n"
+            + "            await ScratchPostgres.QuiesceTimescaleJobsAsync(cs, n);\n"
+            + "            await using var drop = new NpgsqlCommand($\"DROP DATABASE IF EXISTS {n}\", admin);\n        }\n"
+            + "        await Drop();\n    }\n}\n";
+        /* The expression-bodied drop ends at its own semicolon, not at the next member's closing brace. */
+        const string expressionBodiedNeighbour =
+            "public class A\n{\n    public Task Drop() => admin.RunAsync(\"DROP DATABASE IF EXISTS x\");\n\n"
+            + "    public async Task Other()\n    {\n        await ScratchPostgres.QuiesceTimescaleJobsAsync(cs, n);\n    }\n}\n";
+        const string expressionBodiedQuiesced =
+            "public class A\n{\n    public Task Drop() => ScratchPostgres.QuiesceTimescaleJobsAsync(cs, n)"
+            + ".ContinueWith(_ => admin.RunAsync(\"DROP DATABASE IF EXISTS x\"));\n}\n";
+        /* The shape every LiveStoreCleanup drop has: the quiesce and the drop sit in one lambda inside the member. */
+        const string insideLambda =
+            "public class A\n{\n    public async Task Go()\n    {\n"
+            + "        await LiveStoreCleanup.RunAsync(cs, ok, async (cleanup, ct) =>\n        {\n"
+            + "            await ScratchPostgres.QuiesceTimescaleJobsAsync(cs, n);\n"
+            + "            await using var drop = new NpgsqlCommand($\"DROP DATABASE IF EXISTS {n}\", cleanup);\n        });\n    }\n}\n";
+
+        Assert.Equal(["L.cs:5"], ScanForQuiesce([("L.cs", lowercase)]).Unquiesced);
+        Assert.Equal(["L.cs:5"], Scan([("L.cs", lowercase)]).Pooled);
+        Assert.Equal(["S.cs:6"], ScanForQuiesce([("S.cs", quiesceInString)]).Unquiesced);
+        Assert.Equal(["T.cs:5"], ScanForQuiesce([("T.cs", quiesceAfterTheDrop)]).Unquiesced);
+        Assert.Equal(["N.cs:10"], ScanForQuiesce([("N.cs", noModifier)]).Unquiesced);
+        Assert.Equal(["D.cs:8"], ScanForQuiesce([("D.cs", localFunctionWithout)]).Unquiesced);
+        Assert.Empty(ScanForQuiesce([("W.cs", localFunctionWith)]).Unquiesced);
+        Assert.Equal(["X.cs:3"], ScanForQuiesce([("X.cs", expressionBodiedNeighbour)]).Unquiesced);
+        Assert.Empty(ScanForQuiesce([("Y.cs", expressionBodiedQuiesced)]).Unquiesced);
+        Assert.Empty(ScanForQuiesce([("Z.cs", insideLambda)]).Unquiesced);
+    }
+
+    /// <summary>A generic method's name is found (<c>Name&lt;T&gt;(</c>), so an allow-list entry for it matches and its still-needed check works.</summary>
+    [Fact]
+    public void AGenericMethod_OnTheAllowList_IsExcused_AndFoundByTheStaleEntryCheck()
+    {
+        var allowListed = QuiesceExceptions.Keys.First();
+        var allowListedFile = allowListed.Split("::")[0];
+        var allowListedMethod = allowListed.Split("::")[1];
+        var generic =
+            "public class A\n{\n    public async Task " + allowListedMethod + "<T>() where T : class\n    {\n"
+            + "        await using var drop = new NpgsqlCommand($\"DROP DATABASE IF EXISTS {n}\", admin);\n    }\n}\n";
+
+        Assert.Empty(ScanForQuiesce([(allowListedFile, generic)]).Unquiesced);
+        Assert.Equal(["Other.cs:5"], ScanForQuiesce([("Other.cs", generic)]).Unquiesced);
+        Assert.True(MethodStillSkipsQuiesce(allowListedMethod, generic));
+        Assert.False(MethodStillSkipsQuiesce("SomeOtherMethod", generic));
+    }
+
     [Fact]
     public void TheExceptions_NameRealFiles_AndEachOneStillHoldsTheDropText()
     {
@@ -338,7 +644,7 @@ public sealed class UnpooledDropConnectionCensusTests
             Assert.False(string.IsNullOrWhiteSpace(reason), $"{file} is allowed without a reason.");
             var path = Path.Combine(directory!, file);
             Assert.True(File.Exists(path), $"{file} is in Exceptions but is not in the test project; remove the entry.");
-            Assert.True(File.ReadAllText(path).Contains("DROP DATABASE", StringComparison.Ordinal),
+            Assert.True(File.ReadAllText(path).Contains("DROP DATABASE", StringComparison.OrdinalIgnoreCase),
                 $"{file} no longer holds DROP DATABASE; remove it from Exceptions.");
         }
     }

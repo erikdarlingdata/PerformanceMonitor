@@ -110,8 +110,9 @@ $fn$", ct);
     /// now staged instead. The refresh job still runs for real, to completion, before the sweep starts. Then the
     /// runner holds what a refresh holds until it commits, <c>ROW EXCLUSIVE</c> on the materialization hypertable
     /// (its DELETE and INSERT), in an open transaction. A <c>lock_timeout</c> on the test's own sweeper session makes
-    /// the first drop give up behind that lock instead of waiting it out (the limit is reset right after that attempt, so the retries run with the server's own). That is the drop losing to the job with the
-    /// connection still Open, the shape of the deadlock arm (40P01), on every iteration. The broken-connection arm
+    /// the first drop give up behind that lock instead of waiting it out (the limit is reset right after that attempt,
+    /// so the retries run with the server's own). That is the drop losing to the job with the connection still Open,
+    /// the shape of the deadlock arm (40P01), on every iteration. The broken-connection arm
     /// (XX000) is pinned by the deterministic test above. The policy stays a day out, so the scheduler never
     /// launches its own refresh beside the drop either.</para>
     /// </summary>

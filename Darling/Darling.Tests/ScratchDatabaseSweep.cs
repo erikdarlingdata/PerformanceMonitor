@@ -35,8 +35,15 @@ namespace Darling.Tests;
 /// between the check and the drop refuses to go instead of being pulled out from under a test.</item>
 /// <item>Each drop is preceded by <see cref="ScratchPostgres.QuiesceTimescaleJobsAsync"/> (#5549): a database is never
 /// dropped while one of its TimescaleDB job workers is still attached, the same rule every in-test drop follows.
-/// The quiesce is best-effort and bounded, it never throws, and it opens one short client session of its own in the
-/// database, so the drop retries briefly while that session finishes closing (<see cref="DropAttempts"/>).</item>
+/// The quiesce is best-effort and bounded, and it never throws. It opens one short client session of its own in the
+/// database, and the drop needs no retry for that session: PostgreSQL's own <c>DROP DATABASE</c> waits up to 5
+/// seconds for other backends to exit before it raises SQLSTATE 55006 (<c>CountOtherDBBackends</c>), which covers the
+/// closing session. Do not wrap the drop in a retry loop: when a session really stays, each attempt costs that full
+/// 5 seconds, and 30 of them (about 153 s) ran past the sweep's 60 s limit and left every later database in place.
+/// A plain drop is tried once per database. The quiesce also unschedules the database's TimescaleDB jobs
+/// (<c>alter_job(scheduled =&gt; false)</c>) before the drop, so a drop the server refuses leaves that database
+/// with its jobs unscheduled. That is accepted: the sweep only drops a database it has already judged abandoned
+/// (past <see cref="AbandonedAfter"/>, no client session), and nothing is rescheduled.</item>
 /// <item>The database the connection string itself names is never a candidate.</item>
 /// </list></para>
 /// </summary>
@@ -76,17 +83,6 @@ WHERE d.datname LIKE 'darling\_scratch\_%'
   AND NOT EXISTS (
       SELECT 1 FROM pg_stat_activity AS a
       WHERE a.datid = d.oid AND a.backend_type = 'client backend')";
-
-    /// <summary>
-    /// How many times, and how far apart, the plain drop is tried while the database still reports "being accessed by
-    /// other users" (SQLSTATE 55006). The quiesce just before it connected to the database and disconnected again, and the
-    /// server's backend for that session can outlive the client's close by a few milliseconds. A session that is really
-    /// there stays, so the last attempt's refusal is logged and the database is left, as before.
-    /// </summary>
-    internal const int DropAttempts = 30;
-
-    /// <summary>The wait between two of the <see cref="DropAttempts"/>.</summary>
-    internal static readonly TimeSpan DropRetryDelay = TimeSpan.FromMilliseconds(100);
 
     /// <summary>A fresh name: the prefix, the creation time to the second, then 12 hex characters.</summary>
     internal static string NewName(DateTime utcNow) =>
@@ -174,29 +170,20 @@ WHERE d.datname LIKE 'darling\_scratch\_%'
 
             try
             {
-                for (var attempt = 1; ; attempt++)
-                {
-                    try
-                    {
-                        /* The name matched the anchored pattern above, so it is hex and digits only: safe as a quoted
-                           identifier. */
-                        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\"", admin);
-                        await drop.ExecuteNonQueryAsync(cancellationToken);
-                        break;
-                    }
-                    catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ObjectInUse && attempt < DropAttempts)
-                    {
-                        /* Most likely the quiesce's own session, still closing on the server. */
-                        await Task.Delay(DropRetryDelay, cancellationToken);
-                    }
-                }
+                /* One attempt. The server itself waits up to 5 s for the quiesce's closing session (and any other
+                   backend) to leave before it raises 55006, so a retry here only multiplies the wait for a session
+                   that really stays. The name matched the anchored pattern above, so it is hex and digits only: safe
+                   as a quoted identifier. */
+                await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\"", admin);
+                await drop.ExecuteNonQueryAsync(cancellationToken);
 
                 dropped.Add(name);
                 log($"Dropped abandoned scratch database {name}.");
             }
             catch (PostgresException ex)
             {
-                /* Typically a session that connected after the check: not abandoned after all. Leave it. */
+                /* Typically a session that connected after the check: not abandoned after all. Leave it. Its TimescaleDB
+                   jobs stay unscheduled (the quiesce ran first); see the class comment. */
                 log($"Left scratch database {name} in place: {ex.MessageText}");
             }
         }

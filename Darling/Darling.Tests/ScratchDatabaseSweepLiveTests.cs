@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -122,6 +123,99 @@ public sealed class ScratchDatabaseSweepLiveTests
                 }
             });
         }
+    }
+
+    /// <summary>
+    /// #5549: an abandoned database with TimescaleDB jobs is quiesced before the sweep drops it. A custom job that
+    /// sleeps 8 seconds is running in the database when the sweep starts, and 8 seconds is longer than the server's own
+    /// 5-second wait inside a plain <c>DROP DATABASE</c>: a sweep that dropped without quiescing first would be refused
+    /// with "being accessed by other users" and leave the database, while the quiesce waits the worker out (its cap is
+    /// 10 seconds) and the drop then goes through.
+    /// </summary>
+    [Fact]
+    public async Task TheSweep_QuiescesAnAbandonedDatabasesTimescaleJobs_BeforeDroppingIt()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live scratch sweep test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        var name = $"darling_scratch_{OldStamp}_{Guid.NewGuid().ToString("N")[..12]}";
+
+        /* Same wait as the first sweep test: the once-per-cluster sweep must have finished before an old, idle database
+           is planted, or it could be the one to drop it before the checks below run. */
+        await (await ScratchPostgres.CreateAsync(baseConnectionString!, ct)).DisposeAsync();
+
+        var bodySucceeded = false;
+        try
+        {
+            var unpooledAdmin = ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString);
+            await using var admin = new NpgsqlConnection(unpooledAdmin);
+            await admin.OpenAsync(ct);
+            await CreateDatabaseAsync(admin, name, ct);
+
+            var inDatabase = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = name, Pooling = false }.ConnectionString;
+            await using (var connection = new NpgsqlConnection(inDatabase))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+                Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(inDatabase, ct),
+                    "TimescaleDB is not available on this PostgreSQL, so there are no jobs for the sweep to quiesce.");
+
+                /* The product's own policies, then one job that is still running when the sweep arrives. */
+                await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+                foreach (var sql in new[]
+                {
+                    "CREATE PROCEDURE public.sweep_quiesce_slow_job(job_id int, config jsonb) LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(8); END $$",
+                    "SELECT add_job('public.sweep_quiesce_slow_job', interval '1 hour', initial_start => now())",
+                })
+                {
+                    await using var command = new NpgsqlCommand(sql, connection);
+                    await command.ExecuteNonQueryAsync(ct);
+                }
+            }
+
+            /* The job worker is attached to the database, and no client session is: that is what the sweep looks for. */
+            var workers = 0L;
+            for (var poll = 0; poll < 100 && workers == 0; poll++)
+            {
+                workers = await ScratchPostgres.JobWorkerCountAsync(admin, name, ct);
+                if (workers == 0)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+                }
+            }
+
+            Assert.True(workers > 0, "the slow job never started, so this test would prove nothing about the quiesce.");
+            for (var poll = 0; poll < 50 && await ClientSessionCountAsync(admin, name, ct) > 0; poll++)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
+            }
+
+            Assert.Equal(0L, await ClientSessionCountAsync(admin, name, ct));
+
+            var log = new List<string>();
+            var dropped = await ScratchDatabaseSweep.SweepAsync(
+                baseConnectionString!, now, ScratchDatabaseSweep.AbandonedAfter, log.Add, ct);
+
+            Assert.Contains(name, dropped);
+            Assert.Contains(log, line => line.Contains(name, StringComparison.Ordinal) && line.StartsWith("Dropped", StringComparison.Ordinal));
+            Assert.Empty(await ExistingAsync(baseConnectionString!, new[] { name }, ct));
+            Assert.Equal(0L, await ScratchPostgres.JobWorkerCountAsync(admin, name, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await DropIfStillThereAsync(baseConnectionString!, name, bodySucceeded);
+        }
+    }
+
+    private static async Task<long> ClientSessionCountAsync(NpgsqlConnection admin, string name, CancellationToken ct)
+    {
+        await using var count = new NpgsqlCommand(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND backend_type = 'client backend'", admin);
+        count.Parameters.AddWithValue(name);
+        return (long)(await count.ExecuteScalarAsync(ct))!;
     }
 
     [Fact]
