@@ -30,7 +30,8 @@ public sealed class McpJobTools
                two together would fix one by breaking the other. */
             var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
-            var rows = await dataService.GetRunningJobsAsync(resolved.ServerId);
+            var read = await dataService.ReadRunningJobsAsync(resolved.ServerId);
+            var rows = read.Jobs;
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "running_jobs")
@@ -48,6 +49,12 @@ public sealed class McpJobTools
                     ?? await McpRuntimePrecondition.GatedOffStatusAsync(
                         dataService, resolved.ServerId, resolved.ServerName, "running_jobs",
                         CollectorRuntimePrecondition.RunningJobsPossibleCauses)
+                    /* The freshness bound (#1812): the collector's last good collection is older than three missed cycles, so
+                       "no jobs found" would be a claim about now that the store cannot back (an offline server, a lost msdb
+                       login or a switched-off collector all look like this). It says when collection last worked. */
+                    ?? (read.LastGoodCollection is DateTime lastGood
+                        ? McpHelpers.Status("unavailable", PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGood))
+                        : null)
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or collector has not run yet).");
             }
 

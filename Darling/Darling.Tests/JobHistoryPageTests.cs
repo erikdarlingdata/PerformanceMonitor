@@ -283,6 +283,38 @@ public sealed class JobHistoryPageTests
     }
 
 
+    /// <summary>
+    /// W2 of the morning walk: the Message column sat at about 90 px, so each row grew 150-250 px tall, and a click on a
+    /// row opened nothing. The cell now shows the message in a clamped, readable-width block, and a click (or Enter) on
+    /// the row opens the whole message in a detail pane that Close empties and the page rebuild keeps.
+    /// </summary>
+    [Fact]
+    public void ARowClickOpensTheWholeMessage_AndTheCellClampsIt()
+    {
+        var d = Run().GetProperty("detail");
+        var full = d.GetProperty("longMessage").GetString()!;
+        var before = d.GetProperty("before");
+
+        Assert.Equal(full, Strings(before.GetProperty("cellTexts"))[0]);
+        Assert.Equal("", before.GetProperty("pane").GetString());
+        Assert.All(before.GetProperty("clickable").EnumerateArray(), c => Assert.True(c.GetBoolean()));
+
+        Assert.Contains("Job run: Nightly / (Job outcome) on srv-a", d.GetProperty("opened").GetString());
+        Assert.Equal(full, Strings(d.GetProperty("preText")).Single());
+        Assert.Contains("Job run: Nightly", d.GetProperty("reopened").GetString());
+        Assert.Equal("No message was recorded for this run.", Strings(d.GetProperty("noMessagePre")).Single());
+        Assert.Equal("", d.GetProperty("closed").GetString());
+
+        /* The server page's SQL Agent tab draws the same read, so its Message column gets the same clamp. */
+        var tabs = Wwwroot("js", "pages", "server-tabs.js").ReplaceLineEndings("\n");
+        var tabColumns = tabs[tabs.IndexOf("const JOB_HISTORY_COLUMNS = [", StringComparison.Ordinal)..];
+        Assert.Contains("render: jobMessageCell", tabColumns[..tabColumns.IndexOf("\n];", StringComparison.Ordinal)], StringComparison.Ordinal);
+        Assert.Contains("el(\"div\", { class: \"jh-message\"", tabs, StringComparison.Ordinal);
+
+        var css = Wwwroot("css", "app.css");
+        Assert.Matches("\\.jh-message \\{[^}]*min-width: 2[0-9]rem;[^}]*-webkit-line-clamp: 3;", css);
+    }
+
     [Fact]
     public void TheRunTimeColumnIsAnInstantFieldSoACustomRangeTrimsTheGrid()
     {

@@ -290,7 +290,7 @@ public sealed class DarlingMcpCustomViewTools
             var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None, readLatency, remapClientTimeout: true);
             return outcome.Payload is not null
                 ? outcome.Payload.ToJsonString(McpHelpers.JsonOptions)
-                : Outcome(outcome.IsServerError ? "error" : "invalid", outcome.Error!);
+                : Outcome(outcome.IsNotFound ? "not_found" : outcome.IsServerError ? "error" : "invalid", outcome.Error!);
         }
         catch (Exception ex)
         {

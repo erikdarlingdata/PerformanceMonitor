@@ -1289,6 +1289,13 @@ pre.code {
 .locking-detail-counters dt { color: var(--muted); }
 .locking-detail-counters dd { margin: 0; font-variant-numeric: tabular-nums; }
 
+/* Job History (W2): the Message cell keeps a readable width and shows the first 3 lines; the row's detail pane holds the whole message. */
+.jh-message { min-width: 24rem; max-width: 40rem; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
+.jh-detail:empty { display: none; }
+.jh-detail { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
+.jh-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.jh-detail-message { margin: 8px 0 0; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* Storage Growth heatmap (#4843): one accent shade per service band, 0 (smallest) to 7 (largest). */
 .heat-band-0 { background: rgba(46, 174, 241, 0.10); }
 .heat-band-1 { background: rgba(46, 174, 241, 0.21); }

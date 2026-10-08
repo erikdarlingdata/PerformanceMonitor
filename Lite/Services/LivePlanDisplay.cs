@@ -26,4 +26,12 @@ internal static class LivePlanDisplay
     /// through, so a caller's "no plan found" check still works after it.
     /// </summary>
     public static string? Filter(string? planXml) => SensitiveStatements.Xml(planXml);
+
+    /// <summary>
+    /// <see cref="Filter"/> on a thread-pool thread, for the display sites (every caller is a UI handler). The judge
+    /// parses the whole plan and can spend seconds on a large live plan, so it never runs on the dispatcher (#5554). The
+    /// withheld-on-timeout rule is unchanged: it is the same call.
+    /// </summary>
+    public static Task<string?> FilterAsync(string? planXml)
+        => string.IsNullOrEmpty(planXml) ? Task.FromResult(planXml) : Task.Run(() => Filter(planXml));
 }

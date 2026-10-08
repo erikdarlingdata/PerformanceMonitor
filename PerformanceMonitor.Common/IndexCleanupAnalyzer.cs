@@ -1215,43 +1215,46 @@ namespace PerformanceMonitor.Common
         {
             var notes = new List<string>();
 
+            // These notes are shown to users (the FinOps Index Analysis banner, the web page and the MCP tool), so they say what is
+            // left out of the scripts and what to do about it, in plain words. The developer reasons stay here: the data behind the
+            // analysis (Stage 1 of sp_IndexCleanup) does not record filegroup or partition placement, per-column sparse or LOB type,
+            // or the partition scheme name; Reverse Duplicate and Equal Except For Filter follow the proc's adversarial tests 9a/10a,
+            // which leave those indexes alone; Unique Constraint Replacement (Rules 7, 7.5, 7.5b) reproduces the proc's literal
+            // behavior, verified against a live @debug=1 run (Rule 7.5 step 2 has no is_unique guard, so an already-unique index is
+            // still rebuilt as UNIQUE); and 'Same Keys Different Order' is not ported (the Reverse Duplicate rows cover most of it).
             if (recommendations.Any(r => r.ScriptOmitsPartitionPlacement))
             {
-                notes.Add("Reconstructed CREATE/MERGE scripts omit the trailing ON <filegroup/partition_scheme> clause: "
-                    + "Stage 1 did not capture filegroup/partition placement. For a partitioned index the rebuild would "
-                    + "default to the table's scheme mapping; verify placement before running.");
+                notes.Add("The CREATE and MERGE scripts leave out the ON filegroup or partition scheme clause, because the "
+                    + "collected data does not record where an index is stored. For a partitioned index the rebuild uses the "
+                    + "table's default placement, so check where the index lives before you run the script.");
             }
 
             if (recommendations.Any(r => r.ResultKind == IndexCleanupResultKind.Compress))
             {
-                notes.Add("Compression eligibility cannot exclude tables with sparse columns or legacy LOB types "
-                    + "(text/ntext/image): Stage 1 did not capture per-column type/sparse metadata, so a small number of "
-                    + "compression candidates may be ineligible in practice (sp_IndexCleanup excludes them via a live column scan).");
-                notes.Add("Compression savings use sp_IndexCleanup's general 0.20–0.60 × size band, NOT "
-                    + "sp_estimate_data_compression_savings (a live-sampling proc, out of scope for data-driven analysis).");
-                notes.Add("COMPRESSION REBUILD uses PARTITION = ALL when partition_count > 1 (a proxy; Stage 1 did not "
-                    + "capture the partition scheme name).");
+                notes.Add("Some compression candidates may not be compressible in practice. The collected data does not say which "
+                    + "columns are sparse or hold legacy large-object types (text, ntext, image), so tables with those columns are "
+                    + "not left out. Check a table for them before you compress it.");
+                notes.Add("Compression savings are a rough range of 20% to 60% of the index size. They are not measured with "
+                    + "sp_estimate_data_compression_savings, which samples the live server and cannot run on collected data.");
+                notes.Add("COMPRESSION REBUILD scripts use PARTITION = ALL for an index with more than one partition, because "
+                    + "the collected data does not record the partition scheme name.");
             }
 
-            notes.Add("Reverse Duplicate and Equal Except For Filter are recognized and surfaced as REVIEW rows but "
-                + "never auto-disabled — matching sp_IndexCleanup's tested behavior (its adversarial tests 9a/10a assert "
-                + "reversed-order and filter-differing indexes are left alone; a different leading column or filter serves "
-                + "different queries/rows).");
+            notes.Add("Reverse Duplicate and Equal Except For Filter indexes are listed as REVIEW rows only and are never disabled "
+                + "for you. An index with the same columns in a different order, or with a different filter, can serve different "
+                + "queries or rows, so check each one by hand.");
 
             if (recommendations.Any(r => r.ConsolidationRule == IndexCleanupRules.UniqueConstraintReplacement))
             {
-                notes.Add("Unique Constraint Replacement (sp_IndexCleanup Rule 7/7.5/7.5b) reproduces the proc's LITERAL "
-                    + "behavior, verified against a live @debug=1 run: a nonclustered index whose key_columns EXACTLY match "
-                    + "a unique constraint is made unique (MERGE SCRIPT) and the constraint is dropped (DISABLE CONSTRAINT "
-                    + "SCRIPT). This fires even when the index is ALREADY unique — the proc's Rule 7.5 step 2 has no is_unique "
-                    + "guard, so it overrides Rule 7's KEEP with MAKE UNIQUE (a redundant-but-harmless UNIQUE rebuild that "
-                    + "still drops the constraint). A constraint backing an inbound foreign-key reference is never dropped, "
-                    + "and an index whose key columns are a SUPERSET of the constraint's is not promoted.");
+                notes.Add("A nonclustered index whose key columns exactly match a unique constraint is rebuilt as UNIQUE "
+                    + "(MERGE SCRIPT) and the constraint is dropped (DISABLE CONSTRAINT SCRIPT). This also happens when the index "
+                    + "is already unique: the UNIQUE rebuild is then redundant but harmless, and the constraint is still dropped. "
+                    + "A constraint that a foreign key references is never dropped, and an index whose key columns are a superset "
+                    + "of the constraint's key columns is not made unique.");
             }
 
-            notes.Add("Out of scope of the Unique Constraint Replacement port: sp_IndexCleanup's 'Same Keys Different Order' "
-                + "REVIEW case, largely covered by the Reverse Duplicate review rows above and reproducible from the captured "
-                + "metadata if later required.");
+            notes.Add("Not covered: sp_IndexCleanup also reports a Same Keys Different Order review case. The Reverse Duplicate "
+                + "review rows above cover most of it.");
 
             return notes;
         }

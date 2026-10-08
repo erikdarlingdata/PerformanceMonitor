@@ -36,7 +36,7 @@
  * list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, isSessionExpired, onSessionExpired } from "./util.js";
+import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, readErrorCount, isSessionExpired, onSessionExpired } from "./util.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
@@ -430,7 +430,11 @@ function renderStatusBar() {
   if (statusCollection && NON_OK_COLLECTION_STATES.has(statusCollection)) {
     items.push(el("span", { class: "sb-item sb-collection sb-warn", text: "Collection: " + statusCollection[0].toUpperCase() + statusCollection.slice(1) }));
   }
-  items.push(el("span", { class: "sb-item", text: "Updated " + localTime(d.generated_at) }));
+  /* The stamp is the page's own last load (notePageUpdated), not the sidebar's fleet read: the fleet read is the
+     shell's, so a server, FinOps or Job History page reloaded by hand or by auto-refresh left the time at the first
+     load (the morning walk, W3/W10). Until the first page settles, the fleet roll-up's time stands in. */
+  const updated = statusPageUpdatedAt != null ? new Date(statusPageUpdatedAt).toISOString() : d.generated_at;
+  items.push(el("span", { class: "sb-item sb-updated", text: "Updated " + localTime(updated) }));
   items.push(el("span", { class: "sb-item", id: "refresh-hint" }));
 
   const children = [];
@@ -440,6 +444,16 @@ function renderStatusBar() {
   });
   mount(statusbar, children);
   updateRefreshHint();
+}
+
+/* When the current page last finished loading (epoch ms), set by every route's render: first load, auto-refresh
+   poll and "Reload this page now" alike. */
+let statusPageUpdatedAt = null;
+
+function notePageUpdated(ms) {
+  statusPageUpdatedAt = ms;
+  /* Before the first fleet read lands there is no bar to repaint (it would flash "Fleet unavailable"). */
+  if (statusFleet) renderStatusBar();
 }
 
 function updateStatusBar(d) {
@@ -539,16 +553,24 @@ function markPageRenderStart(routeName, isPoll) {
   if (isNoPollRoute(routeName)) {
     pageRendering = false;
     pageNextRefreshAt = Infinity;
+    notePageUpdated(Date.now());
     return;
   }
   pageRendering = true;
   pageRenderStart = Date.now();
+  pageRenderErrorsAtStart = readErrorCount();
   pageNextRefreshAt = Infinity;
 }
+
+/* The read-error count when the current render began; a render whose reads raised it ended with a red strip. */
+let pageRenderErrorsAtStart = 0;
 
 function settlePageRender(now) {
   pageRendering = false;
   pageLastRenderMs = now - pageRenderStart;
+  /* The footer says the page is current only when this render's reads settled without an error: a poll that failed keeps the last
+     good time, and the red strip on the page is the failure's own notice. */
+  if (readErrorCount() === pageRenderErrorsAtStart) notePageUpdated(now);
   scheduleNextPageRefresh(now);
 }
 

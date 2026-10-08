@@ -242,6 +242,21 @@ export function databaseFilterControl({ serverId, server, onApply }) {
   return { node, label: () => button.textContent };
 }
 
+/**
+ * Closes the open popover, as a click on its button does (the morning walk, W9). The open flag lives at module scope so the
+ * 60 s poll's rebuild keeps a popover the reader is using; a navigation (a tab click, another server, a deep link) is not
+ * a rebuild, and without this the next page drew the control already open.
+ */
+export function closeDatabaseFilter() {
+  if (openFor === null) return;
+  const id = openFor;
+  openFor = null;
+  loadFailed = "";
+  dropSearch(id);
+  const paint = painters.get(id);
+  if (paint) paint();
+}
+
 /** Forgets the held inventories and the open flag. For tests. */
 export function resetDatabaseFilterState() {
   inventories.clear();

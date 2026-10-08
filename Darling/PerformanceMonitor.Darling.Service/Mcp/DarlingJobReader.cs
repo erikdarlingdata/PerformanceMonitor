@@ -62,6 +62,18 @@ internal static class DarlingJobReader
     /// latest does not depend on the clock, and the ordering stays on the collector-computed duration rather
     /// than on either clock. $1 server_id.
     ///
+    /// <para>The snapshot counts only while it is the collector's CURRENT answer: the collector writes no row when no
+    /// job is running, so the newest row can be weeks old. The latest SUCCESSFUL <c>running_jobs</c> run in
+    /// <c>collection_log</c> (a SUCCESS with zero rows for a run that found nothing) decides: rows stored means the
+    /// newest snapshot is that run's; none stored means nothing is running, unless a snapshot newer than that log row
+    /// exists (the log row is stamped when the run ends, after its rows are stored). A server with no such log row keeps
+    /// the newest snapshot. The same text as the viewer's <c>ViewerDataService.RunningJobsSql</c>.</para>
+    ///
+    /// <para>The snapshot must also be recent: <c>collection_time &gt;= $2</c> is the alert read's #1812 bound
+    /// (<see cref="PerformanceMonitor.Alerting.RunningJobsCurrency.Cutoff"/>, three missed cycles at the effective running_jobs cadence).
+    /// A server that went offline while a job ran (only failed runs after it), a lost msdb login or a collector switched off
+    /// otherwise left the job reading as running for days. $2 is the oldest collection time still current (naive UTC).</para>
+    ///
     /// <para>The conversion follows the server's time zone, so a job that started before a daylight saving
     /// change lands at its real UTC time rather than an hour off (#4793). Before that it subtracted the ONE
     /// newest collected offset, which was right only for a job that started after the last change.</para>
@@ -86,24 +98,102 @@ internal static class DarlingJobReader
             FROM v_running_jobs
             WHERE server_id = $1
         )
+        AND   collection_time >= $2
+        AND   (
+            NOT EXISTS
+            (
+                SELECT 1
+                FROM collection_log
+                WHERE server_id = $1
+                AND   collector_name = 'running_jobs'
+                AND   status = 'SUCCESS'
+            )
+            OR EXISTS
+            (
+                SELECT 1
+                FROM
+                (
+                    SELECT collection_time, rows_collected
+                    FROM collection_log
+                    WHERE server_id = $1
+                    AND   collector_name = 'running_jobs'
+                    AND   status = 'SUCCESS'
+                    ORDER BY collection_time DESC
+                    LIMIT 1
+                ) AS last_run
+                WHERE last_run.rows_collected IS NULL
+                OR    last_run.rows_collected > 0
+                OR    v_running_jobs.collection_time > last_run.collection_time
+            )
+        )
         ORDER BY current_duration_seconds DESC
         """;
 
+    /// <summary>The newest collection time for the running_jobs collector: its latest SUCCESS run (a run that found nothing logs
+    /// SUCCESS with zero rows) or its newest snapshot, whichever is later. The same text as the viewer's
+    /// <c>ViewerDataService.RunningJobsLastGoodCollectionSql</c>. $1 server_id.</summary>
+    public const string RunningJobsLastGoodCollectionSql = """
+        SELECT MAX(t)
+        FROM
+        (
+            SELECT MAX(collection_time) AS t
+            FROM collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'running_jobs'
+            AND   status = 'SUCCESS'
+            UNION ALL
+            SELECT MAX(collection_time)
+            FROM v_running_jobs
+            WHERE server_id = $1
+        ) AS x
+        """;
+
+    /// <summary>The running jobs, and the last good collection's time when no job is listed because it is older than the freshness bound.</summary>
+    public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection);
+
     public static async Task<List<RunningJobRow>> GetRunningJobsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => (await ReadRunningJobsAsync(postgres, serverId, cancellationToken)).Jobs;
+
+    /// <summary>
+    /// The running jobs while the snapshot is current: the alert read's #1812 bound at this server's effective running_jobs cadence
+    /// (the per-server override, else the fleet one, else the shipped default). When nothing is listed and the collector's last good
+    /// collection is older than that bound, <see cref="RunningJobsRead.LastGoodCollection"/> carries its time.
+    /// </summary>
+    public static async Task<RunningJobsRead> ReadRunningJobsAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
-        var rows = new List<RunningJobRow>();
+        var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
+        var cadence = PerformanceMonitor.Collectors.CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes("running_jobs", serverId, overrides) ?? 5;
+        var cutoff = PerformanceMonitor.Alerting.RunningJobsCurrency.Cutoff(DateTime.UtcNow, cadence);
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
-        await using var command = postgres.CreateCommand(RunningJobsSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+
+        var rows = new List<RunningJobRow>();
+        await using (var command = postgres.CreateCommand(RunningJobsSql))
         {
-            rows.Add(MapRunningJobRow(reader, clock));
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddTimestamp(command, cutoff);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(MapRunningJobRow(reader, clock));
+            }
         }
 
-        return rows;
+        if (rows.Count > 0)
+        {
+            return new RunningJobsRead(rows, null);
+        }
+
+        /* Nothing listed: it reads as "not current" only when the last good collection is older than the bound (a healthy collector
+           that found no job logs a recent SUCCESS). The rows read above released its connection first. */
+        await using var lastGood = postgres.CreateCommand(RunningJobsLastGoodCollectionSql);
+        lastGood.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(lastGood, serverId);
+        var last = await lastGood.ExecuteScalarAsync(cancellationToken);
+        DateTime? lastGoodTime = last is DateTime t ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null;
+        return new RunningJobsRead(rows, PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff));
     }
 
     /// <summary>Maps one row of <see cref="RunningJobsSql"/> (11 columns, in the SELECT's order).</summary>

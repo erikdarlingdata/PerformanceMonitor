@@ -316,9 +316,10 @@ public sealed class AlertNotebookRenderClientTests
         // Every error card is built by the settling `fail` function: the one panelErrorCard call left is inside it.
         Assert.Single(Regex.Matches(body, @"panelErrorCard\("));
 
-        // The dashboard grid passes no callback, so its behaviour is the one it had.
+        // The dashboard grid passes no callback (its panel is only re-scoped by panelUnderScope first, which cannot
+        // take a limiter slot), so its behaviour is the one it had.
         Assert.Contains(
-            "panels.map((p, i) => panelOrError(p, readSet, sourceSet, currentScope(), undefined, i))",
+            "panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i))",
             ReadRepoFile(ViewsPath), StringComparison.Ordinal);
     }
 

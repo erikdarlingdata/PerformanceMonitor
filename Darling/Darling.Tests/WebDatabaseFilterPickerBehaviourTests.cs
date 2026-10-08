@@ -59,6 +59,21 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
         }
     }
 
+    /// <summary>
+    /// W9 of the morning walk: the Databases popover opened on Queries stayed open on the Wait Stats tab, because its open flag
+    /// outlives the page rebuild so the 60 s poll keeps it. A tab click (a render that is not the poll's) now closes it.
+    /// </summary>
+    [Fact]
+    public void ThePopover_StaysOpenThroughThePoll_ButClosesOnANavigation()
+    {
+        var r = Run("tabChange");
+
+        Assert.True(r.GetProperty("openAfterClick").GetBoolean());
+        Assert.True(r.GetProperty("openAfterPoll").GetBoolean());
+        Assert.False(r.GetProperty("openAfterNavigation").GetBoolean());
+        Assert.Equal("false", r.GetProperty("expandedAfterNavigation").GetString());
+    }
+
     [Fact]
     public void APostgreSqlServer_GetsNoPicker_AndNoFilter()
     {
