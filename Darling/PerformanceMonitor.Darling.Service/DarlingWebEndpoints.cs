@@ -2843,6 +2843,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             : default;
         var queryStoreWideEligible = wideResolution.Eligible;
 
+        /* #5525: the scoped names that no registry row carries. The compiler scopes by server_id and keeps matching those names on the
+           row's stored server_name, so no scope loses what it matched before. Resolved here, before the hourly-edges snapshot below
+           takes its connection, so this lookup never asks the pool for a second one while the snapshot holds the first. */
+        var unregisteredServers = await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken);
+
         /* #4605: only a panel the hourly-plus-raw-edges route could serve pays for the count guard. It runs on one
            connection, in a REPEATABLE READ READ ONLY transaction the panel statement shares, so a collector batch that
            commits after the guard cannot add a row the guard never saw. Every other panel opens its own connection
@@ -2877,7 +2882,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {

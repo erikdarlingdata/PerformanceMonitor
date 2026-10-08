@@ -152,6 +152,7 @@ public sealed class ComposeParameterCoverageTests
     internal static int PredictedParameterCount(PanelPlan plan, bool serverScoped, ComposeRunContext context) =>
         2
         + (serverScoped ? 1 : 0)
+        + (serverScoped && context.UnregisteredServers is { Count: > 0 } ? 1 : 0)
         + (PredictsWideStartBind(plan, context) ? 1 : 0)
         + (PredictsHourlyEdgesBinds(plan, context) ? 2 : 0)
         + (PredictsModuleOverlayFloorBind(plan, context) ? 1 : 0)
@@ -190,12 +191,12 @@ public sealed class ComposeParameterCoverageTests
     /// server-local source adds the four arrays of per-server offset stretches (#4821: server names, local
     /// start, local end, offset), and never binds the server list a second time.
     /// </summary>
-    internal static int PredictedAnnotationParameterCount(bool serverScoped, bool serverLocal = false) =>
-        2 + (serverScoped ? 1 : 0) + (serverLocal ? 4 : 0);
+    internal static int PredictedAnnotationParameterCount(bool serverScoped, bool serverLocal = false, bool unregistered = false) =>
+        2 + (serverScoped ? 1 : 0) + (serverScoped && unregistered ? 1 : 0) + (serverLocal ? 4 : 0);
 
     /// <summary>The server clock read that comes before a server-local annotation query binds only the
     /// optional server scope.</summary>
-    internal static int PredictedServerClockReadParameterCount(bool serverScoped) => serverScoped ? 1 : 0;
+    internal static int PredictedServerClockReadParameterCount(bool serverScoped, bool unregistered = false) => (serverScoped ? 1 : 0) + (serverScoped && unregistered ? 1 : 0);
 
     /* ───────────────────────── the corpus sweep ───────────────────────── */
 
@@ -378,7 +379,7 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        Assert.Equal(24, sites);
+        Assert.Equal(27, sites);
     }
 
     /// <summary>

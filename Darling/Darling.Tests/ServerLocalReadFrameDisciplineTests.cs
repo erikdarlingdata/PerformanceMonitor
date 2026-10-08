@@ -301,12 +301,14 @@ public sealed class ServerLocalReadFrameDisciplineTests
         var servers = new[] { "SERVER-A", "SERVER-B" };
 
         var clockRead = ComposeCompiler.CompileServerClockRead(RunContext(servers));
-        Assert.Contains("AND   server_name = ANY($1)", clockRead.Sql, StringComparison.Ordinal);
+        Assert.Contains("AND   server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($1)))", clockRead.Sql, StringComparison.Ordinal);
         Assert.Single(clockRead.Parameters);
 
         var scoped = CompiledAnnotation(serverLocal, servers);
-        Assert.Contains("f.server_name = ANY($3)", scoped.Sql, StringComparison.Ordinal);
-        Assert.Single(Regex.Matches(scoped.Sql, @"ANY\("));
+        Assert.Contains("f.server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($3)))", scoped.Sql, StringComparison.Ordinal);
+        /* #5525: the id list is resolved from the names inside the SQL, so the scope spells ANY( twice and still binds the names once. */
+        Assert.Equal(2, Regex.Matches(scoped.Sql, @"ANY\(").Count);
+        Assert.Single(Regex.Matches(scoped.Sql, @"\$3(?!\d)"));
         Assert.Equal(7, scoped.Parameters.Count);
         Assert.DoesNotContain("SERVER-A", scoped.Sql, StringComparison.Ordinal);
 

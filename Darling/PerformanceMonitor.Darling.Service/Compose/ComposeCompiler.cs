@@ -28,8 +28,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// window binds $1/$2 and the bucket ceiling, but retention-tier routing and the partial-window notice
 /// measure AGE from now — an absolute (zoomed/historical) window can end long before now.
 /// <see cref="Servers"/> is the resolved <c>$server</c> scope (Erik's Decision 1 fleet axis): null/empty =
-/// the WHOLE FLEET (no server predicate); one or many server names = a bound <c>server_name = ANY($n)</c>
-/// filter, never interpolated (the compile-run endpoint resolves the $server variable to this). Group-by-server
+/// the WHOLE FLEET (no server predicate); one or many server names = a bound name list ($n) that the read turns into
+/// <c>server_id = ANY(ARRAY(SELECT ... FROM collect.servers WHERE server_name = ANY($n)))</c> (#5525), never interpolated (the compile-run endpoint resolves the $server variable to this). Group-by-server
 /// and a per-panel server filter are separate and flow through the normal dimension path.</summary>
 /// <see cref="Coverage"/> is the #1759 companion to <see cref="Rollups"/>: existence is not enough, because a
 /// rollup created over pre-existing history serves only what it materialized, so the router also needs each
@@ -42,6 +42,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// joins modules and takes the hourly-raw-edges route; with it, that route resolves names from the map plus a recent
 /// overlay of procedure_stats instead of ranking the whole window. Null (the default, and every other route) keeps the
 /// window-wide ranking CTE.
+/// <see cref="UnregisteredServers"/> (#5525) is the part of <see cref="Servers"/> that names no <c>collect.servers</c> row, found by
+/// the runner (<see cref="ComposeServerScope.FindUnregisteredAsync"/>) before it compiles. The compiler scopes a read by
+/// <c>server_id</c>, resolved from the registry by name; a name with no registry row resolves to no id, so those names alone are
+/// also matched on the row's stored <c>server_name</c>, exactly as the old scope matched them. Null or empty (the default, and
+/// every run whose names are all registered) adds nothing to the SQL or to the parameters.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
@@ -53,7 +58,8 @@ public sealed record ComposeRunContext(
     bool QueryStoreWideEligible = false,
     DateTime? QueryStoreWideStart = null,
     ComposeHourlyEdgesVerdict? HourlyEdges = null,
-    DateTime? ModuleMapThrough = null)
+    DateTime? ModuleMapThrough = null,
+    IReadOnlyList<string>? UnregisteredServers = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -74,7 +80,7 @@ public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> 
 /// <c>collect.&lt;table&gt;</c> — the composed query can NEVER name a <c>config</c> table or an
 /// off-catalog column, and never relies on search_path.</item>
 /// <item>Every VALUE is a bound parameter: <c>$1</c>/<c>$2</c> the naive-UTC window, then (when the run is
-/// scoped to specific servers) a bound <c>server_name = ANY($n)</c>, then filter values as <c>= ANY($n)</c>
+/// scoped to specific servers) a bound server-name list ($n, resolved to <c>server_id</c> in the SQL, #5525), then filter values as <c>= ANY($n)</c>
 /// (with the array bound), <c>LIKE $n</c>, threshold <c>$n</c>, and <c>LIMIT $n</c> for topN.</item>
 /// <item>Aggregation is archetype-gated (SUM on the delta of a cumulative, on the column of a delta; AVG/
 /// MIN/MAX on the gauge/per-event column; <c>percentile_cont</c> only on per-event); a ratio is
@@ -133,7 +139,7 @@ public static class ComposeCompiler
     /// <para><c>server_id</c> is in the partition because a composed panel spans the fleet, not one server —
     /// and <c>server_name</c> is there too, which is NOT redundant: Postgres can push a qual through a
     /// subquery containing a window function only when the qual's columns appear in EVERY window's
-    /// PARTITION BY, and the panel's server scope is expressed as <c>server_name = ANY(...)</c> in the outer
+    /// PARTITION BY, and the panel's server scope is expressed as <c>server_id = ANY(...)</c> in the outer
     /// WHERE. Without it a fleet store would rank every server's rows before narrowing to the panel's. It is
     /// 1:1 with <c>server_id</c>, so it only ever makes the partition finer, never over-collapses. The
     /// grouped/filtered dimensions (<c>database_name</c>) push down for the same reason.</para>
@@ -403,12 +409,14 @@ public static class ComposeCompiler
 
         var p = new ParamList();
         /* $1 start, $2 end — the naive-UTC window prelude. The server scope is OPTIONAL/multi: null/empty
-           $server => the whole fleet (no predicate); one/many servers => a bound server_name = ANY($n), never
+           $server => the whole fleet (no predicate); one/many servers => a bound name list resolved to server_id in the SQL (ServerScope, #5525), never
            interpolated (the compile-run endpoint resolves the $server variable to this). */
         var startParam = p.AddTimestamp(context.StartUtc);
         var endParam = p.AddTimestamp(context.EndUtc);
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
+        string FactScope() => ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam);
 
         /* The hourly-raw-edges route binds its two edge instants here and no other route binds anything, so every
            other compile keeps its parameters. wideStartParam below is Query Store only and the hybrid route never
@@ -470,7 +478,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? $"{FactAlias}.server_name = ANY({serverScopeParam})" : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
@@ -511,7 +519,7 @@ public static class ComposeCompiler
             sql.Append(indent).Append("  AND ").Append(FactAlias).Append('.').Append(timeColumn).Append(endOperator).Append(endParam).Append('\n');
             if (hasServerScope)
             {
-                sql.Append(indent).Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");
+                sql.Append(indent).Append("  AND ").Append(FactScope()).Append('\n');
             }
 
             foreach (var clause in filterClauses)
@@ -546,7 +554,7 @@ public static class ComposeCompiler
             sql.Append("          AND collection_time <= ").Append(endParam).Append('\n');
             if (hasServerScope)
             {
-                sql.Append("          AND server_name = ANY(").Append(serverScopeParam).Append(")\n");
+                sql.Append("          AND ").Append(ServerScope(string.Empty, serverScopeParam!, unregisteredParam)).Append('\n');
             }
 
             sql.Append("          AND sql_handle IS NOT NULL\n");
@@ -564,6 +572,9 @@ public static class ComposeCompiler
                 sql.Append("    WHERE mm.last_seen >= ").Append(startParam).Append('\n');
                 if (hasServerScope)
                 {
+                    /* module_map is a small table keyed (server_name, sql_handle) with no server_id column, so it stays scoped by the
+                       scoped names (#5525). The fact rows are scoped by id, so a renamed server's pre-rename handles resolve through
+                       m_recent when the overlay covers them and read '(ad hoc)' when only this map would. */
                     sql.Append("      AND mm.server_name = ANY(").Append(serverScopeParam).Append(")\n");
                 }
 
@@ -753,13 +764,36 @@ public static class ComposeCompiler
         new Dictionary<string, ServerClock>(StringComparer.Ordinal);
 
     /// <summary>
+    /// The server scope predicate every fact read shares (#5525): <c>&lt;prefix&gt;server_id = ANY(ARRAY(SELECT reg.server_id FROM
+    /// collect.servers AS reg WHERE reg.server_name = ANY($names))))</c>. Every collector hypertable and every rollup compresses
+    /// segmented by <c>server_id</c>, which also leads the time index, and <c>server_name</c> is neither, so the old
+    /// <c>server_name = ANY($n)</c> read every compressed chunk in full and discarded most of it. The uncorrelated sub-select
+    /// is an InitPlan: Postgres evaluates it once, pushes the id list into each compressed chunk's segment filter (and through
+    /// the Query Store dedupe window, whose PARTITION BY carries <c>server_id</c>), and keeps this compiler free of a connection
+    /// and the parameter list unchanged.
+    ///
+    /// <para><b>Rename semantics.</b> The registry (<c>collect.servers</c>) holds one CURRENT <c>server_name</c> per
+    /// <c>server_id</c>, and a re-connect rewrites it; fact rows keep the name they were written under. A scoped name now selects
+    /// the server that currently carries it, so a renamed server's whole history is included, where the old filter
+    /// matched only the rows written under that exact spelling. A scoped name that has NO registry row (the runner finds those,
+    /// <see cref="ComposeRunContext.UnregisteredServers"/>) can resolve to no id, so those names alone also match on the row's
+    /// stored <c>server_name</c> through <paramref name="unregisteredParam"/>: nothing a scope matched before drops out.</para>
+    /// </summary>
+    internal static string ServerScope(string prefix, string namesParam, string? unregisteredParam)
+    {
+        var byId = $"{prefix}server_id = ANY(ARRAY(SELECT reg.server_id FROM {PgSchemaGenerator.CollectSchema}.servers AS reg WHERE reg.server_name = ANY({namesParam})))";
+        return unregisteredParam is null ? byId : $"({byId} OR {prefix}server_name = ANY({unregisteredParam}))";
+    }
+
+    /// <summary>
     /// The read that runs before a panel's <see cref="AnnotationClockFrame.ServerLocal"/> annotation query
     /// (#4821): each server's newest <c>server_properties</c> row that has an offset, with the
     /// <c>time_zone_id</c> from that SAME row, the row <c>DarlingServerClockReader</c> reads for one server.
     ///
     /// <para><c>server_properties</c> is indexed <c>(server_id, collection_time)</c> and NOT on
     /// <c>server_name</c>, so the <c>DISTINCT ON</c> sort has no index to ride. When the panel names its
-    /// servers, the same list the annotation query filters on bounds it, so the sort covers the requested
+    /// servers, the same list the annotation query filters on bounds it (by <c>server_id</c> since #5525, see
+    /// <see cref="ServerScope"/>; a renamed server then also yields its old-name rows), so the sort covers the requested
     /// servers instead of the whole fleet's retained history. A fleet-wide panel names none and reads every
     /// server, as the old in-query join did.</para>
     /// </summary>
@@ -777,7 +811,9 @@ public static class ComposeCompiler
         sql.Append("WHERE utc_offset_minutes IS NOT NULL\n");
         if (context.Servers is { Count: > 0 })
         {
-            sql.Append("AND   server_name = ANY(").Append(p.AddTextArray(context.Servers)).Append(")\n");
+            var scopeParam = p.AddTextArray(context.Servers);
+            var unregisteredParam = context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
+            sql.Append("AND   ").Append(ServerScope(string.Empty, scopeParam, unregisteredParam)).Append('\n');
         }
 
         sql.Append("ORDER BY server_name, collection_time DESC");
@@ -936,7 +972,7 @@ public static class ComposeCompiler
 
     /// <summary>Compiles one annotation source into its bounded, catalog-only, schema-qualified event query:
     /// <c>SELECT &lt;ts&gt; AS ts, f.&lt;labelCol&gt; AS label FROM collect.&lt;table&gt; AS f WHERE
-    /// &lt;ts&gt; BETWEEN $1 AND $2 [AND f.server_name = ANY($3)] ORDER BY ts LIMIT
+    /// &lt;ts&gt; BETWEEN $1 AND $2 [AND f.server_id = ANY(ARRAY(SELECT ... WHERE server_name = ANY($3)))] ORDER BY ts LIMIT
     /// &lt;MaxAnnotationEvents&gt;</c>. Every identifier is a catalog constant; every value is bound.
     ///
     /// <para><c>&lt;ts&gt;</c> is the bare <c>f.&lt;timeCol&gt;</c> for a UTC source and the de-skewed
@@ -957,7 +993,8 @@ public static class ComposeCompiler
         var endParam = p.AddTimestamp(context.EndUtc);
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
-        var serverLocal = source.Frame == AnnotationClockFrame.ServerLocal;
+        var unregisteredParam = hasServerScope && context.UnregisteredServers is { Count: > 0 } ? p.AddTextArray(context.UnregisteredServers) : null;
+        var serverLocal =source.Frame == AnnotationClockFrame.ServerLocal;
 
         var ts = serverLocal
             ? $"{FactAlias}.{source.TimeColumn} - make_interval(mins => COALESCE(o.utc_offset_minutes, 0))"
@@ -978,7 +1015,7 @@ public static class ComposeCompiler
         sql.Append("  AND ").Append(ts).Append(" <= ").Append(endParam).Append('\n');
         if (hasServerScope)
         {
-            sql.Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");
+            sql.Append("  AND ").Append(ServerScope($"{FactAlias}.", serverScopeParam!, unregisteredParam)).Append('\n');
         }
 
         sql.Append("ORDER BY ts\n");

@@ -542,8 +542,11 @@ public sealed class CustomAlertEvaluator
         ILogger? logger, CancellationToken cancellationToken)
     {
         var start = nowUtc.AddHours(-definition.WindowHours);
+        var servers = new[] { storageName };
+        /* #5525: the compiler scopes by server_id; a storage name with no registry row keeps matching on the row's stored name. */
+        var unregistered = await ComposeServerScope.FindUnregisteredAsync(pool, servers, cancellationToken);
         var context = new ComposeRunContext(
-            new[] { storageName }, start, nowUtc, ComposeRunContext.NoVariables, rollups, nowUtc, coverage);
+            servers, start, nowUtc, ComposeRunContext.NoVariables, rollups, nowUtc, coverage, UnregisteredServers: unregistered);
 
         var (compiled, compileError) = ComposeCompiler.Compile(definition.Plan, context);
         if (compileError is not null || compiled is null)
