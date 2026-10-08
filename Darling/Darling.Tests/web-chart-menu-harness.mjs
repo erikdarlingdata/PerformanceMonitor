@@ -36,7 +36,13 @@ class FakeNode {
   click() {}
   get offsetWidth() { return this.attrs.role === "menu" ? 176 : 0; }
   get offsetHeight() { return this.attrs.role === "menu" ? 100 : 0; }
-  getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 320 }; }
+  replaceChild(next, old) { const i = this.children.indexOf(old); if (i >= 0) this.children[i] = next; return old; }
+  /* The drawn plot svg reports the size it was drawn at (one SVG unit is one CSS pixel, 300 px high). The .chart box is
+     taller than its 300 px plot (the legend sits below it) and as wide as the chart was drawn: 1000, or globalThis.__plotW. */
+  getBoundingClientRect() {
+    if (this.tag === "svg" && this.attrs.width) return { left: 0, top: 0, width: Number(this.attrs.width), height: Number(this.attrs.height) };
+    return { left: 0, top: 0, width: globalThis.__plotW || 1000, height: 320 };
+  }
   set textContent(value) { this.children = []; this.text = String(value); }
   get textContent() { return (this.text || "") + this.children.map((c) => c.textContent).join(""); }
 }
@@ -47,6 +53,19 @@ globalThis.document = {
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
   body: new FakeNode("body"),
+};
+
+/* A ResizeObserver for the measured-width case only (#5586): while globalThis.__plotW is set, a watched plot box reports that
+   width as the chart is built, as the browser does once it has laid the chart out. Every other case runs with no report, so it
+   keeps the default width (1000). */
+globalThis.ResizeObserver = class {
+  constructor(cb) { this.cb = cb; }
+  observe(target) {
+    if (!globalThis.__plotW) return;
+    target.isConnected = true;
+    this.cb([{ contentRect: { width: globalThis.__plotW, height: 300 } }]);
+  }
+  disconnect() {}
 };
 globalThis.location = { hash: "#/server/A/waits" };
 let blobParts = null;
@@ -117,6 +136,16 @@ const cornerMenu = find(corner, (n) => n.attrs.role === "menu")[0];
 out.rightClickStyle = { left: cornerMenu.style.left, top: cornerMenu.style.top, right: cornerMenu.style.right };
 cornerMenu.listeners.keydown[0]({ key: "Tab", preventDefault() {} });
 out.menuAfterTab = find(corner, (n) => n.attrs.role === "menu").length;
+
+/* A chart drawn at a measured width (1600 px, #5586): a right-click near its right edge keeps the menu inside the wider box. */
+globalThis.__plotW = 1600;
+const wideChart = charts.zoomableLineChart(spec({ title: "Wait trend" }), "m9", scope);
+const wideDiv = find(wideChart, (n) => String(n.className) === "chart")[0];
+wideDiv.listeners.contextmenu[0]({ preventDefault() {}, clientX: 1590, clientY: 100 });
+const wideMenu = find(wideChart, (n) => n.attrs.role === "menu")[0];
+out.measuredMenuStyle = { left: wideMenu.style.left, top: wideMenu.style.top, svgWidth: Number(find(wideChart, (n) => n.tag === "svg")[0].attrs.width) };
+wideMenu.listeners.keydown[0]({ key: "Tab", preventDefault() {} });
+globalThis.__plotW = null;
 
 /* The menu and the source panel survive a rebuild of the same chart (the 60 s poll). */
 const keep1 = charts.zoomableLineChart(spec({ title: "Wait trend", source: { read: "get_wait_stats", params: { hours: 4 } } }), "m7", scope);

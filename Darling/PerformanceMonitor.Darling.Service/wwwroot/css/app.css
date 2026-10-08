@@ -560,6 +560,17 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 .chart { width: 100%; position: relative; }
 .chart svg { display: block; width: 100%; height: auto; max-height: 300px; }
+/* Line, scatter and bar charts draw at the width of their box, one SVG unit per CSS pixel (#5586), so the SVG keeps the size its
+   inline style gives it (the .chart svg rule above is for the pie chart). It is out of flow inside .chart-plot: a fixed-width SVG must not stop a narrowing
+   panel from shrinking, which would hide the narrowing from the width the chart watches. */
+.chart .chart-plot { position: relative; width: 100%; overflow: hidden; }
+.chart svg.plot-svg { position: absolute; left: 0; top: 0; max-height: none; }
+/* On paper the page is narrower than the screen the chart was drawn for, and nothing redraws it for the print layout: the SVG goes
+   back into the flow and scales to the page width uniformly (its viewBox keeps the aspect), so the newest data is not clipped (#5586). */
+@media print {
+  .chart .chart-plot { height: auto !important; overflow: visible; }
+  .chart svg.plot-svg { position: static; width: 100% !important; height: auto !important; }
+}
 .chart .axis text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart .axis .axis-unit { fill: var(--dim); font-size: 10px; }
 .chart .grid-line { stroke: var(--border); stroke-width: 1; }
@@ -623,12 +634,13 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart .threshold-line { stroke: var(--dim); stroke-width: 1; stroke-dasharray: 6 4; opacity: 0.7; }
 .chart .threshold-label { fill: var(--dim); font-size: 10px; font-variant-numeric: tabular-nums; }
 
-/* A ranked bar chart scrolls vertically inside the panel when its list is tall (the SVG grows per row). */
+/* A ranked bar chart scrolls vertically inside the panel when its list is tall (its plot box grows per row; the width is the panel's, so only the height scrolls). */
 .chart-bar { max-height: 340px; overflow-y: auto; }
 .chart-bar svg { max-height: none; }
 .chart .bar-label { fill: var(--dim); font-size: 12px; }
 .chart .bar-track { fill: var(--bg-dark); }
-.chart .bar-value { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* The halo is the panel (.card) colour, so a dashed threshold line stops at the number instead of running through it (#5586). */
+.chart .bar-value { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; }
 
 /* A ranked donut: the wedges, the center total, and a value-bearing legend below. */
 .chart-pie .pie-wrap { display: flex; justify-content: center; }
