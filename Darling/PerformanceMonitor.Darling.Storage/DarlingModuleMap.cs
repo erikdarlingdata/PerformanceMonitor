@@ -80,11 +80,39 @@ public static class DarlingModuleMap
     /// It bounds the first refresh on a store with no watermark, and a refresh after a long stall.</summary>
     public static readonly TimeSpan MaxLookback = TimeSpan.FromDays(2);
 
+    /// <summary>The select list of the <c>src</c> CTE both refreshes read (#5583): the identity and names a handle was
+    /// seen under, and the newest time it was seen under exactly those names.</summary>
+    private const string SourceColumns = "server_name, sql_handle, database_name, schema_name, object_name, max(collection_time) AS collection_time";
+
+    /// <summary>
+    /// The <c>src</c> grouping (#5583). The refresh reads every procedure_stats row in its window (10.6 M rows for the
+    /// daily 30-hour repair on one large store) to land on a few thousand handles (21,636). Handing the tail those
+    /// raw rows made its <c>DISTINCT ON</c> sort all of them (a 2.19 GB spill, 21.5 s of a 35.5 s statement),
+    /// wrote them to disk as the CTE (<c>up</c> and <c>st</c> both read <c>src</c>), and read them a second time for
+    /// <c>st</c>'s <c>max()</c>. Grouping first collapses the rows to one per (server, handle, names) before anything
+    /// sorts or materializes them. On a copy of that store the same window ran in 8.3 s: a Partial HashAggregate per
+    /// chunk, a Finalize HashAggregate, one batch with no spill (16 MB), the tail's sort a 5 MB quicksort, the CTE in
+    /// memory, <c>st</c>'s <c>max()</c> 2.6 ms, and the same 21,636 upserts.
+    ///
+    /// <para>The names are in the key so that the tail's <c>DISTINCT ON ... ORDER BY collection_time DESC</c> still
+    /// keeps the newest row's names for a handle: the newest group is the newest row, its names win, and
+    /// <c>max(collection_time)</c> is that row's time, so <c>last_seen</c> and the watermark's
+    /// <c>max(collection_time)</c> are what they were. NULL name columns group together. Two rows at the same newest
+    /// <c>collection_time</c> with different names stay as arbitrary as they were (the sort has no tie-break).</para>
+    ///
+    /// <para>The planner estimated 1,302,615 groups against the 21,636 real ones (about 60x high), so a store with
+    /// other statistics could still plan a Sort + GroupAggregate here. That is no worse than the plan before this
+    /// change, and a HashAggregate that outgrows its memory spills in partitions (PostgreSQL 13 and later) rather
+    /// than failing.</para>
+    /// </summary>
+    private const string SourceGroupBy = "GROUP BY server_name, sql_handle, database_name, schema_name, object_name";
+
     /// <summary>
     /// The statement tail both refreshes share, after their own <c>WITH src AS (...)</c> head: upsert the latest
     /// attribution per handle from <c>src</c>, then advance the watermark in the same statement.
     /// ACCUMULATES: a handle that stops appearing keeps its last-known attribution forever (no delete). DISTINCT ON
-    /// keeps the most-recent row per handle; the ON CONFLICT only advances a row (never regresses last_seen), so a
+    /// keeps the most-recent <c>src</c> row per handle (<c>src</c> is already one row per handle and name set, see
+    /// <see cref="SourceGroupBy"/>, so this sorts thousands of rows, not the raw read); the ON CONFLICT only advances a row (never regresses last_seen), so a
     /// stale run can't overwrite a fresher attribution. The watermark only moves forward too (GREATEST), never
     /// runs ahead of the store's clock (LEAST: one row stamped in the future would otherwise pin it there for good,
     /// since GREATEST never lets it back down), and an empty <c>src</c> writes nothing, so a refresh that read no
@@ -142,11 +170,12 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     /// windowed read; it is not a licence for the next one.</para>
     /// </summary>
     public const string RefreshSql = @"WITH src AS (
-    SELECT server_name, sql_handle, database_name, schema_name, object_name, collection_time
+    SELECT " + SourceColumns + @"
     FROM collect.procedure_stats
     WHERE collection_time >= now() - interval '2 days'
       AND sql_handle IS NOT NULL
       AND sql_handle <> ''
+    " + SourceGroupBy + @"
 ),
 " + UpsertAndAdvanceTail;
 
@@ -158,11 +187,12 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     /// read.
     /// </summary>
     public const string RefreshSinceSql = @"WITH src AS (
-    SELECT server_name, sql_handle, database_name, schema_name, object_name, collection_time
+    SELECT " + SourceColumns + @"
     FROM collect.procedure_stats
     WHERE collection_time >= $1
       AND sql_handle IS NOT NULL
       AND sql_handle <> ''
+    " + SourceGroupBy + @"
 ),
 " + UpsertAndAdvanceTail;
 
