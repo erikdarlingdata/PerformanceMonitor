@@ -923,6 +923,7 @@ public sealed class McpLatestSnapshotStampLivePostgresTests
             /* Every row sits in the past; the anchor is base + 5 min, so every age below is exact. */
             var @base = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-2);
             var anchor = @base.AddMinutes(5).ToString("o") + "Z";
+            var runningJobsLatest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
 
             /* ── memory grants: a storm 30 minutes before a calm latest snapshot ── */
             foreach (var (t, waiters, timeouts, granted) in new[] { (@base.AddMinutes(-30), 12, 3L, 6000m), (@base, 0, 0L, 500m) })
@@ -1035,10 +1036,13 @@ VALUES ($1,$2,$3,$4,$5,120,'SUCCESS',7)", CollectionIdGenerator.Next(), ServerId
                     @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type_desc, total_size_mb, used_size_mb, volume_mount_point, volume_total_mb, volume_free_mb)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
                     CollectionIdGenerator.Next(), t, ServerId, ServerName, "Sales", "Sales", "ROWS", 10240m, 8192m, "D:\\", 512000m, 204800m);
+                /* get_running_jobs lists a snapshot only while it is recent (the alert read's #1812 bound), so its latest row is
+                   two minutes old instead of two hours; the stamp is still the latest row's own time. */
+                var jobsAt = t == @base ? runningJobsLatest : t.AddMinutes(-90);
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     @"INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-                    t, ServerId, ServerName, "Nightly ETL", "22222222-2222-2222-2222-222222222222", true, t.AddMinutes(-30), 1800L, 600L, 900L, 42L, true, 300.0m);
+                    jobsAt, ServerId, ServerName, "Nightly ETL", "22222222-2222-2222-2222-222222222222", true, jobsAt.AddMinutes(-30), 1800L, 600L, 900L, 42L, true, 300.0m);
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, cpu_count, physical_memory_mb)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
@@ -1059,7 +1063,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             {
                 var payload = Parse(json);
                 Assert.True(payload.TryGetProperty("captured_at", out var capturedAt), $"{name}: no captured_at on the payload");
-                Assert.Equal(Stamp(@base), capturedAt.GetString());
+                Assert.Equal(Stamp(name == "get_running_jobs" ? runningJobsLatest : @base), capturedAt.GetString());
                 Assert.False(payload.TryGetProperty("collection_time", out _), $"{name}: still publishes the retired top-level collection_time beside captured_at");
             }
 

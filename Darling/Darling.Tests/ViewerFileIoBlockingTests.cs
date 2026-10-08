@@ -39,8 +39,8 @@ public sealed class ViewerFileIoBlockingSqlTests
         /* Release walk V9: the ranking is two top-10 lists, one by reads for the read chart and one by writes for the write chart,
            not one list by reads + writes (which held only log files on a server whose logs carry the most operations). */
         Assert.Contains("top_files AS", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ROW_NUMBER() OVER (ORDER BY total_reads DESC, total_writes DESC, database_name, file_name) AS read_rank", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ROW_NUMBER() OVER (ORDER BY total_writes DESC, total_reads DESC, database_name, file_name) AS write_rank", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY total_reads DESC NULLS LAST, total_writes DESC NULLS LAST, database_name COLLATE \"C\" NULLS LAST, file_name COLLATE \"C\" NULLS LAST) AS read_rank", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY total_writes DESC NULLS LAST, total_reads DESC NULLS LAST, database_name COLLATE \"C\" NULLS LAST, file_name COLLATE \"C\" NULLS LAST) AS write_rank", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.Contains("read_rank <= 10 AND total_reads > 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.Contains("write_rank <= 10 AND total_writes > 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ORDER BY SUM(delta_reads + delta_writes) DESC", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
@@ -85,7 +85,7 @@ public sealed class ViewerFileIoBlockingSqlTests
     {
         Assert.Contains("FROM v_file_io_stats", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
         Assert.Contains("WITH top_files AS", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC NULLS LAST, database_name COLLATE \"C\" NULLS LAST, file_name COLLATE \"C\" NULLS LAST", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
 
         /* The per-file label is database.file, and the interval is the row's STORED sample_interval_seconds
            (0 → NULL) with the LAG over collection_time only for pre-V127 rows (#3540). */
@@ -271,6 +271,7 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
     private const int FileIoBudgetServerId = -971008;
     private const int FileIoSingletonServerId = -971009;
     private const int FileIoTopFilesServerId = -971010;
+    private const int FileIoRankOrderServerId = -971011;
 
     private const string ServerName = "viewer-w1c-e2e";
 
@@ -492,6 +493,92 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "file_io_stats", FileIoTopFilesServerId, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// File I/O ranking, NULL and tie order (the DuckDB twin is in Lite.Tests' FileIoLatencyTopFilesTests): PostgreSQL sorts a
+    /// NULL first under DESC, so a file whose reads were all NULL (writes only) took read rank 1 here alone and pushed the tenth
+    /// data file out of the read list. The sums are COALESCEd to 0, every key is NULLS LAST, and tied files break on the
+    /// database and file name in byte order (COLLATE "C"), the order DuckDB uses.
+    /// </summary>
+    [Fact]
+    public async Task FileIoLatency_NullReadsAndTiedFiles_KeepTheSameTenAsDuckDb_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live File I/O ranking-order test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "file_io_stats", FileIoRankOrderServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
+
+            /* Eleven data files tied on reads and writes. Byte order puts "C_data" first and "a9" last, so "a9" is the one dropped;
+               a locale-aware order would drop "C_data" instead. */
+            foreach (var name in new[] { "C_data", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9" })
+            {
+                await InsertFileIoAsync(connection, FileIoRankOrderServerId, t1, "Db", name,
+                    deltaReads: 100, deltaWrites: 5, deltaReadBytes: 0, deltaWriteBytes: 0,
+                    deltaStallReadMs: 500, deltaStallWriteMs: 10, deltaStallQueuedReadMs: 0, deltaStallQueuedWriteMs: 0);
+            }
+
+            /* A writes-only file whose delta_reads is NULL, not 0. */
+            using (var command = new NpgsqlCommand(@"
+INSERT INTO file_io_stats
+    (collection_id, collection_time, server_id, server_name, database_name, file_name,
+     delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms)
+VALUES (1, $1, $2, $3, 'Db', 'nullreads_log', NULL, 7, NULL, 7, NULL, 7)", connection))
+            {
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(t1, DateTimeKind.Unspecified));
+                command.Parameters.AddWithValue(FileIoRankOrderServerId);
+                command.Parameters.AddWithValue(ServerName);
+                await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+
+            var rows = await viewer.GetFileIoLatencyTrendAsync(FileIoRankOrderServerId, t1.AddMinutes(-1), t1.AddMinutes(1));
+            var read = rows.Where(r => r.Reads > 0).Select(r => r.FileName).Distinct().ToList();
+
+            Assert.Equal(10, read.Count);
+            Assert.Contains("C_data", read);
+            Assert.DoesNotContain("a9", read);
+            Assert.DoesNotContain("nullreads_log", read);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "file_io_stats", FileIoRankOrderServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>The Viewer's chart picks its files the same way Lite's does: each chart on its own count (the shared helper, its cases in Lite.Tests).</summary>
+    [Fact]
+    public void FileIoChartFiles_ReadChartKeepsTheDataFilesWhenTwelveLogsOutweighThem()
+    {
+        var t = DateTime.UtcNow;
+        var points = new System.Collections.Generic.List<FileIoLatencyPoint>();
+        for (var i = 0; i < 12; i++)
+        {
+            points.Add(new FileIoLatencyPoint(t, $"Db{i:00}", "log", 0, 3.0, 0, 0, Reads: 0, Writes: 1000 + i));
+        }
+
+        points.Add(new FileIoLatencyPoint(t, "DbA", "data", 1.0, 0, 0, 0, Reads: 50, Writes: 1));
+        points.Add(new FileIoLatencyPoint(t, "DbB", "data", 1.0, 0, 0, 0, Reads: 40, Writes: 1));
+
+        var read = PerformanceMonitor.Ui.FileIoChartFiles.ReadChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.Reads, p => p.Writes);
+        var write = PerformanceMonitor.Ui.FileIoChartFiles.WriteChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.Reads, p => p.Writes);
+
+        Assert.Equal(new[] { "DbA.data", "DbB.data" }, read.Select(g => g.Key));
+        Assert.Equal(10, write.Count);
+        Assert.All(write, g => Assert.EndsWith(".log", g.Key, StringComparison.Ordinal));
     }
 
     [Fact]

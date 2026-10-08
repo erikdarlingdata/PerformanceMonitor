@@ -131,8 +131,8 @@ WITH file_totals AS (
     SELECT
         database_name,
         file_name,
-        SUM(delta_reads) AS total_reads,
-        SUM(delta_writes) AS total_writes
+        COALESCE(SUM(delta_reads), 0) AS total_reads,
+        COALESCE(SUM(delta_writes), 0) AS total_writes
     FROM v_file_io_stats
     WHERE server_id = $1
     AND   collection_time >= $2

@@ -145,15 +145,73 @@ VALUES ($1, $2, 'S1', 'running_jobs', $3, 12, $4, $5)";
     }
 
     [Fact]
-    public async Task FailedRunsAfterTheLastSuccess_DoNotMakeTheLastSuccessfulSnapshotVanish()
+    public async Task FailedRunsJustAfterTheLastSuccess_DoNotMakeTheLastSuccessfulSnapshotVanish()
     {
-        /* Only a SUCCESS run says what is running. A later PERMISSIONS or ERROR run looked at nothing, so it neither
-           clears nor confirms the list; the msdb banner already reports the failure. */
+        /* Only a SUCCESS run says what is running. A later PERMISSIONS or ERROR run looked at nothing, so it neither clears nor
+           confirms the list while the snapshot is still inside the freshness bound (three missed cycles, 15 minutes at the shipped 5). */
         var data = await SeedAsync(
-            TimeSpan.FromMinutes(30),
-            new LogRow(TimeSpan.FromMinutes(30.01), "SUCCESS", 1),
-            new LogRow(TimeSpan.FromMinutes(15), "ERROR", 0),
-            new LogRow(TimeSpan.FromMinutes(5), "PERMISSIONS", 0));
+            TimeSpan.FromMinutes(8),
+            new LogRow(TimeSpan.FromMinutes(8.01), "SUCCESS", 1),
+            new LogRow(TimeSpan.FromMinutes(5), "ERROR", 0),
+            new LogRow(TimeSpan.FromMinutes(2), "PERMISSIONS", 0));
+
+        var read = await data.ReadRunningJobsAsync(ServerId);
+
+        Assert.Single(read.Jobs);
+        Assert.Null(read.LastGoodCollection);
+    }
+
+    [Fact]
+    public async Task SuccessWithRowsThenOnlyFailedRunsForHours_ReadsNoJobsAndSaysCollectionIsNotCurrent()
+    {
+        /* The offline-after-rows case: the server went away while a job ran, and three hours of ERROR runs followed. The job
+           must not read as running (its "current duration" frozen at the last good run) and the answer says when collection last worked. */
+        var data = await SeedAsync(
+            TimeSpan.FromHours(3),
+            new LogRow(TimeSpan.FromHours(3), "SUCCESS", 1),
+            new LogRow(TimeSpan.FromHours(2), "ERROR", 0),
+            new LogRow(TimeSpan.FromHours(1), "ERROR", 0),
+            new LogRow(TimeSpan.FromMinutes(5), "ERROR", 0));
+
+        var read = await data.ReadRunningJobsAsync(ServerId);
+
+        Assert.Empty(read.Jobs);
+        Assert.NotNull(read.LastGoodCollection);
+        Assert.True(DateTime.UtcNow - read.LastGoodCollection!.Value > TimeSpan.FromHours(2.9));
+        Assert.Empty(await data.GetRunningJobsAsync(ServerId));
+    }
+
+    [Fact]
+    public async Task CollectorSwitchedOffAfterARunThatStoredRows_ReadsNoJobsAndSaysCollectionIsNotCurrent()
+    {
+        /* No later log row exists at all: the user turned the collector off in the schedule editor. */
+        var data = await SeedAsync(TimeSpan.FromHours(5), new LogRow(TimeSpan.FromHours(5), "SUCCESS", 1));
+
+        var read = await data.ReadRunningJobsAsync(ServerId);
+
+        Assert.Empty(read.Jobs);
+        Assert.NotNull(read.LastGoodCollection);
+    }
+
+    [Fact]
+    public async Task HealthyCollectorThatFoundNoJobs_ReadsNoJobsAndDoesNotClaimCollectionIsStale()
+    {
+        var data = await SeedAsync(
+            TimeSpan.FromDays(2),
+            new LogRow(TimeSpan.FromDays(2), "SUCCESS", 1),
+            new LogRow(TimeSpan.FromMinutes(3), "SUCCESS", 0));
+
+        var read = await data.ReadRunningJobsAsync(ServerId);
+
+        Assert.Empty(read.Jobs);
+        Assert.Null(read.LastGoodCollection);
+    }
+
+    [Fact]
+    public async Task StoreWithNoRunLogForTheCollector_KeepsTheNewestSnapshotWhileItIsCurrent()
+    {
+        /* A log row can be gone (retention) while the data row is not: with nothing to decide by, keep what was read before, while it is recent. */
+        var data = await SeedAsync(TimeSpan.FromMinutes(4));
 
         var jobs = await data.GetRunningJobsAsync(ServerId);
 
@@ -161,14 +219,14 @@ VALUES ($1, $2, 'S1', 'running_jobs', $3, 12, $4, $5)";
     }
 
     [Fact]
-    public async Task StoreWithNoRunLogForTheCollector_KeepsTheNewestSnapshot()
+    public async Task StoreWithNoRunLogForTheCollector_StopsListingASnapshotOlderThanTheBound()
     {
-        /* A log row can be gone (retention) while the data row is not: with nothing to decide by, keep what was read before. */
         var data = await SeedAsync(TimeSpan.FromHours(3));
 
-        var jobs = await data.GetRunningJobsAsync(ServerId);
+        var read = await data.ReadRunningJobsAsync(ServerId);
 
-        Assert.Single(jobs);
+        Assert.Empty(read.Jobs);
+        Assert.NotNull(read.LastGoodCollection);
     }
 
     [Fact]
