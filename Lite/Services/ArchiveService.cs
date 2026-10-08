@@ -697,8 +697,14 @@ COPY (
        newly-opened connections start at the resting cap; the COPY value is
        applied transiently around parquet COPY operations and restored after.
        See WithRaisedCopyMemoryLimit and the comment block on ConnectionString. */
-    private const string MainConnectionRestingMemoryLimit = DuckDbInitializer.MainConnectionMemoryLimit;
-    private const string MainConnectionCopyMemoryLimit = "4GB";
+    private static string MainConnectionRestingMemoryLimit => DuckDbInitializer.MainConnectionMemoryLimit;
+
+    /// <summary>
+    /// The COPY value: 4 GB, or the user's setting (#5457) when that is larger. It must never land below the
+    /// resting value, or the "raise" would lower the limit.
+    /// </summary>
+    internal static string MainConnectionCopyMemoryLimit =>
+        $"{Math.Max(4, DuckDbInitializer.ConfiguredMemoryLimitGb)}GB";
 
     /// <summary>
     /// Runs <paramref name="action"/> with the connection's memory_limit raised

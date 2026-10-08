@@ -60,6 +60,7 @@ public partial class SettingsWindow : Window
         UpdateMcpStatus();
         LoadDefaultTimeRange();
         LoadConnectionTimeout();
+        LoadDuckDbMemoryLimit();
         LoadCsvSeparator();
         LoadColorTheme();
         LoadTimeDisplayMode();
@@ -263,7 +264,7 @@ public partial class SettingsWindow : Window
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         JsonNode root;
-        bool mcpChanged, mcpValid, alertsValid, webhooksValid;
+        bool mcpChanged, mcpValid, alertsValid, webhooksValid, memoryLimitValid;
 
         /* The read AND every mutator, under one catch. Before the consolidation each writer carried its
            own try, so an exception thrown while BUILDING a value -- not just on the disk I/O -- was caught,
@@ -278,6 +279,7 @@ public partial class SettingsWindow : Window
             (mcpChanged, mcpValid) = await SaveMcpSettingsAsync(root);
             SaveDefaultTimeRange(root);
             SaveConnectionTimeout(root);
+            memoryLimitValid = SaveDuckDbMemoryLimit(root);
             SaveCsvSeparator(root);
             SaveColorTheme(root);
             SaveTimeDisplayMode(root);
@@ -324,7 +326,7 @@ public partial class SettingsWindow : Window
             UpdateMcpStatus();
         }
 
-        switch (SettingsSaveReport.Classify(written, mcpChanged, alertsValid, mcpValid, webhooksValid))
+        switch (SettingsSaveReport.Classify(written, mcpChanged, alertsValid, mcpValid, webhooksValid, memoryLimitValid))
         {
             case SettingsSaveOutcome.NothingWritten:
                 MessageBox.Show(
@@ -342,14 +344,68 @@ public partial class SettingsWindow : Window
 
             case SettingsSaveOutcome.SavedAndMcpNeedsRestart:
                 MessageBox.Show(
-                    "Settings saved. MCP changes take effect after restarting the application.",
+                    "Settings saved. MCP changes take effect after restarting the application."
+                    + MemoryLimitRestartNote(),
                     "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
 
             default:
-                MessageBox.Show("Settings saved.", "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show("Settings saved." + MemoryLimitRestartNote(), "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
         }
+    }
+
+    /* #5457: the DuckDB memory limit last saved on this page when it differs from the value the running
+       process started with. memory_limit belongs to a DuckDB instance, so a change takes effect at the next
+       start and the save dialogs say so. */
+    private int? _pendingDuckDbMemoryLimitGb;
+
+    private string MemoryLimitRestartNote() =>
+        _pendingDuckDbMemoryLimitGb is int gb && gb != Database.DuckDbInitializer.ConfiguredMemoryLimitGb
+            ? $"\n\nThe DuckDB memory limit ({gb} GB) takes effect after Lite restarts."
+            : "";
+
+    /// <summary>
+    /// Shows the stored value (not the running one), so a value saved earlier in this session and still waiting
+    /// for a restart is what the box shows when the window is opened again.
+    /// </summary>
+    private void LoadDuckDbMemoryLimit()
+    {
+        var settings = SettingsFileGuard.Read(System.IO.Path.Combine(App.ConfigDirectory, "settings.json"));
+        var gb = DuckDbMemoryLimitSetting.Resolve(
+            settings.State == SettingsFileState.Unreadable ? null : settings.Text,
+            DuckDbMemoryLimitSetting.PhysicalMemoryBytes(),
+            out _);
+        DuckDbMemoryLimitBox.Text = gb.ToString(CultureInfo.InvariantCulture);
+        DuckDbMemoryLimitHint.Text =
+            $"GB ({DuckDbMemoryLimitSetting.RangeText(DuckDbMemoryLimitSetting.PhysicalMemoryBytes())}; default "
+            + $"{DuckDbMemoryLimitSetting.DefaultGb}). Raise it if a tab reports DuckDB out of memory. "
+            + "Takes effect after Lite restarts.";
+    }
+
+    /// <summary>
+    /// Validates the DuckDB memory limit box and writes it to the shared document. An entry outside the range is
+    /// rejected with a message that states the range and the stored value is left as it was; returns false for
+    /// that so the save report says the page was written with an objection.
+    /// </summary>
+    private bool SaveDuckDbMemoryLimit(JsonNode root)
+    {
+        var physical = DuckDbMemoryLimitSetting.PhysicalMemoryBytes();
+        var text = DuckDbMemoryLimitBox.Text.Trim();
+
+        if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var gb)
+            || !DuckDbMemoryLimitSetting.IsInRange(gb, physical))
+        {
+            MessageBox.Show(
+                $"The DuckDB memory limit must be {DuckDbMemoryLimitSetting.RangeText(physical)}. "
+                + $"\"{DuckDbMemoryLimitBox.Text}\" was not saved; the other settings were.",
+                "DuckDB memory limit", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        root[DuckDbMemoryLimitSetting.SettingsKey] = gb;
+        _pendingDuckDbMemoryLimitGb = gb;
+        return true;
     }
 
     /// <summary>

@@ -1276,7 +1276,7 @@ public partial class FinOpsTab : UserControl
         {
             AppLogger.Error("FinOps", $"Failed to run index analysis: {ex.Message}");
             if (_loads.Superseded(nameof(RunIndexAnalysis_Click), gen)) return;
-            IndexAnalysisStatusText.Text = $"Error: {ex.Message}";
+            IndexAnalysisStatusText.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
         finally
         {
