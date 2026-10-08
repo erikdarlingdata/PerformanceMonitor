@@ -1020,6 +1020,11 @@ public sealed class ServerSummaryItem
     {
         get
         {
+            /* Round-1 L7: an Offline card's Deadlocks value reads "--", so the rate and "Last: N ago" of the old
+               collection must not sit beside it as if they were current (the web fleet card's offline chip also
+               swaps them for the stale sentence). Blocking and Threads already blank their detail here. */
+            if (IsOffline) return "";
+
             var parts = new List<string>(2);
             if (DeadlockRatePerHour.HasValue)
             {
@@ -1304,7 +1309,9 @@ public sealed class ServerSummaryItem
     public SolidColorBrush ThreadsSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(ThreadsSeverity);
     public SolidColorBrush CollectorSeverityBrush => SeverityBrush(CollectorSeverity);
 
-    public bool HasAlerts => BlockingCount > 0 || DeadlockCount > 0;
+    /// <summary>Whether the card has a current blocking or deadlock count to flag. An Offline card has no current data
+    /// (its values read "--"), so the counts of the last collection are not an alert (round-1 L7).</summary>
+    public bool HasAlerts => !IsOffline && (BlockingCount > 0 || DeadlockCount > 0);
 
     /// <summary>
     /// The card border reflects the worst signal: offline (red) &gt; a Critical metric (red) &gt; a Warning
