@@ -59,6 +59,7 @@ namespace Darling.Tests;
 /// whose path had moved (#1550/#1551 before it), and that one at least had the decency to be loud.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public class ProductVersionDeclarationTests
 {
     /// <summary>The one file that declares a product version, repo-relative with forward slashes.</summary>

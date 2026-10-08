@@ -78,6 +78,7 @@ namespace Darling.Tests;
 /// concurrent edit, and a roster entry is a merge conflict this rule does not need.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class ViewerButtonAccessKeyTests
 {
     /// <summary>

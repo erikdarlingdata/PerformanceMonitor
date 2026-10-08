@@ -32,6 +32,15 @@ public class DarlingEncryptPasswordStreamTests
 {
     private const string DummyInput = "dummy-input-for-the-test";
 
+    /// <summary>
+    /// How long each child may take to exit (#5459). Neither child waits on anything of its own: the verb reads one line
+    /// from a stdin the test has already closed, makes one local DPAPI call and prints, and PowerShell runs a four-line
+    /// script. What a busy runner stretches is the START of each: a freshly built executable that an antivirus scan
+    /// opens first, and a cold Windows PowerShell 5.1 (the same cold start #4866 and #4911 gave a 180 s limit). A hang
+    /// still fails, 180 s later.
+    /// </summary>
+    private static readonly TimeSpan PowerShellExitLimit = TimeSpan.FromSeconds(180);
+
     private sealed record RunResult(int ExitCode, string StdOut, string StdErr);
 
     /// <summary>
@@ -77,7 +86,7 @@ public class DarlingEncryptPasswordStreamTests
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
-        Assert.True(process.WaitForExit(60_000), "--encrypt-password did not exit within 60 seconds.");
+        Assert.True(process.WaitForExit(PowerShellExitLimit), $"--encrypt-password did not exit within {PowerShellExitLimit.TotalSeconds:0} seconds.");
         return new RunResult(process.ExitCode, await stdoutTask, await stderrTask);
     }
 
@@ -147,7 +156,7 @@ public class DarlingEncryptPasswordStreamTests
 
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
-            Assert.True(process.WaitForExit(120_000), "powershell.exe did not exit within 120 seconds.");
+            Assert.True(process.WaitForExit(PowerShellExitLimit), $"powershell.exe did not exit within {PowerShellExitLimit.TotalSeconds:0} seconds.");
             var stdout = await stdoutTask;
             var stderr = await stderrTask;
 

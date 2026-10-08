@@ -2579,6 +2579,29 @@ public sealed class DarlingManagedPostgres
     /// for the soft limit's overshoot, the store's own growth, and the disk-pressure self-alert.</summary>
     internal const int WalSizingFreeDiskDivisor = 8;
 
+    /// <summary>The verdict's drift tolerance on the WAL ladder (#5459): the share of the data volume's free
+    /// space (one eighth) the reading may have moved since the block was written before the stored
+    /// <c>max_wal_size</c> reads as stale. See <see cref="IsWalSizeWithinDriftOf"/>.</summary>
+    internal const int WalSizingVerdictToleranceDivisor = 8;
+
+    /// <summary>
+    /// Whether <paramref name="currentMaxWalSizeMb"/> is a rung the ladder would pick for ANY free-space reading
+    /// within one eighth of <paramref name="freeDiskBytesOnDataVolume"/> either way (#5459). The writer re-derives
+    /// a rung at each service start, but the host profile and the stored verdicts re-derive from a LATER reading
+    /// of a volume that other work keeps filling and emptying; a volume sitting within a few hundred MB of a rung
+    /// edge (16, 32, 64 or 128 GB free) therefore read "stale after a hardware change" on a store nobody had
+    /// touched. A real hardware change halves or doubles the headroom, which moves the rung by far more than this
+    /// band, so it still reads stale. The ladder is monotonic, so the two ends bound every rung in between.
+    /// </summary>
+    internal static bool IsWalSizeWithinDriftOf(long freeDiskBytesOnDataVolume, long currentMaxWalSizeMb)
+    {
+        var free = Math.Max(0L, freeDiskBytesOnDataVolume);
+        var slack = free / WalSizingVerdictToleranceDivisor;
+        var low = DeriveWalSettings(free - slack).MaxWalSizeMb;
+        var high = DeriveWalSettings(free + slack).MaxWalSizeMb;
+        return currentMaxWalSizeMb >= low && currentMaxWalSizeMb <= high;
+    }
+
     /// <summary>
     /// The PostgreSQL major whose release notes moved <c>checkpoint_completion_target</c>'s default from 0.5 to
     /// 0.9 (PostgreSQL 14, E.25.3.1.9: <i>"Change checkpoint_completion_target default to 0.9 (Stephen Frost).
@@ -2682,6 +2705,53 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     internal static bool ConfHasCurrentWalSizingStamp(string conf, string expectedStamp)
         => LastLineWithPrefixEquals(conf, ConfWalSizingStampPrefix, expectedStamp);
+
+    /// <summary>
+    /// True when the MOST RECENT v12 stamp in the conf names the same PostgreSQL major as
+    /// <paramref name="postgresMajor"/> and a <c>max_wal_size</c> that <see cref="IsWalSizeWithinDriftOf"/>
+    /// accepts for <paramref name="freeDiskBytesOnDataVolume"/> (#5459). The writer's twin of the verdict
+    /// tolerance, through the same function so the two cannot disagree: a volume whose reading crosses a rung
+    /// edge back and forth between starts keeps the block it wrote instead of appending a new one on every
+    /// crossing. A different major, a halved or doubled headroom, a stamp that does not parse, or no stamp at
+    /// all is not "within drift" and the caller appends as before.
+    /// </summary>
+    internal static bool ConfHasWalSizingStampWithinDrift(string conf, long freeDiskBytesOnDataVolume, int postgresMajor)
+        => ConfHasWalSizingStampWithinDrift(conf, freeDiskBytesOnDataVolume, postgresMajor, out _, out _);
+
+    /// <summary>
+    /// The same test, handing back the <c>max_wal_size</c> and <c>min_wal_size</c> (MB) the stamp names, from the
+    /// one parse that decides it (#5459). The caller's "kept" log line names the values IN FORCE, which are the
+    /// stamp's, not the ones this start's reading would derive. Both are 0 when the stamp is absent or does not
+    /// parse; they are set whenever it parses, whether or not the verdict is "within drift".
+    /// </summary>
+    internal static bool ConfHasWalSizingStampWithinDrift(
+        string conf, long freeDiskBytesOnDataVolume, int postgresMajor, out long stampMaxWalMb, out long stampMinWalMb)
+    {
+        stampMaxWalMb = 0;
+        stampMinWalMb = 0;
+        var lastIndex = conf.LastIndexOf(ConfWalSizingStampPrefix, StringComparison.Ordinal);
+        if (lastIndex < 0)
+        {
+            return false;
+        }
+
+        var lineEnd = conf.IndexOf('\n', lastIndex);
+        var line = (lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd]).TrimEnd('\r');
+        var match = System.Text.RegularExpressions.Regex.Match(
+            line, @"max_wal_size_mb=(\d+) min_wal_size_mb=(\d+) pg_major=(\d+)$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        if (!match.Success
+            || !int.TryParse(match.Groups[3].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var stampMajor)
+            || !long.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out stampMaxWalMb)
+            || !long.TryParse(match.Groups[2].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out stampMinWalMb))
+        {
+            stampMaxWalMb = 0;
+            stampMinWalMb = 0;
+            return false;
+        }
+
+        return stampMajor == postgresMajor && IsWalSizeWithinDriftOf(freeDiskBytesOnDataVolume, stampMaxWalMb);
+    }
 
     /// <summary>
     /// The v12 block (#3802): the marker, the stamp, one comment line recording the headroom it was derived
@@ -3675,7 +3745,12 @@ public sealed class DarlingManagedPostgres
     /// has only ever been reachable on Windows.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    internal void EnsureConfAppended(string dataDirectory)
+    internal void EnsureConfAppended(string dataDirectory) => EnsureConfAppended(dataDirectory, null);
+
+    /// <summary><see cref="EnsureConfAppended(string)"/> with the data-volume read replaceable, so a test can say
+    /// what free space each start sees (#5459). Production always passes null.</summary>
+    [SupportedOSPlatform("windows")]
+    internal void EnsureConfAppended(string dataDirectory, Func<string, (long AvailableFreeBytes, long TotalBytes)>? readVolumeSpace)
     {
         var confPath = Path.Combine(dataDirectory, "postgresql.conf");
         if (!File.Exists(confPath))
@@ -3904,7 +3979,7 @@ public sealed class DarlingManagedPostgres
            from a figure we could not read is worse than leaving the block in force. All three settings are
            SIGHUP-context and this runs before pg_ctl start, so a service-owned start applies them at once. */
         var v12Major = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
-        if (!TryReadDataVolumeSpace(dataDirectory, out var v12FreeBytes, out var v12TotalBytes))
+        if (!TryReadDataVolumeSpace(dataDirectory, out var v12FreeBytes, out var v12TotalBytes, readVolumeSpace))
         {
             _logger.LogWarning(
                 "Skipped the v12 WAL-sizing check: the free space on the volume holding {DataDirectory} could not be read, so a change in headroom cannot be distinguished from a failed reading. The WAL settings currently in force (the last v12 block if one exists, otherwise v4's max_wal_size = 4GB) stay in force.",
@@ -3922,7 +3997,12 @@ public sealed class DarlingManagedPostgres
                they are looking at. */
             LogWalSizingAutoConfOverrides(dataDirectory, v12Settings);
 
-            if (!ConfHasCurrentWalSizingStamp(conf, v12Stamp))
+            var v12SameStamp = ConfHasCurrentWalSizingStamp(conf, v12Stamp);
+            long v12InForceMaxWalMb = 0;
+            long v12InForceMinWalMb = 0;
+            var v12WithinDrift = !v12SameStamp
+                && ConfHasWalSizingStampWithinDrift(conf, v12FreeBytes, v12Major, out v12InForceMaxWalMb, out v12InForceMinWalMb);
+            if (!v12SameStamp && !v12WithinDrift)
             {
                 File.AppendAllText(confPath, BuildWalSizingConfAppend(v12FreeBytes, v12TotalBytes, v12Major));
                 _logger.LogInformation(
@@ -3934,9 +4014,22 @@ public sealed class DarlingManagedPostgres
                 /* The self-proving shape (#3802): a re-derivation that changes nothing still says what it
                    derived and from what, so a start with no append is distinguishable from a start that never
                    checked. */
-                _logger.LogInformation(
-                    "Managed store WAL sizing (v12): max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume — unchanged, the block in force was derived to the same rung; checkpoint_completion_target {CheckpointNote}.",
-                    v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), v12CheckpointNote);
+                if (!v12WithinDrift)
+                {
+                    _logger.LogInformation(
+                        "Managed store WAL sizing (v12): max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume — unchanged, the block in force is kept (the same rung: this reading derives the block in force); checkpoint_completion_target {CheckpointNote}.",
+                        v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), v12CheckpointNote);
+                }
+                else
+                {
+                    /* #5459: the block kept is the stamp's, not this reading's. Near a rung the two differ, so
+                       the line names the values in force and the value this reading derives, and says the
+                       reading is inside the drift tolerance, rather than naming a size that is not in force. */
+                    _logger.LogInformation(
+                        "Managed store WAL sizing (v12): max_wal_size {InForceMaxWal}MB, min_wal_size {InForceMinWal}MB in force and kept; this reading ({FreeGb} GB free of {TotalGb} GB on the data volume) derives max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB, which is within the drift tolerance of the block in force; checkpoint_completion_target {CheckpointNote}.",
+                        v12InForceMaxWalMb, v12InForceMinWalMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes),
+                        v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, v12CheckpointNote);
+                }
             }
         }
 

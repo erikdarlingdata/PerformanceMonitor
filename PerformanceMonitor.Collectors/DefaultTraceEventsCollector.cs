@@ -217,13 +217,13 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 DECLARE
     @current_trace_path nvarchar(260);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     @current_trace_path = t.path
 FROM sys.traces AS t
 WHERE t.is_default = 1
 AND   t.status = 1;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     event_time = ft.StartTime,
     event_name = te.name,
     event_class = ft.EventClass,
@@ -318,7 +318,7 @@ ORDER BY
     ft.StartTime DESC
 OPTION(RECOMPILE);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     current_trace_path = @current_trace_path;";
 
     public override string Name => "default_trace_events";

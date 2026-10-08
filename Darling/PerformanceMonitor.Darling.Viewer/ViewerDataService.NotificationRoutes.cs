@@ -307,7 +307,7 @@ public sealed class NotificationRouteRow
     /// hour (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>). This used to be the machine's local
     /// time in every mode. Empty for a route that has not been stored yet.
     /// </summary>
-    public string ModifiedDisplay => ModifiedAtUtc == default ? "" : ViewerTimeHelper.FormatForDisplay(ModifiedAtUtc, "g");
+    public string ModifiedDisplay => ModifiedAtUtc == default ? "" : ViewerTimeHelper.FormatForDisplay(ModifiedAtUtc, "yyyy-MM-dd HH:mm:ss");
 
     public NotificationRouteRow Clone() => new()
     {

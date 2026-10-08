@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// (no live PG). Also pins the tool surface, param contracts, snapshot-read SQL, the 27-setting database-config
 /// column list, and the Gemini-clean advertised schema.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
 {
     private static readonly string[] ConfigToolSurface =
@@ -579,6 +580,7 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
 /// asserts the change tools surface the change and the scoped-config tool round-trips.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpConfigHistoryToolsLivePostgresTests
 {
     private const string ServerName = "darling-mcp-confighist-e2e";

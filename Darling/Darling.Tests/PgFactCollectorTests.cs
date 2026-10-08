@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /* Live-fixture tests share one Postgres store; the collection serializes them so
    cross-test row churn (inserts/purges/deletes) cannot race another class's assertions. */
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class PgFactCollectorTests
 {
     /// <summary>Distinctive fake ids — a real server_id is a storage-name hash, never these.</summary>

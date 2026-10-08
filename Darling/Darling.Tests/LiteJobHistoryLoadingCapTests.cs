@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// <c>ViewerPerfmonShapingParityTests</c> pins Viewer/Lite parity — a source scan, not a rendered control.
 /// The label text itself is pinned once, off this call path, by <c>JobHistoryCapLabelTests</c>.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class LiteJobHistoryLoadingCapTests
 {
     [Fact]

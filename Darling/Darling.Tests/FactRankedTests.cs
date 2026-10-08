@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// rows. A reflection walk over every collector would have to invent fixtures for families that never rank, and
 /// would pass vacuously on the three that do.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class FactRankedTests
 {
     /// <summary>

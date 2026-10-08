@@ -58,6 +58,8 @@
                 <Run Text="Blocking &amp;"/>
                 <LineBreak/>
                 <Run Text="Deadlocking"/>
+                <LineBreak/>
+                <Run Text="events"/>
             </TextBlock>
             <ScottPlot:WpfPlot Grid.Row="1" Grid.Column="1" x:Name="BlockingChart"/>
         </Grid>
@@ -80,7 +82,7 @@
                 <ColumnDefinition Width="100"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="I/O Latency" VerticalAlignment="Center"
+            <TextBlock Grid.Column="0" Text="I/O Latency ms" VerticalAlignment="Center"
                        FontSize="12" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
             <ScottPlot:WpfPlot Grid.Column="1" x:Name="FileIoChart"/>

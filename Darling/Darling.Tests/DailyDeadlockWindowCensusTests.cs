@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// signals type over: same walker, same brace-matching, same whole-repo scope.
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class DailyDeadlockWindowCensusTests
 {
     /// <summary>
