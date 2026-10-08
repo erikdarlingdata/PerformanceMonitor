@@ -1324,7 +1324,7 @@ $do$";
             {
                 /* Shutdown or the pass's budget while this aggregate's jobs are stopped: start them again (on a
                    short grace of its own, not the cancelled token), then let the cancellation through as before. */
-                await ResumeContinuousAggregateJobsAfterCancellationAsync(connection, hold, legacy, logger);
+                await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, legacy, logger);
                 throw;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1332,14 +1332,15 @@ $do$";
                 logger?.LogWarning(
                     "Could not judge or drop superseded baseline relation {Legacy} — it lingers (harmlessly, but materializing) until the next restart retries: {Message}",
                     legacy, ex.Message);
-                if (!await ReopenBrokenConnectionAsync(connection, logger, cancellationToken))
+
+                /* #5551: the aggregate stays, so its jobs go back to running. After the reopen, because a drop
+                   that broke the connection is the usual way to get here; if the reopen fails the log names them. */
+                if (!await ReopenAndResumeAfterFailedDropAsync(
+                        connection, hold, legacy, logger,
+                        "The retired-baseline sweep's connection broke and could not be reopened, so the rest of the sweep is skipped until the next pass retries it: {Message}", cancellationToken))
                 {
                     return dropped;
                 }
-
-                /* #5551: the aggregate stays, so its jobs go back to running. After the reopen, because a drop
-                   that broke the connection is the usual way to get here. */
-                await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, legacy, logger, cancellationToken);
             }
         }
 
@@ -1379,7 +1380,7 @@ $do$";
             }
             catch (OperationCanceledException) when (hold.Unscheduled.Count > 0)
             {
-                await ResumeContinuousAggregateJobsAfterCancellationAsync(connection, hold, view, logger);
+                await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, view, logger);
                 throw;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1387,12 +1388,12 @@ $do$";
                 logger?.LogWarning(
                     "Could not drop retired baseline relation {View} — it lingers (harmlessly, but materializing) until the next restart retries: {Message}",
                     view, ex.Message);
-                if (!await ReopenBrokenConnectionAsync(connection, logger, cancellationToken))
+                if (!await ReopenAndResumeAfterFailedDropAsync(
+                        connection, hold, view, logger,
+                        "The retired-baseline sweep's connection broke and could not be reopened, so the rest of the sweep is skipped until the next pass retries it: {Message}", cancellationToken))
                 {
                     return dropped;
                 }
-
-                await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, view, logger, cancellationToken);
             }
         }
 
@@ -1403,8 +1404,9 @@ $do$";
     /// #5551: how long a drop of a continuous aggregate waits for the aggregate's job workers to exit, and how
     /// often it looks. See <see cref="Default"/> for the numbers and why they are what they are.
     /// </summary>
-    /// <param name="Cap">The longest the drop waits for a running worker. At the cap the aggregate's jobs are
-    /// scheduled again and the drop is skipped; the next pass retries it.</param>
+    /// <param name="Cap">The longest the drop waits for a running worker. At the cap, if the final look still lists
+    /// a worker, the aggregate's jobs are scheduled again and the drop is skipped; the next pass retries it. A final
+    /// look that lists none lets the drop go ahead. A zero cap is one look.</param>
     /// <param name="PollInterval">The gap between two looks at <c>pg_stat_activity</c>.</param>
     public sealed record AggregateJobQuiesceOptions(TimeSpan Cap, TimeSpan PollInterval)
     {
@@ -1415,9 +1417,11 @@ $do$";
         /// (nothing collects while they wait), and again on the hourly store-maintenance pass, whose whole budget is
         /// 5 minutes for every step (<c>DarlingWorker</c>'s <c>s_storeObjectConvergenceBudget</c>). A drop happens once
         /// per store, on the pass that retires or reshapes that aggregate, and only a refresh that is ALREADY running
-        /// when the jobs are stopped is waited for (stopping the jobs first means no new one starts), so the wait is
-        /// the rest of one refresh: seconds for the baseline and reshape aggregates, which are small or only a day
-        /// or two old. 30 seconds covers that with room, and it is a cap a start can afford. The worst case is every
+        /// when the jobs are stopped is waited for (stopping the jobs first means no new one starts). TimescaleDB's
+        /// scheduler usually ends such a worker itself within a few seconds of the stop (measured: about 3-4 s;
+        /// the worker's refresh rolls back), and one that finishes first is just as good, so the wait is a few
+        /// seconds for the baseline and reshape aggregates, which are small or only a day or two old. 30 seconds
+        /// covers that with room, and it is a cap a start can afford. The worst case is every
         /// relation of both sweeps (two superseded, two retired, four reshaped = eight) stuck behind a running
         /// worker, 8 x 30 s = 4 minutes, which still fits inside the hourly pass's 5. A longer cap would let a stuck
         /// worker stall startup, or eat the hourly budget; a refresh that really does take longer costs nothing
@@ -1518,13 +1522,23 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     /// a job already stopped is left stopped, and never started again;</description></item>
     /// <item><description>wait until two looks in a row (<see cref="AggregateJobWorkerCountSql"/>) show no worker
     /// of ANY of the aggregate's jobs, stopped or not, for at most <see cref="AggregateJobQuiesceOptions.Cap"/>;</description></item>
-    /// <item><description>at the cap, with a worker still running: schedule the stopped jobs again, warn, and return
-    /// <see cref="AggregateJobHold.Skip"/> so the caller leaves this aggregate alone until the next pass. No backend
-    /// is cancelled or terminated.</description></item>
+    /// <item><description>at the cap, if the final look still lists a worker: schedule the stopped jobs again, warn,
+    /// and return <see cref="AggregateJobHold.Skip"/> so the caller leaves this aggregate alone until the next
+    /// pass. A final look that lists none lets the drop go ahead.</description></item>
     /// </list>
+    /// <para><b>This method does not cancel or terminate a backend itself, but stopping a job makes TimescaleDB's
+    /// scheduler end that job's running worker</b> (measured on TimescaleDB 2.30.1: within a few seconds of the
+    /// stop). The refresh then rolls back, which is harmless to the data, the server log records the worker's error
+    /// ("job N threw an error"), and the job's statistics record one failed run (<c>total_failures</c> + 1,
+    /// <c>last_run_status</c> = Failed). After a successful drop the job and its statistics row are gone with the
+    /// aggregate; on the skip and failed-drop paths the job stays, scheduled again, with that failure on its record
+    /// until its next run succeeds (the #3816 job-failure alert can report it once; see its doc). So the wait is
+    /// for the worker to exit, whether the scheduler ended it or it finished.</para>
     /// A plain-PostgreSQL store, a plain view and an absent relation have no jobs, so this changes nothing and
-    /// returns <see cref="AggregateJobHold.None"/>. If anything after the stop throws (including a cancellation) the
-    /// stopped jobs are scheduled again before it propagates, so an aggregate is never left stopped by this method.
+    /// returns <see cref="AggregateJobHold.None"/>. If the stop itself or anything after it throws (including a
+    /// cancellation, and a stop that committed but lost its connection) the stopped jobs are scheduled again, on a
+    /// grace of their own, before it propagates; if even that fails the log names the jobs and the view. So an
+    /// aggregate is not left stopped by this method without a log line that says which jobs.
     /// The CALLER owns the jobs once it gets a hold back: it starts them again when the drop fails
     /// (<see cref="ResumeContinuousAggregateJobsAsync"/>), and after a successful drop they are gone with the aggregate.
     /// </summary>
@@ -1564,19 +1578,23 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
 
         var allIds = jobs.Select(j => j.JobId).ToArray();
         var stoppedIds = jobs.Where(j => j.Scheduled).Select(j => j.JobId).ToArray();
-        if (stoppedIds.Length > 0)
-        {
-            using var stop = new NpgsqlCommand(UnscheduleJobsSql, connection) { CommandTimeout = SetupTimeoutSeconds };
-            stop.Parameters.AddWithValue(stoppedIds);
-            await stop.ExecuteNonQueryAsync(cancellationToken);
-        }
-
         var hold = new AggregateJobHold(stoppedIds, false);
+
+        /* The stop is INSIDE the try: a stop that committed on the server but then lost its connection (or timed
+           out) still has to be undone, and scheduling an id that was never stopped is a no-op. */
         try
         {
+            if (stoppedIds.Length > 0)
+            {
+                using var stop = new NpgsqlCommand(UnscheduleJobsSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                stop.Parameters.AddWithValue(stoppedIds);
+                await stop.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             /* Two empty looks in a row: a worker the scheduler launched just before the stop can still be starting
                up and not yet listed on the first look. The deadline is checked BETWEEN looks, never by cancelling a
-               statement in flight, so a cap cannot break the connection it is about to use again. */
+               statement in flight, so a cap cannot break the connection it is about to use again. At the cap the
+               FINAL look decides: a worker still listed there skips the drop, an empty one lets it go ahead. */
             var clock = Stopwatch.StartNew();
             var emptyLooks = 0;
             while (true)
@@ -1596,45 +1614,54 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
 
                 if (clock.Elapsed >= options.Cap)
                 {
-                    break;
+                    if (workers == 0)
+                    {
+                        return hold;
+                    }
+
+                    logger?.LogWarning(
+                        "Not dropping continuous aggregate {View} this pass (#5551): a job worker of it was still running at the last look, {Seconds:0.0} s after its jobs were stopped (TimescaleDB usually ends such a worker itself, and this one had not exited), so the jobs are scheduled again and the drop is retried on the next pass. A worker the stop ended, if any, is recorded as one failed run in its job's statistics.",
+                        view, clock.Elapsed.TotalSeconds);
+                    await ResumeContinuousAggregateJobsAsync(connection, stoppedIds, view, logger);
+                    return new AggregateJobHold(Array.Empty<int>(), true);
                 }
 
                 await Task.Delay(options.PollInterval, cancellationToken);
             }
-
-            logger?.LogWarning(
-                "Not dropping continuous aggregate {View} this pass (#5551): a job worker of it was still running {Seconds:0} s after its jobs were stopped, so they are scheduled again and the drop is retried on the next pass.",
-                view, options.Cap.TotalSeconds);
-            await ResumeContinuousAggregateJobsAsync(connection, stoppedIds, view, logger, cancellationToken);
-            return new AggregateJobHold(Array.Empty<int>(), true);
-        }
-        catch (OperationCanceledException)
-        {
-            await ResumeContinuousAggregateJobsAfterCancellationAsync(connection, hold, view, logger);
-            throw;
         }
         catch (Exception)
         {
-            /* The look itself failed (a broken connection, a lock timeout). The caller never gets a hold back, so the
-               stopped jobs are started again here before the failure reaches its per-relation catch. */
-            await ResumeContinuousAggregateJobsAsync(connection, stoppedIds, view, logger, cancellationToken);
+            /* A cancellation (shutdown, or the pass's budget) or a failure of the stop or of a look (a broken
+               connection, a lock timeout). The caller never gets a hold back, so the jobs this method stopped are
+               scheduled again here, on a grace of their own that the cancelled token cannot take away, before the
+               exception reaches the caller's catch. */
+            await ResumeContinuousAggregateJobsAsync(connection, stoppedIds, view, logger);
             throw;
         }
     }
 
+    /// <summary>The longest a resume of stopped jobs may take, on its own token: shutdown or the pass's budget may
+    /// already have cancelled the caller's.</summary>
+    private static readonly TimeSpan s_resumeGrace = TimeSpan.FromSeconds(10);
+
+    /// <summary>The operator's way back, put in every log line that says jobs stayed stopped: the ids and the view.</summary>
+    private static string StoppedJobsNote(IReadOnlyList<int> jobIds, string view)
+        => $"Job(s) {string.Join(", ", jobIds)} of continuous aggregate {view} are still stopped; schedule each again with SELECT alter_job(<job id>, scheduled => true). A later pass reads a stopped job as one stopped by hand and leaves it alone.";
+
     /// <summary>
     /// #5551: schedules again the jobs a drop attempt stopped, when the aggregate stays. BEST EFFORT and logged,
     /// never throws: a failed drop is already being handled by the caller's catch, and an aggregate left stopped is
-    /// the less bad outcome than a second failure hiding the first. The connection is reopened first if the failed
-    /// statement broke it (<see cref="ReopenBrokenConnectionAsync"/>, #5416). A job the caller did not stop is never
-    /// passed in, so one that was stopped by hand before the sweep stays stopped.
+    /// the less bad outcome than a second failure hiding the first. Runs on a grace token of its own
+    /// (<see cref="s_resumeGrace"/>), never the caller's, so a cancelled caller cannot swallow it. The connection is
+    /// reopened first if the failed statement broke it (<see cref="ReopenBrokenConnectionAsync"/>, #5416). A job
+    /// the caller did not stop is never passed in, so one that was stopped by hand before the sweep stays stopped.
+    /// When the jobs cannot be scheduled again the log line names them and the view.
     /// </summary>
     internal static async Task ResumeContinuousAggregateJobsAsync(
         NpgsqlConnection connection,
         IReadOnlyList<int> stoppedJobIds,
         string view,
-        ILogger? logger,
-        CancellationToken cancellationToken)
+        ILogger? logger)
     {
         if (stoppedJobIds.Count == 0)
         {
@@ -1643,16 +1670,18 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
 
         try
         {
+            using var grace = new CancellationTokenSource(s_resumeGrace);
             if (!await ReopenBrokenConnectionAsync(
-                    connection, logger, cancellationToken,
-                    "The connection broke while the jobs of a continuous aggregate were stopped and could not be reopened, so they could not be scheduled again: {Message}"))
+                    connection, logger, grace.Token,
+                    "The connection broke while the jobs of a continuous aggregate were stopped and could not be reopened, so they could not be scheduled again: {Message} "
+                    + StoppedJobsNote(stoppedJobIds, view)))
             {
                 return;
             }
 
             using var start = new NpgsqlCommand(RescheduleJobsSql, connection) { CommandTimeout = SetupTimeoutSeconds };
             start.Parameters.AddWithValue(stoppedJobIds.ToArray());
-            await start.ExecuteNonQueryAsync(cancellationToken);
+            await start.ExecuteNonQueryAsync(grace.Token);
             logger?.LogInformation(
                 "Scheduled {Count} job(s) of continuous aggregate {View} again (#5551): the drop did not go ahead, so it keeps refreshing.",
                 stoppedJobIds.Count, view);
@@ -1660,21 +1689,42 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
         catch (Exception ex)
         {
             logger?.LogWarning(
-                "Could not schedule job(s) {JobIds} of continuous aggregate {View} again after the drop did not go ahead (#5551), so it stops refreshing until they are scheduled (SELECT alter_job(<job id>, scheduled => true)) or the next start: {Message}",
-                string.Join(", ", stoppedJobIds), view, ex.Message);
+                "Could not schedule the stopped jobs of continuous aggregate {View} again after the drop did not go ahead (#5551): {Message} {Note}",
+                view, ex.Message, StoppedJobsNote(stoppedJobIds, view));
         }
     }
 
-    /// <summary>The same, for a cancellation (shutdown, or the hourly pass's budget): the cancelled token cannot
-    /// run the statement, so it gets a short grace of its own.</summary>
-    private static async Task ResumeContinuousAggregateJobsAfterCancellationAsync(
+    /// <summary>
+    /// #5551: what each sweep's per-relation catch does after a failed drop while it holds stopped jobs: reopen the
+    /// connection if the failure broke it, then schedule the jobs again. Returns false when the connection could not
+    /// be reopened (the sweep ends, as before); that log line names the stopped jobs and the view, so the operator
+    /// knows which to schedule again. With nothing stopped it is exactly <see cref="ReopenBrokenConnectionAsync"/>.
+    /// The reopen of a sweep that holds jobs runs on the resume grace, not the caller's token.
+    /// </summary>
+    private static async Task<bool> ReopenAndResumeAfterFailedDropAsync(
         NpgsqlConnection connection,
         AggregateJobHold hold,
         string view,
-        ILogger? logger)
+        ILogger? logger,
+        string reopenFailedTemplate,
+        CancellationToken cancellationToken)
     {
-        using var grace = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, view, logger, grace.Token);
+        if (hold.Unscheduled.Count == 0)
+        {
+            return await ReopenBrokenConnectionAsync(connection, logger, cancellationToken, reopenFailedTemplate);
+        }
+
+        using (var grace = new CancellationTokenSource(s_resumeGrace))
+        {
+            if (!await ReopenBrokenConnectionAsync(
+                    connection, logger, grace.Token, reopenFailedTemplate + " " + StoppedJobsNote(hold.Unscheduled, view)))
+            {
+                return false;
+            }
+        }
+
+        await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, view, logger);
+        return true;
     }
 
     /// <summary>
@@ -6087,7 +6137,7 @@ WITH NO DATA";
             }
             catch (OperationCanceledException) when (hold.Unscheduled.Count > 0)
             {
-                await ResumeContinuousAggregateJobsAfterCancellationAsync(connection, hold, view, logger);
+                await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, view, logger);
                 throw;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -6100,14 +6150,12 @@ WITH NO DATA";
                    had no reopen, so the NEXT view's stale check threw "Connection is not open" and logged a second,
                    misleading failure. Reopened here the way the retired-baseline sweep does, and the stopped jobs
                    start again so the aggregate that stays keeps refreshing. */
-                if (!await ReopenBrokenConnectionAsync(
-                        connection, logger, cancellationToken,
-                        "The stale-aggregate reshape's connection broke and could not be reopened, so the rest of the reshape is skipped until the next pass retries it: {Message}"))
+                if (!await ReopenAndResumeAfterFailedDropAsync(
+                        connection, hold, view, logger,
+                        "The stale-aggregate reshape's connection broke and could not be reopened, so the rest of the reshape is skipped until the next pass retries it: {Message}", cancellationToken))
                 {
                     return dropped;
                 }
-
-                await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, view, logger, cancellationToken);
             }
         }
 

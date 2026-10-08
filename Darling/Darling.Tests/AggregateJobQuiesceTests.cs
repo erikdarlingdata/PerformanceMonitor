@@ -153,11 +153,39 @@ public sealed class AggregateJobQuiescePinTests
             Assert.Contains("hold = AggregateJobHold.None;", after, StringComparison.Ordinal);
         }
 
-        /* The three catches start the jobs again, after the reopen. */
+        /* The three catches reopen and start the jobs again (one helper, which names the stopped jobs when the
+           reopen fails), and the three cancellation catches start them again on the resume's own grace token. */
         Assert.Equal(3, Regex.Matches(source,
-            @"ReopenBrokenConnectionAsync\([^;]*\)\)\s+\{\s+return dropped;\s+\}\s+(/\*.*?\*/\s+)?await ResumeContinuousAggregateJobsAsync\(connection, hold\.Unscheduled, \w+, logger, cancellationToken\);",
+            @"if \(!await ReopenAndResumeAfterFailedDropAsync\(\s*connection, hold, \w+, logger,\s*""[^""]*"", cancellationToken\)\)\s+\{\s+return dropped;\s+\}").Count);
+        Assert.Equal(3, Regex.Matches(source,
+            @"catch \(OperationCanceledException\) when \(hold\.Unscheduled\.Count > 0\)\s+\{\s+(/\*.*?\*/\s+)?await ResumeContinuousAggregateJobsAsync\(connection, hold\.Unscheduled, \w+, logger\);\s+throw;",
             RegexOptions.Singleline).Count);
-        Assert.Equal(3, Regex.Matches(source, @"catch \(OperationCanceledException\) when \(hold\.Unscheduled\.Count > 0\)").Count);
+    }
+
+    /// <summary>
+    /// The quiesce's own exits (#5551 review): the stop is INSIDE the try whose catch schedules the jobs again, the
+    /// resume has no caller token to be cancelled with, and the cap decides on the final look.
+    /// </summary>
+    [Fact]
+    public void Quiesce_StopIsInsideTheTry_ResumeRunsOnItsOwnGrace_AndTheCapDecidesOnTheFinalLook()
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs")).Replace("\r\n", "\n");
+        var start = source.IndexOf("internal static async Task<AggregateJobHold> QuiesceContinuousAggregateJobsAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var end = source.IndexOf("/// <summary>The longest a resume of stopped jobs may take", start, StringComparison.Ordinal);
+        Assert.True(end > start);
+        var body = source[start..end];
+
+        Assert.Matches(@"try\s+\{\s+if \(stoppedIds\.Length > 0\)\s+\{\s+using var stop = new NpgsqlCommand\(UnscheduleJobsSql, connection\)", body);
+        Assert.Matches(@"catch \(Exception\)\s+\{\s+(/\*[^*]*\*/\s+)?await ResumeContinuousAggregateJobsAsync\(connection, stoppedIds, view, logger\);\s+throw;", body);
+        Assert.Matches(@"if \(clock\.Elapsed >= options\.Cap\)\s+\{\s+if \(workers == 0\)\s+\{\s+return hold;\s+\}", body);
+
+        /* No resume anywhere in the product takes a caller token. */
+        Assert.DoesNotContain("ResumeContinuousAggregateJobsAfterCancellationAsync", source, StringComparison.Ordinal);
+        Assert.Matches(@"internal static async Task ResumeContinuousAggregateJobsAsync\(\s+NpgsqlConnection connection,\s+IReadOnlyList<int> stoppedJobIds,\s+string view,\s+ILogger\? logger\)", source);
+
+        /* A resume that cannot happen names the jobs and the view. */
+        Assert.Equal(4, Regex.Matches(source, @"StoppedJobsNote\(").Count); // the definition + the three log lines that use it
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
@@ -192,6 +220,9 @@ public sealed class AggregateJobQuiesceLiveTests
     private const string Retired = "cpu_utilization_baseline";
 
     private static readonly TimescaleSupport.AggregateJobQuiesceOptions FastCap = new(TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(100));
+
+    /// <summary>One look and no wait: the skip path of (c) runs before the scheduler can end the worker.</summary>
+    private static readonly TimescaleSupport.AggregateJobQuiesceOptions ZeroCap = new(TimeSpan.Zero, TimeSpan.FromMilliseconds(50));
 
     /// <summary>(a) The jobs are stopped before the drop, and the drop still removes the aggregate and its jobs.</summary>
     [Fact]
@@ -257,34 +288,45 @@ public sealed class AggregateJobQuiesceLiveTests
             var workerPid = await ScalarAsync<int>(connection, $"SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type LIKE '% [{refreshJob}]'", ct);
 
             /* The jobs are stopped while the worker runs... */
-            Assert.True(await WaitForAsync(async () => (await JobStatesAsync(connection, jobIds, ct)).Values.All(scheduled => !scheduled), TimeSpan.FromSeconds(30), ct),
-                $"the sweep never stopped the jobs: {log.Joined}");
+            await WaitForJobsStoppedAsync(connection, jobIds, log, ct);
 
-            /* ...and for as long as THAT worker is alive the aggregate must stay and the sweep must keep waiting. The
-               invariant is checked on every look (the relation is read first, so a drop that landed under a live worker
-               cannot be missed by a later read), not only after a fixed delay, because TimescaleDB's own scheduler may
-               end a worker whose job was just stopped: the sweep waits for the exit either way, and once the worker is
-               gone nothing is left to hold it. Looked at for two seconds, the window in which an early drop would show. */
+            /* ...and for as long as THAT worker is alive the sweeper's own backend must never be running the DROP.
+               That is what proves the wait: with the wait removed the DROP would sit in the sweeper's
+               pg_stat_activity.query (blocked on the worker's locks, or running) from the moment the jobs are
+               stopped, while a relation-exists check alone passes either way, because a DROP blocked behind the worker
+               has not removed the view yet. Each look reads the worker, then the sweeper's query, then the worker
+               again, and judges only when the same worker was alive on both sides. The statement text is matched by
+               its start (DO $do$) as well as DROP MATERIALIZED VIEW, because track_activity_query_size cuts the long
+               DO block short. TimescaleDB's own scheduler may end a worker whose job was just stopped (measured at
+               about 3-4 s): then nothing is left to hold the sweep, and the test only passes if it OBSERVED the hold
+               first - at least one look with the worker alive and the sweeper inside its wait loop (its last
+               statement is the worker count). Looked at for two seconds. */
+            var sweeperPid = sweeper.ProcessID;
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
-            var workerEndedOnItsOwn = false;
+            var observedHold = false;
             while (DateTime.UtcNow < deadline)
             {
                 var existsBefore = await RelationExistsAsync(connection, Retired, ct);
-                var alive = await ScalarAsync<long>(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {workerPid} AND backend_type LIKE '% [{refreshJob}]'", ct) > 0;
-                Assert.False(!existsBefore && alive, $"the aggregate was dropped under a running job worker: {log.Joined}");
-                if (!alive)
+                var aliveBefore = await WorkerAliveAsync(connection, workerPid, refreshJob, ct);
+                var sweeperQuery = await ScalarAsync<string>(connection, $"SELECT coalesce(query, '') FROM pg_stat_activity WHERE pid = {sweeperPid}", ct);
+                var aliveAfter = await WorkerAliveAsync(connection, workerPid, refreshJob, ct);
+                if (!aliveBefore || !aliveAfter)
                 {
-                    workerEndedOnItsOwn = true;
                     break;
                 }
 
+                Assert.True(existsBefore, $"the aggregate was dropped under a running job worker: {log.Joined}");
+                Assert.False(
+                    sweeperQuery.Contains("DROP MATERIALIZED VIEW", StringComparison.Ordinal) || sweeperQuery.TrimStart().StartsWith("DO $do$", StringComparison.Ordinal),
+                    $"the sweeper reached its DROP while the job worker (pid {workerPid}) was still alive: {log.Joined}");
+                Assert.False(sweep.IsCompleted, $"the sweep finished while a worker was running: {log.Joined}");
+                observedHold |= sweeperQuery.Contains("pg_stat_activity", StringComparison.Ordinal);
                 await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
             }
 
-            if (!workerEndedOnItsOwn)
+            if (!observedHold)
             {
-                Assert.False(sweep.IsCompleted, $"the sweep finished while a worker was running: {log.Joined}");
-                Assert.True(await RelationExistsAsync(connection, Retired, ct), "the aggregate must still exist while its worker runs");
+                Assert.Skip($"TimescaleDB ended the job worker before the hold could be observed, so this run proves nothing about the wait: {log.Joined}");
             }
 
             await ExecuteAsync(gate, $"SELECT pg_advisory_unlock({GateKey})", ct);
@@ -310,8 +352,8 @@ public sealed class AggregateJobQuiesceLiveTests
     }
 
     /// <summary>
-    /// (c) At the cap, with the worker still running: the jobs are scheduled again, the aggregate stays, nothing is
-    /// cancelled, one warning names it; the next pass, with the worker gone, drops it.
+    /// (c) At the cap, with the worker still running at the final look: the jobs are scheduled again, the aggregate
+    /// stays, the sweep ends no backend itself, one warning names it; the next pass, with the worker gone, drops it.
     /// </summary>
     [Fact]
     public async Task AtTheCap_TheJobsAreScheduledAgain_TheAggregateStays_AndTheNextPassDropsIt_AgainstDevPostgres()
@@ -337,13 +379,16 @@ public sealed class AggregateJobQuiesceLiveTests
             var workerPid = await ScalarAsync<int>(connection, $"SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type LIKE '% [{refreshJob}]'", ct);
 
             var log = new CapturingTestLogger();
-            Assert.Equal(0, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, log, DateTime.UtcNow, FastCap, ct));
+            /* A zero cap: the first look sees the worker, so the skip and the resume follow within milliseconds of the
+               stop. TimescaleDB's scheduler ends a worker whose job was stopped within a few seconds (measured at
+               3-4 s), and a cap of seconds could let that land inside the wait, which would turn this into a drop. */
+            Assert.Equal(0, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, log, DateTime.UtcNow, ZeroCap, ct));
 
             Assert.True(await RelationExistsAsync(connection, Retired, ct), "the aggregate stays at the cap");
             Assert.All(await JobStatesAsync(connection, jobIds, ct), s => Assert.True(s.Value, "every job it stopped is scheduled again"));
             Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
             Assert.Contains(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains(Retired, StringComparison.Ordinal) && l.Contains("#5551", StringComparison.Ordinal));
-            /* Not cancelled, not terminated: the very same backend is still running. */
+            /* The sweep itself ended nothing: the very same backend is still running. */
             Assert.Equal(1L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {workerPid} AND backend_type LIKE '% [{refreshJob}]'", ct));
 
             await ExecuteAsync(gate, $"SELECT pg_advisory_unlock({GateKey})", ct);
@@ -362,6 +407,73 @@ public sealed class AggregateJobQuiesceLiveTests
                 await ExecuteAsync(gate, $"SELECT pg_advisory_unlock({GateKey})", CancellationToken.None);
             }
         }
+    }
+
+    /// <summary>
+    /// A cancellation (shutdown, or the hourly pass's budget) while the sweep waits for a worker: the exception goes
+    /// through, and the jobs the sweep stopped are scheduled again anyway, because the resume runs on its own grace
+    /// token and not the cancelled one.
+    /// </summary>
+    [Fact]
+    public async Task CancelledWhileWaiting_SchedulesTheJobsAgain_OnATokenOfItsOwn_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await CreateRetiredAggregateAsync(connection, Retired, ct);
+        var jobIds = await JobIdsAsync(connection, Retired, ct);
+        var refreshJob = await RefreshJobIdAsync(connection, Retired, ct);
+
+        await using var gate = new NpgsqlConnection(scratch.ConnectionString);
+        await gate.OpenAsync(ct);
+        await ExecuteAsync(gate, $"SELECT pg_advisory_lock({GateKey})", ct);
+        await using var sweeper = new NpgsqlConnection(scratch.ConnectionString);
+        await sweeper.OpenAsync(ct);
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        try
+        {
+            await StartRefreshWorkerAsync(connection, refreshJob, ct);
+            Assert.True(await WaitForAsync(async () => await WorkerCountAsync(connection, jobIds, ct) > 0, TimeSpan.FromSeconds(60), ct),
+                "the scheduler never started the refresh worker");
+
+            var log = new CapturingTestLogger();
+            var sweep = Task.Run(() => TimescaleSupport.DropRetiredBaselineAggregatesAsync(
+                sweeper, log, DateTime.UtcNow, new TimescaleSupport.AggregateJobQuiesceOptions(TimeSpan.FromSeconds(120), TimeSpan.FromMilliseconds(100)), cancel.Token));
+            await WaitForJobsStoppedAsync(connection, jobIds, log, ct);
+
+            cancel.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => sweep.WaitAsync(TimeSpan.FromSeconds(60), ct));
+
+            Assert.True(await RelationExistsAsync(connection, Retired, ct), "a cancelled sweep drops nothing");
+            Assert.All(await JobStatesAsync(connection, jobIds, ct), s => Assert.True(s.Value, $"job {s.Key} is scheduled again after the cancellation"));
+            Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            await ExecuteAsync(gate, $"SELECT pg_advisory_unlock({GateKey})", CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// A cap of zero is one look: with no worker running the final look is empty, and an empty final look lets the
+    /// drop go ahead (it is not skipped, and it logs no warning).
+    /// </summary>
+    [Fact]
+    public async Task EmptyFinalLookAtTheCap_LetsTheDropGoAhead_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await CreateRetiredAggregateAsync(connection, Retired, ct);
+
+        var log = new CapturingTestLogger();
+        Assert.Equal(1, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, log, DateTime.UtcNow, ZeroCap, ct));
+        Assert.False(await RelationExistsAsync(connection, Retired, ct), "the drop goes ahead on an empty final look");
+        Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
     }
 
     /// <summary>
@@ -602,6 +714,29 @@ $fn$", ct);
         Assert.Equal(jobIds.Count, states.Count);
         return states;
     }
+
+    /// <summary>Waits until the sweep has stopped every one of the jobs. A drop that ran under the worker deletes the
+    /// jobs instead, and that is reported as what it is rather than as a missing row.</summary>
+    private static async Task WaitForJobsStoppedAsync(NpgsqlConnection connection, IReadOnlyCollection<int> jobIds, CapturingTestLogger log, CancellationToken ct)
+    {
+        async Task<(long Present, long Scheduled)> LookAsync()
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT count(*), count(*) FILTER (WHERE scheduled) FROM timescaledb_information.jobs WHERE job_id = ANY($1::integer[])", connection);
+            command.Parameters.AddWithValue(jobIds.ToArray());
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            return (reader.GetInt64(0), reader.GetInt64(1));
+        }
+
+        var reached = await WaitForAsync(async () => { var look = await LookAsync(); return look.Present == 0 || look.Scheduled == 0; }, TimeSpan.FromSeconds(30), ct);
+        var final = await LookAsync();
+        Assert.True(reached, $"the sweep never stopped the jobs: {log.Joined}");
+        Assert.True(final.Present == jobIds.Count, $"the aggregate's jobs were dropped before its worker exited: {log.Joined}");
+    }
+
+    private static async Task<bool> WorkerAliveAsync(NpgsqlConnection connection, int workerPid, int jobId, CancellationToken ct)
+        => await ScalarAsync<long>(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {workerPid} AND backend_type LIKE '% [{jobId}]'", ct) > 0;
 
     private static async Task<long> WorkerCountAsync(NpgsqlConnection connection, IReadOnlyCollection<int> jobIds, CancellationToken ct)
     {
