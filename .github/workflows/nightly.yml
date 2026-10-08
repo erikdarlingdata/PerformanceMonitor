@@ -506,6 +506,9 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
+          # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
@@ -699,6 +702,9 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
+          # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
@@ -1112,6 +1118,9 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
+          # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
           if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling

@@ -120,7 +120,8 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         const string database = "pm_test_pgreadbinaryfile_sqlascii";
         const string targetKey = "dev-postgres-sqlascii-probe";
 
-        await using var adminConnection = new NpgsqlConnection(connectionStringRoot);
+        /* #5549: unpooled, because this connection runs the drop (and the create beside it). */
+        await using var adminConnection = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(connectionStringRoot));
         await adminConnection.OpenAsync();
 
         await DropScratchDatabaseAsync(connectionStringRoot, adminConnection, database);
@@ -162,7 +163,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(connectionStringRoot, bodySucceeded, async (cleanup, _) =>
+            await LiveStoreCleanup.RunAsync(ScratchPostgres.UnpooledAdminConnectionString(connectionStringRoot), bodySucceeded, async (cleanup, _) =>
             {
                 await DropScratchDatabaseAsync(connectionStringRoot, cleanup, database);
             });
@@ -205,7 +206,9 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         var ct = TestContext.Current.CancellationToken;
         const string database = "pm_test_enc1252";
 
-        await using var admin = new NpgsqlConnection(connectionStringRoot);
+        /* #5549: unpooled, because this connection runs the drop. The database is a bare WIN1252 one made from template0,
+           so it never holds a TimescaleDB job and needs no quiesce. */
+        await using var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(connectionStringRoot));
         await admin.OpenAsync(ct);
         await using (var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS {database}", admin)) { await drop.ExecuteNonQueryAsync(ct); }
         await using (var create = new NpgsqlCommand($"CREATE DATABASE {database} ENCODING 'WIN1252' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0", admin))
@@ -234,7 +237,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(connectionStringRoot!, bodySucceeded, async (cleanup, _) =>
+            await LiveStoreCleanup.RunAsync(ScratchPostgres.UnpooledAdminConnectionString(connectionStringRoot!), bodySucceeded, async (cleanup, _) =>
             {
                 await DropScratchDatabaseAsync(connectionStringRoot!, cleanup, database);
             });

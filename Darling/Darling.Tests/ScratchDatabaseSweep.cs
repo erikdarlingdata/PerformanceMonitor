@@ -33,6 +33,17 @@ namespace Darling.Tests;
 /// count: every database with the extension has one, and an abandoned database would otherwise never look idle.</item>
 /// <item>The drop is a plain <c>DROP DATABASE</c>, never <c>WITH (FORCE)</c>, so a database that gained a session
 /// between the check and the drop refuses to go instead of being pulled out from under a test.</item>
+/// <item>Each drop is preceded by <see cref="ScratchPostgres.QuiesceTimescaleJobsAsync"/> (#5549): a database is never
+/// dropped while one of its TimescaleDB job workers is still attached, the same rule every in-test drop follows.
+/// The quiesce is best-effort and bounded, and it never throws. It opens one short client session of its own in the
+/// database, and the drop needs no retry for that session: PostgreSQL's own <c>DROP DATABASE</c> waits up to 5
+/// seconds for other backends to exit before it raises SQLSTATE 55006 (<c>CountOtherDBBackends</c>), which covers the
+/// closing session. Do not wrap the drop in a retry loop: when a session really stays, each attempt costs that full
+/// 5 seconds, and 30 of them (about 153 s) ran past the sweep's 60 s limit and left every later database in place.
+/// A plain drop is tried once per database. The quiesce also unschedules the database's TimescaleDB jobs
+/// (<c>alter_job(scheduled =&gt; false)</c>) before the drop, so a drop the server refuses leaves that database
+/// with its jobs unscheduled. That is accepted: the sweep only drops a database it has already judged abandoned
+/// (past <see cref="AbandonedAfter"/>, no client session), and nothing is rescheduled.</item>
 /// <item>The database the connection string itself names is never a candidate.</item>
 /// </list></para>
 /// </summary>
@@ -130,7 +141,9 @@ WHERE d.datname LIKE 'darling\_scratch\_%'
         var ownDatabase = new NpgsqlConnectionStringBuilder(baseConnectionString).Database;
         var dropped = new List<string>();
 
-        await using var admin = new NpgsqlConnection(baseConnectionString);
+        /* #5549: unpooled, like ScratchPostgres's own create and drop, so the backend that ran a DROP DATABASE ends
+           with this connection instead of going back into the pool every live test draws from. */
+        await using var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString));
         await admin.OpenAsync(cancellationToken);
 
         var idle = new List<string>();
@@ -150,18 +163,27 @@ WHERE d.datname LIKE 'darling\_scratch\_%'
                 continue;
             }
 
+            /* #5549: no TimescaleDB job worker is left in the database the drop below removes. Best-effort: it never
+               throws, so a database that cannot be opened, or one without the extension, goes straight to the drop; and
+               it ends at once when nothing runs there, so a sweep over idle databases stays quick. */
+            await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString, name, cancellationToken);
+
             try
             {
-                /* The name matched the anchored pattern above, so it is hex and digits only: safe as a quoted
-                   identifier. */
+                /* One attempt. The server itself waits up to 5 s for the quiesce's closing session (and any other
+                   backend) to leave before it raises 55006, so a retry here only multiplies the wait for a session
+                   that really stays. The name matched the anchored pattern above, so it is hex and digits only: safe
+                   as a quoted identifier. */
                 await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\"", admin);
                 await drop.ExecuteNonQueryAsync(cancellationToken);
+
                 dropped.Add(name);
                 log($"Dropped abandoned scratch database {name}.");
             }
             catch (PostgresException ex)
             {
-                /* Typically a session that connected after the check: not abandoned after all. Leave it. */
+                /* Typically a session that connected after the check: not abandoned after all. Leave it. Its TimescaleDB
+                   jobs stay unscheduled (the quiesce ran first); see the class comment. */
                 log($"Left scratch database {name} in place: {ex.MessageText}");
             }
         }

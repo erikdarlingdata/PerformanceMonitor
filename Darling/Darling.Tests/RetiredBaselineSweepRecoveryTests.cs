@@ -49,7 +49,10 @@ public sealed class RetiredBaselineSweepRecoveryLiveTests
         var bodySucceeded = false;
         try
         {
-            using var connection = new NpgsqlConnection(connectionString);
+            /* The sweep runs on the connection shape the product's service uses: the product search path, so an
+               unqualified TimescaleDB call in the sweep (alter_job) resolves on a fresh store too, where the extension
+               lives in collect and a pooled backend started before the migration has no path to it. */
+            using var connection = new NpgsqlConnection(WithProductSearchPath(connectionString!));
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
             await CreateRetiredFixtureAsync(connection, ct);
@@ -100,15 +103,24 @@ $fn$", ct);
     }
 
     /// <summary>
-    /// The real race, with the policy's refresh job left to run (no <c>initial_start</c> delay) and one running
-    /// beside every drop: the sweep either wins, loses to a deadlock (40P01, connection stays Open) or loses to
-    /// <c>XX000</c> (connection broken). Whichever it is, the connection must be Open when the sweep returns and
-    /// the retry loop must finish the job. Whether the XX000 arm fires is down to timing (about one iteration in
-    /// forty on a laptop), so this checks the invariant on every iteration and the deterministic test above is
-    /// what pins the broken-connection arm.
+    /// A refresh job in flight when the sweep's drop lands: the drop loses, the connection must be Open when the
+    /// sweep returns, and the retry loop must finish the job once the refresh is done.
+    ///
+    /// <para>#5549: this used to race a real <c>CALL run_job</c> against the drop, 40 times, with the policy also
+    /// due on the scheduler. On CI the client backend running that refresh died with 0xC0000005 while the drop was
+    /// running, and the postmaster restarted every process on the shared cluster, so the tests that were running
+    /// at the time failed too. A TimescaleDB job must not run while its aggregate is being dropped, so the race is
+    /// now staged instead. The refresh job still runs for real, to completion, before the sweep starts. Then the
+    /// runner holds what a refresh holds until it commits, <c>ROW EXCLUSIVE</c> on the materialization hypertable
+    /// (its DELETE and INSERT), in an open transaction. A <c>lock_timeout</c> on the test's own sweeper session makes
+    /// the first drop give up behind that lock instead of waiting it out (the limit is reset right after that attempt,
+    /// so the retries run with the server's own). That is the drop losing to the job with the connection still Open,
+    /// the shape of the deadlock arm (40P01), on every iteration. The broken-connection arm
+    /// (XX000) is pinned by the deterministic test above. The policy stays a day out, so the scheduler never
+    /// launches its own refresh beside the drop either.</para>
     /// </summary>
     [Fact]
-    public async Task Sweep_LeavesItsConnectionOpen_WhenARefreshJobRunsDuringTheDrop_AgainstDevPostgres()
+    public async Task Sweep_LeavesItsConnectionOpen_WhenARefreshHoldsALockDuringTheDrop_AgainstDevPostgres()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -122,21 +134,33 @@ $fn$", ct);
             await setup.OpenAsync(ct);
             await PgMigrations.MigrateAsync(setup, ct);
 
-            for (var i = 0; i < 40; i++)
+            /* run_job is qualified with the extension's schema. A pooled connection opened before a fresh store's
+               migration has no search path to it, and the old test swallowed that 42883 with every other error, so on
+               a fresh database its refresh job never ran at all. */
+            var runJob = await ScalarAsync<string>(setup,
+                "SELECT format('%I.run_job', n.nspname) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'timescaledb'", ct);
+
+            for (var i = 0; i < 5; i++)
             {
-                await CreateRetiredFixtureAsync(setup, ct, delayRefreshPolicy: false);
+                await CreateRetiredFixtureAsync(setup, ct);
                 var jobId = await ScalarAsync<int>(setup,
                     "SELECT job_id FROM timescaledb_information.jobs WHERE proc_name = 'policy_refresh_continuous_aggregate' AND hypertable_schema = 'collect' AND hypertable_name = 'cpu_utilization_baseline'", ct);
+                var materialization = await ScalarAsync<string>(setup,
+                    "SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = 'cpu_utilization_baseline'", ct);
 
-                using var sweeper = new NpgsqlConnection(connectionString);
+                /* Opened with the product search path, like the service's own connections; run_job below stays qualified. */
+                using var sweeper = new NpgsqlConnection(WithProductSearchPath(connectionString!));
                 await sweeper.OpenAsync(ct);
-                using var runner = new NpgsqlConnection(connectionString);
+                using var runner = new NpgsqlConnection(WithProductSearchPath(connectionString!));
                 await runner.OpenAsync(ct);
-                var run = Task.Run(async () =>
-                {
-                    try { await ExecuteAsync(runner, $"CALL run_job({jobId})", ct); }
-                    catch (Exception ex) when (ex is not OperationCanceledException) { /* the job losing to the DROP is the point */ }
-                }, ct);
+
+                /* The refresh runs for real and finishes before any drop starts (#5549). */
+                await ExecuteAsync(runner, $"CALL {runJob}({jobId})", ct);
+
+                /* The next refresh, in flight: the lock its materialization writes hold until it commits. */
+                using var inFlight = await runner.BeginTransactionAsync(ct);
+                await ExecuteAsync(runner, $"LOCK TABLE {materialization} IN ROW EXCLUSIVE MODE", ct);
+                await ExecuteAsync(sweeper, "SET lock_timeout = '500ms'", ct);
 
                 var log = new CapturingTestLogger();
                 for (var attempt = 0; attempt < 5; attempt++)
@@ -144,6 +168,20 @@ $fn$", ct);
                     await TimescaleSupport.DropRetiredBaselineAggregatesAsync(sweeper, log, ct);
                     Assert.True(sweeper.State == ConnectionState.Open,
                         $"iteration {i}: the connection is {sweeper.State} after sweep attempt {attempt + 1}: {log.Joined}");
+                    if (attempt == 0)
+                    {
+                        /* The drop lost to the job: lock_timeout (55P03), logged once, and the aggregate is still there. */
+                        Assert.True(await ScalarAsync<bool>(sweeper, "SELECT to_regclass('collect.cpu_utilization_baseline') IS NOT NULL", ct),
+                            $"iteration {i}: the first sweep dropped the aggregate through the in-flight job's lock: {log.Joined}");
+                        Assert.Equal(1, log.Lines.Count(l => l.StartsWith("Warning:", StringComparison.Ordinal)
+                            && l.Contains("cpu_utilization_baseline", StringComparison.Ordinal)
+                            && l.Contains("55P03", StringComparison.Ordinal)));
+                        /* The 500 ms limit was for the attempt that has to lose. Later attempts run with the server's own
+                           lock_timeout, so autovacuum or another job holding a lock briefly does not fail the test. */
+                        await ExecuteAsync(sweeper, "RESET lock_timeout", ct);
+                        await inFlight.CommitAsync(ct);
+                    }
+
                     if (await ScalarAsync<bool>(sweeper, "SELECT to_regclass('collect.cpu_utilization_baseline') IS NULL AND to_regclass('collect.file_io_baseline') IS NULL", ct))
                     {
                         break;
@@ -152,7 +190,6 @@ $fn$", ct);
                     await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
                 }
 
-                await run;
                 Assert.True(await ScalarAsync<bool>(sweeper, "SELECT to_regclass('collect.cpu_utilization_baseline') IS NULL AND to_regclass('collect.file_io_baseline') IS NULL", ct),
                     $"iteration {i}: the retired relations survived five sweep attempts: {log.Joined}");
             }
@@ -169,8 +206,12 @@ $fn$", ct);
         }
     }
 
+    /// <summary>The connection string with <c>Search Path</c> set to the product's (<see cref="PgSchemaGenerator.SearchPath"/>), as DarlingWorker sets it.</summary>
+    private static string WithProductSearchPath(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+
     /// <summary>The pre-#2007 shapes the sweep retires: cpu as a continuous aggregate with its policies, file_io as a plain view.</summary>
-    private static async Task CreateRetiredFixtureAsync(NpgsqlConnection connection, CancellationToken ct, bool delayRefreshPolicy = true)
+    private static async Task CreateRetiredFixtureAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await ExecuteAsync(connection,
             "SELECT create_hypertable('collect.cpu_utilization_stats', by_range('collection_time', INTERVAL '1 day'), if_not_exists => true, migrate_data => true)", ct);
@@ -184,9 +225,10 @@ SELECT server_id, time_bucket('1 hour', collection_time) AS bucket, collection_t
 FROM collect.cpu_utilization_stats
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA", ct);
-        /* The race test wants the refresh job live (initial_start now), so it can run beside the drop. The
-           deterministic test plants its own failure and keeps the job a day out. */
-        var initialStart = delayRefreshPolicy ? "now() + INTERVAL '1 day'" : "now()";
+        /* The refresh policy of this fixture's aggregate is parked a day out in both tests, so the scheduler never launches
+           that policy's refresh while the sweep is dropping the aggregate (#5549). It stops only this policy: the other
+           jobs the migration scheduled in the test database still run on their own schedules. */
+        const string initialStart = "now() + INTERVAL '1 day'";
         await ExecuteAsync(connection,
             $"SELECT add_continuous_aggregate_policy('collect.cpu_utilization_baseline', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => {initialStart}, if_not_exists => true)", ct);
         await ExecuteAsync(connection,
