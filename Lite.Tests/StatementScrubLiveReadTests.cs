@@ -191,9 +191,10 @@ public sealed class StatementScrubLiveReadTests
     }
 
     /// <summary>
-    /// The windows and tabs that open their own connection to the monitored server. A read of statement text or a plan
-    /// from one of them is judged where it is read (the Live Snapshot above); a new file that opens a connection fails here
-    /// until the list is updated, which is the moment to decide what it reads.
+    /// The files anywhere in Lite (windows, tabs, services and the analysis fetcher) that open their own connection to the
+    /// monitored server. A read of statement text or a plan from one of them is judged where it is read (the Live Snapshot
+    /// above) or at the call that displays it; a new file that opens a connection fails here until the list is updated,
+    /// which is the moment to decide what it reads.
     /// </summary>
     [Fact]
     public void TheFilesThatOpenTheirOwnServerConnection_AreTheKnownOnes()
