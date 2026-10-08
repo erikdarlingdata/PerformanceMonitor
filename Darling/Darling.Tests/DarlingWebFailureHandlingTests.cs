@@ -594,7 +594,7 @@ public sealed class DarlingWebFailureHandlingTests
 
         Assert.Equal(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
         Assert.Equal(1, capturing.Inner.CountAtLevel(LogLevel.Error));
-        Assert.Equal(1, capturing.Inner.Lines.Count);
+        Assert.Single(capturing.Inner.Lines);
         Assert.Contains("/api/anything", capturing.Inner.Joined, StringComparison.Ordinal);
     }
 
