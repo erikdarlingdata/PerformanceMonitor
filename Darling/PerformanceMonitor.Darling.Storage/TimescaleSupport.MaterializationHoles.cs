@@ -276,9 +276,10 @@ public static partial class TimescaleSupport
     /// <summary>
     /// The scan, for one aggregate: every bucket in <c>[$1, $2]</c> at <c>$3</c> width that the materialization
     /// hypertable holds NO row for and the source holds at least one row for that the aggregate's own filter
-    /// admits. Two correlated <c>EXISTS</c> probes per bucket, each an index range on a relation whose time index
-    /// TimescaleDB creates by default (the source's <c>&lt;time&gt;_idx</c>, the materialization's
-    /// <c>bucket_idx</c>), so cost follows the number of buckets scanned and not the size of either table.
+    /// admits. Two correlated <c>EXISTS</c> probes per bucket. Each can be an index range on a relation whose time
+    /// index TimescaleDB creates by default (the source's <c>&lt;time&gt;_idx</c>, the materialization's
+    /// <c>bucket_idx</c>), so cost follows the number of buckets scanned and not the size of either table; whether
+    /// the planner USES the materialization's index is the question the #5521 paragraph below answers.
     /// <paramref name="materialization"/> is the aggregate's materialization hypertable
     /// (<see cref="ResolveMaterializationAsync"/>), read directly so a real-time aggregate's un-materialized
     /// tail does not count as covered. Ordered oldest first, the order the cap consumes.
@@ -297,6 +298,36 @@ public static partial class TimescaleSupport
     /// a SubPlan once per bucket with the chunk it needs picked at run time. The candidate buckets are fenced the
     /// same way, so the source is probed only for the buckets the materialization probe found empty. Measured
     /// with the old text as the oracle: the same buckets, in the same order, on every target.</para>
+    ///
+    /// <para><b>The materialization probe is a range pair, not an equality (#5521).</b> Every materialization has
+    /// the default <c>bucket_idx</c> (<c>bucket DESC</c>), and the probe with <c>m.bucket = b.bucket</c> still did a
+    /// Seq Scan of a whole uncompressed chunk for a bucket the chunk lacked: 240,137 blocks, 11.2 s, on a field
+    /// store's daily Query Store interval rollup, 23 times in 13 days. A chunk whose rows all carry one bucket
+    /// value has <c>n_distinct = 1</c> and a most-common-value frequency of 1, so <c>bucket = $param</c> is
+    /// estimated to match every row, and a SubPlan under <c>EXISTS</c> is costed for its FIRST row: a sequential
+    /// scan expected to hit a match at once costs next to nothing, so it beats the index. The estimate is wrong
+    /// exactly when the bucket is missing, and a missing bucket is what this scan looks for. Written as
+    /// <c>m.bucket &gt;= b.bucket AND m.bucket &lt;= b.bucket</c> the probe is the same set of rows for a
+    /// <c>timestamp</c> (and TimescaleDB still excludes chunks at run time and pushes the pair into a compressed
+    /// chunk's min/max metadata), but PostgreSQL cannot read a range with two non-constant bounds off the
+    /// statistics and uses its flat default of 0.5% of the rows, whatever the bucket values look like. The
+    /// first-row cost of the index then wins by a wide margin on a big chunk, and a missing bucket costs one index
+    /// seek instead of a chunk read. Measured on a rig shaped like the field chunk (default compression,
+    /// uncompressed chunks of 600 K and 100 K rows with every bucket value in a chunk the same, heap pages not
+    /// all-visible): 31,773 blocks before, 294 after, for the one missing bucket in an uncompressed chunk.</para>
+    ///
+    /// <para><b>Why not bound the probe by <c>server_id</c> instead (the issue's fix direction).</b> Measured on
+    /// the same rig and kept out: <c>server_id = ANY(ids) AND bucket = $param</c> is still estimated to match
+    /// every row, so the planner kept the Seq Scan (24,766 blocks for the same bucket); with the range pair added
+    /// it seeks, but the list of every <c>server_id</c> in the materialization, read in the same statement so the
+    /// answer stays exact, costs a seek per server per chunk (2,940 blocks for a window with no hole, against
+    /// 308), which grows with the chunk count and so cannot be bought back on a store with a year of daily
+    /// chunks. The range pair alone needs no list, no per-target index check and no fallback, and the
+    /// Query Store interval hourly rollup's materialization, which has no <c>server_id</c> index, takes it too.
+    /// The compressed chunks cost what they did (a scan of the compressed heap with the min/max filter; 82
+    /// blocks against 92 on the rig, 24.6 ms on the field store). "Walk forward from the oldest hole" is not
+    /// needed either: once a missing bucket costs a seek, the scan's cost follows the number of buckets and
+    /// not the size of the chunks.</para>
     /// </summary>
     public static string MaterializationHoleScanSql(MaterializationHoleTarget target, (string Schema, string Name) materialization)
     {
@@ -308,7 +339,7 @@ SELECT c.bucket
 FROM (
     SELECT b.bucket
     FROM generate_series($1::timestamp, $2::timestamp, $3::interval) AS b(bucket)
-    WHERE NOT EXISTS (SELECT 1 FROM {QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)} AS m WHERE m.bucket = b.bucket OFFSET 0)
+    WHERE NOT EXISTS (SELECT 1 FROM {QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)} AS m WHERE m.bucket >= b.bucket AND m.bucket <= b.bucket OFFSET 0)
     OFFSET 0
 ) AS c
 WHERE EXISTS (
