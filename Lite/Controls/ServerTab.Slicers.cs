@@ -87,6 +87,7 @@ public partial class ServerTab : UserControl
             _activeQueriesSlicerData = data;
             _activeQueriesSlicerMetric = "Sessions";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, queryFrom, queryTo, DateTime.UtcNow);
+            EmptyState.Show(ActiveQueriesSlicer, data.Count == 0, "No active query samples in the selected time window.");
             if (data.Count > 0)
                 ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
         }
@@ -130,6 +131,7 @@ public partial class ServerTab : UserControl
             _queryStatsSlicerData = data;
             _queryStatsSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
+            EmptyState.Show(QueryStatsSlicer, data.Count == 0, "No query statistics in the selected time window.");
             if (data.Count > 0)
                 QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
@@ -171,6 +173,7 @@ public partial class ServerTab : UserControl
             _queryStoreSlicerData = data;
             _queryStoreSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
+            EmptyState.Show(QueryStoreSlicer, data.Count == 0, "No Query Store data in the selected time window.");
             if (data.Count > 0)
                 QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
@@ -211,6 +214,7 @@ public partial class ServerTab : UserControl
             _procStatsSlicerData = data;
             _procStatsSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
+            EmptyState.Show(ProcStatsSlicer, data.Count == 0, "No procedure statistics in the selected time window.");
             if (data.Count > 0)
                 ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }

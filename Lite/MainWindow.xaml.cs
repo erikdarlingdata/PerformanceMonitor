@@ -48,6 +48,17 @@ public partial class MainWindow : Window
     private SystemTrayService? _trayService;
     private WindowResumeGuard? _resumeGuard;
     private readonly Dictionary<string, TabItem> _openServerTabs = new();
+
+    /* What the status bar says after the server's first collection ("Data loaded", or the collection error), by server id.
+       Switching to a server's tab words the status bar from this, so "Data loaded" is not lost on the way back (F19). */
+    private readonly Dictionary<string, string> _serverStatusSuffix = new();
+
+    /// <summary>
+    /// The status bar text for a connected server tab: "Connected to X", plus " - Data loaded" (or the collection error)
+    /// once the server's first collection has finished. One wording for the moment the tab opens and every later switch to it.
+    /// </summary>
+    internal static string ConnectedStatusText(string displayName, string? suffix) =>
+        string.IsNullOrEmpty(suffix) ? $"Connected to {displayName}" : $"Connected to {displayName} - {suffix}";
     private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<int> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
     /* Server tab badge state for the non-blocking/deadlock conditions (#754/#749), keyed by the
        ServerConnection GUID (the same key as _openServerTabs). The alert sweep sets these; both the
@@ -589,7 +600,8 @@ public partial class MainWindow : Window
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
             ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;
-            StatusText.Text = $"Connected to {serverTab.Server.DisplayNameWithIntent}";
+            _serverStatusSuffix.TryGetValue(serverTab.Server.Id, out var statusSuffix);
+            StatusText.Text = ConnectedStatusText(serverTab.Server.DisplayNameWithIntent, statusSuffix);
         }
 
         /* Refresh alerts tab when selected */
@@ -1213,14 +1225,16 @@ public partial class MainWindow : Window
             try
             {
                 await Task.Run(() => _collectorService.RunAllCollectorsForServerAsync(server));
-                StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Data loaded";
+                _serverStatusSuffix[server.Id] = "Data loaded";
+                StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, "Data loaded");
                 serverTab.RefreshData();
                 UpdateCollectorHealth();
                 _ = RefreshOverviewAsync();
             }
             catch (Exception ex)
             {
-                StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Collection error: {ex.Message}";
+                _serverStatusSuffix[server.Id] = $"Collection error: {ex.Message}";
+                StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, _serverStatusSuffix[server.Id]);
             }
         }
         else
@@ -1546,6 +1560,7 @@ public partial class MainWindow : Window
 
             ServerTabControl.Items.Remove(tab);
             _openServerTabs.Remove(serverId);
+            _serverStatusSuffix.Remove(serverId);
 
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);

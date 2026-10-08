@@ -14,7 +14,7 @@ using Lite.Tests.Helpers;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
-namespace Lite.Tests;
+namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// Every SQL Server collector's own statements carry the self-query marker (#1007 click-through, F14).
