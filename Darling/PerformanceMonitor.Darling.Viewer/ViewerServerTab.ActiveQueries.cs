@@ -105,8 +105,9 @@ public partial class ViewerServerTab
         var data = await _dataService.GetActiveQuerySlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _activeQueriesSlicerData = data;
         _activeQueriesSlicerMetric = "Sessions";
-        EmptyState.Show(ActiveQueriesSlicer, data.Count == 0, "No active query samples in the selected time window.");
-        if (data.Count > 0)
+        if (data.Count == 0)
+            ActiveQueriesSlicer.ShowEmpty("No active query samples in the selected time window.");
+        else
             ActiveQueriesSlicer.LoadData(data, "Sessions", startUtc, endUtc);
     }
 

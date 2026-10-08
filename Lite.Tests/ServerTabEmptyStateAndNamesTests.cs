@@ -117,6 +117,149 @@ public class ServerTabEmptyStateAndNamesTests
         Assert.Equal(0, count);
     }
 
+    [Theory]
+    [InlineData("NoAlertsMessage")]
+    [InlineData("NoJobsMessage")]
+    [InlineData("NoDbSizesMessage")]
+    [InlineData("NoStorageGrowthMessage")]
+    public void EmptyState_LeavesASurfaceWithAnyOtherOwnMessageAlone_SoTwoTextsAreNeverDrawnOverEachOther(string siblingName)
+    {
+        var (sameCell, otherCell) = OnStaThread(() =>
+        {
+            var host = new Grid();
+            var dataGrid = new DataGrid();
+            host.Children.Add(dataGrid);
+            host.Children.Add(new TextBlock { Name = siblingName });
+            EmptyState.Show(dataGrid, isEmpty: true);
+            var sameCellCount = EmptyTexts(host).Count;
+
+            /* A message in ANOTHER cell does not stop the text. */
+            var other = new Grid();
+            var grid2 = new DataGrid();
+            other.Children.Add(grid2);
+            var message = new TextBlock { Name = siblingName };
+            Grid.SetRow(message, 1);
+            other.Children.Add(message);
+            EmptyState.Show(grid2, isEmpty: true);
+            return (sameCellCount, EmptyTexts(other).Count);
+        });
+
+        Assert.Equal(0, sameCell);
+        Assert.Equal(1, otherCell);
+    }
+
+    [Fact]
+    public void EmptyState_TheGenericGridWording_MatchesTheThemesNoDataText()
+    {
+        Assert.Equal("No data for the selected time range.", EmptyState.DefaultGridText);
+        foreach (var theme in new[] { "Lite/Themes/DarkTheme.xaml", "Lite/Themes/LightTheme.xaml", "Lite/Themes/CoolBreezeTheme.xaml",
+            "Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml", "Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml", "Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml" })
+        {
+            Assert.Contains("Value=\"" + EmptyState.DefaultGridText + "\"", RepoFile(theme), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ASlicerWithNoDataShowsItsTextOnTheChartCanvas_NotOverTheHeader_AndDropsThePreviousBars()
+    {
+        var (text, cleared) = OnStaThread(() =>
+        {
+            var slicer = new PerformanceMonitorLite.Controls.TimeRangeSlicerControl();
+            slicer.ShowEmpty("No query statistics in the selected time window.");
+            return (slicer.EmptyText, slicer.SelectionStartUtc);
+        });
+
+        Assert.Equal("No query statistics in the selected time window.", text);
+        Assert.Null(cleared);
+
+        foreach (var file in new[] { "Lite/Controls/TimeRangeSlicerControl.xaml.cs", "Darling/PerformanceMonitor.Darling.Viewer/TimeRangeSlicerControl.xaml.cs" })
+        {
+            var source = RepoFile(file);
+            Assert.Contains("if (_data.Count < 1) { DrawEmptyText(); return; }", source, StringComparison.Ordinal);
+            Assert.Contains("_emptyText = null;", source, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void AccessibleNames_RecomputeAnAutoName_WhenTheHeaderTextChanges_ButNeverReplaceAHandSetOne()
+    {
+        var (first, second, handSet) = OnStaThread(() =>
+        {
+            var text = new TextBlock { Text = "SQL2022" };
+            var panel = new StackPanel();
+            panel.Children.Add(text);
+            var tab = new TabItem { Header = panel };
+            AccessibleNames.Name(tab, tab.Header);
+            var firstName = AutomationProperties.GetName(tab);
+            text.Text = "SQL2022 (renamed)";
+            var secondName = AutomationProperties.GetName(tab);
+
+            var other = new TextBlock { Text = "A" };
+            var otherPanel = new StackPanel();
+            otherPanel.Children.Add(other);
+            var named = new TabItem { Header = otherPanel };
+            AutomationProperties.SetName(named, "Alerts");
+            AccessibleNames.Name(named, named.Header);
+            other.Text = "B";
+            return (firstName, secondName, AutomationProperties.GetName(named));
+        });
+
+        Assert.Equal("SQL2022", first);
+        Assert.Equal("SQL2022 (renamed)", second);
+        Assert.Equal("Alerts", handSet);
+    }
+
+    [Fact]
+    public void AccessibleNames_GiveAColumnFilterButtonItsOwnName()
+    {
+        var buttonName = OnStaThread(() =>
+        {
+            var panel = new StackPanel { Orientation = Orientation.Horizontal };
+            var button = new Button();
+            panel.Children.Add(button);
+            panel.Children.Add(new TextBlock { Text = "Duration (ms)" });
+            var header = new System.Windows.Controls.Primitives.DataGridColumnHeader { Content = panel };
+            AccessibleNames.Name(header, header.Content);
+            return AutomationProperties.GetName(button);
+        });
+
+        Assert.Equal("Filter Duration (ms)", buttonName);
+    }
+
+    [Fact]
+    public void TheOverviewCard_HasAnAutomationPeerThatCarriesItsName()
+    {
+        var (peerName, controlType) = OnStaThread(() =>
+        {
+            var card = new PerformanceMonitorLite.Controls.OverviewCardBorder();
+            AutomationProperties.SetName(card, "example-sql-01");
+            var peer = System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(card);
+            return (peer.GetName(), peer.GetAutomationControlType());
+        });
+
+        Assert.Equal("example-sql-01", peerName);
+        Assert.Equal(System.Windows.Automation.Peers.AutomationControlType.Group, controlType);
+        Assert.Contains("<controls:OverviewCardBorder", RepoFile("Lite/MainWindow.xaml"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheSettingsWindow_KeepsSaveAndCloseBelowTheScrollArea()
+    {
+        var xaml = RepoFile("Lite/Windows/SettingsWindow.xaml");
+        var scrollEnd = xaml.IndexOf("</ScrollViewer>", StringComparison.Ordinal);
+        Assert.True(scrollEnd > 0);
+        Assert.True(xaml.IndexOf("Click=\"SaveButton_Click\"", StringComparison.Ordinal) > scrollEnd, "Save sits inside the scroll area again");
+        Assert.True(xaml.IndexOf("Click=\"CloseButton_Click\"", StringComparison.Ordinal) > scrollEnd);
+    }
+
+    [Fact]
+    public void TheOverviewRefresh_ReadsEachServersClockOncePerRefresh()
+    {
+        var source = RepoFile("Lite/MainWindow.xaml.cs");
+        Assert.Contains("var refreshClocks = new Dictionary<int, ServerClock>();", source, StringComparison.Ordinal);
+        Assert.Contains("refreshClocks.TryGetValue(serverId, out var cached)", source, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AccessibleNames_NameAPanelHeaderFromItsTitle_NotFromItsFilterButton()
     {
@@ -163,6 +306,8 @@ public class ServerTabEmptyStateAndNamesTests
         var style = xaml.Substring(start, xaml.IndexOf("</Style>", start, StringComparison.Ordinal) - start);
 
         Assert.Contains("<WrapPanel", style, StringComparison.Ordinal);
+        Assert.Contains("KeyboardNavigation.TabNavigation=\"Once\"", style, StringComparison.Ordinal);
+        Assert.Contains("KeyboardNavigation.DirectionalNavigation=\"Cycle\"", style, StringComparison.Ordinal);
         Assert.Contains("IsItemsHost=\"True\"", style, StringComparison.Ordinal);
         Assert.DoesNotContain("<TabPanel", style, StringComparison.Ordinal);
         Assert.Contains("PART_SelectedContentHost", style, StringComparison.Ordinal);
@@ -176,7 +321,8 @@ public class ServerTabEmptyStateAndNamesTests
         var xaml = RepoFile(file);
 
         Assert.Contains("Text=\"I/O Latency ms\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("<Run Text=\"events\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("<Run Text=\"events\"/>", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("<Run Text=\"events\" FontWeight", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"CPU %\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"Buffer Pool MB\"", xaml, StringComparison.Ordinal);
     }
@@ -189,7 +335,7 @@ public class ServerTabEmptyStateAndNamesTests
         var slicers = RepoFile("Lite/Controls/ServerTab.Slicers.cs");
         foreach (var slicer in new[] { "ActiveQueriesSlicer", "QueryStatsSlicer", "QueryStoreSlicer", "ProcStatsSlicer" })
         {
-            Assert.Contains("EmptyState.Show(" + slicer + ", data.Count == 0", slicers, StringComparison.Ordinal);
+            Assert.Contains(slicer + ".ShowEmpty(", slicers, StringComparison.Ordinal);
         }
 
         var charts = RepoFile("Lite/Controls/ServerTab.Charts.cs");

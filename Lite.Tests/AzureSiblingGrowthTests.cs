@@ -126,8 +126,8 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
     public async Task StorageGrowth_ASiblingCollectedAfterTheFix_GrowsLikeAnyOtherDatabase()
     {
         /* Once the new shape is old enough to compare against, the sibling reports its growth. */
-        await SeedSiblingAsync("sibdb", 10_000, 100, Collected.AddDays(-30));
-        await SeedSiblingAsync("sibdb", 10_100, 110, Collected.AddDays(-7));
+        await SeedSiblingAsync("sibdb", 10_000, 100, Collected.AddDays(-30.5));
+        await SeedSiblingAsync("sibdb", 10_100, 110, Collected.AddDays(-7.5));
         await SeedSiblingAsync("sibdb", 10_240, 119);
 
         var sib = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "sibdb");
@@ -137,8 +137,8 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
         Assert.Equal(10_000m, sib.Size30dAgoMb);
         Assert.Equal(140m, sib.Growth7dMb);
         Assert.Equal(240m, sib.Growth30dMb);
-        /* 240 MB over the 30 real days between the 30-day-old snapshot and now. */
-        Assert.Equal(Math.Round(240m / 30m, 4), Math.Round(sib.DailyGrowthRateMb!.Value, 4));
+        /* 240 MB over the 30.5 real days between the 30-day-old snapshot and now. */
+        Assert.Equal(Math.Round(240m / 30.5m, 4), Math.Round(sib.DailyGrowthRateMb!.Value, 4));
     }
 
     [Fact]

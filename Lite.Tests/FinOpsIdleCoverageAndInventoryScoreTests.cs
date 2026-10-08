@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -18,7 +19,7 @@ namespace Lite.Tests;
 
 /// <summary>
 /// The Optimization tab's Idle Databases grid follows the recommendation row's rule: a database is idle for 7 days only when query
-/// stats hold a sample on each of the last 7 UTC days. Without that coverage the grid is empty AND says why, instead of "No idle
+/// stats hold a sample on each of the 7 complete UTC days before today AND the oldest sample is at least 7 days old. Without that coverage the grid is empty AND says why, instead of "No idle
 /// databases detected". (The Server Inventory "Idle DBs" count has its own read test in FinOpsFleetReadParityTests.)
 /// </summary>
 public sealed class FinOpsIdleDatabasesCoverageTests : IClassFixture<SharedDuckDbFixture>, IDisposable
@@ -55,9 +56,19 @@ INSERT INTO database_size_stats
      file_name, physical_name, total_size_mb, used_size_mb)
 VALUES ($1, $2, $3, 'IdleSrv', $4, 7, 1, 'ROWS', $5, $5, 100, NULL)", _nextId++, DateTime.UtcNow, ServerId, name, name + ".mdf");
 
-    private async Task SeedQueryStatsDaysAsync(int days)
+    private async Task SeedQueryStatsDaysAsync(int days) => await SeedQueryStatsAtDaysBackAsync(Enumerable.Range(0, days).Select(d => (double)d).ToArray());
+
+    private async Task SeedQueryStatsAtAsync(DateTime timeUtc) =>
+        await ExecAsync(@"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+     delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
+VALUES ($1, $2, $3, 'IdleSrv', 'DbElsewhere', '0xE', 1, 10, 20, 1)", _nextId++, timeUtc, ServerId);
+
+    /// <summary>One sample per entry, that many days before now (a fraction is a part of a day).</summary>
+    private async Task SeedQueryStatsAtDaysBackAsync(params double[] daysBack)
     {
-        for (var d = 0; d < days; d++)
+        foreach (var d in daysBack)
             await ExecAsync(@"
 INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash,
@@ -79,16 +90,48 @@ VALUES ($1, $2, $3, 'IdleSrv', 'DbElsewhere', '0xE', 1, 10, 20, 1)", _nextId++, 
     }
 
     [Fact]
-    public async Task SevenDaysOfQueryStats_HasCoverage_AndAnUnusedDatabaseIsIdle()
+    public async Task EightDaysBackThroughYesterday_HasCoverage_AndAnUnusedDatabaseIsIdle()
     {
+        // The oldest sample is 8 days old and each of the 7 complete days before today holds one; nothing has arrived yet today.
         await SeedDatabaseAsync("DbOne");
-        await SeedQueryStatsDaysAsync(7);
+        await SeedQueryStatsAtDaysBackAsync(1, 2, 3, 4, 5, 6, 7, 8);
 
         var svc = new LocalDataService(_duckDb);
 
         Assert.True(await svc.HasQueryStatsCoverageAsync(ServerId));
         Assert.Equal("DbOne", Assert.Single(await svc.GetIdleDatabasesAsync(ServerId)).DatabaseName);
         Assert.Equal("No idle databases detected", LocalDataService.IdleDatabasesEmptyText(true));
+    }
+
+    [Fact]
+    public async Task SixAndAHalfDaysSampledEveryDay_HasNoCoverage_BecauseTheOldestSampleIsNotSevenDaysOld()
+    {
+        await SeedDatabaseAsync("DbOne");
+        await SeedQueryStatsAtDaysBackAsync(0, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5);
+
+        Assert.False(await new LocalDataService(_duckDb).HasQueryStatsCoverageAsync(ServerId));
+    }
+
+    [Fact]
+    public async Task SevenAndAHalfDaysMissingOneCompleteDay_HasNoCoverage()
+    {
+        // Samples at noon 8, 7, 6, 5, 4, 2 and 1 days back: the oldest sample is older than 7 days, but 3 days back was never watched.
+        await SeedDatabaseAsync("DbOne");
+        foreach (var d in new[] { 8, 7, 6, 5, 4, 2, 1 })
+            await SeedQueryStatsAtAsync(DateTime.UtcNow.Date.AddDays(-d).AddHours(12));
+
+        Assert.False(await new LocalDataService(_duckDb).HasQueryStatsCoverageAsync(ServerId));
+    }
+
+    [Fact]
+    public async Task FullCoverageWithNoSampleYetToday_IsStillCovered()
+    {
+        // The state just after 00:00 UTC: every complete day from 7 days back to yesterday holds a sample, today none yet.
+        await SeedDatabaseAsync("DbOne");
+        foreach (var d in new[] { 8, 7, 6, 5, 4, 3, 2, 1 })
+            await SeedQueryStatsAtAsync(DateTime.UtcNow.Date.AddDays(-d).AddHours(12));
+
+        Assert.True(await new LocalDataService(_duckDb).HasQueryStatsCoverageAsync(ServerId));
     }
 
     [Fact]

@@ -244,7 +244,7 @@
 
     <!-- No Data Message Style (for empty DataGrids) -->
     <Style x:Key="NoDataMessage" TargetType="TextBlock">
-        <Setter Property="Text" Value="No data for selected time range"/>
+        <Setter Property="Text" Value="No data for the selected time range."/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
         <Setter Property="FontSize" Value="14"/>
         <Setter Property="HorizontalAlignment" Value="Center"/>
@@ -645,7 +645,9 @@
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
                         <WrapPanel x:Name="HeaderPanel" Grid.Row="0" IsItemsHost="True" Panel.ZIndex="1"
-                                   KeyboardNavigation.TabIndex="1"/>
+                                   KeyboardNavigation.TabIndex="1"
+                                   KeyboardNavigation.TabNavigation="Once"
+                                   KeyboardNavigation.DirectionalNavigation="Cycle"/>
                         <Border x:Name="ContentPanel" Grid.Row="1"
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"

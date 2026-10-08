@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -41,6 +42,20 @@ public static class AccessibleNames
         EventManager.RegisterClassHandler(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader), FrameworkElement.LoadedEvent, new RoutedEventHandler(OnColumnHeaderLoaded));
     }
 
+    /// <summary>The name this class set itself, so a later change of the header text can replace it while a name set by hand never is.</summary>
+    private static readonly DependencyProperty AutoNameProperty = DependencyProperty.RegisterAttached(
+        "AutoName", typeof(string), typeof(AccessibleNames), new PropertyMetadata(null));
+
+    /// <summary>The text block a name was read from, and the handler that re-reads the name when its text changes.</summary>
+    private sealed class Watcher
+    {
+        public TextBlock Source = null!;
+        public EventHandler Handler = null!;
+    }
+
+    private static readonly DependencyProperty WatcherProperty = DependencyProperty.RegisterAttached(
+        "Watcher", typeof(Watcher), typeof(AccessibleNames), new PropertyMetadata(null));
+
     private static void OnTabItemLoaded(object sender, RoutedEventArgs e)
     {
         if (sender is TabItem tab)
@@ -57,19 +72,114 @@ public static class AccessibleNames
         }
     }
 
-    /// <summary>Names <paramref name="element"/> from <paramref name="header"/> unless it already has a name or the header is plain text.</summary>
+    private static void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is DependencyObject element)
+        {
+            Unwatch(element);
+        }
+    }
+
+    /// <summary>
+    /// Names <paramref name="element"/> from <paramref name="header"/> unless a hand-set name is there or the header is plain text.
+    /// A name this class set before is replaced when the header text has changed since (an edited server tab, a bound column
+    /// title), and a changed text is picked up from then on without another call.
+    /// </summary>
     public static void Name(DependencyObject element, object? header)
     {
-        if (header is null || header is string || !string.IsNullOrEmpty(AutomationProperties.GetName(element)))
+        if (header is null || header is string)
         {
             return;
         }
 
-        var text = VisibleText(header);
+        var text = VisibleText(header, out var source);
 
-        if (!string.IsNullOrWhiteSpace(text))
+        if (!string.IsNullOrWhiteSpace(text) && SetAuto(element, text))
+        {
+            if (element is System.Windows.Controls.Primitives.DataGridColumnHeader)
+            {
+                NameFilterButtons(header, text);
+            }
+        }
+
+        Watch(element, source);
+    }
+
+    /// <summary>Sets the name unless one was set by hand; true when the element carries this class's name afterwards.</summary>
+    private static bool SetAuto(DependencyObject element, string text)
+    {
+        var current = AutomationProperties.GetName(element);
+        var auto = (string?)element.GetValue(AutoNameProperty);
+
+        if (!string.IsNullOrEmpty(current) && !string.Equals(current, auto, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.Equals(current, text, StringComparison.Ordinal))
         {
             AutomationProperties.SetName(element, text);
+        }
+
+        element.SetValue(AutoNameProperty, text);
+        return true;
+    }
+
+    /// <summary>The filter button beside a column title has only a private-use glyph: a screen reader reads it as "Filter &lt;column&gt;".</summary>
+    private static void NameFilterButtons(object header, string columnTitle)
+    {
+        if (header is System.Windows.Controls.Primitives.ButtonBase button)
+        {
+            SetAuto(button, "Filter " + columnTitle);
+        }
+        else if (header is DependencyObject d)
+        {
+            foreach (var child in LogicalTreeHelperChildren(d))
+            {
+                NameFilterButtons(child, columnTitle);
+            }
+        }
+    }
+
+    private static void Watch(DependencyObject element, TextBlock? source)
+    {
+        var watcher = (Watcher?)element.GetValue(WatcherProperty);
+
+        if (watcher is not null && ReferenceEquals(watcher.Source, source))
+        {
+            return;
+        }
+
+        Unwatch(element);
+
+        if (source is null || element is not FrameworkElement fe)
+        {
+            return;
+        }
+
+        var descriptor = DependencyPropertyDescriptor.FromProperty(TextBlock.TextProperty, typeof(TextBlock));
+        EventHandler handler = (_, _) =>
+        {
+            object? current = element switch
+            {
+                TabItem t => t.Header,
+                System.Windows.Controls.Primitives.DataGridColumnHeader h => h.Content,
+                _ => null,
+            };
+            Name(element, current);
+        };
+        descriptor.AddValueChanged(source, handler);
+        element.SetValue(WatcherProperty, new Watcher { Source = source, Handler = handler });
+        fe.Unloaded -= OnUnloaded;
+        fe.Unloaded += OnUnloaded;
+    }
+
+    private static void Unwatch(DependencyObject element)
+    {
+        if (element.GetValue(WatcherProperty) is Watcher watcher)
+        {
+            DependencyPropertyDescriptor.FromProperty(TextBlock.TextProperty, typeof(TextBlock)).RemoveValueChanged(watcher.Source, watcher.Handler);
+            element.ClearValue(WatcherProperty);
         }
     }
 
@@ -77,8 +187,12 @@ public static class AccessibleNames
     /// The first piece of visible text in a header: the string itself, a text block's text, or the first non-empty text
     /// block found inside a panel or content control, in the order the user reads them. Null when there is none.
     /// </summary>
-    public static string? VisibleText(object? header)
+    public static string? VisibleText(object? header) => VisibleText(header, out _);
+
+    private static string? VisibleText(object? header, out TextBlock? source)
     {
+        source = null;
+
         switch (header)
         {
             case null:
@@ -89,14 +203,16 @@ public static class AccessibleNames
                 /* The filter button beside a column title: its glyph is not the title. */
                 return null;
             case TextBlock tb:
+                source = tb;
                 return tb.Text?.Trim();
             case DependencyObject d:
                 foreach (var child in LogicalTreeHelperChildren(d))
                 {
-                    var found = VisibleText(child);
+                    var found = VisibleText(child, out var childSource);
 
                     if (!string.IsNullOrWhiteSpace(found))
                     {
+                        source = childSource;
                         return found;
                     }
                 }

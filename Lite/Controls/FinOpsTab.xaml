@@ -713,7 +713,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LogicalReads, StringFormat='{}{0:N0}'}" Width="130">
+                            <DataGridTextColumn Binding="{Binding LogicalReads, StringFormat='{}{0:N0}'}" Width="136">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LogicalReads" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -726,7 +726,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding PhysicalReads, StringFormat='{}{0:N0}'}" Width="135">
+                            <DataGridTextColumn Binding="{Binding PhysicalReads, StringFormat='{}{0:N0}'}" Width="141">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PhysicalReads" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1576,7 +1576,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding CleanupState}" Width="100">
+                            <DataGridTextColumn Binding="{Binding CleanupState}" Width="106">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CleanupState" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1584,7 +1584,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LastCleanupEnd, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="150">
+                            <DataGridTextColumn Binding="{Binding LastCleanupEnd, StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}" Width="156">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastCleanupEnd" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1592,7 +1592,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding SkippedLowWaterMark, StringFormat='{}{0:N0}'}" Width="165">
+                            <DataGridTextColumn Binding="{Binding SkippedLowWaterMark, StringFormat='{}{0:N0}'}" Width="171">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SkippedLowWaterMark" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -1880,7 +1880,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding DailyWriteOpsSaved}" Width="160" SortMemberPath="DailyWriteOpsSavedSort">
+                            <DataGridTextColumn Binding="{Binding DailyWriteOpsSaved}" Width="166" SortMemberPath="DailyWriteOpsSavedSort">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DailyWriteOpsSaved" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2359,7 +2359,7 @@
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="140">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Header="Query Preview" Width="400">
+                                    <DataGridTemplateColumn Header="Query Preview" Width="350">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
                                                 <TextBlock Text="{Binding QueryPreview}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
@@ -2889,7 +2889,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding AvgLogicalReads, StringFormat='{}{0:N0}'}" Width="155">
+                            <DataGridTextColumn Binding="{Binding AvgLogicalReads, StringFormat='{}{0:N0}'}" Width="161">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgLogicalReads" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -3022,7 +3022,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding CpuCount, StringFormat='{}{0:N0}'}" Width="125">
+                            <DataGridTextColumn Binding="{Binding CpuCount, StringFormat='{}{0:N0}'}" Width="131">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuCount" Click="FilterButton_Click" Margin="0,0,4,0"/>

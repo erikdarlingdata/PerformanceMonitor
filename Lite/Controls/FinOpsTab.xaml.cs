@@ -48,6 +48,9 @@ public partial class FinOpsTab : UserControl
        later re-runs that load, the same one a server reselect runs, unless this is recent (FinOpsShowReloadPolicy). */
     private DateTime? _lastPerServerLoadUtc;
 
+    /* True until the tab's first show after start-up has run its reload: that one never skips on the age of the start-up load. */
+    private bool _firstShowPending = true;
+
     private DataGridFilterManager<DatabaseResourceUsageRow>? _dbResourcesFilterMgr;
     private DataGridFilterManager<StorageGrowthRow>? _storageGrowthFilterMgr;
     private DataGridFilterManager<DatabaseSizeRow>? _dbSizesFilterMgr;
@@ -609,7 +612,9 @@ public partial class FinOpsTab : UserControl
            tab (and the recommendations built from them) can still be that empty window. Re-run the same whole load a server
            reselect runs, for the server already selected; the per-grid generations drop any paint it supersedes. Filters stay: no
            server switch happened. It covers both size grids, so the flagged reloads below are for a recent load. */
-        if (FinOpsShowReloadPolicy.ShouldReloadOnShow(_lastPerServerLoadUtc, DateTime.UtcNow))
+        var firstShow = _firstShowPending;
+        _firstShowPending = false;
+        if (FinOpsShowReloadPolicy.ShouldReloadOnShow(_lastPerServerLoadUtc, DateTime.UtcNow, firstShow))
         {
             _ = LoadPerServerDataAsync();
             return;
@@ -619,6 +624,22 @@ public partial class FinOpsTab : UserControl
            extra local read, and the generation check keeps only the newest paint. */
         if (_dbSizesNeedReload) _ = LoadDatabaseSizesAsync(serverId);
         if (_storageGrowthNeedReload) _ = LoadStorageGrowthAsync(serverId);
+    }
+
+    /// <summary>
+    /// The Overview refresh saw that a collection for <paramref name="serverId"/> finished at <paramref name="lastCollectionUtc"/>.
+    /// A tab that is visible on that server reloads (see <see cref="FinOpsShowReloadPolicy.ShouldReloadAfterCollection"/>): the load it
+    /// holds may have read the window before the collection, and nothing else re-runs it while the tab stays shown.
+    /// </summary>
+    public void NoteCollection(int serverId, DateTime? lastCollectionUtc)
+    {
+        if (!IsVisible || _dataService == null || lastCollectionUtc is not DateTime collected) return;
+        if (serverId == 0 || GetSelectedServerId() != serverId) return;
+
+        if (FinOpsShowReloadPolicy.ShouldReloadAfterCollection(_lastPerServerLoadUtc, collected, DateTime.UtcNow))
+        {
+            _ = LoadPerServerDataAsync();
+        }
     }
 
     private async System.Threading.Tasks.Task LoadDatabaseSizesAsync(int serverId)

@@ -20,8 +20,15 @@
             </ContextMenu>
         </ResourceDictionary>
     </Window.Resources>
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-    <Grid Margin="16">
+    <!-- Save and Close sit in a footer row BELOW the scroll area, so they stay visible when the work-area clamp makes the
+         window shorter than the form (Lite click-through review). -->
+    <Grid>
+    <Grid.RowDefinitions>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Margin="16,16,16,0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -817,11 +824,13 @@
             </Grid>
         </Border>
 
-        <!-- Buttons -->
-        <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="_Save" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="_Close" Click="CloseButton_Click" IsCancel="True"/>
-        </StackPanel>
     </Grid>
     </ScrollViewer>
+
+    <!-- Buttons -->
+    <StackPanel x:Name="FooterButtons" Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="16,12,16,16">
+        <Button Content="_Save" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+        <Button Content="_Close" Click="CloseButton_Click" IsCancel="True"/>
+    </StackPanel>
+    </Grid>
 </Window>

@@ -127,6 +127,31 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
 
     [Theory]
     [InlineData(0, false)]
+    [InlineData(60 * 60, false)]         // 60 minutes of backfill after a restart
+    [InlineData(22 * 3600, false)]
+    [InlineData(23 * 3600, true)]
+    [InlineData(24 * 3600, true)]
+    public void CpuWindowCoversEnough_NeedsMostOfTheTwentyFourHourWindow(int seconds, bool enough)
+    {
+        Assert.Equal(enough, LocalDataService.CpuWindowCoversEnough(TimeSpan.FromSeconds(seconds)));
+    }
+
+    [Fact]
+    public async Task CpuRightSizing_TwoDaysLastWeekThenSixtyMinutesOfFreshSamples_GivesNoTwentyFourHourRuleAdvice()
+    {
+        // The 7-day span is days (6 days back, then now) but the last 24 hours hold 60 minutes: rule 2's P95 is an hour's load.
+        var recs = await RunRecommendationsAsync(async s =>
+        {
+            await s.SeedRightSizingScenarioAsync(engineEdition: 3, withCpuSamples: false, cpuCount: 8);
+            await s.SeedFinOpsCpuUtilizationAsync(8, 2, samples: 48, spacingMinutes: 60, daysBack: 6);
+            await s.SeedFinOpsCpuUtilizationAsync(8, 2, samples: 13, spacingMinutes: 5);
+        });
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
     [InlineData(4 * 60, false)]          // the four minutes (here four hours) of a first collect
     [InlineData(23 * 3600, false)]
     [InlineData(24 * 3600, true)]
@@ -256,11 +281,33 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task IdleDatabases_FourAndAHalfDaysOfHistory_AdviseNothing()
+    public async Task IdleDatabases_SixAndAHalfDaysOfHistory_AdviseNothing()
     {
-        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithFourAndAHalfDaysOfHistoryAsync());
+        // Sampled through every day, yet the oldest sample is only 6.5 days old: seven dates can all hold a sample after six days
+        // and a few minutes, so the per-day check alone would call this covered at most times of day.
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync());
 
         Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task IdleDatabases_SevenAndAHalfDaysOfHistoryMissingOneDay_AdviseNothing()
+    {
+        // Samples 8..1 days back except 3 days back: the oldest sample is older than 7 days, but nothing watched that one day.
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithSampleDaysAsync(8, 7, 6, 5, 4, 2, 1, 0));
+
+        Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task IdleDatabases_FullCoverageWithNoSampleYetToday_StillAdvise()
+    {
+        // Every complete day from 7 days back to yesterday holds a sample, nothing has arrived today (it is just after 00:00 UTC):
+        // the check must not wait for today's first sample.
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithSampleDaysAsync(8, 7, 6, 5, 4, 3, 2, 1));
+
+        var idle = Assert.Single(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("No query activity in 7 days", idle.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -566,12 +613,13 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
 
     /* ── Helpers ── */
 
-    /// <summary>The scenario, plus CPU samples from two days ago: the server's CPU samples then span more than a day, which the CPU right-sizing rules need.</summary>
+    /// <summary>The scenario, plus CPU samples from two days ago and a 24-hour window of samples half an hour apart: the 7-day span passes rule 12's gate and the oldest sample inside the 24 hours is 23.5 hours old, which rule 2's gate needs.</summary>
     private static Func<TestDataSeeder, Task> WithADayOfCpuHistory(Func<TestDataSeeder, Task> scenario) =>
         async s =>
         {
             await scenario(s);
             await s.SeedOlderCpuHistoryAsync(8, 2);
+            await s.SeedFinOpsCpuUtilizationAsync(8, 2, samples: 48, spacingMinutes: 30);
         };
 
     private async Task<List<RecommendationRow>> RunRecommendationsAsync(

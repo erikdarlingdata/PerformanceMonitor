@@ -897,7 +897,7 @@ public partial class ServerTab : UserControl
         }
 
         _blockingTrendHover?.Clear();
-        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No blocking in the selected time window.");
+        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No blocking in the selected time window.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */
@@ -976,7 +976,7 @@ public partial class ServerTab : UserControl
         }
 
         _deadlockTrendHover?.Clear();
-        EmptyState.Show(DeadlockTrendChart, data.Count == 0, "No deadlocks in the selected time window.");
+        EmptyState.Show(DeadlockTrendChart, data.Count == 0, "No deadlocks in the selected time window.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No deadlocks — show a flat line at zero so the chart looks active */

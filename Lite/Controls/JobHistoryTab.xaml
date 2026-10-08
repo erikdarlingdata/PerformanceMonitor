@@ -167,7 +167,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding RunStatusDesc}" Width="95">
+                    <DataGridTextColumn Binding="{Binding RunStatusDesc}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunStatusDesc" Click="FilterButton_Click" Margin="0,0,4,0"/>

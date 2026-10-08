@@ -417,7 +417,7 @@
                                 </ItemsControl.ItemsPanel>
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
-                                        <Border Background="{DynamicResource BackgroundLightBrush}"
+                                        <controls:OverviewCardBorder Background="{DynamicResource BackgroundLightBrush}"
                                                 BorderBrush="{Binding CardBorderBrush}"
                                                 BorderThickness="2" CornerRadius="6"
                                                 Margin="6"
@@ -542,7 +542,7 @@
                                                     </StackPanel>
                                                 </Border>
                                             </Grid>
-                                        </Border>
+                                        </controls:OverviewCardBorder>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>

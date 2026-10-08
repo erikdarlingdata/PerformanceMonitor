@@ -105,15 +105,14 @@ SELECT @count;";
     /// <summary>
     /// True for an edition that is paid for as Enterprise, the only editions the licensing advice ("Enterprise may not be
     /// required", the downgrade savings) can apply to. A Developer or Evaluation edition (including "Enterprise Developer Edition"
-    /// and "Enterprise Evaluation Edition") has no license fee to save, and Express is never Enterprise, so none of the three gets
-    /// licensing advice.
+    /// and "Enterprise Evaluation Edition") has no license fee to save, so neither gets licensing advice. Express needs no clause of
+    /// its own: no Express edition string contains "Enterprise", so the first test already leaves it out.
     /// </summary>
     internal static bool EditionNeedsLicensingAdvice(string? edition) =>
         !string.IsNullOrEmpty(edition)
         && edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase)
         && !edition.Contains("Developer", StringComparison.OrdinalIgnoreCase)
-        && !edition.Contains("Evaluation", StringComparison.OrdinalIgnoreCase)
-        && !edition.Contains("Express", StringComparison.OrdinalIgnoreCase);
+        && !edition.Contains("Evaluation", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Runs all Phase 1 recommendation checks and returns a consolidated list.
@@ -299,10 +298,14 @@ END;", sqlConn);
             AppLogger.Error("FinOps", $"Recommendation check failed (Enterprise features): {ex.Message}");
         }
 
-        /* Both CPU right-sizing rules (2 and 12) read the same samples. A server enrolled minutes ago holds only the ring-buffer
-           backfill of its first collect ("68 samples over 4 minutes"), which is not a week of load, so neither rule speaks until the
-           samples span a full day, and the two never both land in the list: the one that keeps more cores wins. */
+        /* The two CPU right-sizing rules (2 and 12) read DIFFERENT windows, so each is gated on its own. A server enrolled minutes ago
+           holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which is not a day or a week of load.
+           Rule 2 reads the last 24 hours (its P95), so it speaks only when the oldest sample INSIDE those 24 hours is at least 23 hours
+           old: a server collected for two days last week, closed, and restarted with 60 minutes of backfill has a 7-day span of days
+           but a 24-hour window of one hour. Rule 12 reads 7 days, so it keeps the 24-hour span over those 7 days. The two never both
+           land in the list: the one that keeps more cores wins. */
         var cpuSpanEnough = CpuSamplesSpanEnough(await GetCpuSampleSpanAsync(serverId));
+        var cpuWindowCoversDay = CpuWindowCoversEnough(await GetOldestCpuSampleAgeAsync(serverId, TimeSpan.FromHours(24)));
         RecommendationRow? computeCpuRow = null;
         var computeCpuTarget = 0;
 
@@ -312,7 +315,7 @@ END;", sqlConn);
             var util = await GetUtilizationEfficiencyAsync(serverId);
             /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
                The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
-            if (cpuSpanEnough && util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
+            if (cpuWindowCoversDay && util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
                 && util.ProvisioningStatus != ProvisioningVerdict.NotApplicable)
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
@@ -911,12 +914,46 @@ HAVING COUNT(*) >= 24";
     /// <summary>True when CPU samples spanning <paramref name="span"/> are enough for CPU right-sizing advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
     internal static bool CpuSamplesSpanEnough(TimeSpan span) => span >= CpuRightSizingMinSpan;
 
+    /// <summary>How old the oldest CPU sample inside rule 2's 24-hour window must be: most of the window, so its P95 is a day's load and not the minutes since a restart.</summary>
+    internal static readonly TimeSpan CpuWindowMinOldestAge = TimeSpan.FromHours(23);
+
+    /// <summary>True when the oldest CPU sample inside the 24-hour window is at least 23 hours old, so the window's P95 describes most of a day.</summary>
+    internal static bool CpuWindowCoversEnough(TimeSpan oldestSampleAge) => oldestSampleAge >= CpuWindowMinOldestAge;
+
     /// <summary>
     /// True when the prescriptive CPU row (rule 12) replaces the compute row (rule 2) or stands alone: it does when no compute row
     /// exists (<paramref name="computeTargetCores"/> null) or when it keeps MORE cores than that row. At a tie the compute row stays.
     /// </summary>
     internal static bool PrescriptiveCpuRowWins(int? computeTargetCores, int prescriptiveTargetCores) =>
         computeTargetCores is not int compute || prescriptiveTargetCores > compute;
+
+    /// <summary>How long ago the oldest CPU sample inside the last <paramref name="window"/> was taken (rule 2 reads the last 24 hours): zero when there is none or the read fails.</summary>
+    private async Task<TimeSpan> GetOldestCpuSampleAgeAsync(int serverId, TimeSpan window)
+    {
+        try
+        {
+            var now = DateTime.UtcNow;
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT MIN(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   sqlserver_cpu_utilization IS NOT NULL";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = now - window });
+            var oldest = await command.ExecuteScalarAsync();
+            if (oldest != null && oldest != DBNull.Value)
+                return now - Convert.ToDateTime(oldest);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Recommendation check failed (CPU window coverage): {ex.Message}");
+        }
+
+        return TimeSpan.Zero;
+    }
 
     /// <summary>The span from the oldest to the newest CPU sample in the last 7 days (the window rule 12 reads): zero when there is none or the read fails.</summary>
     private async Task<TimeSpan> GetCpuSampleSpanAsync(int serverId)
@@ -945,11 +982,17 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
         return TimeSpan.Zero;
     }
 
-    /// <summary>The number of UTC days, counting today, that must each hold a query-stats sample before a database is called idle for 7 days.</summary>
+    /// <summary>The number of complete UTC days (the seven before today) that must each hold a query-stats sample before a database is called idle for 7 days.</summary>
     internal const int IdleCoverageDays = 7;
 
-    /// <summary>The first UTC day of the idle-coverage window: today and the six days before it. The per-server check and the fleet read share it.</summary>
-    internal static DateTime IdleCoverageStartUtc() => DateTime.UtcNow.Date.AddDays(-(IdleCoverageDays - 1));
+    /// <summary>
+    /// The bounds of the idle-coverage check at <paramref name="nowUtc"/>: the first UTC day that must hold a sample (seven days
+    /// back), the start of today (exclusive end: today is not required, so coverage does not vanish from 00:00 UTC until the first
+    /// sample of the day), and the instant the oldest query-stats sample must be at or before (now minus seven days). The per-server
+    /// check and the fleet read share it.
+    /// </summary>
+    internal static (DateTime StartDay, DateTime EndDay, DateTime OldestCutoff) IdleCoverageBounds(DateTime nowUtc) =>
+        (nowUtc.Date.AddDays(-IdleCoverageDays), nowUtc.Date, nowUtc.AddDays(-IdleCoverageDays));
 
     /// <summary>What the Optimization tab's Idle Databases grid says when it is empty: that no database is idle, or (when the query
     /// stats do not cover the last 7 UTC days) that idle cannot be judged yet. An empty grid after a collection gap must not read as
@@ -959,25 +1002,33 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
         : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
 
     /// <summary>
-    /// True once the server's query stats hold a sample on each of the last 7 UTC days (today and the six before it). The advice
-    /// text claims "no query activity in 7 days", so all 7 days must have been watched. The oldest sample being 7 days old is not
-    /// enough: after a collection gap (the app was closed for nine days) the oldest sample is old, yet the days since hold no
-    /// sample, and every database reads as idle because nothing was watching, not because nothing ran. Without the coverage there is
-    /// no idle row at all.
+    /// True when the server's query stats cover a full 7 days: BOTH the oldest sample is at or before now minus 7 days, AND each of
+    /// the 7 complete UTC days before today holds at least one sample. The advice text claims "no query activity in 7 days", so all
+    /// 7 days must have been watched. The oldest sample alone is not enough: after a collection gap (the app was closed for nine
+    /// days) the oldest sample is old, yet the days since hold no sample, and every database reads as idle because nothing was
+    /// watching. The per-day check alone is not enough either: seven dates can all hold a sample after only six days and a few
+    /// minutes of history. Today is not required, so a covered server stays covered just after 00:00 UTC. Without the coverage there
+    /// is no idle row at all.
     /// </summary>
     internal async Task<bool> HasQueryStatsCoverageAsync(int serverId)
     {
+        var (startDay, endDay, oldestCutoff) = IdleCoverageBounds(DateTime.UtcNow);
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-SELECT COUNT(DISTINCT CAST(collection_time AS DATE))
+SELECT
+    MIN(collection_time),
+    COUNT(DISTINCT CASE WHEN collection_time >= $2 AND collection_time < $3 THEN CAST(collection_time AS DATE) END)
 FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2";
+WHERE server_id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = IdleCoverageStartUtc() });
-        var days = await command.ExecuteScalarAsync();
-        return days != null && days != DBNull.Value && Convert.ToInt64(days) >= IdleCoverageDays;
+        command.Parameters.Add(new DuckDBParameter { Value = startDay });
+        command.Parameters.Add(new DuckDBParameter { Value = endDay });
+        using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync() || reader.IsDBNull(0) || reader.IsDBNull(1))
+            return false;
+
+        return Convert.ToDateTime(reader.GetValue(0)) <= oldestCutoff && Convert.ToInt64(reader.GetValue(1)) >= IdleCoverageDays;
     }
 
     private static string FormatDuration(long seconds)

@@ -22,13 +22,14 @@ namespace PerformanceMonitor.Ui;
 /// surface is empty and only toggled afterwards, so a surface that always has rows never pays for one.</para>
 ///
 /// <para>A surface whose cell already holds a <c>*NoDataMessage</c> element (the System Events grids, whose message also
-/// carries the "this collector does not run on this server" wording) keeps that element as its only text: this does
-/// nothing there.</para>
+/// carries the "this collector does not run on this server" wording) or any other <c>*Message</c> element (Alert History's
+/// <c>NoAlertsMessage</c>, Job History's <c>NoJobsMessage</c>, the FinOps <c>No*Message</c> texts) keeps that element as its
+/// only text: this does nothing there, so two strings are never drawn over each other.</para>
 /// </summary>
 public static class EmptyState
 {
     /// <summary>What a grid says when its caller gave no wording of its own.</summary>
-    public const string DefaultGridText = "No rows to show.";
+    public const string DefaultGridText = "No data for the selected time range.";
 
     /// <summary>The name given to the element this class makes, so it is found again and never doubled.</summary>
     public const string ElementName = "EmptyStateText";
@@ -44,8 +45,10 @@ public static class EmptyState
     /// <summary>
     /// Shows the empty-state text over <paramref name="surface"/> when <paramref name="isEmpty"/>, hides it otherwise.
     /// <paramref name="text"/> wins over the surface's attached <see cref="TextProperty"/>, which wins over the default.
+    /// <paramref name="clearOfBaseline"/> puts the text near the top instead of the middle, for a trend chart that still draws
+    /// its flat zero line when empty, so the words never sit on the line.
     /// </summary>
-    public static void Show(FrameworkElement surface, bool isEmpty, string? text = null)
+    public static void Show(FrameworkElement surface, bool isEmpty, string? text = null, bool clearOfBaseline = false)
     {
         /* A chart is often wrapped in a Border for its margin; the text then sits in the Border's cell. */
         FrameworkElement anchor = surface;
@@ -62,7 +65,7 @@ public static class EmptyState
         var row = Grid.GetRow(anchor);
         var column = Grid.GetColumn(anchor);
 
-        if (parent.Children.OfType<TextBlock>().Any(t => t.Name.EndsWith("NoDataMessage", System.StringComparison.Ordinal)
+        if (parent.Children.OfType<TextBlock>().Any(t => t.Name.EndsWith("Message", System.StringComparison.Ordinal)
                 && Grid.GetRow(t) == row && Grid.GetColumn(t) == column))
         {
             return;
@@ -81,10 +84,11 @@ public static class EmptyState
             {
                 Name = ElementName + "_" + SurfaceKey(surface),
                 HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
+                VerticalAlignment = clearOfBaseline ? VerticalAlignment.Top : VerticalAlignment.Center,
+                Margin = clearOfBaseline ? new Thickness(0, 36, 0, 0) : new Thickness(0),
                 TextAlignment = TextAlignment.Center,
                 TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 480,
+                MaxWidth = 520,
                 FontStyle = FontStyles.Italic,
                 IsHitTestVisible = false,
             };

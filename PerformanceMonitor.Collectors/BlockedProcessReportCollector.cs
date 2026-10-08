@@ -437,7 +437,7 @@ BEGIN
         IF HAS_DBACCESS(DB_NAME(@resolve_database_id)) = 1
         BEGIN
             SET @resolve_sql = N'
-            UPDATE b
+            UPDATE /* PerformanceMonitorLite */ b
             SET b.resource_object_id = p.object_id
             FROM #bpr AS b
             JOIN ' + QUOTENAME(DB_NAME(@resolve_database_id)) + N'.sys.partitions AS p
@@ -566,7 +566,7 @@ BEGIN
                    Deferring it to a nested batch is what keeps this collector runnable on 2016
                    and 2017 at all. */
                 SET @resolve_sql = N'
-                UPDATE b
+                UPDATE /* PerformanceMonitorLite */ b
                 SET b.resource_object_id = pi.object_id
                 FROM #bpr AS b
                 CROSS APPLY sys.dm_db_page_info(b.resource_database_id, b.resource_file_id, b.resource_page_id, ''LIMITED'') AS pi

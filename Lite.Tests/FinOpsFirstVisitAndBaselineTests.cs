@@ -23,7 +23,8 @@ namespace Lite.Tests;
 /// <summary>
 /// The FinOps tab loads once at start-up, before the first collection has run. A store that was closed for days (or a server enrolled
 /// a minute ago) then showed "No Data", empty grids and "N idle database(s)" from that empty window until the server was reselected.
-/// Showing the tab now re-runs the same whole per-server load a reselect runs, unless the last one began under 30 seconds ago.
+/// Showing the tab now re-runs the same whole per-server load a reselect runs, unless the last one began under 30 seconds ago; the
+/// FIRST show after start-up always reloads, and a visible tab reloads when a collection for its server finishes (at most once a minute).
 /// WPF cannot run here, so the tab itself is a source pin anchored on its method declarations, and the rule is a pure function.
 /// </summary>
 [Trait("Stage", "Guard")]
@@ -33,6 +34,30 @@ public sealed class FinOpsShowReloadPolicyTests
 
     [Fact]
     public void NoLoadYet_Reloads() => Assert.True(FinOpsShowReloadPolicy.ShouldReloadOnShow(null, Now));
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(5)]
+    [InlineData(29)]
+    public void TheFirstShowAfterStartUp_ReloadsWhateverTheAgeOfTheStartUpLoad(int secondsAgo)
+    {
+        // Open Lite and go straight to FinOps: the start-up load began seconds ago, before the first collection.
+        Assert.True(FinOpsShowReloadPolicy.ShouldReloadOnShow(Now.AddSeconds(-secondsAgo), Now, firstShowSinceStart: true));
+        Assert.False(FinOpsShowReloadPolicy.ShouldReloadOnShow(Now.AddSeconds(-secondsAgo), Now, firstShowSinceStart: false));
+    }
+
+    [Theory]
+    [InlineData(120, 130, false)] // the collection finished before the last load began
+    [InlineData(30, 10, false)]    // finished after the last load, but the load is 30 s old: debounced
+    [InlineData(70, 10, true)]     // finished after the last load, and the load is over a minute old
+    [InlineData(70, 80, false)]    // the last load began after the collection finished
+    public void ACollectionFinishingWhileTheTabIsVisible_ReloadsOnceTheLastLoadIsAMinuteOld(int loadSecondsAgo, int collectionSecondsAgo, bool reload)
+    {
+        Assert.Equal(reload, FinOpsShowReloadPolicy.ShouldReloadAfterCollection(Now.AddSeconds(-loadSecondsAgo), Now.AddSeconds(-collectionSecondsAgo), Now));
+    }
+
+    [Fact]
+    public void ACollectionBeforeAnyLoad_Reloads() => Assert.True(FinOpsShowReloadPolicy.ShouldReloadAfterCollection(null, Now, Now));
 
     [Theory]
     [InlineData(0, false)]
@@ -78,13 +103,29 @@ public sealed class FinOpsShowReloadPolicyTests
         Assert.Single(sub);
 
         var body = BodyOf(src, sub[0].Groups[1].Value);
-        var gate = body.IndexOf("FinOpsShowReloadPolicy.ShouldReloadOnShow(_lastPerServerLoadUtc, DateTime.UtcNow)", StringComparison.Ordinal);
+        var gate = body.IndexOf("FinOpsShowReloadPolicy.ShouldReloadOnShow(_lastPerServerLoadUtc, DateTime.UtcNow, firstShow)", StringComparison.Ordinal);
         Assert.True(gate >= 0, "The show handler does not ask FinOpsShowReloadPolicy.");
         var whole = body.IndexOf("_ = LoadPerServerDataAsync();", gate, StringComparison.Ordinal);
         Assert.True(whole > gate, "The show handler does not run LoadPerServerDataAsync, the load a server reselect runs.");
+        // The first show is remembered before the gate, so only the first one skips the age check.
+        Assert.True(body.IndexOf("var firstShow = _firstShowPending;", StringComparison.Ordinal) is var f && f >= 0 && f < gate);
+        Assert.Contains("_firstShowPending = false;", body, StringComparison.Ordinal);
         // The flagged size-grid reloads stay, after the whole-load gate, for a recent load.
         Assert.True(body.IndexOf("if (_dbSizesNeedReload) _ = LoadDatabaseSizesAsync(", whole, StringComparison.Ordinal) > whole);
     }
+
+    [Fact]
+    public void TheOverviewRefresh_TellsTheVisibleFinOpsTab_ThatACollectionFinished()
+    {
+        var tab = ReadFinOpsTab();
+        Assert.Contains("FinOpsShowReloadPolicy.ShouldReloadAfterCollection(_lastPerServerLoadUtc, collected, DateTime.UtcNow)", tab, StringComparison.Ordinal);
+        Assert.Contains("if (!IsVisible", tab, StringComparison.Ordinal);
+
+        var main = File.ReadAllText(Path.Combine(RepoRoot(CallerFile()), "Lite", "MainWindow.xaml.cs")).Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("FinOpsContent.NoteCollection(summary.ServerId, summary.LastCollectionTime);", main, StringComparison.Ordinal);
+    }
+
+    private static string CallerFile([CallerFilePath] string thisFile = "") => thisFile;
 
     [Fact]
     public void ReselectingAServer_AndShowingTheTab_RunTheSameLoad_AndEachWholeLoadStampsItsStart()

@@ -173,7 +173,7 @@ FROM sys.dm_os_sys_info AS dosi;
    sp_executesql so SQL 2016 never binds it (@is_linux = 0). */
 IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
     EXEC sys.sp_executesql
-        N'SELECT @linux = CASE WHEN hi.host_platform = N''Linux'' THEN 1 ELSE 0 END FROM sys.dm_os_host_info AS hi;',
+        N'SELECT /* PerformanceMonitorLite */ @linux = CASE WHEN hi.host_platform = N''Linux'' THEN 1 ELSE 0 END FROM sys.dm_os_host_info AS hi;',
         N'@linux bit OUTPUT', @linux = @is_linux OUTPUT;
 
 SELECT /* PerformanceMonitorLite */ TOP (60)

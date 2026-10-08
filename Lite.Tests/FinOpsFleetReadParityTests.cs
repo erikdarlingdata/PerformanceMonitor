@@ -42,7 +42,9 @@ public class FinOpsFleetReadParityTests : IDisposable
     /// <summary>One query_stats sample per UTC day for the last <paramref name="days"/> days (today first), on a database no size snapshot lists, so the idle-coverage rule is met without making any listed database active.</summary>
     private static void SeedQueryStatsCoverage(DuckDBConnection conn, int serverId, string serverName, DateTime now, ref long nextId, int days = 7)
     {
-        for (var d = 0; d < days; d++)
+        /* A full-coverage seed (7 or more days) starts yesterday and reaches 8 days back: the oldest sample must be at least 7 days old and each complete day before today must hold one. A short seed (the gap case) starts now. */
+        var start = days >= 7 ? 1 : 0;
+        for (var d = start; d < start + (days >= 7 ? days + 1 : days); d++)
             Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
                           delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
                          VALUES ($1,$2,$3,$4,'DbElsewhere','0xE',1,10,20,1)", nextId--, now.AddDays(-d), serverId, serverName);
@@ -172,8 +174,10 @@ public class FinOpsFleetReadParityTests : IDisposable
 
     /// <summary>
     /// The fleet "Idle DBs" count follows the recommendation row's rule: a database is idle for 7 days only when query stats hold a
-    /// sample on each of the last 7 UTC days. A store that was closed for days (samples only today and yesterday) reads NULL (a dash), not
-    /// a count of every database; a covered server with nothing idle reads 0, not NULL.
+    /// sample on each of the 7 complete UTC days before today AND the oldest sample is at least 7 days old. A store that was closed for
+    /// days (samples only today and yesterday) reads NULL (a dash), not a count of every database; so does one whose samples reach every
+    /// date but start only 6 days and a few minutes back; a covered server with nothing idle reads 0, not NULL, even with no sample yet
+    /// today.
     /// </summary>
     [Fact]
     public async Task ServerMetrics_IdleDbCount_NeedsSevenDaysOfQueryStatsCoverage()
@@ -183,13 +187,14 @@ public class FinOpsFleetReadParityTests : IDisposable
 
         const int gapServerId = 50;
         const int busyServerId = 60;
+        const int youngServerId = 70;
         var now = DateTime.UtcNow;
         long nextId = -1;
 
         using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
         {
             await conn.OpenAsync();
-            foreach (var (serverId, name) in new[] { (gapServerId, "GAP"), (busyServerId, "BUSYALL") })
+            foreach (var (serverId, name) in new[] { (gapServerId, "GAP"), (busyServerId, "BUSYALL"), (youngServerId, "YOUNG") })
             {
                 SeedServerProperties(conn, serverId, name, nextId--, now);
                 Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
@@ -200,17 +205,29 @@ public class FinOpsFleetReadParityTests : IDisposable
             // GAP: samples today and yesterday only (the app was closed before that), DbOne never ran in them.
             SeedQueryStatsCoverage(conn, gapServerId, "GAP", now, ref nextId, days: 2);
 
-            // BUSYALL: all 7 days covered, and DbOne is the database that ran, so nothing is idle.
-            for (var d = 0; d < 7; d++)
+            // BUSYALL: the oldest sample is 8 days old and each of the 7 complete days before today holds one (none yet today), and DbOne
+            // is the database that ran, so nothing is idle.
+            for (var d = 1; d <= 8; d++)
                 Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
                               delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
                              VALUES ($1,$2,$3,$4,'DbOne','0xB',5,10,20,1)", nextId--, now.AddDays(-d), busyServerId, "BUSYALL");
+
+            // YOUNG: a sample on each of the 7 dates from 7 days back to yesterday, but the first is at 23:59:30 of the 7th day back, so the
+            // oldest sample is not yet 7 days old (6 days and a few minutes at most times of day). Seven dates are covered; the history is not.
+            Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+                          delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
+                         VALUES ($1,$2,$3,$4,'DbOne','0xY',5,10,20,1)", nextId--, now.Date.AddDays(-7).AddHours(23).AddMinutes(59).AddSeconds(30), youngServerId, "YOUNG");
+            for (var d = 1; d <= 6; d++)
+                Exec(conn, @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+                              delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads)
+                             VALUES ($1,$2,$3,$4,'DbOne','0xY',5,10,20,1)", nextId--, now.Date.AddDays(-d).AddHours(12), youngServerId, "YOUNG");
         }
 
         var metrics = await new LocalDataService(initializer).GetServerMetricsAsync();
 
         Assert.Null(metrics[gapServerId].IdleDbCount);
         Assert.Equal(0, metrics[busyServerId].IdleDbCount);
+        Assert.Null(metrics[youngServerId].IdleDbCount);
     }
 
     /// <summary>

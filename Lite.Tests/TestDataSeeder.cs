@@ -2197,13 +2197,51 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
         await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 7.1, coverEveryDay: true);
     }
 
-    /// <summary>The idle-database scenario on a server watched for 4.5 days, a sample at least every half day: the advice text claims 7, and the last 7 UTC days are not all covered at any time of day, so nothing is called idle.</summary>
-    public async Task SeedIdleDatabasesWithFourAndAHalfDaysOfHistoryAsync()
+    /// <summary>The idle-database scenario on a server watched for 6.5 days, a sample at least every half day, so EVERY UTC day holds a sample: the advice text claims 7, and the oldest sample is not yet 7 days old, so at no time of day is anything called idle.</summary>
+    public async Task SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync()
     {
         await ClearTestDataAsync();
         await SeedTestServerAsync();
         await SeedDatabaseSizesForIdleTestAsync();
-        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 4.5, coverEveryDay: true);
+        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 6.5, coverEveryDay: true);
+    }
+
+    /// <summary>
+    /// The idle-database scenario with query-stats samples at exactly the given days back, each at noon UTC (<c>daysBack</c> of 0 is
+    /// today at noon). Day granularity keeps the scenario the same at every time of day the test runs.
+    /// </summary>
+    public async Task SeedIdleDatabasesWithSampleDaysAsync(params int[] daysBack)
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+        await SeedDatabaseSizesForIdleTestAsync();
+
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        foreach (var day in daysBack)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name,
+     database_name, query_hash, delta_execution_count,
+     delta_worker_time, delta_elapsed_time, delta_logical_reads)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _utcNow().Date.AddDays(-day).AddHours(12) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = "ActiveDB" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = $"0xDAY{day:D4}" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 300L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 6_000_000L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 12_000_000L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 150_000L });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
     }
 
     /// <summary>

@@ -304,15 +304,16 @@ active_dbs AS (
     WHERE collection_time >= $2
     AND   delta_execution_count > 0
 ),
-/* The recommendation row's coverage rule (HasQueryStatsCoverageAsync, IdleCoverageDays): a database is called idle for 7 days only when
-   query stats hold a sample on each of the last 7 UTC days. A server without that coverage has no idle_dbs row, so its count is NULL
-   (a dash), never a count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
+/* The recommendation row's coverage rule (HasQueryStatsCoverageAsync, IdleCoverageBounds): a database is called idle for 7 days only when
+   the oldest query-stats sample is at or before now minus 7 days ($5) AND each of the 7 complete UTC days from $3 up to (not including)
+   $6 holds a sample; today is not required. A server without that coverage has no idle_dbs row, so its count is NULL (a dash), never a
+   count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
 idle_coverage AS (
     SELECT server_id
     FROM v_query_stats
-    WHERE collection_time >= $3
     GROUP BY server_id
-    HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
+    HAVING MIN(collection_time) <= $5
+       AND COUNT(DISTINCT CASE WHEN collection_time >= $3 AND collection_time < $6 THEN CAST(collection_time AS DATE) END) >= $4
 ),
 idle_dbs AS (
     SELECT
@@ -356,8 +357,11 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
 
         command.Parameters.Add(new DuckDBParameter { Value = cpuCutoff });
         command.Parameters.Add(new DuckDBParameter { Value = idleCutoff });
-        command.Parameters.Add(new DuckDBParameter { Value = IdleCoverageStartUtc() });
+        var (coverageStart, coverageEnd, coverageOldestCutoff) = IdleCoverageBounds(DateTime.UtcNow);
+        command.Parameters.Add(new DuckDBParameter { Value = coverageStart });
         command.Parameters.Add(new DuckDBParameter { Value = (long)IdleCoverageDays });
+        command.Parameters.Add(new DuckDBParameter { Value = coverageOldestCutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = coverageEnd });
 
         var results = new Dictionary<int, ServerMetricsRow>();
         using var reader = await command.ExecuteReaderAsync();

@@ -886,6 +886,8 @@ public partial class MainWindow : Window
         try
         {
             var summaries = new List<ServerSummaryItem>();
+            /* Each server's clock is read once per refresh, however many cards share its storage id. */
+            var refreshClocks = new Dictionary<int, ServerClock>();
             foreach (var server in servers)
             {
                 try
@@ -896,7 +898,7 @@ public partial class MainWindow : Window
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
-                        summary.Clock = await ReadOverviewClockAsync(serverId);
+                        summary.Clock = await ReadOverviewClockAsync(serverId, refreshClocks);
                         summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
@@ -914,6 +916,12 @@ public partial class MainWindow : Window
             StampTagPills(summaries);
             _overviewSummaries = summaries;
             ApplyOverviewView();
+
+            /* A FinOps tab left open while a collection for its server finishes reloads, as it does on a show. */
+            foreach (var summary in summaries)
+            {
+                FinOpsContent.NoteCollection(summary.ServerId, summary.LastCollectionTime);
+            }
 
             /* Alerts run over the WHOLE fleet, never the filtered view — a search box narrowing what's on
                screen must not silence alerts for the servers it hides. */
@@ -934,8 +942,13 @@ public partial class MainWindow : Window
     /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>). A failed clock read leaves the card on
     /// the next clock in the chain rather than dropping the card.
     /// </summary>
-    private async Task<ServerClock> ReadOverviewClockAsync(int serverId)
+    private async Task<ServerClock> ReadOverviewClockAsync(int serverId, Dictionary<int, ServerClock> refreshClocks)
     {
+        if (refreshClocks.TryGetValue(serverId, out var cached))
+        {
+            return cached;
+        }
+
         ServerClock? collected = null;
         try
         {
@@ -947,7 +960,9 @@ public partial class MainWindow : Window
             AppLogger.Debug("Overview", $"Server clock read failed for server {serverId}, its card takes its open tab's or the machine's clock: {ex.Message}");
         }
 
-        return ServerTimeHelper.ClockForServer(collected, OpenTabClockFor(serverId));
+        var clock = ServerTimeHelper.ClockForServer(collected, OpenTabClockFor(serverId));
+        refreshClocks[serverId] = clock;
+        return clock;
     }
 
     private void ServerListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
