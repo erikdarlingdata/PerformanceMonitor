@@ -103,7 +103,7 @@ FROM generate_series(1, {rows}) AS g", ct);
         foreach (var table in QueryStoreIntervalPartitions.All)
         {
             var leaves = $"SELECT t.relid FROM pg_partition_tree('{table.Parent}'::regclass) AS t WHERE t.isleaf";
-            Assert.True(await LongAsync(connection, $"SELECT count(*) FROM ({leaves}) AS x", ct) >= 5, "legacy, several days and DEFAULT are leaves");
+            Assert.True(await LongAsync(connection, $"SELECT count(*) FROM ({leaves}) AS x", ct) >= 4, "legacy, the promoted days and DEFAULT are leaves");
 
             var expectedBytes = await LongAsync(connection, $"SELECT sum(pg_total_relation_size(relid)) FROM ({leaves}) AS x(relid)", ct);
             var expectedRows = await LongAsync(connection, $"SELECT sum(reltuples)::bigint FROM pg_class WHERE oid IN ({leaves}) AND reltuples >= 0", ct);

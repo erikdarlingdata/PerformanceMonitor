@@ -309,7 +309,7 @@ public sealed class StoreSelfMetricsTests
                 /* #5571: a day-partitioned parent has no storage of its own (its size reads 0), so its row sums the
                    LEAF partitions through pg_partition_tree, bytes and the reltuples estimate alike. */
                 Assert.Contains($"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('{table}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('{table}'))::bigint", sql, StringComparison.Ordinal);
-                Assert.Contains($"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND c.oid IN (SELECT t.relid FROM pg_partition_tree('{table}'::regclass) AS t WHERE t.isleaf UNION ALL", sql, StringComparison.Ordinal);
+                Assert.Contains($"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('{table}'::regclass) AS t WHERE t.isleaf) OR", sql, StringComparison.Ordinal);
             }
             else
             {

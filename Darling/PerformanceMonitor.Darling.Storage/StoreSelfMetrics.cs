@@ -666,11 +666,11 @@ FROM pg_stat_bgwriter AS b";
     /// that is not partitioned the table itself is the one leaf.
     /// </summary>
     private const string IntervalLatestPartitionRowsSql =
-        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf UNION ALL SELECT 'collect.{QueryStoreIntervalLatest.TableName}'::regclass WHERE NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass))))";
+        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass)))))";
 
     /// <summary>The wide parent's row estimate, summed over its leaf partitions. See <see cref="IntervalLatestPartitionRowsSql"/>.</summary>
     private const string IntervalWidePartitionRowsSql =
-        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass) AS t WHERE t.isleaf UNION ALL SELECT 'collect.{QueryStoreIntervalWide.TableName}'::regclass WHERE NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass))))";
+        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalWide.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass)))))";
 
     /// <summary>
     /// The named plain-table rows (#3582, extended #4609) — every store shape, like the dimension rows,
