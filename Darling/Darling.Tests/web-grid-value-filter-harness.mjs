@@ -45,6 +45,11 @@ let storage = makeStorage();
 globalThis.localStorage = storage;
 const warnings = [];
 console.warn = (m) => warnings.push(String(m));
+/* A window that records its listeners, so a scenario can fire "pagehide" the way a closing tab does. */
+const windowListeners = {};
+globalThis.window = { addEventListener: (t, fn) => { (windowListeners[t] ||= []).push(fn); } };
+const firePagehide = () => { for (const fn of windowListeners.pagehide || []) fn({}); };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const root = process.argv[2];
 let generation = 0;
@@ -52,7 +57,8 @@ let generation = 0;
 const loadPanels = async () => await import(pathToFileURL(root + "/panels.js").href + "?gen=" + generation++);
 let mod = await loadPanels();
 let VIZ = mod.VIZ;
-const reload = async () => { mod = await loadPanels(); VIZ = mod.VIZ; };
+/* A restart of the browser: the page was closed first, which flushes a pending write (pagehide). */
+const reload = async () => { mod.flushGridFilters(); mod = await loadPanels(); VIZ = mod.VIZ; };
 
 const cols = [
   { key: "u", label: "Login" },
@@ -88,13 +94,15 @@ const findItem = (w, value) => {
 const blankItem = (w) => valueItems(w).find((n) => n.className.split(" ").includes("gfv-blank"));
 const notes = (w) => byClass(w, "gfv-note").map((n) => n.textContent).filter((t) => t !== "");
 /* What a reader's next visit would see: the kept copy of the filters, read the way the page reads it. */
-const stored = () => { const t = storage.items.get("pm.gridFilters.v1"); return t === undefined ? null : JSON.parse(t); };
+const stored = () => { mod.flushGridFilters(); const t = storage.items.get("pm.gridFilters.v1"); return t === undefined ? null : JSON.parse(t); };
 const storedState = () => {
   const doc = stored();
   if (!doc) return { mode: "None", values: [], blank: false };
   for (const [, cols2] of doc.grids) for (const f of Object.values(cols2)) if (f.values) return { mode: f.values.mode === "hide" ? "Hide" : "ShowOnly", values: f.values.set, blank: f.values.blank };
   return { mode: "None", values: [], blank: false };
 };
+
+const shownIx0 = (w) => tbodyOf(w).children.filter((t) => t.style.display !== "none").map((t) => t.children[0].textContent);
 
 const out = {};
 const scenarios = {
@@ -253,6 +261,7 @@ const scenarios = {
     tick(findItem(w, "job_svc"), false);
     tick(findItem(w, "app"), false);
     out.refusedShown = shownIx(w);
+    mod.flushGridFilters();
     out.warnings = warnings.length;
     // no storage object at all
     delete globalThis.localStorage;
@@ -335,6 +344,162 @@ const scenarios = {
     search(w, "zzz");
     out.noMatch = byClass(w, "gfv-empty").map((n) => n.textContent);
   },
+
+  /* The web half of the shared name pairs: noListName over every "web" key the fixture lists. */
+  async namePairs() {
+    const { readFileSync } = await import("node:fs");
+    const gvf = await import(pathToFileURL(root + "/grid-value-filter.js").href);
+    const find = (o) => { for (const [k, v] of Object.entries(o)) { if (k === "noListColumnPairs") return v; if (v && typeof v === "object" && !Array.isArray(v)) { const r = find(v); if (r) return r; } } return null; };
+    const pairs = find(JSON.parse(readFileSync(process.argv[4], "utf8")));
+    out.excluded = pairs.excluded.map((p) => [p.web, gvf.noListName(p.web)]);
+    out.listed = pairs.listed.map((p) => [p.web, gvf.noListName(p.web)]);
+  },
+  /* Which columns get a list by name (the shared no-list rule), with cells short enough to list: the Alerts "Detail"
+     column (key detail_text), job step messages, error and script columns, the opt-out marker, and a plain column. */
+  offeredByName() {
+    const has = (w, i) => { open(w, i); const r = byClass(w, "grid-filter-values").length > 0; filterBtn(w, i).click(); return r; };
+    const names = ["detail_text", "step_message", "error_message", "recommendation_details", "description", "reason", "Script", "ImplementationScript", "LastError", "AdditionalInfo", "login_name", "status"];
+    const mix = names.map((k) => ({ key: k, label: k === "reason" ? "Reason" : "Col " + k, valueList: k === "reason" ? false : undefined }));
+    const row = {};
+    for (const k of names) row[k] = "short";
+    newRoute();
+    const w = VIZ.table({ rows: [row, { ...row }] }, { rowsKey: "rows", columns: mix, title: "ByName", tools: false });
+    out.names = names;
+    out.offered = mix.map((_, i) => has(w, i));
+  },
+  /* The list holds a cell's raw value, not what the cell draws, and a blank is a blank raw value. */
+  rawValues() {
+    newRoute();
+    const cs = [{ key: "u", label: "Login", render: (r) => "<<" + (r.u ?? "none") + ">>" }];
+    const rows = [{ u: "sa" }, { u: "App" }, { u: "app" }, { u: null }, { u: "  " }, { u: "job" }];
+    const w = VIZ.table({ rows }, { rowsKey: "rows", columns: cs, title: "Raw", tools: false });
+    open(w, 0);
+    out.items = valueItems(w).map(itemText);
+    out.hasBlank = !!blankItem(w);
+    tick(findItem(w, "sa"), false);
+    out.shown = shownIx0(w);
+    tick(blankItem(w), false);
+    out.shownNoBlank = shownIx0(w);
+  },
+  /* The search folds case like .NET OrdinalIgnoreCase: a capital sharp s is not a sharp s, "ss" is not a sharp s. */
+  searchFold() {
+    newRoute();
+    const w = build(["\u1E9E", "stra\u00DFe", "STRASSE", "App", "\u0130x"]);
+    open(w, 0);
+    search(w, "\u00DF");
+    out.sharpS = valueItems(w).map(itemText);
+    search(w, "ss");
+    out.ss = valueItems(w).map(itemText);
+    search(w, "APP");
+    out.app = valueItems(w).map(itemText);
+    search(w, "app");
+    out.appLower = valueItems(w).map(itemText);
+  },
+  /* Writes are debounced: a burst of clicks is one write, after the quiet; pagehide writes at once. */
+  async debounced() {
+    newRoute();
+    const w = build(["sa", "app", "job_svc", "etl"]);
+    open(w, 0);
+    storage.writes = 0;
+    tick(findItem(w, "app"), false);
+    tick(findItem(w, "etl"), false);
+    tick(findItem(w, "sa"), false);
+    out.writesAtOnce = storage.writes;
+    out.keyAtOnce = storage.items.has("pm.gridFilters.v1");
+    await wait(150);
+    out.writesAt150 = storage.writes;
+    await wait(500);
+    out.writesAfterQuiet = storage.writes;
+    out.setAfterQuiet = JSON.parse(storage.items.get("pm.gridFilters.v1")).grids[0][1];
+    // pagehide flushes a change that has not waited
+    tick(findItem(w, "job_svc"), false);
+    out.writesBeforePagehide = storage.writes;
+    firePagehide();
+    out.writesAfterPagehide = storage.writes;
+    const doc = JSON.parse(storage.items.get("pm.gridFilters.v1"));
+    out.setAfterPagehide = Object.values(doc.grids[0][1])[0].values;
+  },
+  /* A text match on a column that gets no list lasts the session: kept by a refresh and a tab switch, never written,
+     never read back. A text match on a list column is kept across a restart. */
+  async sessionText() {
+    newRoute();
+    const hash = globalThis.location.hash;
+    const cs = [
+      { key: "u", label: "Login" },
+      { key: "detail_text", label: "Detail" },
+      { key: "why", label: "Why", valueList: false },
+    ];
+    const rows = [{ u: "sa", detail_text: "alpha", why: "one" }, { u: "app", detail_text: "beta", why: "two" }, { u: "etl", detail_text: "alpha", why: "two" }];
+    const draw = () => VIZ.table({ rows }, { rowsKey: "rows", columns: cs, title: "Sess", tools: false });
+    const shown = (w) => tbodyOf(w).children.filter((t) => t.style.display !== "none").map((t) => t.children[0].textContent);
+    let w = draw();
+    open(w, 1); type(w, "alpha"); filterBtn(w, 1).click();
+    open(w, 2); type(w, "one"); filterBtn(w, 2).click();
+    open(w, 0); type(w, "a"); filterBtn(w, 0).click();
+    out.inPage = shown(draw());
+    out.storedText = JSON.stringify(stored());
+    await reload();
+    globalThis.location = { hash };
+    w = draw();
+    out.afterRestart = shown(w);
+    out.chipsAfterRestart = chips(w);
+  },
+  /* A value part kept on a column that has stopped getting a list: it still filters, shows read-only with a Clear
+     button, and the text match that was kept on it is dropped. */
+  async keptValuePart() {
+    newRoute();
+    const hash = globalThis.location.hash;
+    const base = [{ key: "grp", label: "Grp" }, { key: "i", label: "Ix", format: "int" }];
+    const rows = ["x", "y", "z"].map((g, i) => ({ grp: g, i }));
+    let w = VIZ.table({ rows }, { rowsKey: "rows", columns: base, title: "Kept", tools: false });
+    open(w, 0);
+    tick(findItem(w, "y"), false);
+    type(w, "x");
+    out.before = shownIx(w);
+    await reload();
+    globalThis.location = { hash };
+    w = VIZ.table({ rows }, { rowsKey: "rows", columns: [{ key: "grp", label: "Grp", valueList: false }, base[1]], title: "Kept", tools: false });
+    out.afterShown = shownIx(w);
+    open(w, 0);
+    out.hasList = byClass(w, "grid-filter-values").length > 0;
+    out.keptNote = byClass(w, "gfv-kept-note").map((n) => n.textContent);
+    out.textBox = textBox(w).value;
+    const clearKept = byClass(w, "gfv-kept-clear")[0];
+    out.hasClear = !!clearKept;
+    clearKept.click();
+    out.afterClear = shownIx(w);
+    out.keptGone = byClass(w, "gfv-kept").length === 0;
+    out.storedAfterClear = JSON.stringify(stored());
+  },
+  /* FinOps: a bare #/finops is rewritten to the server shown, so each server has its own filters. */
+  async finopsKey() {
+    const fin = await import(pathToFileURL(root + "/pages/finops.js").href);
+    globalThis.history = { state: null, replaceState: (st, t, url) => { globalThis.location = { hash: url }; } };
+    const rows = ["sa", "app", "job_svc"];
+    const draw = () => build(rows);
+    globalThis.location = { hash: "#/finops" };
+    fin.pinFinopsHash("srv-a", "utilization");
+    out.hashA = globalThis.location.hash;
+    let w = draw();
+    open(w, 0);
+    tick(findItem(w, "app"), false);
+    out.shownA = shownIx(w);
+    // the reader opens FinOps bare again and lands on another server
+    globalThis.location = { hash: "#/finops" };
+    fin.pinFinopsHash("srv-b", "utilization");
+    out.hashB = globalThis.location.hash;
+    out.shownB = shownIx(draw());
+    // and back on the first
+    globalThis.location = { hash: "#/finops" };
+    fin.pinFinopsHash("srv-a", "utilization");
+    out.shownBackOnA = shownIx(draw());
+    // a hash that already names the server and tab is left alone
+    let calls = 0;
+    globalThis.history = { state: null, replaceState: () => { calls++; } };
+    globalThis.location = { hash: "#/finops/srv-a/utilization" };
+    fin.pinFinopsHash("srv-a", "utilization");
+    out.callsOnSameHash = calls;
+  },
   /* A refresh in place (Alert History) re-lists the open box. */
   reconciled() {
     newRoute();
@@ -342,6 +507,8 @@ const scenarios = {
     open(w, 0);
     out.before = valueItems(w).map(itemText);
     const tbody = tbodyOf(w);
+    /* the reconciler updates the row object and its cell together; the list reads the row object */
+    mod.gridRowOf(tbody.children[0]).u = "zed";
     tbody.children[0].children[0].textContent = "zed";
     mod.reapplyGridSort(tbody);
     out.after = valueItems(w).map(itemText);

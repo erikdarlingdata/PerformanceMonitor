@@ -532,6 +532,7 @@ table.data tbody tr:has(> td > .plan-cell.plan-open) > td { vertical-align: top;
 .gfv-empty { opacity: 0.7; }
 .gfv-note { color: var(--warn); }
 .gfv-note:empty { display: none; }
+.gfv-kept { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* ─────────────────────────── band list ─────────────────────────── */

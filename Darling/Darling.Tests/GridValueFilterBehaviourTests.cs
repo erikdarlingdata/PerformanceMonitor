@@ -168,6 +168,121 @@ public sealed class GridValueFilterBehaviourTests
     }
 
     [Fact]
+    public void TheNoListNameRule_GivesTheDesktopsAnswer_ForEveryPairInTheSharedFixture()
+    {
+        var r = Run("namePairs", FixturePath);
+        Assert.NotEmpty(r.GetProperty("excluded").EnumerateArray());
+        Assert.NotEmpty(r.GetProperty("listed").EnumerateArray());
+        Assert.All(r.GetProperty("excluded").EnumerateArray(), p => Assert.True(p[1].GetBoolean(), p[0].GetString() + " must get no list"));
+        Assert.All(r.GetProperty("listed").EnumerateArray(), p => Assert.False(p[1].GetBoolean(), p[0].GetString() + " must get a list"));
+    }
+
+    [Fact]
+    public void AColumnNamedLikeProse_OrAStatement_GetsNoList_EvenWithShortCells()
+    {
+        var r = Run("offeredByName");
+        var names = Strs(r.GetProperty("names"));
+        var offered = r.GetProperty("offered").EnumerateArray().Select(e => e.GetBoolean()).ToArray();
+        // The Alerts "Detail" column (detail_text), job step and severe-error messages, recommendation details, descriptions,
+        // scripts, errors and info cells, and a column marked valueList: false (the stored-caveat "reason") get no list;
+        // an ordinary name column does.
+        for (var i = 0; i < names.Length; i++)
+        {
+            Assert.True(offered[i] == (names[i] == "login_name" || names[i] == "status"), names[i] + " offered=" + offered[i]);
+        }
+    }
+
+    [Fact]
+    public void TheList_HoldsTheRawValue_NotTheTextTheCellDraws_AndABlankIsABlankRawValue()
+    {
+        var r = Run("rawValues");
+        Assert.Equal(new[] { "(Blanks)", "App", "job", "sa" }, Strs(r.GetProperty("items")));
+        Assert.True(r.GetProperty("hasBlank").GetBoolean());
+        Assert.Equal(new[] { "<<App>>", "<<app>>", "<<none>>", "<<  >>", "<<job>>" }, Strs(r.GetProperty("shown")));
+        Assert.Equal(new[] { "<<App>>", "<<app>>", "<<job>>" }, Strs(r.GetProperty("shownNoBlank")));
+    }
+
+    [Fact]
+    public void TheValueSearch_FoldsCaseLikeDotNetOrdinalIgnoreCase()
+    {
+        var r = Run("searchFold");
+        Assert.Equal(new[] { "stra\u00DFe" }, Strs(r.GetProperty("sharpS")));
+        Assert.Equal(new[] { "STRASSE" }, Strs(r.GetProperty("ss")));
+        Assert.Equal(new[] { "App" }, Strs(r.GetProperty("app")));
+        Assert.Equal(new[] { "App" }, Strs(r.GetProperty("appLower")));
+    }
+
+    [Fact]
+    public void TheKeptCopy_IsWrittenOnceAfterABurst_AndAtOnceOnPagehide()
+    {
+        var r = Run("debounced");
+        Assert.Equal(0, r.GetProperty("writesAtOnce").GetInt32());
+        Assert.False(r.GetProperty("keyAtOnce").GetBoolean());
+        Assert.Equal(0, r.GetProperty("writesAt150").GetInt32());
+        Assert.Equal(1, r.GetProperty("writesAfterQuiet").GetInt32());
+        var column = r.GetProperty("setAfterQuiet").EnumerateObject().Single().Value.GetProperty("values");
+        Assert.Equal("showOnly", column.GetProperty("mode").GetString());
+        Assert.Equal(new[] { "job_svc" }, Strs(column.GetProperty("set")));
+        Assert.Equal(1, r.GetProperty("writesBeforePagehide").GetInt32());
+        Assert.Equal(2, r.GetProperty("writesAfterPagehide").GetInt32());
+        Assert.Empty(r.GetProperty("setAfterPagehide").GetProperty("set").EnumerateArray());
+    }
+
+    [Fact]
+    public void ATextMatch_OnAColumnWithNoList_LastsTheSessionOnly_AndOneOnAListColumnIsKept()
+    {
+        var r = Run("sessionText");
+        // all three matches filter the page now
+        Assert.Equal(new[] { "sa" }, Strs(r.GetProperty("inPage")));
+        // only the list column's match was written
+        var written = JsonDocument.Parse(r.GetProperty("storedText").GetString()!).RootElement.GetProperty("grids")[0][1];
+        var only = written.EnumerateObject().Single();
+        Assert.StartsWith("u\u0001", only.Name);
+        Assert.Equal("a", only.Value.GetProperty("text").GetString());
+        // and after a restart only that one comes back
+        Assert.Equal(new[] { "sa", "app" }, Strs(r.GetProperty("afterRestart")));
+        Assert.Equal(new[] { "Login: a\u00D7" }, Strs(r.GetProperty("chipsAfterRestart")));
+    }
+
+    [Fact]
+    public void AValuePartKeptOnAColumnThatHasNoList_ShowsReadOnlyWithAClearButton_AndItsTextMatchIsDropped()
+    {
+        var r = Run("keptValuePart");
+        Assert.Equal(new[] { 0 }, Ints(r.GetProperty("before")));
+        Assert.Equal(new[] { 0, 2 }, Ints(r.GetProperty("afterShown")));
+        Assert.False(r.GetProperty("hasList").GetBoolean());
+        Assert.Equal(new[] { "A kept value filter hides 1 value. This column has no value list." }, Strs(r.GetProperty("keptNote")));
+        Assert.Equal("", r.GetProperty("textBox").GetString());
+        Assert.True(r.GetProperty("hasClear").GetBoolean());
+        Assert.Equal(new[] { 0, 1, 2 }, Ints(r.GetProperty("afterClear")));
+        Assert.True(r.GetProperty("keptGone").GetBoolean());
+        Assert.Equal("null", r.GetProperty("storedAfterClear").GetString());
+    }
+
+    [Fact]
+    public void OnABareFinOpsAddress_EachServerGetsItsOwnFilters()
+    {
+        var r = Run("finopsKey");
+        Assert.Equal("#/finops/srv-a/utilization", r.GetProperty("hashA").GetString());
+        Assert.Equal(new[] { 0, 2 }, Ints(r.GetProperty("shownA")));
+        Assert.Equal("#/finops/srv-b/utilization", r.GetProperty("hashB").GetString());
+        Assert.Equal(new[] { 0, 1, 2 }, Ints(r.GetProperty("shownB")));
+        Assert.Equal(new[] { 0, 2 }, Ints(r.GetProperty("shownBackOnA")));
+        Assert.Equal(0, r.GetProperty("callsOnSameHash").GetInt32());
+    }
+
+    [Fact]
+    public void TheFinOpsPaint_PinsTheServerBeforeItBuildsTheTab()
+    {
+        // The behaviour above runs pinFinopsHash itself; this pins that paint() calls it ahead of the tab's build, which
+        // is what makes the tab's tables carry the server in their filter key (the page cannot be run without a server).
+        var src = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "finops.js");
+        var pin = src.IndexOf("pinFinopsHash(chosen, active.id);", System.StringComparison.Ordinal);
+        var build = src.IndexOf("active.build(chosen,", System.StringComparison.Ordinal);
+        Assert.True(pin > 0 && build > pin, "paint() must call pinFinopsHash before active.build");
+    }
+
+    [Fact]
     public void TheList_CarriesAriaLabels_AndEscapeClosesIt()
     {
         var r = Run("keyboard");

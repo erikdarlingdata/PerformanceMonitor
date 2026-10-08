@@ -128,4 +128,45 @@ public sealed class ColumnFilterWiringCensusTests
             Assert.True(own.Count == 0, $"{dir} carries its own filter class: {string.Join(", ", own)}");
         }
     }
+
+    [Fact]
+    public void Alert_History_and_Job_History_set_the_one_all_servers_scope_in_both_apps()
+    {
+        /* One fixed scope for a cross-server list, set in the constructor before any filter manager is built, so a
+           restart finds the filters again (#5565). Without it the grid has no scope and nothing is kept. */
+        var files = new[]
+        {
+            ReadRepoFile("Lite", "Controls", "AlertsHistoryTab.xaml.cs"),
+            ReadRepoFile("Lite", "Controls", "JobHistoryTab.xaml.cs"),
+            ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "AlertsHistoryTab.xaml.cs"),
+            ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "JobHistoryTab.xaml.cs"),
+        };
+        foreach (var code in files)
+        {
+            var scope = code.IndexOf("ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);", StringComparison.Ordinal);
+            var manager = code.IndexOf("new DataGridFilterManager<", StringComparison.Ordinal);
+            Assert.True(scope > 0 && manager > scope, "a cross-server history tab must set ColumnFilterScope.AllServers before it builds its filter manager");
+        }
+    }
+
+    [Fact]
+    public void The_three_HistoryDataGrid_windows_in_each_app_have_no_scope()
+    {
+        /* Three drill-down windows per app share the grid name HistoryDataGrid, so a scope would make them overwrite
+           each other's filters. They stay unsaved: no ColumnFilterScope anywhere in them. */
+        foreach (var dir in new[] { "Lite/Windows", "Darling/PerformanceMonitor.Darling.Viewer" })
+        {
+            var windows = Directory.GetFiles(PathTo(dir.Split('/')), "*.xaml")
+                .Where(f => File.ReadAllText(f).Contains("x:Name=\"HistoryDataGrid\"", StringComparison.Ordinal))
+                .ToList();
+            Assert.Equal(3, windows.Count);
+            foreach (var xaml in windows)
+            {
+                var code = File.ReadAllText(xaml + ".cs");
+                Assert.Contains("new DataGridFilterManager<", code, StringComparison.Ordinal);
+                Assert.DoesNotContain("ColumnFilterScope", code, StringComparison.Ordinal);
+                Assert.DoesNotContain("ColumnFilterScope", File.ReadAllText(xaml), StringComparison.Ordinal);
+            }
+        }
+    }
 }

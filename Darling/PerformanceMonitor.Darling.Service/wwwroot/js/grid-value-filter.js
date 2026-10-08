@@ -192,10 +192,11 @@ export function serializeFilters(grids) {
   const list = [...grids].map(([key, cols]) => {
     const out = {};
     for (const [id, f] of cols) {
-      /* A text match typed on a column that gets no list (a statement, a plan, a message) lasts the session only. */
-      if (f.session || noListName(id)) continue;
+      /* A column named like a statement, a plan or a message keeps nothing. A text match typed on a column the page
+         marked `session` (valueList: false) lasts the session only, so only its value part, if it still holds one, is kept. */
+      if (noListName(id)) continue;
       const v = f.values && valuesOn(f.values) && f.values.set.length <= FILTER_STORE_MAX_VALUES ? f.values : null;
-      const entry = { op: f.op, text: f.text ?? "" };
+      const entry = f.session ? { op: "contains", text: "" } : { op: f.op, text: f.text ?? "" };
       if (v) entry.values = { mode: v.mode, set: [...v.set], blank: v.blank };
       if (entryOn(entry)) out[id] = entry;
     }
