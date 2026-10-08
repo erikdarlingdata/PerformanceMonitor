@@ -836,6 +836,12 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal ManagedConfWriteResult? LastManagedConfWriteResult { get; private set; }
 
+    /// <summary>Test-only seam (#5459): what the data volume holds, for every <see cref="TryReadDataVolumeSpace"/>
+    /// call this instance makes that does not pass its own reader. A live test sets it per instance to say what
+    /// free space each service start sees, because a CI runner's own free space cannot be steered to a ladder
+    /// edge. Null in production, which reads the real volume.</summary>
+    internal Func<string, (long AvailableFreeBytes, long TotalBytes)>? TestOnlyVolumeSpaceReader { get; set; }
+
     /// <summary>Whether THIS start ran PostgreSQL on <see cref="ManagedConfFile.LastGoodFileName"/> rather than
     /// the file <see cref="WriteManagedConfFile"/> just rendered (#4215) — set only in the recovery
     /// branch of <see cref="EnsureManagedConfReadyAsync"/>, the one place that copies the last-good file back
@@ -2658,6 +2664,34 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
+    /// <see cref="DeriveWalSettings(long)"/> for the managed file's render (#5459), which re-derives at every
+    /// service start from a reading of a volume that other work keeps filling and emptying. When
+    /// <paramref name="inForceMaxWalSizeMb"/> is a rung of the ladder that <see cref="IsWalSizeWithinDriftOf"/>
+    /// accepts for this reading, the answer is that rung's settings: the file already holds it, and a reading a
+    /// few hundred MB across a ladder edge is not a change in headroom. Anything else, a null, a value off the
+    /// ladder, or a rung one eighth of the free space away or more, derives plainly from the reading, so a real
+    /// halving or doubling of the headroom still moves the rung.
+    /// </summary>
+    internal static WalSettings DeriveWalSettings(long freeDiskBytesOnDataVolume, long? inForceMaxWalSizeMb)
+    {
+        const long oneMb = 1024L * 1024L;
+
+        if (inForceMaxWalSizeMb is > 0 and var inForce && inForce <= WalSizingCeilingBytes / oneMb
+            && IsWalSizeWithinDriftOf(freeDiskBytesOnDataVolume, inForce))
+        {
+            /* The free space that derives exactly this rung: <c>rung * divisor</c>. A value that is not a rung
+               derives to a different one, which the equality below turns away. */
+            var atRung = DeriveWalSettings(inForce * oneMb * WalSizingFreeDiskDivisor);
+            if (atRung.MaxWalSizeMb == inForce)
+            {
+                return atRung;
+            }
+        }
+
+        return DeriveWalSettings(freeDiskBytesOnDataVolume);
+    }
+
+    /// <summary>
     /// Whether the v12 block emits <c>checkpoint_completion_target = 0.9</c> for a store on this PostgreSQL
     /// major: only BELOW 14, where the default was 0.5 (see
     /// <see cref="CheckpointCompletionTargetDefaultChangedMajor"/>). An unknown major (0, from an unreadable
@@ -2765,9 +2799,10 @@ public sealed class DarlingManagedPostgres
     /// Supersedes v4's fixed <c>max_wal_size = 4GB</c> by last-occurrence-wins and restates nothing else — the
     /// blocks compose, they do not compete.</para>
     /// </summary>
-    internal static string BuildWalSizingConfAppend(long freeDiskBytesOnDataVolume, long totalDiskBytesOnDataVolume, int postgresMajor)
+    internal static string BuildWalSizingConfAppend(
+        long freeDiskBytesOnDataVolume, long totalDiskBytesOnDataVolume, int postgresMajor, long? inForceMaxWalSizeMb = null)
     {
-        var settings = DeriveWalSettings(freeDiskBytesOnDataVolume);
+        var settings = DeriveWalSettings(freeDiskBytesOnDataVolume, inForceMaxWalSizeMb);
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV12).Append('\n');
@@ -4199,12 +4234,6 @@ public sealed class DarlingManagedPostgres
     {
         var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
         var inputs = GatherManagedConfRenderInputs(dataDirectory, postgresMajor);
-        var rendered = ManagedConfFile.Render(inputs);
-        var renderOverride = TestOnlyRenderOverride.Value;
-        if (renderOverride is not null)
-        {
-            rendered = renderOverride(rendered);
-        }
 
         string? existingText = null;
         try
@@ -4217,6 +4246,24 @@ public sealed class DarlingManagedPostgres
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             _logger.LogWarning("Could not read {Path} ({Message}); writing a fresh one.", managedPath, ex.Message);
+        }
+
+        /* #5459: the free-space reading moves by a few hundred MB between two starts on a busy machine. Read next
+           to a ladder edge (16, 32, 64 or 128 GiB free) it would derive another max_wal_size from nothing but that
+           churn, give the body another hash, and rewrite a file nothing had changed. The file's own rung is an
+           input to the render, kept while it is within the tolerance the settings check and the stored verdicts
+           already share (IsWalSizeWithinDriftOf); halved or doubled headroom still moves it. A hand edit is
+           never read, so its diff against a fresh render below is still the plain derivation. */
+        if (existingText is not null)
+        {
+            inputs = inputs with { InForceMaxWalSizeMb = ManagedConfFile.ReadInForceMaxWalSizeMb(existingText) };
+        }
+
+        var rendered = ManagedConfFile.Render(inputs);
+        var renderOverride = TestOnlyRenderOverride.Value;
+        if (renderOverride is not null)
+        {
+            rendered = renderOverride(rendered);
         }
 
         if (existingText is not null && ManagedConfFile.IsHandEdited(existingText))
@@ -4435,7 +4482,7 @@ public sealed class DarlingManagedPostgres
     {
         try
         {
-            (freeBytes, totalBytes) = (readVolumeSpace ?? DarlingStoreUpgrade.ReadVolumeSpace)(dataDirectory);
+            (freeBytes, totalBytes) = (readVolumeSpace ?? TestOnlyVolumeSpaceReader ?? DarlingStoreUpgrade.ReadVolumeSpace)(dataDirectory);
             if (freeBytes >= 0 && totalBytes > 0)
             {
                 return true;
