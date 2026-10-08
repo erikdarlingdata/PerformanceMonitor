@@ -36,6 +36,8 @@ import {
   parseRange,
   readWindow,
   reachRefusal,
+  rollingOnlyRefusal,
+  minSpanRefusal,
   reachText,
   sampleIntervalNote,
   dataStartNote,
@@ -56,6 +58,10 @@ let pickerCount = 0;
  * @param {number|null} [opts.sampleIntervalMs] the main collector's interval; a span with fewer than 3 samples shows a note
  * @param {number|null} [opts.dataStartMs] where the data begins; a range starting well before it shows a note
  * @param {boolean} [opts.compact] hide the detail beside the button (it moves into the tooltip)
+ * @param {boolean} [opts.rollingOnly] offer only "this long back from now" (#5562 R5, the FinOps pages): no calendar periods, no
+ *   custom end, whole hours, at least one hour. A range outside that is greyed out or refused with the reason, never clamped.
+ * @param {number} [opts.minSpanMs] a floor above the global 5 minutes for a page whose read cannot answer a shorter range
+ * @param {number} [opts.stepMs] with rollingOnly, the unit a length must be a whole number of (default one hour; a daily read passes a day)
  * @param {string} [opts.label] the accessible name (default "Time range")
  * @param {(spec: object, range: object) => void} [opts.onChange] raised when the reader picks or applies a range
  */
@@ -116,10 +122,16 @@ export function timeRangePicker(opts = {}) {
     draw();
   }
 
+  /* Why this page cannot read the range, or null: past the reach, outside a rolling-only page's shape, or under its own floor. */
+  function refusalFor(next, range) {
+    const rolling = opts.rollingOnly ? rollingOnlyRefusal(next, range.spanMs, opts.minSpanMs || undefined, opts.stepMs || undefined) : null;
+    return rolling || minSpanRefusal(range.spanMs, opts.minSpanMs) || reachRefusal(range.spanMs, reach);
+  }
+
   function choose(next) {
     const r = resolveSpec(next, now(), zone);
     if (!r.ok) return r.error.message;
-    const tooLong = reachRefusal(r.range.spanMs, reach);
+    const tooLong = refusalFor(next, r.range);
     if (tooLong) return tooLong;
     hold(next);
     close(true);
@@ -130,7 +142,7 @@ export function timeRangePicker(opts = {}) {
   /* One row of the popup lists: the name, the length it is right now, and why it is greyed out when it is. */
   function item(next, nowMs) {
     const r = resolveSpec(next, nowMs, zone);
-    const why = !r.ok ? r.error.message : reachRefusal(r.range.spanMs, reach);
+    const why = !r.ok ? r.error.message : refusalFor(next, r.range);
     const selected = specId(next) === specId(spec);
     const children = [el("span", { class: "trp-item-name", text: specName(next) })];
     if (r.ok) children.push(el("span", { class: "trp-item-length", text: r.range.length }));
@@ -162,7 +174,7 @@ export function timeRangePicker(opts = {}) {
     const r = parseRange(text, nowMs, zone);
     let error = r.ok ? null : r.error;
     if (r.ok) {
-      const tooLong = reachRefusal(r.range.spanMs, reach);
+      const tooLong = refusalFor(r.spec, r.range);
       if (tooLong) error = tooLong;
     }
     if (error) {
@@ -196,7 +208,7 @@ export function timeRangePicker(opts = {}) {
   function buildPopup() {
     const nowMs = now();
     const r = current();
-    textBox = el("input", { type: "text", class: "trp-text", "aria-label": "Type a time range", "aria-describedby": previewId, placeholder: "45m, last month, Oct 1 - Oct 2", autocomplete: "off", spellcheck: "false" });
+    textBox = el("input", { type: "text", class: "trp-text", "aria-label": "Type a time range", "aria-describedby": previewId, placeholder: opts.rollingOnly ? "6h, 3d, 2w" : "45m, last month, Oct 1 - Oct 2", autocomplete: "off", spellcheck: "false" });
     preview = el("div", { class: "trp-preview", id: previewId, role: "status", "aria-live": "polite" });
     applyButton = el("button", { type: "button", class: "btn trp-apply", text: "Apply" });
     fromBox = el("input", { type: "datetime-local", class: "trp-pick", "aria-label": "Range start", step: "60" });
@@ -224,16 +236,23 @@ export function timeRangePicker(opts = {}) {
       el("div", { class: "trp-heading", text: "Calendar periods" }),
       ...CALENDAR_PRESETS.map((s) => item(s, nowMs)),
     ]);
-    const custom = el("div", { class: "trp-column trp-custom" }, [
-      el("div", { class: "trp-heading", text: "Type a range" }),
-      textBox,
-      preview,
-      el("div", { class: "trp-heading", text: "Or pick a start and an end" }),
-      el("div", { class: "trp-picks" }, [fromBox, el("span", { text: "to" }), toBox]),
-      el("div", { class: "trp-zone", text: "Times are in " + zone.replace(/_/g, " ") + "." }),
-      applyButton,
-    ]);
-    popup = el("div", { class: "trp-popup", role: "dialog", "aria-label": name + " options" }, [quick, periods, custom]);
+    /* A rolling-only page (#5562 R5) has no calendar periods and no start-and-end pick: its reads are "hours back from now". */
+    const custom = el(
+      "div",
+      { class: "trp-column trp-custom" },
+      opts.rollingOnly
+        ? [el("div", { class: "trp-heading", text: "Type a length" }), textBox, preview, applyButton]
+        : [
+            el("div", { class: "trp-heading", text: "Type a range" }),
+            textBox,
+            preview,
+            el("div", { class: "trp-heading", text: "Or pick a start and an end" }),
+            el("div", { class: "trp-picks" }, [fromBox, el("span", { text: "to" }), toBox]),
+            el("div", { class: "trp-zone", text: "Times are in " + zone.replace(/_/g, " ") + "." }),
+            applyButton,
+          ]
+    );
+    popup = el("div", { class: "trp-popup", role: "dialog", "aria-label": name + " options" }, opts.rollingOnly ? [quick, custom] : [quick, periods, custom]);
     popup.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();

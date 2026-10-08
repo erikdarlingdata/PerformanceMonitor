@@ -22,17 +22,13 @@
  */
 
 import { VIZ } from "../panels.js";
+import { pageRangePicker, windowOfSpec } from "../page-range.js";
+import { relativeSpec } from "../time-range.js";
 import { orderServers } from "../server-order.js";
 import { el, mount, clear, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime } from "../util.js";
 
-/** The window choices: the house presets, in hours. */
-export const WINDOWS = [
-  { value: 1, label: "Last 1 hour" },
-  { value: 4, label: "Last 4 hours" },
-  { value: 12, label: "Last 12 hours" },
-  { value: 24, label: "Last 24 hours" },
-  { value: 168, label: "Last 7 days" },
-];
+/** The default range, in hours. The range itself is the shared time range picker's (#5562). */
+export const DEFAULT_HOURS = 24;
 
 /** The run statuses the read accepts; an empty value is every status. */
 export const STATUSES = [
@@ -62,7 +58,7 @@ export const JOB_HISTORY_COLUMNS = [
 
 /* The filter state, kept across the 60 s rebuild. `jobDraft` is the job text as typed, applied on Enter or when
    the box loses focus; `job` is the text the last read used. */
-const state = { server: "", hours: 24, status: "", category: "", limit: 100, job: "", jobDraft: "", jobFocused: false, jobCaret: null };
+const state = { server: "", spec: relativeSpec(DEFAULT_HOURS * 3600000), status: "", category: "", limit: 100, job: "", jobDraft: "", jobFocused: false, jobCaret: null };
 /* The categories seen in any answer, so the Category choices survive a filter that narrows the next answer. */
 const seenCategories = new Set();
 /* The server choices from the last list_servers read, so the rebuild paints its select at once. */
@@ -122,9 +118,27 @@ function fill(sel, options, value) {
   sel.value = String(value);
 }
 
+/** The read takes whole hours back from the end, so a range of 30 minutes comes back as the whole hour. The runs are newest first, so
+ *  the row limit drops only the OLDEST ones and cutting at the range's start cannot hide a run inside it; the end is bounded in
+ *  the reader (R6), never here. */
+export function trimRunsToStart(data, w) {
+  if (!w || !Array.isArray(data.runs)) return data;
+  return {
+    ...data,
+    runs: data.runs.filter((r) => {
+      const t = Date.parse(r && r.run_time);
+      return !Number.isFinite(t) || t >= w.startMs;
+    }),
+  };
+}
+
 /** The read's parameters for the current filters; an empty filter is left off so the read applies none. */
 export function readParams() {
-  const p = { hours: state.hours, limit: state.limit };
+  /* A finished range sends its end as `as_of` (#5562 R6). The reader bounds the runs by that end in SQL, before the row limit
+     (JobHistoryFilter.UntilUtc, DarlingJobHistoryReader.cs), so the newest runs the limit keeps are the range's own. */
+  const w = windowOfSpec(state.spec) || windowOfSpec(relativeSpec(DEFAULT_HOURS * 3600000));
+  const p = { hours: w.hours, limit: state.limit };
+  if (w.asOf) p.as_of = w.asOf;
   if (state.server) p.server = state.server;
   /* The text in the box is what the next read uses, so a rebuild or another filter's change never leaves typed text unapplied. */
   state.job = state.jobDraft.trim();
@@ -199,10 +213,17 @@ export function renderJobHistory(main) {
   const body = el("div", {}, [loadingStrip("Loading job history…")]);
 
   const reload = () => load();
-  const win = select("Window", WINDOWS, state.hours, (v) => {
-    state.hours = Number(v);
-    reload();
-  });
+  /* The picker's reach comes from the catalog (get_job_history reaches 168 hours): a longer range is greyed out with the reason. */
+  const rangePicker = pageRangePicker({
+    read: "get_job_history",
+    spec: state.spec,
+    label: "Window",
+    onChange: (spec) => {
+      state.spec = spec;
+      reload();
+    },
+  }).picker;
+  const win = { label: el("div", { class: "range-control" }, [el("span", { text: "Window" }), rangePicker.node]) };
   const server = select("Server", serverOptions(), state.server, (v) => {
     state.server = v;
     reload();
@@ -284,7 +305,7 @@ export function renderJobHistory(main) {
         showAgent(null);
         return mount(body, readErrorStrip(res.message));
       }
-      const data = res.data || {};
+      const data = trimRunsToStart(res.data || {}, windowOfSpec(state.spec));
       const kept = keptWindowStrip(res);
       showAgent(res.kind === "empty" ? res.hints : data);
       if (res.kind === "empty") {

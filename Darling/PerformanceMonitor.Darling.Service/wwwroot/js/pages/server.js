@@ -52,6 +52,7 @@ import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
 import { timeRangePicker } from "../time-range-picker.js";
+import { serverCatalog, collectorIntervalFromCatalog } from "../page-range.js";
 import { browserZone, resolveSpec, relativeSpec, fixedSpec, specName, wholeHours, readWindow, reachRefusal, ROLLING_PRESETS, MINIMUM_SPAN_MS } from "../time-range.js";
 
 /** How far back this page's reads reach, in hours. All but three ranged reads on these tabs (the collection log, current waits and
@@ -296,6 +297,9 @@ function paintTabs(tabsSlot, server, tabId, card) {
 function redrawPanels() {
   if (!gridNode || !current.tab || !current.server) return;
 
+  /* Before the keepGrid return: a poll that keeps the panels still built a new picker, which needs its note. */
+  applySampleNote();
+
   if (keepGrid) {
     keepGrid = false;
     return;
@@ -370,7 +374,30 @@ function rangeControl() {
       if (holdSpec(server, spec, Date.now()) == null) redrawPanels();
     },
   });
+  rangePicker = picker;
   return el("div", { class: "range-control" }, [el("span", { text: "Range" }), picker.node]);
+}
+
+/* The picker on screen, so the tab on screen can tell it how often its data is collected (#5562 R3). */
+let rangePicker = null;
+
+/** The "collected every N minutes" note for the tab on screen (#5562 R3). Each tab declares its main collector (`collector` in
+ *  server-tabs.js); the server's catalog gives that collector's ACTUAL interval (a per-server schedule row over the fleet's over the
+ *  shipped default) as `collector_interval_minutes`. The picker shows the note when the chosen span holds fewer than 3 samples at that
+ *  interval, and never widens the range. A tab with no single main collector, or a catalog that cannot be read, shows no note. */
+function applySampleNote() {
+  const picker = rangePicker;
+  const tab = current.tab;
+  const server = current.server;
+  if (!picker) return;
+  if (!tab || !tab.collector || !server) {
+    picker.setSampleInterval(null);
+    return;
+  }
+  serverCatalog(server).then((catalog) => {
+    if (picker !== rangePicker || tab !== current.tab || server !== current.server) return;
+    picker.setSampleInterval(collectorIntervalFromCatalog(catalog, tab.collector));
+  });
 }
 
 /* This server's fleet card, plus the reason sentence the fleet's worst-first ranking computed for it. ONE

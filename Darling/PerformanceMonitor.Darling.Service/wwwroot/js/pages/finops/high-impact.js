@@ -14,33 +14,14 @@ import { VIZ } from "../../panels.js";
 import { planColumn } from "../plan-viewer.js";
 import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
+import { finopsWindowControl } from "./window.js";
 
 // The default window.
 const HOURS = 24;
 
-// The desktop's window choices (FinOpsTab.xaml ~:874), as hours.
-const WINDOWS = [
-  { value: 1, label: "Last 1 hour" },
-  { value: 4, label: "Last 4 hours" },
-  { value: 12, label: "Last 12 hours" },
-  { value: 24, label: "Last 24 hours" },
-  { value: 168, label: "Last 7 days" },
-];
-
 // The chosen window per server, kept here so the 60 s rebuild of the tab does not put it back to 24 hours.
 const chosenHours = new Map();
 
-// A labelled <select> (the server-tabs.js pickerControl pattern); every value goes through el()'s text and attribute paths.
-function pickerControl(label, options, selected, onPick) {
-  const sel = el(
-    "select",
-    { class: "range-select-inline", "aria-label": label },
-    options.map((o) => el("option", { value: o.value, text: o.label }))
-  );
-  sel.value = String(selected);
-  sel.addEventListener("change", () => onPick(Number(sel.value)));
-  return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
-}
 const LIMIT = 10;
 
 const COLUMNS = [
@@ -97,7 +78,8 @@ export const tab = {
       }
     };
     const start = chosenHours.get(server) ?? HOURS;
-    const root = el("div", {}, [pickerControl("Window", WINDOWS, start, (hours) => load(hours)), body]);
+    const win = finopsWindowControl({ hours: start, onChange: (hours) => load(hours) });
+    const root = el("div", {}, [win.node, body]);
     load(start);
     return root;
   },

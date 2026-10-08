@@ -26,6 +26,8 @@
 import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, rollupTextId,
          fmtInt, fmtMb, fmtPct, fmtBool, fmtText, bandClass, disclosure } from "../util.js";
 import { gridTable } from "../panels.js";
+import { pageRangePicker, windowOfSpec } from "../page-range.js";
+import { relativeSpec } from "../time-range.js";
 
 /* The watch-item state vocabulary — the label each FleetSweepWatchStateMachine state owes an operator. The
    KEYS are the machine's own constants; Darling.Tests.FleetSweepWebFeedTests parses THIS OBJECT and compares
@@ -38,20 +40,15 @@ export const SWEEP_WATCH_STATE_LABELS = {
   closed: "Closed",
 };
 
-/* The configurable viewing spans. 1 hour is the DEFAULT by the owner's ruling ("configurable spans of time
-   though, default hourly") — at the shipped hourly cadence that lands the page on the newest sweep, and the
-   wider spans are the way into history. */
-const SPANS = [
-  { hours: 1, label: "Last hour" },
-  { hours: 6, label: "6 hours" },
-  { hours: 24, label: "24 hours" },
-  { hours: 72, label: "3 days" },
-  { hours: 168, label: "7 days" },
-];
+/* The viewing span is the shared time range picker's (#5562). 1 hour is the DEFAULT by the owner's ruling ("configurable
+   spans of time though, default hourly") - at the shipped hourly cadence that lands the page on the newest sweep, and the
+   wider spans are the way into history. The timeline read takes whole hours back from an end (hours, as_of) with no row
+   cap, so a shorter or finished range is fetched as the whole hours and trimmed to the exact pair in timelineSweeps. */
+const DEFAULT_SPAN_HOURS = 1;
 
 /* Page state persists across the 60s refresh (the fleet page's module-level rule): the chosen span, the
    selected sweep (null = latest), and whether the watch table is showing closed history. */
-let sweepSpanHours = 1;
+let sweepSpec = relativeSpec(DEFAULT_SPAN_HOURS * 3600000);
 let selectedSweepId = null;
 let watchStateShown = null; // null = the open + carried default view; "closed" etc. on request
 
@@ -104,15 +101,28 @@ async function renderCadence(meta) {
 }
 
 function spanControl() {
-  const sel = el("select", { class: "sort-select", "aria-label": "Timeline span" },
-    SPANS.map((s) => el("option", { value: String(s.hours), text: s.label })));
-  sel.value = String(sweepSpanHours);
-  sel.addEventListener("change", () => {
-    sweepSpanHours = Number(sel.value);
-    const mainNode = document.getElementById("main");
-    if (mainNode) renderSweeps(mainNode);
+  const { picker } = pageRangePicker({
+    read: "get_sweep_reports",
+    spec: sweepSpec,
+    label: "Timeline span",
+    /* The sweep feed is the monitoring tool's own, fed by no collector, so there is no "collected every N minutes" note. */
+    useCatalogInterval: false,
+    onChange: (spec) => {
+      sweepSpec = spec;
+      const mainNode = document.getElementById("main");
+      if (mainNode) renderSweeps(mainNode);
+    },
   });
-  return el("label", { class: "sort-control" }, [el("span", { text: "Span" }), sel]);
+  return el("div", { class: "sort-control" }, [el("span", { text: "Span" }), picker.node]);
+}
+
+/* The sweeps the held range covers, from the whole-hours fetch: those swept at or before its end and at or after its start. */
+export function timelineSweeps(sweeps, w) {
+  if (!w) return sweeps;
+  return sweeps.filter((s) => {
+    const t = Date.parse(s.swept_at);
+    return !Number.isFinite(t) || (t >= w.startMs && t <= w.endMs);
+  });
 }
 
 /* ─────────────────────────── the sweep document ─────────────────────────── */
@@ -296,10 +306,11 @@ function livenessBlock(d, lv) {
 
 async function renderTimeline(box, detailBox) {
   mount(box, loadingStrip("Loading timeline…"));
-  const res = await apiGet("/api/sweeps?hours=" + sweepSpanHours);
+  const w = windowOfSpec(sweepSpec) || windowOfSpec(relativeSpec(DEFAULT_SPAN_HOURS * 3600000));
+  const res = await apiGet("/api/sweeps?hours=" + w.hours + (w.asOf ? "&as_of=" + encodeURIComponent(w.asOf) : ""));
   if (res.kind === "error") return mount(box, errorStrip(res.message));
 
-  const sweeps = (res.data && res.data.sweeps) || [];
+  const sweeps = timelineSweeps((res.data && res.data.sweeps) || [], w);
   if (!sweeps.length) {
     mount(box, emptyStrip("No sweeps in this span. Widen the span, or check that fleet_sweep.enabled is on — a gap in this timeline is a missed sweep, with its cause on the service log."));
     return;

@@ -27,6 +27,8 @@ import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emp
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
+import { pageRangePicker, windowOfSpec } from "../page-range.js";
+import { relativeSpec, specName } from "../time-range.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { orderServers } from "../server-order.js";
 import { getSession } from "../views-api.js";
@@ -409,23 +411,22 @@ function reconcileRows(tbody, rows, rowMap) {
 }
 
 /* The four read choices, kept at module scope so the 60 s poll (which calls renderAlerts again) and a visit to
- * another page and back keep them. The windows are the desktop Alert History's, less "All": the tool refuses
- * more than 168 hours, and a choice it would refuse is not offered. The row limits stop at the dispatch
- * layer's 1000-row ceiling. The server is the registry's server_name ("" = the whole fleet). */
-const WINDOW_CHOICES = [
-  { hours: 1, label: "Last 1 Hour" },
-  { hours: 4, label: "Last 4 Hours" },
-  { hours: 24, label: "Last 24 Hours" },
-  { hours: 168, label: "Last 7 Days" },
-];
+ * another page and back keep them. The range is the shared time range picker's spec (#5562), read as of each read so a
+ * rolling range slides. The picker takes the reach from the catalog (get_alert_history reaches 168 hours), so a longer
+ * range is greyed out with the reason, never clamped, and there is no All. The alert table itself keeps 90 days
+ * (DarlingRetention.AlertHistoryRetentionDays, R8), but the web read stops at the common 7 day reach (R2). The row limits
+ * stop at the dispatch layer's 1000-row ceiling. The server is the registry's server_name ("" = the whole fleet). */
+const DEFAULT_HOURS = 24;
 const LIMIT_CHOICES = [200, 500, 1000];
-const choices = { hours: 24, limit: 200, server: "", dismissed: false };
+const choices = { spec: relativeSpec(DEFAULT_HOURS * 3600000), limit: 200, server: "", dismissed: false };
 
 /* The get_alert_history parameters the current choices ask for. server_name and include_dismissed are left out
- * (buildQuery drops empty values) when they are at their defaults. */
+ * (buildQuery drops empty values) when they are at their defaults, and as_of when the range ends now. */
 function readParams() {
+  const w = windowOfSpec(choices.spec);
   return {
-    hours_back: choices.hours,
+    hours_back: w ? w.hours : DEFAULT_HOURS,
+    as_of: w ? w.asOf : null,
     limit: choices.limit,
     server_name: choices.server || null,
     include_dismissed: choices.dismissed ? "true" : null,
@@ -433,7 +434,7 @@ function readParams() {
 }
 
 function windowLabel() {
-  return (WINDOW_CHOICES.find((w) => w.hours === choices.hours) || WINDOW_CHOICES[2]).label.toLowerCase();
+  return specName(choices.spec).toLowerCase();
 }
 
 /* The server names list_servers reported on the last successful read; the picker keeps the chosen server in the
@@ -589,8 +590,14 @@ export async function renderAlerts(main) {
     "aria-label": "Filter alerts by server",
   });
 
-  const windowSel = picker("Time range", WINDOW_CHOICES.map((w) => ({ value: w.hours, label: w.label })), choices.hours);
-  windowSel.setAttribute("title", "The web reads at most 7 days of alert history, so there is no All choice.");
+  const rangePicker = pageRangePicker({
+    read: "get_alert_history",
+    spec: choices.spec,
+    label: "Time range",
+    /* No collector feeds the alert log, so there is no "collected every N minutes" note. */
+    useCatalogInterval: false,
+    onChange: (spec) => { choices.spec = spec; changed(); },
+  }).picker;
   const limitSel = picker("Row limit", LIMIT_CHOICES.map((n) => ({ value: n, label: n + " rows" })), choices.limit);
   const serverSel = picker("Server", serverItems(), choices.server);
   const dismissedBox = el("input", { type: "checkbox", "aria-label": "Show dismissed alerts" });
@@ -603,7 +610,7 @@ export async function renderAlerts(main) {
     el("h2", { text: "Alert History" }),
     meta,
     el("div", { class: "spacer" }),
-    control("Range", windowSel),
+    el("div", { class: "range-control" }, [el("span", { text: "Range" }), rangePicker.node]),
     control("Rows", limitSel),
     control("Server", serverSel),
     el("label", { class: "range-control" }, [dismissedBox, el("span", { text: "Show dismissed" })]),
@@ -615,7 +622,6 @@ export async function renderAlerts(main) {
   /* A changed choice refetches and reconciles the table that is already drawn, the same path a poll tick takes.
      It also drops the checked rows: they were picked from the list the old choice showed. */
   const changed = () => { clearSelection(live); return refreshAlerts(live); };
-  windowSel.addEventListener("change", () => { choices.hours = Number(windowSel.value); changed(); });
   limitSel.addEventListener("change", () => { choices.limit = Number(limitSel.value); changed(); });
   serverSel.addEventListener("change", () => { choices.server = serverSel.value; changed(); });
   dismissedBox.addEventListener("change", () => { choices.dismissed = !!dismissedBox.checked; changed(); });

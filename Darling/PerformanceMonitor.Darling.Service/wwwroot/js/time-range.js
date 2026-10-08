@@ -867,6 +867,30 @@ export function reachRefusal(spanMs, hours) {
   return spanMs > hours * HOUR_MS ? "This page's reads reach at most " + reachText(hours) + " back." : null;
 }
 
+/** The shortest range a rolling-only page offers: one hour, because its reads take whole hours back from now (#5562 R5). */
+export const ROLLING_ONLY_MIN_SPAN_MS = HOUR_MS;
+
+/**
+ * The reason a range is not one a rolling-only page can read, or null (#5562 R5). A FinOps read is "this many hours back from
+ * now", so it cannot honor a calendar period, a finished range, a since-range or a length that is not a whole number of hours;
+ * the page refuses them rather than showing a range its read would answer differently.
+ */
+export function rollingOnlyRefusal(spec, spanMs, minSpanMs = ROLLING_ONLY_MIN_SPAN_MS, stepMs = HOUR_MS) {
+  if (!spec || spec.kind !== "relative") {
+    return "This page reads a length back from now, so pick a rolling length such as 24h or 7d.";
+  }
+  if (spanMs < minSpanMs) return "This page reads at least " + formatLength(minSpanMs) + " back from now.";
+  if (spanMs % stepMs !== 0) {
+    return stepMs % DAY_MS === 0 ? "This page reads whole days back from now, such as 7d or 30d." : "This page reads whole hours back from now, such as 6h or 3d.";
+  }
+  return null;
+}
+
+/** The reason a range is shorter than a page's own floor, or null. */
+export function minSpanRefusal(spanMs, minSpanMs) {
+  return minSpanMs > 0 && spanMs < minSpanMs ? "This page reads at least " + formatLength(minSpanMs) + "." : null;
+}
+
 /**
  * The window a read takes for a resolved range: reads take whole `hours` and an `as_of` end. `hours` rounds the span UP to a whole
  * number of hours (at least 1), so the fetch starts at or before the range start and the page trims to the exact pair; `asOf` is

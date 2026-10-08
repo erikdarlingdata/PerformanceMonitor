@@ -1073,6 +1073,7 @@ export const SERVER_TABS = [
   {
     id: "overview",
     label: "Overview",
+    collector: "cpu_utilization",
     build: (server, ctx) => [
       stat("Overview", "get_server_summary", { server }, OVERVIEW_STATS, SNAPSHOT, 2),
       stat("Server Properties", "get_server_properties", { server }, PROPERTY_STATS, SNAPSHOT, 2),
@@ -1121,6 +1122,7 @@ export const SERVER_TABS = [
   {
     id: "waits",
     label: "Wait Stats",
+    collector: "wait_stats",
     build: (server, ctx) => [
       waitsPanel(server, ctx),
       table(
@@ -1158,6 +1160,7 @@ export const SERVER_TABS = [
   {
     id: "cpu",
     label: "CPU",
+    collector: "cpu_utilization",
     build: (server, ctx) => [
       line("CPU Utilization", "get_cpu_utilization", { server, hours: ctx.hours }, "samples", "sample_time", CPU_SERIES, {
         subtitle: ctx.label,
@@ -1209,6 +1212,7 @@ export const SERVER_TABS = [
   {
     id: "memory",
     label: "Memory",
+    collector: "memory_stats",
     build: (server, ctx) => [
       stat("Memory", "get_memory_stats", { server }, MEMORY_STATS, SNAPSHOT, 2),
       line("Memory Trend", "get_memory_trend", { server, hours: ctx.hours }, "trend", "time", MEMORY_SERIES, {
@@ -1299,6 +1303,7 @@ export const SERVER_TABS = [
   {
     id: "blocking",
     label: "Blocking",
+    collector: "blocked_process_report",
     /* get_blocking_stats, which draws Blocking Severity and Deadlock Severity, takes any window, and its tables keep
        more than this page's widest Range. The note names that Range from the presets (tabNote), so narrowing them
        cannot leave it wrong. */
@@ -1442,6 +1447,7 @@ export const SERVER_TABS = [
   {
     id: "io",
     label: "File I/O",
+    collector: "file_io_stats",
     build: (server, ctx) => [
       fileIoPanel(server, ctx),
       table(
@@ -1496,6 +1502,7 @@ export const SERVER_TABS = [
   {
     id: "queries",
     label: "Queries",
+    collector: "query_stats",
     note:
       "Execution-plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution are " +
       "desktop-viewer features — they need a plan renderer and a command back to the monitored server, neither " +
@@ -2575,6 +2582,7 @@ export const POSTGRES_TABS = [
   {
     id: "waits",
     label: "Waits",
+    collector: "pg_wait_sampling",
     /* THE DECISION, argued in the PR: this tab is SHOWN at every PostgreSQL target, including the stock ones
        where its read can never have content. get_pg_wait_stats reads aurora_stat_system_waits(), which core
        PostgreSQL has in no version, so on `postgres` the panel is permanently empty — and it is permanently
@@ -2640,6 +2648,7 @@ export const POSTGRES_TABS = [
   {
     id: "io",
     label: "I/O",
+    collector: "pg_io_stats",
     note:
       "PostgreSQL reports I/O by BACKEND TYPE, object and context rather than by file, so there is no " +
       "per-file grid here and the shape is deliberately not the SQL Server one. On Aurora the whole write side " +
