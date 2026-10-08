@@ -616,8 +616,33 @@ public sealed class ComposeUnknownServerMessageTests
     public void AnUnregisteredNameOverNothing_IsUnknown_AndNamesTheServer()
     {
         var message = DarlingWebEndpoints.UnknownServerMessage(new[] { "h4-walk-throwaway" }, new[] { "h4-walk-throwaway" }, NullRow);
-        Assert.Equal("No server named 'h4-walk-throwaway' is registered, and nothing is stored under that name.", message);
+        Assert.Equal("No server named 'h4-walk-throwaway' is registered, and nothing is stored under that name in this time range.", message);
         Assert.NotNull(DarlingWebEndpoints.UnknownServerMessage(new[] { "a", "b" }, new[] { "a", "b" }, new System.Text.Json.Nodes.JsonArray()));
+    }
+
+    /// <summary>W13: a registry lookup that FAULTED answers every name as unregistered (the old-read fallback), which is not a finding.
+    /// The run must keep the old empty answer, never a not_found for a server that is registered.</summary>
+    [Fact]
+    public void AFailedRegistryLookup_NeverMakesARegisteredServerUnknown()
+    {
+        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "a" }, new[] { "a" }, NullRow, lookupFailed: true));
+        Assert.NotNull(DarlingWebEndpoints.UnknownServerMessage(new[] { "a" }, new[] { "a" }, NullRow, lookupFailed: false));
+    }
+
+    /// <summary>The lookup reports its own fault to the caller (a store nobody listens on is the fault), and still answers every name.</summary>
+    [Fact]
+    public async Task TheRegistryLookup_ReportsAFault_AndStillAnswersEveryName()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var builder = new Npgsql.NpgsqlConnectionStringBuilder
+        {
+            Host = "127.0.0.1", Port = 1, Username = "x", Database = "x", Timeout = 2, CommandTimeout = 2, Pooling = false,
+        };
+        await using var dead = Npgsql.NpgsqlDataSource.Create(builder.ConnectionString);
+        var failed = false;
+        var answer = await ComposeServerScope.FindUnregisteredAsync(dead, new[] { "a", "b" }, ct, logger: null, onLookupFailed: () => failed = true);
+        Assert.True(failed);
+        Assert.Equal(new[] { "a", "b" }, answer);
     }
 
     [Fact]
@@ -633,7 +658,7 @@ public sealed class ComposeUnknownServerMessageTests
     [Fact]
     public void TheWebRoute_AnswersAnUnknownServerAs404WithItsMessage()
     {
-        var outcome = DarlingWebEndpoints.ComposeRunOutcome.NotFound("No server named 'x' is registered, and nothing is stored under that name.");
+        var outcome = DarlingWebEndpoints.ComposeRunOutcome.NotFound("No server named 'x' is registered, and nothing is stored under that name in this time range.");
         Assert.True(outcome.IsNotFound);
         var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 1);
         Assert.Equal(404, (result as Microsoft.AspNetCore.Http.IStatusCodeHttpResult)?.StatusCode);

@@ -1776,48 +1776,97 @@ GROUP BY server_id, collector_name";
     /// <summary>One <see cref="LastCollectionRow"/> per enabled registry server, INCLUDING the ones whose
     /// window holds nothing (#3935): their row is the read's positive report that it looked and found none,
     /// which is what <see cref="ClassifyWindowedFreshness"/> needs before it may call a server Offline.</summary>
-    private static async Task<Dictionary<int, LastCollectionRow>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, ILogger? logger, CancellationToken cancellationToken)
+    internal static async Task<Dictionary<int, LastCollectionRow>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, ILogger? logger, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, LastCollectionRow>();
-        await using var command = postgres.CreateCommand(FleetLastCollectionSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddTimestamp(command, LastCollectionWindowStart(now));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        /* The first read is closed (reader, command, and with them its pooled connection) before the older-collection read opens
+           its own, so one fleet call never holds two pooled connections while it waits for the second: concurrent polls that each
+           held one and waited for another could exhaust the pool and answer 503. */
         {
-            map[reader.GetInt32(0)] = new LastCollectionRow(
-                reader.IsDBNull(1) ? null : reader.GetDateTime(1),
-                reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+            await using var command = postgres.CreateCommand(FleetLastCollectionSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddTimestamp(command, LastCollectionWindowStart(now));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                map[reader.GetInt32(0)] = new LastCollectionRow(
+                    reader.IsDBNull(1) ? null : reader.GetDateTime(1),
+                    reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+            }
         }
 
         /* W1b: a server the window held nothing for gets its real last collection from one more, index-backed read, run
-           only when there is such a server. A failed read leaves the card as it was: the bound text, never a wrong age. */
-        var dark = map.Where(kv => kv.Value.LastCollection is null).Select(kv => kv.Key).ToArray();
-        if (dark.Length > 0)
+           only when there is such a server. A failed read leaves the card as it was: the bound text, never a wrong age.
+           The answer is cached per server for OlderCollectionCacheMinutes: while a server stays dark its older collection
+           cannot change (the 48 h read takes over the moment rows return), so the read never runs on every poll. */
+        var cache = OlderCollectionCache.GetOrCreateValue(postgres);
+        foreach (var id in map.Where(kv => kv.Value.LastCollection is not null).Select(kv => kv.Key))
+        {
+            /* A server with rows is not dark: forget its entry, so a later dark spell reads fresh. */
+            cache.TryRemove(id, out _);
+        }
+
+        var dark = map.Where(kv => kv.Value.LastCollection is null).Select(kv => kv.Key).ToList();
+        var toRead = new List<int>();
+        foreach (var id in dark)
+        {
+            if (cache.TryGetValue(id, out var cached) && now - cached.ReadAt < OlderCollectionCacheTtl)
+            {
+                if (cached.Older is { } older) map[id] = map[id] with { OlderCollection = older };
+            }
+            else
+            {
+                toRead.Add(id);
+            }
+        }
+
+        if (toRead.Count > 0)
         {
             try
             {
-                await using var older = postgres.CreateCommand(FleetOlderCollectionSql);
-                older.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                older.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = dark });
-                AddTimestamp(older, LastCollectionWindowStart(now));
-                await using var olderReader = await older.ExecuteReaderAsync(cancellationToken);
-                while (await olderReader.ReadAsync(cancellationToken))
+                var found = new Dictionary<int, DateTime>();
+                await using (var older = postgres.CreateCommand(FleetOlderCollectionSql))
                 {
-                    var id = olderReader.GetInt32(0);
-                    if (olderReader.IsDBNull(1) || !map.TryGetValue(id, out var row)) continue;
-                    map[id] = row with { OlderCollection = olderReader.GetDateTime(1) };
+                    older.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    older.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = toRead.ToArray() });
+                    AddTimestamp(older, LastCollectionWindowStart(now));
+                    await using var olderReader = await older.ExecuteReaderAsync(cancellationToken);
+                    while (await olderReader.ReadAsync(cancellationToken))
+                    {
+                        var id = olderReader.GetInt32(0);
+                        if (olderReader.IsDBNull(1) || !map.ContainsKey(id)) continue;
+                        found[id] = olderReader.GetDateTime(1);
+                    }
+                }
+
+                foreach (var id in toRead)
+                {
+                    DateTime? olderCollection = found.TryGetValue(id, out var value) ? value : null;
+                    cache[id] = new OlderCollectionEntry(now, olderCollection);
+                    if (olderCollection is { } at) map[id] = map[id] with { OlderCollection = at };
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                /* Display only: the card falls back to the bound sentence. */
-                logger?.LogWarning(ex, "Fleet overview: the last collection of {Count} offline server(s) could not be read; their cards keep the two-day bound", dark.Length);
+                /* Display only: the card falls back to the bound sentence, and nothing is cached, so the next poll tries again. */
+                logger?.LogWarning(ex, "Fleet overview: the last collection of {Count} offline server(s) could not be read; their cards keep the two-day bound", toRead.Count);
             }
         }
 
         return map;
     }
+
+    /// <summary>How long a dark server's older-collection answer is reused (W1b). The value cannot change while the server stays
+    /// dark; it is dropped as soon as the server shows rows again.</summary>
+    internal const int OlderCollectionCacheMinutes = 15;
+
+    private static readonly TimeSpan OlderCollectionCacheTtl = TimeSpan.FromMinutes(OlderCollectionCacheMinutes);
+
+    private sealed record OlderCollectionEntry(DateTime ReadAt, DateTime? Older);
+
+    /// <summary>Per store (the data source), then per server id: the cached older-collection answer. A table keyed on the data source
+    /// object keeps two stores that reuse a server id (tests, a rebind) from sharing an answer.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<NpgsqlDataSource, System.Collections.Concurrent.ConcurrentDictionary<int, OlderCollectionEntry>> OlderCollectionCache = new();
 
     /// <summary>Reads the cross-server 7-day collector health and counts each server's HEALTHY / FAILING
     /// collectors through the shared <see cref="CollectorHealth.HealthStatus"/> banding, plus (#3819) the
