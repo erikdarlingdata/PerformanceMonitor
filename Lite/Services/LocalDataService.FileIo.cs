@@ -89,16 +89,39 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
     /// narrows every other CTE). <paramref name="dbClause"/> "" is the statement as it always read.
     /// </summary>
     internal static string FileIoLatencyTrendSqlFor(string dbClause) => $@"
-WITH top_files AS (
-    SELECT database_name, file_name
+WITH file_totals AS (
+    SELECT
+        database_name,
+        file_name,
+        SUM(delta_reads) AS total_reads,
+        SUM(delta_writes) AS total_writes
     FROM v_file_io_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3{dbClause}
     AND   (delta_reads > 0 OR delta_writes > 0)
     GROUP BY database_name, file_name
-    ORDER BY SUM(delta_reads + delta_writes) DESC
-    LIMIT 10
+),
+/* Release walk V9: the two charts are about different files, so each picks its own. The ten busiest files by reads
+   feed the read chart and the ten busiest by writes feed the write chart; a file in either list is charted. Ranking
+   on reads + writes put only log files in the ten on a server whose logs carry the most operations, and the read
+   chart (and the Overview I/O Latency lane, which reads the same rows) then held nothing but log files with no reads.
+   A tie on one count goes to the file with more of the other, so equally busy files rank by total activity. */
+ranked_files AS (
+    SELECT
+        database_name,
+        file_name,
+        total_reads,
+        total_writes,
+        ROW_NUMBER() OVER (ORDER BY total_reads DESC, total_writes DESC, database_name, file_name) AS read_rank,
+        ROW_NUMBER() OVER (ORDER BY total_writes DESC, total_reads DESC, database_name, file_name) AS write_rank
+    FROM file_totals
+),
+top_files AS (
+    SELECT database_name, file_name
+    FROM ranked_files
+    WHERE (read_rank <= 10 AND total_reads > 0)
+    OR    (write_rank <= 10 AND total_writes > 0)
 ),
 rated AS (
     SELECT
@@ -137,7 +160,7 @@ HAVING COUNT(rated_reads) > 0
 ORDER BY database_name, file_name, 3";
 
     /// <summary>
-    /// Gets file I/O latency trend data broken down by file for charting (top 10 files by I/O activity).
+    /// Gets file I/O latency trend data broken down by file for charting (the top 10 files by reads and the top 10 by writes).
     /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c>
     /// always 1 into <see cref="TrendBuckets.AutoMinutes"/>). The top-10 ranking (<c>top_files</c>) stays an
     /// unbucketed scan of the whole call window, exactly as before — only the per-collection SELECT beneath it
@@ -152,7 +175,7 @@ ORDER BY database_name, file_name, 3";
     /// </summary>
     public async Task<List<FileIoTrendPoint>> GetFileIoLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, IReadOnlyList<string>? databaseNames = null)
     {
-        using var _q = TimeQuery("GetFileIoLatencyTrendAsync", "v_file_io_stats top-10 files, bucketed");
+        using var _q = TimeQuery("GetFileIoLatencyTrendAsync", "v_file_io_stats top-10 files by reads and by writes, bucketed");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 

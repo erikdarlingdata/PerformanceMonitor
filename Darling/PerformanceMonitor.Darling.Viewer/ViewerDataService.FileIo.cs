@@ -56,7 +56,7 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The File I/O latency read — Lite's <c>GetFileIoLatencyTrendAsync</c> ported to Postgres, then bucketed
     /// (#4234). Reads <c>v_file_io_stats</c> (a <c>SELECT *</c> passthrough over <c>file_io_stats</c>): a
-    /// <c>top_files</c> CTE picks the 10 busiest (database, file) pairs by total delta ops over the window —
+    /// <c>top_files</c> CTE picks the 10 busiest (database, file) pairs by total delta reads and the 10 busiest by total delta writes over the window (release walk V9) —
     /// unchanged by bucketing — then average read/write (and queued read/write) latency per bucket is computed
     /// as summed stall-ms / summed ops, with the delta-stall sums CAST to double precision before division. The
     /// queued-stall columns are COALESCE'd to 0 so a server whose build predates them still reads 0.
@@ -77,8 +77,12 @@ public sealed partial class ViewerDataService
     /// </para>
     /// </summary>
     public const string FileIoLatencyTrendSql = $$"""
-        WITH top_files AS (
-            SELECT database_name, file_name
+        WITH file_totals AS (
+            SELECT
+                database_name,
+                file_name,
+                SUM(delta_reads) AS total_reads,
+                SUM(delta_writes) AS total_writes
             FROM v_file_io_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -86,8 +90,28 @@ public sealed partial class ViewerDataService
             AND   (delta_reads > 0 OR delta_writes > 0)
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, file_name
-            ORDER BY SUM(delta_reads + delta_writes) DESC
-            LIMIT 10
+        ),
+        /* Release walk V9: the two charts are about different files, so each picks its own. The ten busiest
+           files by reads feed the read chart and the ten busiest by writes feed the write chart; a file in
+           either list is charted. Ranking on reads + writes put only log files in the ten on a server whose
+           logs carry the most operations, and the read chart (and the Overview I/O Latency lane, which reads
+           the same rows) then held nothing but log files with no reads. A tie on one count goes to the file with more
+           of the other, so equally busy files rank by total activity. */
+        ranked_files AS (
+            SELECT
+                database_name,
+                file_name,
+                total_reads,
+                total_writes,
+                ROW_NUMBER() OVER (ORDER BY total_reads DESC, total_writes DESC, database_name, file_name) AS read_rank,
+                ROW_NUMBER() OVER (ORDER BY total_writes DESC, total_reads DESC, database_name, file_name) AS write_rank
+            FROM file_totals
+        ),
+        top_files AS (
+            SELECT database_name, file_name
+            FROM ranked_files
+            WHERE (read_rank <= 10 AND total_reads > 0)
+            OR    (write_rank <= 10 AND total_writes > 0)
         ),
         rated AS (
             SELECT
@@ -208,7 +232,7 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// Per-file I/O-latency points (top 10 files by delta ops) for one server over the window, for the
+    /// Per-file I/O-latency points (top 10 files by delta reads and top 10 by delta writes) for one server over the window, for the
     /// File I/O tab's Latency sub-tab.
     /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (file), like
     /// <c>GetWaitStatsTrendsByTypesAsync</c>; <paramref name="serverId"/>'s window alone decides the width

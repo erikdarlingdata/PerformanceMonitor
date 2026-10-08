@@ -1190,7 +1190,7 @@ public partial class ServerTab : UserControl
             _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
             _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
-            ShowEngineGap(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count);
+            ShowEngineGap(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count, keepsOwnEmptyText: true);
         }
         catch (Exception ex)
         {

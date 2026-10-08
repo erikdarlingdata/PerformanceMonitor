@@ -386,8 +386,8 @@
     "UptimeWarning": true,
     "DedupeOnlyApplied": true,
     "Notes": [
-      "Reverse Duplicate and Equal Except For Filter are recognized and surfaced as REVIEW rows but never auto-disabled \u2014 matching sp_IndexCleanup\u0027s tested behavior (its adversarial tests 9a/10a assert reversed-order and filter-differing indexes are left alone; a different leading column or filter serves different queries/rows).",
-      "Out of scope of the Unique Constraint Replacement port: sp_IndexCleanup\u0027s \u0027Same Keys Different Order\u0027 REVIEW case, largely covered by the Reverse Duplicate review rows above and reproducible from the captured metadata if later required."
+      "Reverse Duplicate and Equal Except For Filter indexes are listed as REVIEW rows only and are never disabled for you. An index with the same columns in a different order, or with a different filter, can serve different queries or rows, so check each one by hand.",
+      "Not covered: sp_IndexCleanup also reports a Same Keys Different Order review case. The Reverse Duplicate review rows above cover most of it."
     ]
   },
   "recommendationRows": [
@@ -951,8 +951,8 @@
       "UptimeWarning": false,
       "DedupeOnlyApplied": false,
       "Notes": [
-        "Reverse Duplicate and Equal Except For Filter are recognized and surfaced as REVIEW rows but never auto-disabled \u2014 matching sp_IndexCleanup\u0027s tested behavior (its adversarial tests 9a/10a assert reversed-order and filter-differing indexes are left alone; a different leading column or filter serves different queries/rows).",
-        "Out of scope of the Unique Constraint Replacement port: sp_IndexCleanup\u0027s \u0027Same Keys Different Order\u0027 REVIEW case, largely covered by the Reverse Duplicate review rows above and reproducible from the captured metadata if later required."
+        "Reverse Duplicate and Equal Except For Filter indexes are listed as REVIEW rows only and are never disabled for you. An index with the same columns in a different order, or with a different filter, can serve different queries or rows, so check each one by hand.",
+        "Not covered: sp_IndexCleanup also reports a Same Keys Different Order review case. The Reverse Duplicate review rows above cover most of it."
       ]
     },
     "recommendationRows": [
