@@ -93,13 +93,19 @@ public static class QueryStoreBackgroundIndexes
     /// <param name="PlainDropSql">The drop of an INVALID leftover on a plain table.</param>
     /// <param name="MinimumServerVersionNum">The first <c>server_version_num</c> that may build it; 0 for any.</param>
     /// <param name="BelowMinimumReason">Why a server below the floor must not build it, for the log.</param>
+    /// <param name="IndexDefinition">
+    /// What follows <c>ON &lt;table&gt;</c> in the index's definition (<c>(server_id, first_execution_time)</c>,
+    /// <c>USING brin (collection_time) WITH (autosummarize = on)</c>). The partitioned path (#5571) builds the parent
+    /// <c>ON ONLY</c> and each leaf's child from it. Empty for a spec that is never aimed at a partitioned table.
+    /// </param>
     public sealed record IndexSpec(
         string IndexName,
         string TableName,
         string PlainCreateSql,
         string PlainDropSql,
         int MinimumServerVersionNum = 0,
-        string BelowMinimumReason = "");
+        string BelowMinimumReason = "",
+        string IndexDefinition = "");
 
     /// <summary>
     /// A btree on <c>collect.query_store_interval_wide (server_id, first_execution_time)</c> (#4952), built
@@ -122,7 +128,8 @@ public static class QueryStoreBackgroundIndexes
         "collect.query_store_interval_wide",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_wide_server_first_exec "
         + "ON collect.query_store_interval_wide (server_id, first_execution_time);",
-        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_server_first_exec;");
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_server_first_exec;",
+        IndexDefinition: "(server_id, first_execution_time)");
 
     /// <summary>
     /// A btree on <c>collect.query_store_interval_latest (server_id, first_execution_time)</c> (#5507), built
@@ -153,7 +160,8 @@ public static class QueryStoreBackgroundIndexes
         "collect.query_store_interval_latest",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_latest_server_first_exec "
         + "ON collect.query_store_interval_latest (server_id, first_execution_time);",
-        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_latest_server_first_exec;");
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_latest_server_first_exec;",
+        IndexDefinition: "(server_id, first_execution_time)");
 
     /// <summary>Every background index, in the order the one delayed task ensures them.</summary>
     public static readonly IReadOnlyList<IndexSpec> All = new[]
@@ -171,7 +179,8 @@ SELECT
     to_regclass('timescaledb_information.hypertables') IS NOT NULL AS has_hypertable_view,
     (SELECT i.indisvalid
      FROM pg_index AS i
-     WHERE i.indexrelid = to_regclass($2)) AS index_valid;";
+     WHERE i.indexrelid = to_regclass($2)) AS index_valid,
+    (SELECT c.relkind::text FROM pg_class AS c WHERE c.oid = to_regclass($1)) AS table_kind;";
 
     /* Reached only when StateSql reported the view exists, so a store without TimescaleDB never parses it. $1 is the
        table's schema and $2 its name (SplitTableName), each compared as it is rather than through a concatenation, so
@@ -338,6 +347,7 @@ SELECT EXISTS
         bool tableExists;
         bool hasHypertableView;
         bool? indexValid;
+        string? tableKind;
 
         await using (var state = new NpgsqlCommand(StateSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds })
         {
@@ -349,6 +359,7 @@ SELECT EXISTS
             tableExists = reader.GetBoolean(1);
             hasHypertableView = reader.GetBoolean(2);
             indexValid = reader.IsDBNull(3) ? null : reader.GetBoolean(3);
+            tableKind = reader.IsDBNull(4) ? null : reader.GetString(4);
         }
 
         if (!tableExists)
@@ -357,6 +368,10 @@ SELECT EXISTS
             return;
         }
 
+        /* #5571: a day-partitioned table (relkind p) takes the ON ONLY + per-leaf path after the version check, never the
+           plain build below (CREATE INDEX CONCURRENTLY on a partitioned table is refused outright). It is never a
+           hypertable, so the probe below answers false for it. */
+        var isPartitioned = string.Equals(tableKind, "p", StringComparison.Ordinal);
         var isHypertable = false;
         if (hasHypertableView)
         {
@@ -377,6 +392,12 @@ SELECT EXISTS
         if (decision.Action == IndexAction.SkipHypertable)
         {
             logger.LogWarning("Query Store index {Index} not built: {Reason}.", spec.IndexName, decision.Reason);
+            return;
+        }
+
+        if (isPartitioned)
+        {
+            await EnsurePartitionedAsync(connection, spec, logger, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -403,5 +424,140 @@ SELECT EXISTS
 
         logger.LogInformation(
             "Query Store index {Index} built in {Seconds:F1}s (valid).", spec.IndexName, started.Elapsed.TotalSeconds);
+    }
+
+    /// <summary>Deadline for the lock wait of the short DDL the partitioned path runs, in seconds.</summary>
+    internal const int PartitionedLockTimeoutSeconds = 5;
+
+    /* The partitioned parent's leaf partitions ($1), each with whether it already has a child of the parent index ($2). */
+    internal const string LeafStateSql = @"
+SELECT t.relid::regclass::text,
+       c.relname,
+       EXISTS
+       (
+           SELECT 1
+           FROM pg_inherits AS ih
+           JOIN pg_index AS ci ON ci.indexrelid = ih.inhrelid
+           WHERE ih.inhparent = to_regclass($2)
+           AND   ci.indrelid = t.relid
+       ) AS attached
+FROM pg_partition_tree(to_regclass($1)) AS t
+JOIN pg_class AS c ON c.oid = t.relid
+WHERE t.isleaf
+ORDER BY c.relname;";
+
+    /// <summary>
+    /// The partitioned path (#5571). <c>CREATE INDEX CONCURRENTLY</c> is refused on a partitioned table, so the parent
+    /// index is created <c>ON ONLY</c> (catalog only, INVALID until every leaf has a child), then each leaf without an
+    /// attached child gets a <c>CONCURRENTLY</c> build on the leaf (an INVALID leftover of an interrupted build dropped
+    /// first) and an <c>ALTER INDEX ... ATTACH PARTITION</c>. The parent turns VALID by itself when the last leaf attaches.
+    /// A partition made afterwards builds its own child at ATTACH, on an empty table, so this runs to completion once.
+    /// The two short statements that take a parent-level lock run in a transaction under a 5 s <c>lock_timeout</c>; a
+    /// timeout is an error here (the delayed task logs it and the next start retries).
+    /// </summary>
+    internal static async Task EnsurePartitionedAsync(
+        NpgsqlConnection connection, IndexSpec spec, ILogger logger, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(spec.IndexDefinition))
+        {
+            throw new InvalidOperationException($"Index spec {spec.IndexName} has no IndexDefinition, which the partitioned path needs.");
+        }
+
+        var (indexSchema, indexShortName) = SplitTableName(spec.IndexName);
+        var tableShortName = SplitTableName(spec.TableName).Name;
+        var started = System.Diagnostics.Stopwatch.StartNew();
+
+        await ExecuteInLockTimeoutAsync(
+            connection,
+            $"CREATE INDEX IF NOT EXISTS {indexShortName} ON ONLY {spec.TableName} {spec.IndexDefinition};",
+            cancellationToken).ConfigureAwait(false);
+
+        var leaves = new List<(string Leaf, string Suffix, bool Attached)>();
+        await using (var state = new NpgsqlCommand(LeafStateSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds })
+        {
+            state.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = spec.TableName });
+            state.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = spec.IndexName });
+            await using var reader = await state.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var relName = reader.GetString(1);
+                var suffix = relName.StartsWith(tableShortName + "_", StringComparison.Ordinal) ? relName[(tableShortName.Length + 1)..] : relName;
+                leaves.Add((reader.GetString(0), suffix, reader.GetBoolean(2)));
+            }
+        }
+
+        var built = 0;
+        foreach (var (leaf, suffix, attached) in leaves)
+        {
+            if (attached)
+            {
+                continue;
+            }
+
+            var childName = $"{indexShortName}_{suffix}";
+            if (childName.Length > 63)
+            {
+                throw new InvalidOperationException($"The leaf index name {childName} is longer than 63 characters.");
+            }
+
+            var childQualified = $"{indexSchema}.{childName}";
+            bool? childValid = null;
+            await using (var probe = new NpgsqlCommand(
+                "SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1);", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
+            {
+                probe.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = childQualified });
+                if (await probe.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is bool valid)
+                {
+                    childValid = valid;
+                }
+            }
+
+            if (childValid == false)
+            {
+                logger.LogWarning(
+                    "Query Store index {Index} exists but is INVALID (an interrupted build); dropping it and rebuilding.", childQualified);
+                await using var drop = new NpgsqlCommand($"DROP INDEX CONCURRENTLY IF EXISTS {childQualified};", connection) { CommandTimeout = BuildTimeoutSeconds };
+                await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                childValid = null;
+            }
+
+            if (childValid is null)
+            {
+                await using var build = new NpgsqlCommand(
+                    $"CREATE INDEX CONCURRENTLY IF NOT EXISTS {childName} ON {leaf} {spec.IndexDefinition};", connection) { CommandTimeout = BuildTimeoutSeconds };
+                await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await ExecuteInLockTimeoutAsync(
+                connection, $"ALTER INDEX {spec.IndexName} ATTACH PARTITION {childQualified};", cancellationToken).ConfigureAwait(false);
+            built++;
+        }
+
+        bool parentValid;
+        await using (var final = new NpgsqlCommand("SELECT i.indisvalid FROM pg_index AS i WHERE i.indexrelid = to_regclass($1);", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
+        {
+            final.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = spec.IndexName });
+            parentValid = await final.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
+        }
+
+        logger.LogInformation(
+            "Query Store index {Index} on partitioned {Table}: {Built} leaf index(es) built and attached in {Seconds:F1}s; parent {State}.",
+            spec.IndexName, spec.TableName, built, started.Elapsed.TotalSeconds, parentValid ? "valid" : "INVALID");
+    }
+
+    private static async Task ExecuteInLockTimeoutAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{PartitionedLockTimeoutSeconds}s';", connection, transaction) { CommandTimeout = CatalogReadTimeoutSeconds })
+        {
+            await timeout.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CatalogReadTimeoutSeconds })
+        {
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 }

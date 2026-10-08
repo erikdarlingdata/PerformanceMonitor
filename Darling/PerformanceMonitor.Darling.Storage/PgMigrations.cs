@@ -873,6 +873,124 @@ END $$;";
     /// Plain tables, no GRANT (the <c>collect</c> schema's blanket SELECT covers them). <b>No Lite twin:</b> Lite has no PostgreSQL targets.
     /// </summary>
     private const string V170Sql = PgIoStatsHourly.CreateSql;
+
+    /// <summary>
+    /// V171 (#5571) — <c>collect.query_store_interval_wide</c> becomes a table partitioned by day on
+    /// <c>first_execution_time</c>, and the table that holds every row today is ATTACHED to it, whole, as
+    /// <c>query_store_interval_wide_legacy</c>. <b>No row is copied, moved or scanned.</b> V172 does the same for
+    /// <c>query_store_interval_latest</c>; the text is shared (<see cref="BuildQueryStoreIntervalPartitionRungSql"/>).
+    ///
+    /// <para><b>Why this is catalog-only (Erik's rules: no data copy, attach the current table, keep every startup
+    /// statement under <see cref="MigrationCommandTimeoutSeconds"/>).</b> Rename the table and its indexes, create an empty
+    /// partitioned parent with the same columns, and attach the renamed table with the bounds
+    /// <c>(MINVALUE) TO (MAXVALUE)</c>. That partition constraint is only <c>first_execution_time IS NOT NULL</c>, which the
+    /// column's <c>NOT NULL</c> already proves, so <c>ATTACH PARTITION</c> skips its validation scan; the live test reads
+    /// PostgreSQL's DEBUG1 line ("is implied by existing constraints") and the table's <c>seq_scan</c> counter to prove it.
+    /// The parent's indexes are made with <c>CREATE INDEX ... ON ONLY</c> and then <c>ALTER INDEX ... ATTACH PARTITION</c>,
+    /// never as a plain <c>CREATE INDEX</c> on the parent: a plain one BUILDS a child when no valid equivalent exists, and a
+    /// 91 GB build would blow the startup timeout, while <c>ATTACH</c> fails at once. An INVALID leftover (the #5507 shape) is
+    /// therefore dropped here and the background step rebuilds it; a missing one is left for the background step.</para>
+    ///
+    /// <para><b>The one wait.</b> The rename takes ACCESS EXCLUSIVE on the table, so a long reader (the viewer, an MCP
+    /// call) delays it; <c>lock_timeout</c> is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, V153's precedent, so
+    /// the rung fails with a lock error and the next start retries, instead of the command timing out mid-transaction.
+    /// No collector writes during a rung: migrations finish before collectors and the background work start.</para>
+    ///
+    /// <para><b>Guard, idempotence, order.</b> A table that is already partitioned (relkind <c>p</c>) is skipped, so a
+    /// re-run is a no-op. The parent is built <c>LIKE</c> the live table, so the column order is the live attnum order
+    /// that the positional writers use (V155's note); there is no <c>WITH</c> clause because PostgreSQL refuses storage
+    /// parameters on a partitioned table, and the legacy table keeps its fillfactor 50. The rung writes no GRANT: the new
+    /// parent gets the schema's default privileges (DarlingManagedRoles section 4), which cover a table the owner creates,
+    /// and a live test reads the parent as the viewer role.</para>
+    ///
+    /// <para>The names are fixed: <c>X_legacy</c>, and each index's own name plus <c>_legacy</c>. The partitions that
+    /// take over from the legacy table (daily partitions, the default partition, the NOT VALID CHECK on the legacy table)
+    /// are made by the background step, not here. <b>No Lite twin:</b> Lite has no reference to either table.</para>
+    /// </summary>
+    private static readonly string V171Sql = BuildQueryStoreIntervalPartitionRungSql(wide: true);
+
+    /// <summary>
+    /// V172 (#5571) — the same rung for <c>collect.query_store_interval_latest</c>, in its own migration so it gets its own
+    /// <see cref="MigrationCommandTimeoutSeconds"/> window. See <see cref="V171Sql"/>. This table also carries the
+    /// <c>trg_plan_regression_daily_late</c> row trigger (V168): the rung drops the legacy table's copy and creates it on the
+    /// parent, which clones it onto the legacy table (a row trigger on a partitioned table fires for rows written through it).
+    /// </summary>
+    private static readonly string V172Sql = BuildQueryStoreIntervalPartitionRungSql(wide: false);
+
+    /// <summary>
+    /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
+    /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
+    /// </summary>
+    private static string BuildQueryStoreIntervalPartitionRungSql(bool wide)
+    {
+        var table = wide ? "query_store_interval_wide" : "query_store_interval_latest";
+        var uniqueColumns = wide
+            ? "server_id, database_name, runtime_stats_interval_id, plan_id, query_id, replica_role, first_execution_time, execution_type_desc"
+            : "server_id, database_name, runtime_stats_interval_id, plan_id, query_id, replica_role, first_execution_time";
+
+        const string optionalIndex = @"
+
+    IF to_regclass('collect.__NAME___legacy') IS NOT NULL THEN
+        IF (SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass('collect.__NAME___legacy')) THEN
+            CREATE INDEX __NAME__ ON ONLY collect.__TABLE__ __DEFINITION__;
+            ALTER INDEX collect.__NAME__ ATTACH PARTITION collect.__NAME___legacy;
+        ELSE
+            DROP INDEX collect.__NAME___legacy;
+        END IF;
+    END IF;";
+
+        var sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $rung$
+BEGIN
+    IF (SELECT c.relkind FROM pg_class c WHERE c.oid = to_regclass('collect.__TABLE__')) = 'p' THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE collect.__TABLE__ RENAME TO __TABLE___legacy;
+    IF to_regclass('collect.ux___TABLE__') IS NOT NULL THEN
+        ALTER INDEX collect.ux___TABLE__ RENAME TO ux___TABLE___legacy;
+    END IF;
+    IF to_regclass('collect.idx___TABLE___first_exec') IS NOT NULL THEN
+        ALTER INDEX collect.idx___TABLE___first_exec RENAME TO idx___TABLE___first_exec_legacy;
+    END IF;
+    IF to_regclass('collect.ix___TABLE___server_first_exec') IS NOT NULL THEN
+        ALTER INDEX collect.ix___TABLE___server_first_exec RENAME TO ix___TABLE___server_first_exec_legacy;
+    END IF;" + (wide ? @"
+    IF to_regclass('collect.ix___TABLE___collection_time_brin') IS NOT NULL THEN
+        ALTER INDEX collect.ix___TABLE___collection_time_brin RENAME TO ix___TABLE___collection_time_brin_legacy;
+    END IF;" : @"
+    DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.__TABLE___legacy;") + @"
+
+    CREATE TABLE collect.__TABLE__ (LIKE collect.__TABLE___legacy INCLUDING DEFAULTS INCLUDING STORAGE)
+        PARTITION BY RANGE (first_execution_time);
+    ALTER TABLE collect.__TABLE__ ATTACH PARTITION collect.__TABLE___legacy FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
+
+    CREATE UNIQUE INDEX ux___TABLE__ ON ONLY collect.__TABLE__ (__UNIQUECOLUMNS__) NULLS NOT DISTINCT;
+    ALTER INDEX collect.ux___TABLE__ ATTACH PARTITION collect.ux___TABLE___legacy;
+    CREATE INDEX idx___TABLE___first_exec ON ONLY collect.__TABLE__ (first_execution_time);
+    ALTER INDEX collect.idx___TABLE___first_exec ATTACH PARTITION collect.idx___TABLE___first_exec_legacy;"
+            + optionalIndex.Replace("__NAME__", "ix___TABLE___server_first_exec", StringComparison.Ordinal)
+                .Replace("__DEFINITION__", "(server_id, first_execution_time)", StringComparison.Ordinal)
+            + (wide
+                ? optionalIndex.Replace("__NAME__", "ix___TABLE___collection_time_brin", StringComparison.Ordinal)
+                    .Replace("__DEFINITION__", "USING brin (collection_time) WITH (autosummarize = on)", StringComparison.Ordinal)
+                : @"
+
+    CREATE TRIGGER trg_plan_regression_daily_late
+        AFTER INSERT OR UPDATE ON collect.__TABLE__
+        FOR EACH ROW
+        WHEN (NEW.first_execution_time < date_trunc('day', now() AT TIME ZONE 'UTC') - interval '1 day'
+              AND NEW.first_execution_time >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '17 days')
+        EXECUTE FUNCTION collect.plan_regression_daily_mark_late();") + @"
+END
+$rung$;";
+
+        return sql
+            .Replace("__UNIQUECOLUMNS__", uniqueColumns, StringComparison.Ordinal)
+            .Replace("__TABLE__", table, StringComparison.Ordinal);
+    }
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -1081,6 +1199,8 @@ END $$;";
         new Migration(168, "plan-regression-daily", V168Sql),
         new Migration(169, "aws-per-server-role", V169Sql),
         new Migration(170, "pg-io-stats-hourly", V170Sql),
+        new Migration(171, "query-store-interval-wide-partitioned", V171Sql),
+        new Migration(172, "query-store-interval-latest-partitioned", V172Sql),
     };
 
     /// <summary>

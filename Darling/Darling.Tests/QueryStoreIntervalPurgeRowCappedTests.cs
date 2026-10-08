@@ -47,6 +47,10 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
     {
         public string Qualified => "collect." + Name;
 
+        /* #5571: the interval tables are day-partitioned, and the row-capped purge targets the renamed
+           pre-partitioning table by name, so this is the name the purge's log lines and failures carry. */
+        public string Legacy => Qualified + "_legacy";
+
         public override string ToString() => Name;
     }
 
@@ -65,28 +69,35 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
     /// <c>recorded_at</c> (small, and not the table that timed out).
     /// </summary>
     [Fact]
-    public void BothIntervalFactTables_TakeTheAdaptiveRowCap_PendingTablesKeepTheSlice()
+    public void BothIntervalFactTables_TakeTheAdaptiveRowCap_OnTheLegacyTable_PendingTablesKeepTheSlice()
     {
         var source = ReadRetentionSource();
 
-        foreach (var (anchor, table) in new[]
-                 {
-                     ("var intervalLatestDeleted = await PurgeOneAsync(", "QueryStoreIntervalLatest"),
-                     ("var intervalWideDeleted = await PurgeOneAsync(", "QueryStoreIntervalWide"),
-                 })
+        /* #5571: the sweep no longer purges the fact tables by their own names. Each goes through
+           PurgeIntervalTableAsync, which row-caps the LEGACY table by name. */
+        foreach (var table in new[] { "Latest", "Wide" })
         {
-            var at = source.IndexOf(anchor, StringComparison.Ordinal);
-            Assert.True(at >= 0, $"the {table} purge call moved");
-            var end = source.IndexOf("pacer: walPacer);", at, StringComparison.Ordinal);
-            Assert.True(end > at, $"the {table} purge call has no pacer argument");
-            var call = source[at..end];
-
-            Assert.Contains($"{table}.TableName", call, StringComparison.Ordinal);
-            Assert.Contains("RowCappedDeleteSql(", call, StringComparison.Ordinal);
-            Assert.Contains("batchSize: IntervalDeleteRowCap", call, StringComparison.Ordinal);
-            Assert.Contains("adaptiveRowCapTimeColumn: \"first_execution_time\"", call, StringComparison.Ordinal);
-            Assert.DoesNotContain("TimeSlicedDeleteSql(", call, StringComparison.Ordinal);
+            Assert.Contains($"PurgeIntervalTableAsync(\n                postgres, QueryStoreIntervalPartitions.{table}, utcNow", source.Replace("\r\n", "\n"), StringComparison.Ordinal);
         }
+
+        Assert.DoesNotContain("PurgeOneAsync(\n                postgres, QueryStoreIntervalLatest.TableName", source.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.DoesNotContain("PurgeOneAsync(\n                postgres, QueryStoreIntervalWide.TableName", source.Replace("\r\n", "\n"), StringComparison.Ordinal);
+
+        var at = source.IndexOf("var legacyDeleted = await PurgeOneAsync(", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the legacy purge call moved");
+        var end = source.IndexOf("pacer: pacer);", at, StringComparison.Ordinal);
+        Assert.True(end > at, "the legacy purge call has no pacer argument");
+        var call = source[at..end];
+
+        Assert.Contains("postgres, table.Legacy", call, StringComparison.Ordinal);
+        Assert.Contains("RowCappedDeleteSql(table.Legacy", call, StringComparison.Ordinal);
+        Assert.Contains("batchSize: IntervalDeleteRowCap", call, StringComparison.Ordinal);
+        Assert.Contains("adaptiveRowCapTimeColumn: \"first_execution_time\"", call, StringComparison.Ordinal);
+        Assert.DoesNotContain("TimeSlicedDeleteSql(", call, StringComparison.Ordinal);
+        /* The top defect for the partitioned tables: a ctid IN (SELECT ctid ...) against the PARENT can delete live
+           rows of another day, because a ctid repeats across partitions. */
+        Assert.DoesNotContain("table.Parent", call, StringComparison.Ordinal);
+        Assert.DoesNotContain("table.Name", call, StringComparison.Ordinal);
 
         foreach (var (anchor, table) in new[]
                  {
@@ -94,14 +105,14 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
                      ("var intervalWidePendingDeleted = await PurgeOneAsync(", "QueryStoreIntervalWide"),
                  })
         {
-            var at = source.IndexOf(anchor, StringComparison.Ordinal);
-            Assert.True(at >= 0, $"the {table} pending purge call moved");
-            var end = source.IndexOf("pacer: walPacer);", at, StringComparison.Ordinal);
-            var call = source[at..end];
+            var pendingAt = source.IndexOf(anchor, StringComparison.Ordinal);
+            Assert.True(pendingAt >= 0, $"the {table} pending purge call moved");
+            var pendingEnd = source.IndexOf("pacer: walPacer);", pendingAt, StringComparison.Ordinal);
+            var pendingCall = source[pendingAt..pendingEnd];
 
-            Assert.Contains("TimeSlicedDeleteSql(", call, StringComparison.Ordinal);
-            Assert.Contains("\"recorded_at\"", call, StringComparison.Ordinal);
-            Assert.DoesNotContain("adaptiveRowCapTimeColumn", call, StringComparison.Ordinal);
+            Assert.Contains("TimeSlicedDeleteSql(", pendingCall, StringComparison.Ordinal);
+            Assert.Contains("\"recorded_at\"", pendingCall, StringComparison.Ordinal);
+            Assert.DoesNotContain("adaptiveRowCapTimeColumn", pendingCall, StringComparison.Ordinal);
         }
     }
 
@@ -303,10 +314,10 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
             Assert.Equal(inside, await CountAsync(connection, table.Qualified, "true", ct));
 
             var drained = logger.Lines.SingleOrDefault(l =>
-                l.Contains($"drained {expired} row(s) from {table.Name} in", StringComparison.Ordinal));
+                l.Contains($"drained {expired} row(s) from {table.Legacy} in", StringComparison.Ordinal));
             Assert.True(drained is not null, "the drain line is logged with the exact row count: " + logger.Joined);
             Assert.False(drained!.Contains("in 1 batch", StringComparison.Ordinal), "60,000 rows take more than one 50,000-row batch: " + drained);
-            Assert.DoesNotContain($"Retention purge failed for {table.Name}", logger.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain($"Retention purge failed for {table.Legacy}", logger.Joined, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -497,9 +508,9 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
 
                 /* The halving is logged, and the failure carries the rows that did land. */
                 Assert.Contains("retrying at", logger.Joined, StringComparison.Ordinal);
-                Assert.Contains($"Purge batch of {table.Name} at cap {DarlingRetention.IntervalDeleteRowCap}", logger.Joined, StringComparison.Ordinal);
+                Assert.Contains($"Purge batch of {table.Legacy} at cap {DarlingRetention.IntervalDeleteRowCap}", logger.Joined, StringComparison.Ordinal);
                 Assert.Contains(
-                    $"Retention purge failed for {table.Name} after removing 1000 row(s)",
+                    $"Retention purge failed for {table.Legacy} after removing 1000 row(s)",
                     logger.Joined, StringComparison.Ordinal);
             }
 
@@ -512,7 +523,7 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
             Assert.Equal(0, await CountAsync(
                 connection, table.Qualified, "first_execution_time < now() AT TIME ZONE 'UTC' - " + Days(table.HorizonDays), ct));
             Assert.Equal(inside, await CountAsync(connection, table.Qualified, "true", ct));
-            Assert.DoesNotContain($"Retention purge failed for {table.Name}", later.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain($"Retention purge failed for {table.Legacy}", later.Joined, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
