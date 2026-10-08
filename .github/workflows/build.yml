@@ -2445,23 +2445,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${LITE}" = "true" ] || [ "${CORE}" = "true" ] || [ "${ROOT}" = "true" ] || [ "${LINKED}" = "true" ]; then
-            mode=full
-          elif [ "${DARLING_READS}" = "true" ] && [ "${EVENT_NAME}" != "pull_request" ]; then
-            mode=full
-          elif [ "${DARLING_READS}" = "true" ]; then
-            mode=reads
-          else
-            mode=none
-          fi
-
-          run=false
-          if [ "${mode}" = "full" ] || { [ "${mode}" = "reads" ] && [ "${SHARD}" = "0" ]; }; then
-            run=true
-          fi
-
-          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
-          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          # The ladder (full / reads / none) and the which-shard rule live in .github/scripts/ci-select.py, the one
+          # place the selection rules are kept (#5459). It prints `mode=...` and `run=...`; the replay of the
+          # failure corpus checks the same function.
+          decision=$(python .github/scripts/ci-select.py lite-scope --event "${EVENT_NAME}" --shard "${SHARD}" \
+            --lite "${LITE}" --core "${CORE}" --root "${ROOT}" --reads "${DARLING_READS}" --linked "${LINKED}")
+          echo "${decision}" >> "$GITHUB_OUTPUT"
+          mode=$(echo "${decision}" | sed -n 's/^mode=//p')
+          run=$(echo "${decision}" | sed -n 's/^run=//p')
           echo "::notice title=Lite scope::mode=${mode}, shard ${SHARD} runs=${run}"
 
       # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
