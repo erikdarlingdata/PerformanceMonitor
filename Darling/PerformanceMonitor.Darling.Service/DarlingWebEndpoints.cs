@@ -2844,7 +2844,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         var queryStoreWideEligible = wideResolution.Eligible;
 
         /* #5525: the scoped names that no registry row carries. The compiler scopes by server_id and keeps matching those names on the
-           row's stored server_name, so no scope loses what it matched before. Resolved here, before the hourly-edges snapshot below
+           row's stored server_name, so a scope over a name that was never registered keeps matching what it matched before (a scoped name
+           that IS registered means the server the registry holds under it now: see ComposeCompiler.ServerScope). Resolved here, before the hourly-edges snapshot below
            takes its connection, so this lookup never asks the pool for a second one while the snapshot holds the first. */
         var unregisteredServers = await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken, logger);
 
