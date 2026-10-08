@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -34,7 +35,7 @@ public sealed class WebServerPageRangeTests
     [Fact]
     public void EveryOfferedRange_IsOneEveryRangedReadOnEveryTabTakes()
     {
-        if (!WebRangeKeptHistoryBehaviourTests.TryRun("offeredRanges:" + McpHelpers.MaxHoursBack, out var r)) return;
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("offeredRanges:" + McpHelpers.MaxHoursBack, out var r, CatalogJson())) return;
 
         var offered = r.GetProperty("offered").EnumerateArray().Select(e => e.GetInt32()).ToArray();
         Assert.NotEmpty(offered);
@@ -49,11 +50,11 @@ public sealed class WebServerPageRangeTests
            timer, say) reaches the run's list of every fetch without reaching a tab's, and the last tab's has nothing
            after it to be counted in. So the whole list is checked as well: no read the page makes asks for more than the
            capped reads take, whether or not it can be tied to a tab. */
-        var tooWide = Strings(r, "fetches").Where(f => HoursAsked(f) > McpHelpers.MaxHoursBack).ToArray();
+        var tooWide = Strings(r, "fetches").Where(f => HoursAsked(f) > ReachOf(f)).ToArray();
         Assert.True(
             tooWide.Length == 0,
-            $"{tooWide.Length} reads the page made asked for more than {McpHelpers.MaxHoursBack} hours, the widest window the"
-            + " capped reads take (this list is every read the run made, so a read that cannot be tied to a tab is in it):\n"
+            $"{tooWide.Length} reads the page made asked for more hours than the read takes ({McpHelpers.MaxHoursBack} unless the"
+            + " read's row in WebReadReach says more; this list is every read the run made, so a read that cannot be tied to a tab is in it):\n"
             + string.Join("\n", tooWide.Take(40)));
 
         Assert.Empty(r.GetProperty("rejections").EnumerateArray());
@@ -89,8 +90,19 @@ public sealed class WebServerPageRangeTests
         }
     }
 
+    /// <summary>The real <c>/api/catalog</c> body, which the harness serves to the page: each read's <c>max_hours</c> is the one the
+    /// service serves, so a tab's reach in these tests is the product's, not a copy.</summary>
+    private static string CatalogJson() => DarlingWebEndpoints.BuildCatalogNode().ToJsonString();
+
     private static string[] Strings(JsonElement node, string name) =>
         node.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    /// <summary>The hours the read in a fetched URL takes: its row in <see cref="WebReadReach"/>, else the common 168.</summary>
+    private static int ReachOf(string fetched)
+    {
+        var read = Regex.Match(fetched, @"/api/read/([a-z_0-9]+)", RegexOptions.CultureInvariant);
+        return read.Success && WebReadReach.All.TryGetValue(read.Groups[1].Value, out var row) ? row.MaxHours : McpHelpers.MaxHoursBack;
+    }
 
     private static readonly Regex s_hoursParam = new(@"[?&]hours=([0-9]+(?:\.[0-9]+)?)", RegexOptions.CultureInvariant);
 
@@ -115,9 +127,10 @@ public sealed class WebServerPageRangeTests
     [Fact]
     public void TheBlockingTabNote_NamesTheWidestOfferedRange()
     {
-        if (!WebRangeKeptHistoryBehaviourTests.TryRun("offeredRanges:" + McpHelpers.MaxHoursBack, out var r)) return;
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("offeredRanges:" + McpHelpers.MaxHoursBack, out var r, CatalogJson())) return;
 
-        var widest = r.GetProperty("offered").EnumerateArray().Max(e => e.GetInt32());
+        /* The Blocking tab's own reach (#5562 review r1 M4): the number its note names is the widest range THIS tab offers. */
+        var widest = r.GetProperty("found").GetProperty("reaches").GetProperty("SQL Server blocking").GetInt32();
         Assert.True(widest % 24 == 0, $"The widest preset is {widest} hours, not a whole number of days, so this pin needs remapping.");
         var days = widest / 24;
         var notes = r.GetProperty("notes").EnumerateArray().Select(e => e.GetString()!).ToArray();
@@ -130,19 +143,169 @@ public sealed class WebServerPageRangeTests
         Assert.Single(notes, n => n.Contains("A Custom View can show more", System.StringComparison.Ordinal));
     }
 
-    /// <summary>The same rule read from <c>pages/server.js</c> (#5562): the page declares how far its reads reach (no wider than
-    /// <see cref="McpHelpers.MaxHoursBack"/>), hands that reach to the picker so a longer range is greyed out, and derives the
-    /// whole-hour presets it reads as plain <c>hours</c> from the picker module's presets, never a list of its own.</summary>
+    /// <summary>The same rule read from <c>pages/server.js</c> (#5562 review r1 M4): the page holds no reach of its own. A tab's
+    /// reach is the catalog's, read through <c>readsReachHours</c>; it is handed to the picker so a longer range is greyed out with
+    /// the tab's reason; and the whole-hour presets come from the picker module's presets, never a list of its own.</summary>
     [Fact]
-    public void TheOfferedRanges_InTheSource_AreNoWiderThanTheReadsTake()
+    public void TheOfferedRanges_InTheSource_AreTheTabsReachFromTheCatalog()
     {
         var server = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js");
-        var reach = Regex.Match(server, @"const PAGE_REACH_HOURS = ([0-9]+);");
-        Assert.True(reach.Success, "pages/server.js no longer declares PAGE_REACH_HOURS.");
-        Assert.InRange(int.Parse(reach.Groups[1].Value, CultureInfo.InvariantCulture), 1, McpHelpers.MaxHoursBack);
-        Assert.Contains("reachHours: PAGE_REACH_HOURS", server, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("PAGE_REACH_HOURS", server, System.StringComparison.Ordinal);
+        Assert.Contains("readsReachHours(", server, System.StringComparison.Ordinal);
+        Assert.Contains("reachHours: tabReach(null, server)", server, System.StringComparison.Ordinal);
+        Assert.Contains("reachMessage:", server, System.StringComparison.Ordinal);
         Assert.Matches(@"const RANGE_OPTIONS = ROLLING_PRESETS", server);
-        Assert.Contains("hours <= PAGE_REACH_HOURS", server, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("hours <= ", server.Split("function rangeOption")[0], System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A tab does not hand-type its hours (#5562 review r1 M4, ruling R2). Every tab names the windowed reads it makes
+    /// (<c>reachReads</c>), each name is a read the web serves, and no tab object, the registry or the server page carries a
+    /// number of hours as a reach: the only source of a number is the catalog's <c>max_hours</c>.
+    /// </summary>
+    [Fact]
+    public void ATab_NamesItsReads_AndNeverTypesItsHours()
+    {
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var findings = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "analysis-findings.js");
+        var server = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js");
+
+        var hand = new Regex(@"\b(reach|reachHours|reachReads|maxHours|max_hours)\s*[:=]\s*[0-9]", RegexOptions.CultureInvariant);
+        foreach (var (file, text) in new[] { ("server-tabs.js", tabs), ("analysis-findings.js", findings), ("server.js", server) })
+        {
+            var typed = hand.Matches(text).Select(m => m.Value).ToArray();
+            Assert.True(typed.Length == 0, $"{file} types a reach as a number ({string.Join("; ", typed)}); a tab's reach is the catalog's max_hours of its reachReads.");
+        }
+
+        /* Each registry tab declares reachReads (the whole registry is 12 + 8 tabs; the Recommendations tab lives in its own module). */
+        var declared = Regex.Matches(tabs, @"reachReads:\s*\[([^\]]*)\]", RegexOptions.CultureInvariant);
+        Assert.True(declared.Count >= 15, $"Only {declared.Count} tabs declare reachReads.");
+        Assert.Contains("reachReads: [\"get_analysis_findings\"]", findings, System.StringComparison.Ordinal);
+
+        var served = DarlingWebEndpoints.CatalogDescriptors.Keys.ToHashSet(System.StringComparer.Ordinal);
+        foreach (var name in declared.SelectMany(d => Regex.Matches(d.Groups[1].Value, "\"([a-z_]+)\"").Select(m => m.Groups[1].Value)).Distinct())
+        {
+            Assert.True(served.Contains(name), $"A tab's reachReads names {name}, which the web does not serve.");
+        }
+    }
+
+    /// <summary>
+    /// A tab's reach is the smallest <c>max_hours</c> among the reads it makes, from the real catalog. The I/O tab is made of
+    /// two 30-day trends and offers 30 days; the Activity tab shows the perfmon trend (7 days) beside them and stays at 7; the
+    /// Queries tab shows the query heatmap (7 days) and stays at 7; a tab with a list read stays at 7; and every tab's reach
+    /// equals the minimum computed here from the read table, so a tab with two reads takes the smaller. A tab that makes a
+    /// windowed read its <c>reachReads</c> does not name fails the run, because an unnamed read could lift the tab past it.
+    /// </summary>
+    [Fact]
+    public void ATabsReach_IsTheSmallestOfItsReads_FromTheCatalog()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("offeredRanges:" + McpHelpers.MaxHoursBack, out var r, CatalogJson())) return;
+
+        var found = r.GetProperty("found");
+        var reaches = found.GetProperty("reaches");
+        Assert.Equal(720, reaches.GetProperty("SQL Server io").GetInt32());
+        Assert.Equal(McpHelpers.MaxHoursBack, reaches.GetProperty("SQL Server activity").GetInt32());
+        Assert.Equal(McpHelpers.MaxHoursBack, reaches.GetProperty("SQL Server queries").GetInt32());
+        Assert.Equal(McpHelpers.MaxHoursBack, reaches.GetProperty("SQL Server blocking").GetInt32());
+        Assert.Equal(McpHelpers.MaxHoursBack, reaches.GetProperty("SQL Server config").GetInt32());
+
+        /* The I/O tab offers 30 days and the Activity tab does not. */
+        var offeredBy = found.GetProperty("offeredBy");
+        Assert.Contains(720, offeredBy.GetProperty("SQL Server io").EnumerateArray().Select(e => e.GetInt32()));
+        Assert.DoesNotContain(720, offeredBy.GetProperty("SQL Server activity").EnumerateArray().Select(e => e.GetInt32()));
+
+        /* Every tab: the harness's reach equals the minimum of the reads' table rows (a read without a row is 168). */
+        foreach (var tab in reaches.EnumerateObject())
+        {
+            var reads = TabReads(tab.Name);
+            var expected = reads.Length == 0
+                ? McpHelpers.MaxHoursBack
+                : reads.Min(read => WebReadReach.All.TryGetValue(read, out var row) ? row.MaxHours : McpHelpers.MaxHoursBack);
+            Assert.True(expected == tab.Value.GetInt32(), $"{tab.Name}: the page gave {tab.Value.GetInt32()} hours, the smallest of its reads is {expected}.");
+        }
+
+        var undeclared = Strings(found, "undeclared");
+        Assert.True(undeclared.Length == 0, "These tabs made a windowed read their reachReads does not name:\n" + string.Join("\n", undeclared));
+    }
+
+    /// <summary>The reads a tab declares, from the registry source: the tab key is "engine id" as the harness names it.</summary>
+    private static string[] TabReads(string key)
+    {
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        var postgres = key.StartsWith("PostgreSQL ", System.StringComparison.Ordinal);
+        var id = key[(key.LastIndexOf(' ') + 1)..];
+        var registry = tabs[tabs.IndexOf("export const POSTGRES_TABS", System.StringComparison.Ordinal)..];
+        var sql = tabs[..tabs.IndexOf("export const POSTGRES_TABS", System.StringComparison.Ordinal)];
+        var source = postgres ? registry : sql;
+        if (key.StartsWith("SQL Server recommendations", System.StringComparison.Ordinal))
+        {
+            return ["get_analysis_findings"];
+        }
+
+        var match = Regex.Match(source, "    id: \"" + Regex.Escape(id) + "\",.*?(?:reachReads: \\[([^\\]]*)\\])?\\s*,?\\s*build", RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        return match.Success && match.Groups[1].Success
+            ? Regex.Matches(match.Groups[1].Value, "\"([a-z_]+)\"").Select(m => m.Groups[1].Value).ToArray()
+            : [];
+    }
+
+    /// <summary>
+    /// A range carried to a tab that reads less (#5562 review r1 M4, ruling R2): 20 days held on the I/O tab (30-day reach), then
+    /// the Wait Stats tab (7 days). The tab reads its own 7 days, ending where the range ends, and says so in its label and in a
+    /// notice on the page. The range stays held, so the I/O tab takes all of it again. A 30-day pick is refused on the tab that
+    /// cannot read it, with the tab's reason, and no read on that tab asks for more than 168 hours.
+    /// </summary>
+    [Fact]
+    public void ARangeCarriedToATabThatReadsLess_IsReadAtThatTabsReach_AndSaysSo()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("tabReachCarried", out var r, CatalogJson())) return;
+
+        var found = r.GetProperty("found");
+        Assert.Equal(JsonValueKind.Null, found.GetProperty("holdTwentyDays").ValueKind);
+        Assert.Equal(480, found.GetProperty("ioTwentyDays").GetProperty("hours").GetInt32());
+        Assert.Equal(JsonValueKind.Null, found.GetProperty("ioTwentyDays").GetProperty("note").ValueKind);
+
+        var waits = found.GetProperty("waitsTwentyDays");
+        Assert.Equal(168, waits.GetProperty("hours").GetInt32());
+        Assert.StartsWith("last 7 days of ", waits.GetProperty("label").GetString(), System.StringComparison.Ordinal);
+        var note = waits.GetProperty("note").GetString()!;
+        Assert.Contains("longer than this tab reads", note, System.StringComparison.Ordinal);
+        Assert.Contains("up to 7 days", note, System.StringComparison.Ordinal);
+
+        /* The picker's own refusal on the tab that cannot read 30 days says why. */
+        Assert.Equal("This tab reads up to 7 days.", found.GetProperty("holdThirtyOnWaits").GetString());
+        Assert.Contains("up to 7 days", found.GetProperty("holdThirtyOnWaitsRange").GetProperty("error").GetString());
+
+        /* On the I/O tab 30 days is held whole; carried to Wait Stats it is read as 7 days, with the notice on the page. */
+        Assert.Equal(JsonValueKind.Null, found.GetProperty("holdThirtyOnIo").ValueKind);
+        Assert.Equal(720, found.GetProperty("ioThirty").GetProperty("hours").GetInt32());
+        Assert.Equal(JsonValueKind.Null, found.GetProperty("ioThirty").GetProperty("note").ValueKind);
+        var thirty = found.GetProperty("waitsThirty");
+        Assert.Equal(168, thirty.GetProperty("hours").GetInt32());
+        Assert.Contains("(last 30 days) is longer than this tab reads", thirty.GetProperty("note").GetString(), System.StringComparison.Ordinal);
+        Assert.Contains(thirty.GetProperty("note").GetString()!, Strings(r, "notices"));
+
+        var reads = Strings(found, "waitsReads");
+        Assert.NotEmpty(reads);
+        Assert.All(reads, read => Assert.True(HoursAsked(read) <= McpHelpers.MaxHoursBack, "The Wait Stats tab asked for more than it reads: " + read));
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    /// <summary>A wide range held for one server, then a server whose catalog the page has not read: the panels wait for the catalog and
+    /// read once at the tab's reach (720 hours on the I/O tab), instead of reading the common 168 hours first and the rest after.</summary>
+    [Fact]
+    public void AWideRange_OnAServerWhoseCatalogIsNotRead_WaitsForTheCatalog_AndReadsOnce()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("tabReachWaits", out var r, CatalogJson())) return;
+
+        var found = r.GetProperty("found");
+        var fetches = Strings(found, "fetches");
+        var reads = fetches.Where(f => f.StartsWith("/api/read/", System.StringComparison.Ordinal)).ToArray();
+        var windowed = reads.Where(read => HoursAsked(read) > 0).ToArray();
+        Assert.NotEmpty(windowed);
+        Assert.All(windowed, read => Assert.Equal(720, HoursAsked(read)));
+        Assert.InRange(found.GetProperty("catalog").GetInt32(), 0, found.GetProperty("firstRead").GetInt32() - 1);
+        Assert.Empty(Strings(r, "notices"));
+        Assert.Empty(Strings(r, "errors"));
     }
 
     /// <summary>A custom start and end maps to the reads' window: <c>as_of</c> is the end and <c>hours</c> is the span rounded

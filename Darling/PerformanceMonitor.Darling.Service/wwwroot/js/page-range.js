@@ -125,8 +125,20 @@ export function pageRangePicker(opts) {
   return { picker, ready };
 }
 
+/**
+ * How far back a set of reads all reach, in hours: the smallest catalog `max_hours` among them (#5562 review r1 M4, ruling R2). A page
+ * that shows several reads at one range (a server-page tab) can only offer a range every one of them takes, so the shortest reach wins.
+ * A read with no catalog row, an empty list and a catalog that could not be read all give the common 168 hours: the page never offers
+ * a range a read has not said it takes. The number comes from the catalog, the validators' own table, never from the page.
+ */
+export function readsReachHours(catalog, reads) {
+  const entries = catalog && Array.isArray(catalog.reads) ? catalog.reads : [];
+  if (!Array.isArray(reads) || reads.length === 0) return reachHours(null);
+  return Math.min(...reads.map((name) => reachHours(entries.find((r) => r && r.name === name) || null)));
+}
+
 /** The reach as the longest quick choice, when it is longer than the shared list's 30 days (#5562 review r1 M5, ruling R8). */
-function offerReach(picker) {
+export function offerReach(picker) {
   const hours = picker.reachHours();
   if (hours * HOUR_MS > ROLLING_PRESETS[ROLLING_PRESETS.length - 1].spanMs) picker.setExtraPresets([relativeSpec(hours * HOUR_MS)]);
 }

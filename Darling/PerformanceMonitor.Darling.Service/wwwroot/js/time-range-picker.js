@@ -56,6 +56,8 @@ let pickerCount = 0;
  * @param {number} [opts.reachHours] the longest range the page's reads take, in hours (default 168); longer ones are greyed out
  * @param {number|null} [opts.sampleIntervalMs] the main collector's interval; a span with fewer than 3 samples shows a note
  * @param {object[]} [opts.extraPresets] quick choices added after the shared list (a read that reaches past 30 days offers its reach)
+ * @param {(hours: number) => string} [opts.reachMessage] the reason a range past the reach is greyed out, for a page that is not "this page"
+ *   (the server page says "This tab reads up to 7 days.")
  * @param {boolean} [opts.compact] hide the detail beside the button (it moves into the tooltip)
  * @param {boolean} [opts.rollingOnly] offer only "this long back from now" (#5562 R5, the FinOps pages): no calendar periods, no
  *   custom end, whole hours, at least one hour. A range outside that is greyed out or refused with the reason, never clamped.
@@ -128,7 +130,11 @@ export function timeRangePicker(opts = {}) {
   /* Why this page cannot read the range, or null: past the reach, outside a rolling-only page's shape, or under its own floor. */
   function refusalFor(next, range) {
     const rolling = opts.rollingOnly ? rollingOnlyRefusal(next, range.spanMs, opts.minSpanMs || undefined, opts.stepMs || undefined) : null;
-    return rolling || minSpanRefusal(range.spanMs, opts.minSpanMs) || reachRefusal(range.spanMs, reach);
+    if (rolling) return rolling;
+    const tooShort = minSpanRefusal(range.spanMs, opts.minSpanMs);
+    if (tooShort) return tooShort;
+    const tooLong = reachRefusal(range.spanMs, reach);
+    return tooLong && opts.reachMessage ? opts.reachMessage(reach) : tooLong;
   }
 
   function choose(next) {
