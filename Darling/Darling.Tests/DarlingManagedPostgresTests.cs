@@ -2923,6 +2923,103 @@ public sealed class DarlingManagedPostgresTests
         Assert.False(DarlingManagedPostgres.ConfHasCurrentWalSizingStamp(block, DarlingManagedPostgres.BuildWalSizingStamp(settings, postgresMajor + 1)));
     }
 
+    /// <summary>Runs <see cref="DarlingManagedPostgres.EnsureConfAppended"/> once per (free bytes, PG major) step
+    /// against one data directory, with the volume read replaced (#5459), and returns the conf text after each.</summary>
+    private static List<string> HealWalSizingAcrossStarts(params (long FreeBytes, int Major)[] starts)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v12-drift-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, DarlingManagedPostgres.BuildConfAppend(5993));
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5993, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            var afterEachStart = new List<string>();
+            foreach (var (freeBytes, major) in starts)
+            {
+                File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), major.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n");
+                pg.EnsureConfAppended(dataDirectory, _ => (freeBytes, 120 * OneGb));
+                afterEachStart.Add(File.ReadAllText(confPath));
+            }
+
+            return afterEachStart;
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #5459, the writer's side: a start whose free-space reading is just across a rung edge from the one the
+    /// block was written at keeps that block. The file is byte-identical, in both directions of the crossing and
+    /// at every edge, so a volume hovering at an edge no longer grows postgresql.conf by one block per flip.
+    /// </summary>
+    [Theory]
+    [InlineData(16, 300)]
+    [InlineData(32, 300)]
+    [InlineData(64, 1024)]
+    [InlineData(128, 2048)]
+    public void WalSizing_StartJustAcrossARungEdge_AppendsNothing(long edgeGb, long churnMb)
+    {
+        var above = edgeGb * OneGb + churnMb * 1024L * 1024;
+        var below = edgeGb * OneGb - churnMb * 1024L * 1024;
+        Assert.NotEqual(
+            DarlingManagedPostgres.DeriveWalSettings(above).MaxWalSizeMb,
+            DarlingManagedPostgres.DeriveWalSettings(below).MaxWalSizeMb);
+
+        foreach (var (written, later) in new[] { (above, below), (below, above) })
+        {
+            var confs = HealWalSizingAcrossStarts((written, 18), (later, 18), (written, 18));
+            Assert.Equal(1, CountOccurrences(confs[0], DarlingManagedPostgres.ConfMarkerV12));
+            Assert.Equal(confs[0], confs[1]);
+            Assert.Equal(confs[0], confs[2]);
+        }
+    }
+
+    /// <summary>#5459: the writer's tolerance is a band, not a switch-off. Headroom that halved or doubled still
+    /// appends a new block, so a real change is still healed.</summary>
+    [Theory]
+    [InlineData(20, 10)]
+    [InlineData(10, 20)]
+    [InlineData(40, 16)]
+    [InlineData(200, 60)]
+    public void WalSizing_HalvedOrDoubledHeadroom_StillAppends(long writtenGb, long laterGb)
+    {
+        var confs = HealWalSizingAcrossStarts((writtenGb * OneGb, 18), (laterGb * OneGb, 18));
+        Assert.Equal(1, CountOccurrences(confs[0], DarlingManagedPostgres.ConfMarkerV12));
+        Assert.Equal(2, CountOccurrences(confs[1], DarlingManagedPostgres.ConfMarkerV12));
+        Assert.Equal(
+            DarlingManagedPostgres.DeriveWalSettings(laterGb * OneGb).MaxWalSizeMb.ToString(System.Globalization.CultureInfo.InvariantCulture) + "MB",
+            LastSettingValue(confs[1], "max_wal_size"));
+    }
+
+    /// <summary>#5459: a different PostgreSQL major still appends even when the reading is within the band, because
+    /// the stamp's major decides the checkpoint pin and the tolerance never covers it.</summary>
+    [Fact]
+    public void WalSizing_MajorChangeWithinTheBand_StillAppends()
+    {
+        var free = 16 * OneGb + 300L * 1024 * 1024;
+        var confs = HealWalSizingAcrossStarts((free, 18), (free, 13));
+        Assert.Equal(1, CountOccurrences(confs[0], DarlingManagedPostgres.ConfMarkerV12));
+        Assert.Equal(2, CountOccurrences(confs[1], DarlingManagedPostgres.ConfMarkerV12));
+    }
+
+    /// <summary>#5459: no stamp yet, an unparseable stamp and a stamp of another major are never "within drift".</summary>
+    [Fact]
+    public void WalSizing_ConfHasWalSizingStampWithinDrift_RejectsAbsentUnparseableAndOtherMajor()
+    {
+        var block = DarlingManagedPostgres.BuildWalSizingConfAppend(16 * OneGb + 300L * 1024 * 1024, 120 * OneGb, 18);
+        Assert.True(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift(block, 16 * OneGb - 300L * 1024 * 1024, 18));
+        Assert.False(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift(block, 16 * OneGb - 300L * 1024 * 1024, 17));
+        Assert.False(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift("max_wal_size = 4GB\n", 16 * OneGb, 18));
+        Assert.False(DarlingManagedPostgres.ConfHasWalSizingStampWithinDrift(
+            DarlingManagedPostgres.ConfWalSizingStampPrefix + "garbage\n", 16 * OneGb, 18));
+    }
+
     /// <summary>
     /// THE STABILITY PROPERTY (#3802): free disk moving WITHIN a rung is not a change. The check runs on every
     /// start and compares the last stamp exactly, so — v8's lesson, with more force, because free disk moves

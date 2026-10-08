@@ -2707,6 +2707,35 @@ public sealed class DarlingManagedPostgres
         => LastLineWithPrefixEquals(conf, ConfWalSizingStampPrefix, expectedStamp);
 
     /// <summary>
+    /// True when the MOST RECENT v12 stamp in the conf names the same PostgreSQL major as
+    /// <paramref name="postgresMajor"/> and a <c>max_wal_size</c> that <see cref="IsWalSizeWithinDriftOf"/>
+    /// accepts for <paramref name="freeDiskBytesOnDataVolume"/> (#5459). The writer's twin of the verdict
+    /// tolerance, through the same function so the two cannot disagree: a volume whose reading crosses a rung
+    /// edge back and forth between starts keeps the block it wrote instead of appending a new one on every
+    /// crossing. A different major, a halved or doubled headroom, a stamp that does not parse, or no stamp at
+    /// all is not "within drift" and the caller appends as before.
+    /// </summary>
+    internal static bool ConfHasWalSizingStampWithinDrift(string conf, long freeDiskBytesOnDataVolume, int postgresMajor)
+    {
+        var lastIndex = conf.LastIndexOf(ConfWalSizingStampPrefix, StringComparison.Ordinal);
+        if (lastIndex < 0)
+        {
+            return false;
+        }
+
+        var lineEnd = conf.IndexOf('\n', lastIndex);
+        var line = (lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd]).TrimEnd('\r');
+        var match = System.Text.RegularExpressions.Regex.Match(
+            line, @"max_wal_size_mb=(\d+) min_wal_size_mb=\d+ pg_major=(\d+)$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return match.Success
+            && int.TryParse(match.Groups[2].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var stampMajor)
+            && stampMajor == postgresMajor
+            && long.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var stampMaxWalMb)
+            && IsWalSizeWithinDriftOf(freeDiskBytesOnDataVolume, stampMaxWalMb);
+    }
+
+    /// <summary>
     /// The v12 block (#3802): the marker, the stamp, one comment line recording the headroom it was derived
     /// from (so an operator reading postgresql.conf later can see WHY 8192MB without the service log), then
     /// <c>max_wal_size</c> and <c>min_wal_size</c> in whole MB, and <c>checkpoint_completion_target = 0.9</c>
@@ -3698,7 +3727,12 @@ public sealed class DarlingManagedPostgres
     /// has only ever been reachable on Windows.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    internal void EnsureConfAppended(string dataDirectory)
+    internal void EnsureConfAppended(string dataDirectory) => EnsureConfAppended(dataDirectory, null);
+
+    /// <summary><see cref="EnsureConfAppended(string)"/> with the data-volume read replaceable, so a test can say
+    /// what free space each start sees (#5459). Production always passes null.</summary>
+    [SupportedOSPlatform("windows")]
+    internal void EnsureConfAppended(string dataDirectory, Func<string, (long AvailableFreeBytes, long TotalBytes)>? readVolumeSpace)
     {
         var confPath = Path.Combine(dataDirectory, "postgresql.conf");
         if (!File.Exists(confPath))
@@ -3927,7 +3961,7 @@ public sealed class DarlingManagedPostgres
            from a figure we could not read is worse than leaving the block in force. All three settings are
            SIGHUP-context and this runs before pg_ctl start, so a service-owned start applies them at once. */
         var v12Major = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
-        if (!TryReadDataVolumeSpace(dataDirectory, out var v12FreeBytes, out var v12TotalBytes))
+        if (!TryReadDataVolumeSpace(dataDirectory, out var v12FreeBytes, out var v12TotalBytes, readVolumeSpace))
         {
             _logger.LogWarning(
                 "Skipped the v12 WAL-sizing check: the free space on the volume holding {DataDirectory} could not be read, so a change in headroom cannot be distinguished from a failed reading. The WAL settings currently in force (the last v12 block if one exists, otherwise v4's max_wal_size = 4GB) stay in force.",
@@ -3945,7 +3979,7 @@ public sealed class DarlingManagedPostgres
                they are looking at. */
             LogWalSizingAutoConfOverrides(dataDirectory, v12Settings);
 
-            if (!ConfHasCurrentWalSizingStamp(conf, v12Stamp))
+            if (!ConfHasCurrentWalSizingStamp(conf, v12Stamp) && !ConfHasWalSizingStampWithinDrift(conf, v12FreeBytes, v12Major))
             {
                 File.AppendAllText(confPath, BuildWalSizingConfAppend(v12FreeBytes, v12TotalBytes, v12Major));
                 _logger.LogInformation(
@@ -3958,7 +3992,7 @@ public sealed class DarlingManagedPostgres
                    derived and from what, so a start with no append is distinguishable from a start that never
                    checked. */
                 _logger.LogInformation(
-                    "Managed store WAL sizing (v12): max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume — unchanged, the block in force was derived to the same rung; checkpoint_completion_target {CheckpointNote}.",
+                    "Managed store WAL sizing (v12): max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume — unchanged, the block in force is kept (the same rung, or one this reading is within the drift tolerance of); checkpoint_completion_target {CheckpointNote}.",
                     v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), v12CheckpointNote);
             }
         }
