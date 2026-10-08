@@ -135,7 +135,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc)
     {
         var floor = await Service().GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
@@ -239,7 +239,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         var service = Service();
         var rows = await service.GetPlanCorrectionsAsync(ServerId, fromDate: startUtc, toDate: endUtc);
         var probedFloor = await service.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, ServerId, startUtc, endUtc);
-        var (visible, text, probed) = OnStaThread(() =>
+        var (visible, text, probed) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             var probeStepRan = false;
@@ -268,7 +268,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     private static (bool Visible, string Text, int ProbeCalls, bool ReturnedProbeTask) CappedGridBannerStep(DateTime[] rows, DateTime? startUtc = null)
     {
         var rangeStart = startUtc ?? new DateTime(2026, 6, 1);
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             var probeTask = new TaskCompletionSource().Task;
@@ -846,7 +846,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
             },
             "Query Heatmap", startUtc, endUtc);
         var floor = ServerTab.EarlierOfFloorAndRowShown(probed, ServerTab.FirstColumnDrawn(drawn));
-        var (visible, text) = OnStaThread(() =>
+        var (visible, text) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
@@ -1288,29 +1288,6 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
 
     private static IEnumerable<string> AllServerTabCode() =>
         Directory.EnumerateFiles(ControlsDir(), "ServerTab*.cs").Select(path => CodeOf(Path.GetFileName(path)));
-
-    /// <summary>WPF objects require STA; same shape as DataStartBannerTests.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 
     /// <summary>
     /// The <c>///</c> block (and attribute lines) directly above the member that starts at <paramref name="signature"/>,

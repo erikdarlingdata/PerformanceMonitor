@@ -111,7 +111,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc)
     {
         var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
@@ -305,29 +305,6 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         var end = code.IndexOf("\n    }\n", start, StringComparison.Ordinal);
         Assert.True(end > start, $"the end of '{signature}' was not found.");
         return code[start..end];
-    }
-
-    /// <summary>WPF objects require STA; same shape as DataStartBannerTests.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
     }
 
     private static string ControlsFile(string name) =>

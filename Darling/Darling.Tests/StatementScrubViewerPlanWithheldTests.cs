@@ -32,7 +32,7 @@ public sealed class StatementScrubViewerPlanWithheldTests
     [Fact]
     public void APlanWithheldWhole_ShowsTheWithheldSentenceInTheViewer_NotAParseError()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var control = new PlanViewerControl();
             try
@@ -150,22 +150,4 @@ public sealed class StatementScrubViewerPlanWithheldTests
         Assert.DoesNotContain("File.WriteAllText", export, StringComparison.Ordinal);
     }
 
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

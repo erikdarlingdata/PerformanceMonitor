@@ -49,7 +49,7 @@ public sealed class ViewerDisabledListBoxThemeTests
     [InlineData("CoolBreezeTheme.xaml")]
     public void DisabledListBox_RendersTheThemedBackgroundDimmed_NotStockWhite(string themeFile)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var list = new ListBox { IsEnabled = false };
             list.SetResourceReference(Control.BackgroundProperty, "BackgroundDarkBrush");
@@ -65,7 +65,7 @@ public sealed class ViewerDisabledListBoxThemeTests
     [InlineData("CoolBreezeTheme.xaml")]
     public void DisabledServerList_AsShipped_RendersTheThemedBackgroundDimmed(string themeFile)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var list = ParseServerList();
             list.IsEnabled = false;
@@ -80,7 +80,7 @@ public sealed class ViewerDisabledListBoxThemeTests
     [InlineData("CoolBreezeTheme.xaml")]
     public void EnabledListBox_RendersIdenticallyToTheStockTemplate(string themeFile)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var themeStyle = Assert.IsType<Style>(LoadTheme(themeFile)[typeof(ListBox)]);
             var withThemeStyle = new ResourceDictionary { [typeof(ListBox)] = themeStyle };
@@ -190,23 +190,4 @@ public sealed class ViewerDisabledListBoxThemeTests
         return (ListBox)XamlReader.Parse(element.ToString());
     }
 
-    /// <summary>WPF objects require STA; same shape as <c>RawWindowFloorViewerPortTests</c>.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

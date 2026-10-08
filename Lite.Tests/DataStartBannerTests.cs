@@ -116,7 +116,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc)
     {
         var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
@@ -386,29 +386,6 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
             "LiveSnapshot_Click must hide the Active Queries banner exactly once (found " + hides.Count + "): the live rows replace the range rows the banner described");
         Assert.True(hides[0].Index > bound && hides[0].Index < failed,
             "the banner must come down after the live rows are bound and before the failure arm, so a failed live read keeps it");
-    }
-
-    /// <summary>WPF objects require STA; same shape as QueryWindowTruncationTests.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
     }
 
     private static string ControlsFile(string name) =>
