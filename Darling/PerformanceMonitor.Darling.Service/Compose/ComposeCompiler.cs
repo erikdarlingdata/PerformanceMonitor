@@ -47,6 +47,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>server_id</c>, resolved from the registry by name; a name with no registry row resolves to no id, so those names alone are
 /// also matched on the row's stored <c>server_name</c>, exactly as the old scope matched them. Null or empty (the default, and
 /// every run whose names are all registered) adds nothing to the SQL or to the parameters.
+/// <see cref="QueryStoreGroupMembers"/> (#5582) is the runner's count of the members of a Query Store RankedTimeSeries panel's group
+/// dimension(s), the product when there are several: the servers in scope for <c>server</c>, and <c>pg_stats.n_distinct</c> of the
+/// wide parent for <c>database_name</c> and <c>module_name</c> (a high figure, since it counts all retention). Null (the default, and
+/// every run that could not count) means unknown, and unknown compiles the two-scan text: the single-scan base CTE holds buckets x
+/// members rows, which only a known count can bound by <see cref="ComposeLimits.MaxSingleScanBaseRows"/>.
+/// <see cref="QueryStoreStampThrough"/> (#5582, part 3) is the instant below which the Query Store compose rollup answers a wide-route read
+/// (naive UTC, <see cref="DateTimeKind.Unspecified"/>); the runner sets it from the rollup's build state. When it is later than the wide read's
+/// start, and every partial the panel needs has a rollup column, the compile reads the rollup for <c>[start, StampThrough)</c> and the
+/// wide table from <c>StampThrough</c>; otherwise (null, the default, or earlier) it compiles the wide-table text unchanged.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
@@ -59,7 +68,9 @@ public sealed record ComposeRunContext(
     DateTime? QueryStoreWideStart = null,
     ComposeHourlyEdgesVerdict? HourlyEdges = null,
     DateTime? ModuleMapThrough = null,
-    IReadOnlyList<string>? UnregisteredServers = null)
+    IReadOnlyList<string>? UnregisteredServers = null,
+    long? QueryStoreGroupMembers = null,
+    DateTime? QueryStoreStampThrough = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -199,7 +210,8 @@ public static class ComposeCompiler
     private static string BuildFactRelation(
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
         IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
-        string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum)
+        string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum,
+        StampRelation? stamp = null)
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
@@ -258,6 +270,11 @@ public static class ComposeCompiler
            windows of 12 h or more rely on that index and that setting; without them this read scans the table. */
         if (context.QueryStoreWideEligible)
         {
+            if (stamp is not null)
+            {
+                return BuildStampRelation(stamp, wideStartParam ?? startParam, endParam, dimensionFilters);
+            }
+
             return $"(SELECT w.*, s.server_name FROM {PgSchemaGenerator.CollectSchema}.query_store_interval_wide AS w "
                 + $"JOIN {PgSchemaGenerator.CollectSchema}.servers AS s ON s.server_id = w.server_id "
                 + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
@@ -356,7 +373,7 @@ public static class ComposeCompiler
     /// no product path passes <c>false</c>.
     /// </summary>
     internal static (ComposeCompiled? Compiled, string? Error) CompileCore(
-        PanelPlan plan, ComposeRunContext context, bool singleScanRankedTimeSeries)
+        PanelPlan plan, ComposeRunContext context, bool singleScanRankedTimeSeries, Func<string, string?>? stampColumns = null)
     {
         if (plan is null)
         {
@@ -468,6 +485,11 @@ public static class ComposeCompiler
                 ? p.AddTimestamp(wideStart)
                 : null;
 
+        /* #5582 part 3: the stamp route. Decided here, before any later parameter is bound, so $stampThrough sits right after the
+           wide start in every mode; null (the default) compiles the wide-table text above byte for byte. */
+        var stampPlan = TryPlanStamp(plan, route, context, stampColumns ?? StampColumnFor);
+        var stampThroughParam = stampPlan is null ? null : p.AddTimestamp(context.QueryStoreStampThrough!.Value);
+
         /* Filter predicates are built — and their values BOUND — once, in filter order, so the parameter
            order is identical for every mode (window, scope, filters, then topN). RankedTimeSeries (#2734)
            reuses the same clause TEXT in both its rank CTE and its series query, which reuses the same $n
@@ -500,11 +522,22 @@ public static class ComposeCompiler
         string? partialValue = null;
         if (singleScanRankedTimeSeries && plan.Mode == PanelMode.RankedTimeSeries && CanSingleScan(plan, route, context, windowBuckets))
         {
-            partials = new PartialColumns();
+            partials = stampPlan is null ? new PartialColumns() : new PartialColumns(stampColumns ?? StampColumnFor, direct: false);
             partialValue = TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, partials);
         }
 
         var singleScan = partialValue is not null;
+
+        /* The stamp relation's inputs: its partial columns, $stampThrough, and the server scope spelled on the registry join the
+           three arms share (`s.`), because the rollup rows and the wide rows both carry server_id and the registry row carries the name. */
+        var stampRelation = stampPlan is null
+            ? null
+            : new StampRelation(stampPlan.Partials, stampThroughParam!, hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam) : null);
+
+        /* In stamp mode every value is the combine form over the relation's partial columns (single scan: over rank_base's). */
+        string PrimaryValue() => singleScan
+            ? partialValue!
+            : stampPlan is not null ? stampPlan.PrimaryValue : BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route);
 
         /* The fact FROM + (optional) module join + WHERE window/scope/filters — one emitter because the
            RankedTimeSeries rank CTE and the outer query must aggregate the SAME fact rows; two hand-kept
@@ -514,7 +547,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
@@ -661,7 +694,7 @@ public static class ComposeCompiler
                 rankSelects.Add(DimRef(dim) + " AS " + dim.Name);
             }
 
-            rankSelects.Add((singleScan ? partialValue! : BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route)) + " AS value");
+            rankSelects.Add(PrimaryValue() + " AS value");
             sql.Append("    SELECT ").Append(string.Join(", ", rankSelects)).Append('\n');
             if (singleScan)
             {
@@ -724,12 +757,12 @@ public static class ComposeCompiler
             groupExprs.Add(expr);
         }
 
-        selectExprs.Add((singleScan ? partialValue! : BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route)) + " AS value");
+        selectExprs.Add(PrimaryValue() + " AS value");
         if (plan.Overlay is ComposeOverlay overlay)
         {
             /* The second measure (#1606): one more select expression over the SAME fact rows — never a join,
                never a parameter, never a second query. Same route as the primary (the AND-gate above). */
-            selectExprs.Add(BuildValueExpr(overlay.Measure, overlay.Aggregate, overlay.Unit, route) + " AS value2");
+            selectExprs.Add((stampPlan is not null ? stampPlan.OverlayValue! : BuildValueExpr(overlay.Measure, overlay.Aggregate, overlay.Unit, route)) + " AS value2");
         }
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
@@ -1283,17 +1316,249 @@ public static class ComposeCompiler
             : "";
     }
 
+    /* ───────────────────────── the Query Store stamp route (#5582 part 3) ───────────────────────── */
+
+    private const string StampTable = "query_store_compose_stamp";
+    private const string StampBuiltTable = "query_store_compose_stamp_built";
+
+    /// <summary>The rollup column for each partial aggregate the compiler can ask a Query Store panel for, keyed by the partial's
+    /// fact-form text (<c>SUM(f.execution_count)</c>). The only copy of the map in the compiler: a partial it does not name means
+    /// the panel compiles the wide-table text. <c>COUNT(*)</c> is the rollup's <c>wide_rows</c>.</summary>
+    private static readonly Dictionary<string, string> s_stampColumnByPartial = new(StringComparer.Ordinal)
+    {
+        ["COUNT(*)"] = "wide_rows",
+        ["SUM(f.execution_count)"] = "ec_sum",
+        ["COUNT(f.execution_count)"] = "ec_count",
+        ["MIN(f.execution_count)"] = "ec_min",
+        ["MAX(f.execution_count)"] = "ec_max",
+        ["SUM(f.max_duration_us)"] = "maxdur_sum",
+        ["COUNT(f.max_duration_us)"] = "maxdur_count",
+        ["MIN(f.max_duration_us)"] = "maxdur_min",
+        ["MAX(f.max_duration_us)"] = "maxdur_max",
+        ["SUM(f.max_cpu_time_us)"] = "maxcpu_sum",
+        ["COUNT(f.max_cpu_time_us)"] = "maxcpu_count",
+        ["MIN(f.max_cpu_time_us)"] = "maxcpu_min",
+        ["MAX(f.max_cpu_time_us)"] = "maxcpu_max",
+        ["SUM(f.avg_duration_us * f.execution_count)"] = "dur_wsum",
+        ["SUM(f.avg_cpu_time_us * f.execution_count)"] = "cpu_wsum",
+    };
+
+    /// <summary>The rollup column for <paramref name="partialExpression"/>, or null when the rollup does not hold it.</summary>
+    internal static string? StampColumnFor(string partialExpression) =>
+        s_stampColumnByPartial.TryGetValue(partialExpression, out var column) ? column : null;
+
+    /// <summary>The columns of the fact relation a stamp-mode panel may name: the rollup's key (the registry's name rides the
+    /// join). A group or filter on anything else compiles the wide-table text.</summary>
+    private static readonly string[] s_stampDimensionColumns = { "server_name", "database_name", "module_name", "query_hash" };
+
+    /// <summary>What a stamp-mode compile reads: the rollup columns (once each), and the primary and overlay values as the
+    /// combine form over them.</summary>
+    private sealed record StampPlan(IReadOnlyList<StampPartial> Partials, string PrimaryValue, string? OverlayValue);
+
+    /// <summary>The names the stamp relation is spelled with: its partial columns, the bound <c>$stampThrough</c>, and the server
+    /// scope predicate over the registry alias <c>s</c> (null for the fleet).</summary>
+    private sealed record StampRelation(IReadOnlyList<StampPartial> Partials, string ThroughParam, string? ScopeSql);
+
+    /// <summary>
+    /// Whether this compile reads the Query Store rollup (#5582 part 3), and the combine-form values it reads it with. Null (the
+    /// wide-table text, unchanged) unless ALL of these hold: the run is the Query Store wide route (not a rollup tier, not the
+    /// hourly-raw-edges route, no module join); the runner supplied a <see cref="ComposeRunContext.QueryStoreStampThrough"/> later
+    /// than the wide read's start (the later of the window start and <see cref="ComposeRunContext.QueryStoreWideStart"/>); every
+    /// group and filter column is one the rollup keeps; and every partial the primary measure (and the overlay, if any) needs
+    /// has a rollup column (<paramref name="stampColumns"/>), which also rules out an aggregate that does not decompose.
+    /// </summary>
+    private static StampPlan? TryPlanStamp(PanelPlan plan, ComposeRoute route, ComposeRunContext context, Func<string, string?> stampColumns)
+    {
+        if (!context.QueryStoreWideEligible
+            || context.QueryStoreStampThrough is not DateTime through
+            || route.IsCagg
+            || route.Tier == ComposeSourceTier.HourlyRawEdges
+            || plan.UsesModuleJoin
+            || !string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var wideStart = context.QueryStoreWideStart is DateTime start && start > context.StartUtc ? start : context.StartUtc;
+        if (through <= wideStart)
+        {
+            return null;
+        }
+
+        foreach (var dimension in plan.GroupBy.Concat(plan.Filters.Select(f => f.Dimension)))
+        {
+            if (dimension.ViaModuleJoin || dimension.TrailingSpaceHistory
+                || !s_stampDimensionColumns.Contains(dimension.Column, StringComparer.Ordinal))
+            {
+                return null;
+            }
+        }
+
+        var partials = new PartialColumns(stampColumns, direct: true);
+        var primary = TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, partials);
+        if (primary is null)
+        {
+            return null;
+        }
+
+        string? overlayValue = null;
+        if (plan.Overlay is ComposeOverlay overlay)
+        {
+            if (!string.Equals(overlay.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            overlayValue = TryBuildPartialValueExpr(overlay.Measure, overlay.Aggregate, overlay.Unit, partials);
+            if (overlayValue is null)
+            {
+                return null;
+            }
+        }
+
+        return partials.Unmapped || partials.Stamped.Count == 0 ? null : new StampPlan(partials.Stamped, primary, overlayValue);
+    }
+
+    /// <summary>One wide row as the partial <paramref name="partial"/> would be over just that row (the stale and tail arms):
+    /// the count is 1, a sum is the value as numeric, a count of a column is whether it is non-NULL, and the minimum and the
+    /// maximum are the value. Combining these over any set of rows gives the aggregate over those rows, exactly.</summary>
+    private static string PerRowPartial(StampPartial partial) => partial.Kind switch
+    {
+        PartialKind.CountStar => "1",
+        PartialKind.Sum => $"CAST({partial.Operand!(FactAlias)} AS numeric)",
+        PartialKind.Count => $"CAST(({partial.Operand!(FactAlias)} IS NOT NULL) AS integer)",
+        _ => partial.Operand!(FactAlias),
+    };
+
+    /// <summary>
+    /// The stamp-mode fact relation (#5582 part 3): ONE FROM item of partial rows with one column list (server_id, the three
+    /// dimensions, collection_time, server_name, then the partial columns), in three <c>UNION ALL</c> arms that together cover
+    /// <c>[wideStart, end]</c> exactly once:
+    /// <list type="number">
+    /// <item><b>rollup</b>: the rollup's rows in <c>[wideStart, $stampThrough)</c> of hours whose (server, hour) was built and has had no
+    /// late write since (<c>built_seq = late_seq</c>, a semi-join on the build ledger);</item>
+    /// <item><b>stale</b>: for each ledger pair in an hour of <c>[date_trunc('hour', wideStart), $stampThrough)</c> whose build is behind its
+    /// late writes (<c>built_seq IS DISTINCT FROM late_seq</c>), the wide rows of that server and hour inside the same bounds, each as
+    /// the partials of the one row (<c>CROSS JOIN LATERAL</c>, so the wide table is probed per pair);</item>
+    /// <item><b>tail</b>: the wide rows from <c>$stampThrough</c> (never the window start) through the window end, as partials.</item>
+    /// </list>
+    /// Every arm applies the server scope and the pushable dimension filters, over the registry join <c>s</c> and the fact-row alias
+    /// <c>f</c>, so the outer query's own WHERE finds nothing left to remove. The outer query keeps its window predicate as before.
+    /// </summary>
+    private static string BuildStampRelation(StampRelation stamp, string wideStartParam, string endParam, IReadOnlyList<string>? dimensionFilters)
+    {
+        var schema = PgSchemaGenerator.CollectSchema;
+        var through = stamp.ThroughParam;
+        var wide = $"{schema}.query_store_interval_wide";
+        var servers = $"{schema}.servers";
+        var built = $"{schema}.{StampBuiltTable}";
+        const string Head = "f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name";
+
+        var scopeAndFilters = (stamp.ScopeSql is null ? string.Empty : " AND " + stamp.ScopeSql)
+            + string.Concat((dimensionFilters ?? Array.Empty<string>()).Select(c => " AND " + c.Replace("f.server_name", "s.server_name", StringComparison.Ordinal)));
+        var rollupPartials = string.Concat(stamp.Partials.Select(x => $", f.{x.Column}"));
+        var rowPartials = string.Concat(stamp.Partials.Select(x => $", {PerRowPartial(x)} AS {x.Column}"));
+
+        var rollup = $"SELECT {Head}{rollupPartials} FROM {schema}.{StampTable} AS f JOIN {servers} AS s ON s.server_id = f.server_id "
+            + $"WHERE f.collection_time >= {wideStartParam} AND f.collection_time < {through} "
+            + $"AND EXISTS (SELECT 1 FROM {built} AS b WHERE b.server_id = f.server_id AND b.hour = date_trunc('hour', f.collection_time) AND b.built_seq = b.late_seq)"
+            + scopeAndFilters;
+
+        var stale = $"SELECT {Head}{rowPartials} FROM {built} AS b "
+            + $"CROSS JOIN LATERAL (SELECT w.* FROM {wide} AS w WHERE w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour' "
+            + $"AND w.collection_time >= {wideStartParam} AND w.collection_time < {through}) AS f "
+            + $"JOIN {servers} AS s ON s.server_id = f.server_id "
+            + $"WHERE b.hour >= date_trunc('hour', {wideStartParam}) AND b.hour < {through} AND b.built_seq IS DISTINCT FROM b.late_seq"
+            + scopeAndFilters;
+
+        var tail = $"SELECT {Head}{rowPartials} FROM {wide} AS f JOIN {servers} AS s ON s.server_id = f.server_id "
+            + $"WHERE f.collection_time >= {through} AND f.collection_time <= {endParam}"
+            + scopeAndFilters;
+
+        return $"({rollup} UNION ALL {stale} UNION ALL {tail})";
+    }
+
+    private enum PartialKind { Sum, Count, CountStar, Min, Max }
+
+    /// <summary>One rollup column a stamp-mode panel reads: its name, what it aggregates, and the operand over a fact alias
+    /// (<c>w.execution_count</c>), which the wide arms spell as one row's partial.</summary>
+    private sealed record StampPartial(string Column, PartialKind Kind, Func<char, string>? Operand);
+
     /// <summary>The partial aggregates a single-scan RankedTimeSeries base CTE computes (#5582): each is an aggregate
     /// over fact columns (<c>SUM(f.execution_count)</c>) under a generated name (<c>p0</c>, <c>p1</c>, ...) the rank and the
-    /// series re-combine with <c>SUM</c>, <c>MIN</c> or <c>MAX</c>. An expression asked for twice is computed once.</summary>
+    /// series re-combine with <c>SUM</c>, <c>MIN</c> or <c>MAX</c>. An expression asked for twice is computed once.
+    ///
+    /// <para>In stamp mode (#5582 part 3) the fact rows are already partials, so each is read from its rollup column instead
+    /// (<paramref name="stampColumns"/> names it): the single-scan base CTE combines that column
+    /// (<c>SUM(f.ec_sum)</c>), and the direct form (<paramref name="direct"/>) is referenced as <c>f.ec_sum</c> by the value
+    /// expression itself. A partial with no rollup column sets <see cref="Unmapped"/>.</para></summary>
     private sealed class PartialColumns
     {
         private readonly Dictionary<string, string> _nameByExpression = new(StringComparer.Ordinal);
+        private readonly Func<string, string?>? _stampColumns;
+        private readonly bool _direct;
+
+        public PartialColumns()
+        {
+            Alias = RankBaseAlias;
+        }
+
+        public PartialColumns(Func<string, string?> stampColumns, bool direct)
+        {
+            _stampColumns = stampColumns;
+            _direct = direct;
+            Alias = direct ? FactAlias : RankBaseAlias;
+        }
+
+        /// <summary>The alias the combining expression reads its partials through: the base CTE's, or the fact relation's.</summary>
+        public char Alias { get; }
 
         public List<(string Name, string Expression)> Columns { get; } = new();
 
-        /// <summary>The generated name of <paramref name="expression"/>, added to the base CTE on first use.</summary>
-        public string Add(string expression)
+        /// <summary>The rollup columns asked for, once each, in first-use order.</summary>
+        public List<StampPartial> Stamped { get; } = new();
+
+        public bool Unmapped { get; private set; }
+
+        /// <summary>The name <paramref name="kind"/> over <paramref name="operand"/> is read under, registered on first use.</summary>
+        public string Add(PartialKind kind, Func<char, string>? operand)
+        {
+            var expression = kind switch
+            {
+                PartialKind.CountStar => "COUNT(*)",
+                PartialKind.Sum => $"SUM({operand!(FactAlias)})",
+                PartialKind.Count => $"COUNT({operand!(FactAlias)})",
+                PartialKind.Min => $"MIN({operand!(FactAlias)})",
+                _ => $"MAX({operand!(FactAlias)})",
+            };
+
+            if (_stampColumns is null)
+            {
+                return NameFor(expression);
+            }
+
+            var column = _stampColumns(expression);
+            if (column is null)
+            {
+                Unmapped = true;
+                return "unmapped";
+            }
+
+            if (!Stamped.Exists(x => string.Equals(x.Column, column, StringComparison.Ordinal)))
+            {
+                Stamped.Add(new StampPartial(column, kind, operand));
+            }
+
+            if (_direct)
+            {
+                return column;
+            }
+
+            var combine = kind switch { PartialKind.Min => "MIN", PartialKind.Max => "MAX", _ => "SUM" };
+            return NameFor($"{combine}({FactAlias}.{column})");
+        }
+
+        private string NameFor(string expression)
         {
             if (!_nameByExpression.TryGetValue(expression, out var name))
             {
@@ -1316,31 +1581,38 @@ public static class ComposeCompiler
         context.QueryStoreWideEligible
         && !route.IsCagg
         && route.Tier != ComposeSourceTier.HourlyRawEdges
-        && PlanTakesSingleScan(plan, windowBuckets);
+        && PlanTakesSingleScan(plan, windowBuckets, context.QueryStoreGroupMembers);
 
     /// <summary>
     /// The plan-level half of <see cref="CanSingleScan"/>, and the half the Query Store read guard asks before any context
     /// exists (<see cref="RankedTimeSeriesScansFactRowsTwice"/>): a Query Store RankedTimeSeries plan whose single-scan base
     /// CTE is BOUNDED and whose aggregate decomposes.
     ///
-    /// <para><b>Why a bound at all (#5582).</b> The base CTE holds one row per (bucket, group). Measured on the rig with
-    /// every fact row its own group, that is about 150 to 180 bytes of temp file per row (the materialized CTE, the sort or
-    /// hash spill that builds it, and the rank's re-aggregation over it), so a read of the guard's 9.4 million rows would write
-    /// 1.4 to 1.7 GB against the compose session's 1 GB <c>temp_file_limit</c>, where the two-scan text writes only what its
-    /// rank aggregate over the groups spills. So the single scan is taken only when the number of rows is bounded by the plan:
+    /// <para><b>Why a bound at all (#5582).</b> The base CTE holds one row per (bucket, group). A large production store measured
+    /// 436 bytes of temp file per base row with every fact row its own group (the materialized CTE, the sort or hash spill that
+    /// builds it, and the rank's re-aggregation over it), against the compose session's 1 GB <c>temp_file_limit</c>, where the
+    /// two-scan text writes only what its rank aggregate over the groups spills. So the single scan is taken only when the number of rows is bounded by the plan:
     /// buckets x groups, with at most <see cref="ComposeLimits.MaxSingleScanBuckets"/> buckets and no group dimension that is
     /// as large as the fact rows. <c>query_hash</c> is that dimension (one member per statement), and it is the one the
     /// "top N queries over time" panel groups by, so that panel keeps the two-scan text and the guard counts its second
     /// scan. <c>database_name</c>, <c>module_name</c> and <c>server</c> are bounded by the fleet's databases, modules and
-    /// servers.</para>
+    /// servers, and the runner counts them: <paramref name="groupMembers"/> is that count (null: unknown, so two scans).</para>
+    ///
+    /// <para><b>The bound is buckets x members (#5582).</b> A large production store measured 436 bytes of temp file per base row
+    /// (the rig's 150 to 180 was wrong), so 100 buckets x 30,000 module names, 3 million rows, would write about 1.3 GB against the
+    /// 1 GB limit. The single scan is taken only when <c>buckets x members</c> is at most
+    /// <see cref="ComposeLimits.MaxSingleScanBaseRows"/> (about 436 MB), and the bucket cap stays as the series-length bound.</para>
     /// </summary>
-    private static bool PlanTakesSingleScan(PanelPlan plan, double windowBuckets) =>
+    private static bool PlanTakesSingleScan(PanelPlan plan, double windowBuckets, long? groupMembers) =>
         plan.Mode == PanelMode.RankedTimeSeries
         && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal)
         && plan.Overlay is null
         && !plan.UsesModuleJoin
         && windowBuckets > 0
         && windowBuckets <= ComposeLimits.MaxSingleScanBuckets
+        && groupMembers.HasValue
+        && groupMembers.Value >= 0
+        && windowBuckets * groupMembers.Value <= ComposeLimits.MaxSingleScanBaseRows
         && plan.GroupBy.All(dim => !dim.ViaModuleJoin && !dim.TrailingSpaceHistory && !s_unboundedGroupColumns.Contains(dim.Column))
         && TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, new PartialColumns()) is not null;
 
@@ -1353,8 +1625,10 @@ public static class ComposeCompiler
     /// the series each read them. The Query Store read guard counts that second scan against the statement timeout, so it asks
     /// before the context exists, from the plan and the window alone. Any panel that is not a RankedTimeSeries reads them once.
     /// Exact for a run on the wide route, the only route the guard checks; <see cref="CompileCore"/> takes the same decision.
+    /// <paramref name="groupMembers"/> is the same count the compile reads from <see cref="ComposeRunContext.QueryStoreGroupMembers"/>
+    /// (null: unknown, so two scans), so the guard's limit matches what compiles.
     /// </summary>
-    internal static bool RankedTimeSeriesScansFactRowsTwice(PanelPlan plan, DateTime startUtc, DateTime endUtc)
+    internal static bool RankedTimeSeriesScansFactRowsTwice(PanelPlan plan, DateTime startUtc, DateTime endUtc, long? groupMembers)
     {
         if (plan is null)
         {
@@ -1369,7 +1643,7 @@ public static class ComposeCompiler
         var windowSeconds = (endUtc - startUtc).TotalSeconds;
         var bucketSeconds = MeasureCatalog.BucketSeconds(MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds));
         var buckets = bucketSeconds > 0 ? Math.Ceiling(windowSeconds / bucketSeconds) : 0d;
-        return !PlanTakesSingleScan(plan, buckets);
+        return !PlanTakesSingleScan(plan, buckets, groupMembers);
     }
 
     /// <summary>
@@ -1393,7 +1667,7 @@ public static class ComposeCompiler
     /// </summary>
     private static string? TryBuildPartialValueExpr(ComposeMeasure measure, ComposeAggregate aggregate, string unit, PartialColumns partials)
     {
-        string P(string name) => $"{RankBaseAlias}.{name}";
+        string P(string name) => $"{partials.Alias}.{name}";
 
         if (measure.Kind == MeasureKind.Ratio)
         {
@@ -1402,11 +1676,11 @@ public static class ComposeCompiler
                 return null;
             }
 
-            var product = partials.Add($"SUM({FactAlias}.{measure.WeightedValueColumn} * {FactAlias}.{measure.WeightColumn})");
+            var product = partials.Add(PartialKind.Sum, a => $"{a}.{measure.WeightedValueColumn} * {a}.{measure.WeightColumn}");
             string ratio;
             if (measure.RatioMode == MeasureRatioMode.Weighted)
             {
-                var weight = partials.Add($"SUM({FactAlias}.{measure.WeightColumn})");
+                var weight = partials.Add(PartialKind.Sum, a => $"{a}.{measure.WeightColumn}");
                 ratio = $"(CAST(SUM({P(product)}) AS double precision) / NULLIF(SUM({P(weight)}), 0))";
             }
             else
@@ -1419,7 +1693,7 @@ public static class ComposeCompiler
 
         if (aggregate == ComposeAggregate.Count)
         {
-            return $"CAST(SUM({P(partials.Add("COUNT(*)"))}) AS double precision)";
+            return $"CAST(SUM({P(partials.Add(PartialKind.CountStar, null))}) AS double precision)";
         }
 
         /* A delta-family filter would have to ride on the partial; Query Store has none, so refuse the shape rather than
@@ -1429,26 +1703,27 @@ public static class ComposeCompiler
             return null;
         }
 
-        var column = $"{FactAlias}.{(measure.Archetype == MeasureArchetype.Cumulative ? measure.DeltaColumn! : measure.Column!)}";
+        var columnName = measure.Archetype == MeasureArchetype.Cumulative ? measure.DeltaColumn! : measure.Column!;
+        string Column(char a) => $"{a}.{columnName}";
         string native;
         switch (aggregate)
         {
             case ComposeAggregate.Sum:
-                native = $"CAST(SUM({P(partials.Add($"SUM({column})"))}) AS double precision)";
+                native = $"CAST(SUM({P(partials.Add(PartialKind.Sum, Column))}) AS double precision)";
                 break;
             case ComposeAggregate.Avg:
                 {
-                    var sum = partials.Add($"SUM({column})");
-                    var count = partials.Add($"COUNT({column})");
+                    var sum = partials.Add(PartialKind.Sum, Column);
+                    var count = partials.Add(PartialKind.Count, Column);
                     native = $"CAST(SUM({P(sum)}) / NULLIF(SUM({P(count)}), 0) AS double precision)";
                     break;
                 }
 
             case ComposeAggregate.Min:
-                native = $"CAST(MIN({P(partials.Add($"MIN({column})"))}) AS double precision)";
+                native = $"CAST(MIN({P(partials.Add(PartialKind.Min, Column))}) AS double precision)";
                 break;
             case ComposeAggregate.Max:
-                native = $"CAST(MAX({P(partials.Add($"MAX({column})"))}) AS double precision)";
+                native = $"CAST(MAX({P(partials.Add(PartialKind.Max, Column))}) AS double precision)";
                 break;
             default:
                 return null;

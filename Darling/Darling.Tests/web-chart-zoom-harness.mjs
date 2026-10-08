@@ -44,8 +44,15 @@ class FakeNode {
     (this.listeners[type] = this.listeners[type] || []).push(listener);
   }
   setPointerCapture() {}
+  replaceChild(next, old) {
+    const i = this.children.indexOf(old);
+    if (i >= 0) this.children[i] = next;
+    return old;
+  }
+  /* The drawn plot svg reports the size it was drawn at (one SVG unit is one CSS pixel, 300 px high); any other node is 1000 wide. */
   getBoundingClientRect() {
-    return { left: 0, top: 0, width: 1000, height: 320 };
+    if (this.tag === "svg" && this.attrs.width) return { left: 0, top: 0, width: Number(this.attrs.width), height: Number(this.attrs.height) };
+    return { left: 0, top: 0, width: 1000, height: 300 };
   }
   set textContent(value) {
     this.children = [];
@@ -63,6 +70,19 @@ globalThis.document = {
   createTextNode: (text) => new FakeNode("#text", text),
 };
 globalThis.location = { hash: "#/server/A/waits" };
+
+/* A ResizeObserver for the measured-width case only (#5586): while globalThis.__plotW is set, a watched plot box reports that
+   width as the chart is built, as the browser does once it has laid the chart out. Every other case runs with no report, so it
+   keeps the default width (1000). */
+globalThis.ResizeObserver = class {
+  constructor(cb) { this.cb = cb; }
+  observe(target) {
+    if (!globalThis.__plotW) return;
+    target.isConnected = true;
+    this.cb([{ contentRect: { width: globalThis.__plotW, height: 300 } }]);
+  }
+  disconnect() {}
+};
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "chart-zoom-"));
 let charts;
@@ -89,11 +109,11 @@ const specFor = () => ({ points, xKey: "t", series: [{ key: "v", label: "v", col
 /* The plot spans viewBox x 58..984 of 1000 (margins l=58, r=16); the stand-in is 1000 px wide, so a client x is a viewBox x. */
 const PLOT_L = 58;
 const PLOT_W = 1000 - 58 - 16;
-const xAt = (minute) => PLOT_L + (minute / 100) * PLOT_W;
-const brush = (host, fromMin, toMin) => {
+const xAt = (minute, width = 1000) => PLOT_L + (minute / 100) * (width - 58 - 16);
+const brush = (host, fromMin, toMin, width = 1000) => {
   const overlay = find(host, (n) => (n.listeners.pointerdown || []).length)[0];
-  overlay.listeners.pointerdown[0]({ button: 0, clientX: xAt(fromMin), pointerId: 1 });
-  overlay.listeners.pointerup[0]({ clientX: xAt(toMin) });
+  overlay.listeners.pointerdown[0]({ button: 0, clientX: xAt(fromMin, width), pointerId: 1 });
+  overlay.listeners.pointerup[0]({ clientX: xAt(toMin, width) });
 };
 const shown = (host) => {
   const chips = find(host, (n) => String(n.className || n.attrs.class || "").includes("zoom-chip"));
@@ -172,6 +192,14 @@ out.lineClipped = !!line && /^url\(#.+\)$/.test(line.attrs["clip-path"] || "");
 const clipRect = find(gh, (n) => n.tag === "clipPath").map((n) => n.children[0].attrs);
 out.clipRect = clipRect.length ? { x: Number(clipRect[0].x), w: Number(clipRect[0].width) } : null;
 out.lineXs = line ? line.attrs.points.split(" ").map((p) => Number(p.split(",")[0])) : [];
+
+// 11. a chart drawn at a measured width (1600 px, #5586): the same brush maps to the same minutes
+globalThis.__plotW = 1600;
+const wideChart = charts.zoomableLineChart(specFor(), "c8", scope);
+globalThis.__plotW = null;
+brush(wideChart, 20, 40, 1600);
+const wz = charts.getChartZoom("c8", scope);
+out.measuredZoom = wz ? { from: (wz.from - T0) / MIN, to: (wz.to - T0) / MIN } : null;
 
 // 10. a query-only change of the page address keeps the zoom scope
 globalThis.location.hash = "#/server/A/waits?x=1";

@@ -154,6 +154,7 @@ public sealed class ComposeParameterCoverageTests
         + (serverScoped ? 1 : 0)
         + (serverScoped && context.UnregisteredServers is { Count: > 0 } ? 1 : 0)
         + (PredictsWideStartBind(plan, context) ? 1 : 0)
+        + (PredictsStampThroughBind(plan, context) ? 1 : 0)
         + (PredictsHourlyEdgesBinds(plan, context) ? 2 : 0)
         + (PredictsModuleOverlayFloorBind(plan, context) ? 1 : 0)
         + plan.Filters.Count
@@ -184,6 +185,16 @@ public sealed class ComposeParameterCoverageTests
         && context.QueryStoreWideStart is DateTime wideStart
         && wideStart > context.StartUtc
         && string.Equals(plan.Measure.SourceTable, "query_store_stats", StringComparison.Ordinal);
+
+    /// <summary>The #5582 part 3 rule from intent alone: a wide-eligible Query Store run whose stamp instant is later than the wide read's
+    /// start (the later of the window start and the common start), for an aggregate that decomposes, binds <c>$stampThrough</c> once.
+    /// Not read back from the compiler's parameters.</summary>
+    internal static bool PredictsStampThroughBind(PanelPlan plan, ComposeRunContext context) =>
+        context.QueryStoreWideEligible
+        && context.QueryStoreStampThrough is DateTime through
+        && through > (PredictsWideStartBind(plan, context) ? context.QueryStoreWideStart!.Value : context.StartUtc)
+        && string.Equals(plan.Measure.SourceTable, "query_store_stats", StringComparison.Ordinal)
+        && plan.Aggregate != ComposeAggregate.PercentileCont;
 
     /// <summary>
     /// The same prediction for an annotation query, whose parameter set is the window plus the optional
@@ -379,7 +390,8 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        Assert.Equal(27, sites);
+        /* 28: the 27 before #5582 part 3, plus the one $stampThrough bind, folded into the rule as PredictsStampThroughBind. */
+        Assert.Equal(28, sites);
     }
 
     /// <summary>
@@ -568,6 +580,38 @@ public sealed class ComposeParameterCoverageTests
             }
         }
 
+        /* #5582 part 3: the same Query Store statements with a stamp instant. One later than the wide read's start binds one more
+           timestamp ($stampThrough); one that is not later binds nothing extra. Wide starts of +2h (the common start is later than
+           the window), 0 and -1h (it is not) against instants of +1h and +5h make both outcomes occur. */
+        foreach (var measure in MeasureCatalog.Measures.Where(m => string.Equals(m.SourceTable, "query_store_stats", StringComparison.Ordinal)))
+        {
+            var keyword = measure.Kind == MeasureKind.Ratio ? "ratio" : "measure";
+            var aggregate = measure.Kind == MeasureKind.Ratio ? null : MeasureCatalog.WireName(measure.ValidAggs[0]);
+            var aggregateJson = aggregate is null ? "" : $",\"aggregate\":\"{aggregate}\"";
+            var head = $"{{\"source\":\"{measure.SourceTable}\",\"{keyword}\":\"{measure.Key}\"{aggregateJson}";
+            var dimension = measure.AllowedDimensions.Count > 0 ? measure.AllowedDimensions[0] : "server";
+
+            foreach (var wideStart in new DateTime?[] { WindowStart.AddHours(2), WindowStart, WindowStart.AddHours(-1) })
+            {
+                foreach (var stampThrough in new DateTime?[] { WindowStart.AddHours(1), WindowStart.AddHours(5) })
+                {
+                    foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+                    {
+                        Add(corpus, $"{head},\"timeBucket\":\"hour\",\"viz\":\"line\"}}", servers, measure.Key, wide: (true, wideStart), stampThrough: stampThrough);
+                        Add(corpus, $"{head},\"viz\":\"stat\"}}", servers, measure.Key, wide: (true, wideStart), stampThrough: stampThrough);
+                        Add(corpus, $"{head},\"topN\":5,\"groupBy\":[\"{dimension}\"],\"viz\":\"bar\"}}", servers, measure.Key, wide: (true, wideStart), stampThrough: stampThrough);
+                        Add(
+                            corpus,
+                            $"{head},\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"{dimension}\"],\"includeOther\":true,\"viz\":\"line\"}}",
+                            servers,
+                            measure.Key,
+                            wide: (true, wideStart),
+                            stampThrough: stampThrough);
+                    }
+                }
+            }
+        }
+
         /* The hourly-raw-edges route: a window ending now, with a verdict equal to the router's candidate, binds the
            two edge instants. Fleet and scoped, so the prediction's +2 is in the population. */
         {
@@ -691,7 +735,8 @@ public sealed class ComposeParameterCoverageTests
         string? filterOp = null,
         IReadOnlyDictionary<string, string?>? variables = null,
         string[]? declaredVariables = null,
-        (bool Eligible, DateTime? Start)? wide = null)
+        (bool Eligible, DateTime? Start)? wide = null,
+        DateTime? stampThrough = null)
     {
         var (plan, parseError) = ComposeSpec.TryParsePanel(
             (JsonObject)JsonNode.Parse(json)!,
@@ -704,7 +749,7 @@ public sealed class ComposeParameterCoverageTests
             return;
         }
 
-        var context = Context(servers, variables, wide);
+        var context = Context(servers, variables, wide, stampThrough);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, context);
         if (compileError is not null)
         {
@@ -714,6 +759,7 @@ public sealed class ComposeParameterCoverageTests
         corpus.Add(new Statement(
             $"{measureKey} {plan!.Mode} ({(servers is null ? "fleet" : "scoped")})"
             + (wide is null ? "" : $" wide:{wide.Value.Start:HH:mm}")
+            + (stampThrough is null ? "" : $" stamp:{stampThrough.Value:HH:mm}")
             + (filterOp is null ? "" : $" filter:{filterOp}"),
             compiled!,
             PredictedParameterCount(plan, servers is not null, context),
@@ -729,7 +775,8 @@ public sealed class ComposeParameterCoverageTests
     private static ComposeRunContext Context(
         IReadOnlyList<string>? servers,
         IReadOnlyDictionary<string, string?>? variables,
-        (bool Eligible, DateTime? Start)? wide = null) =>
+        (bool Eligible, DateTime? Start)? wide = null,
+        DateTime? stampThrough = null) =>
         new(
             servers,
             WindowStart,
@@ -739,7 +786,8 @@ public sealed class ComposeParameterCoverageTests
             WindowEnd,
             RollupCoverage.Unknown,
             QueryStoreWideEligible: wide?.Eligible ?? false,
-            QueryStoreWideStart: wide?.Start);
+            QueryStoreWideStart: wide?.Start,
+            QueryStoreStampThrough: stampThrough);
 
     /// <summary>The repository root, from this file's own compile-time path — the same anchor
     /// <c>StartupCommandTimeoutTests</c> and <c>ServerLocalReadFrameDisciplineTests</c> use, so the source

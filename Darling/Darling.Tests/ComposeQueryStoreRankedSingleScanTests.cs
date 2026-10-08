@@ -24,10 +24,13 @@ public sealed class ComposeQueryStoreRankedSingleScanTests
     private static string Json(string groupBy, string bucket, string measureKind = "ratio", string key = "qs_total_cpu_us", string extra = "") =>
         "{\"source\":\"query_store_stats\",\"" + measureKind + "\":\"" + key + "\",\"timeBucket\":\"" + bucket + "\",\"topN\":10,\"groupBy\":[\"" + groupBy + "\"],\"viz\":\"line\"" + extra + "}";
 
-    private static string Sql(string json, DateTime start, DateTime end, bool singleScan, bool wide = true)
+    /// <summary>A bounded group dimension of 100 members: small enough that the 100-bucket cap, not the member term, decides.</summary>
+    private const long SmallGroup = 100;
+
+    private static string Sql(string json, DateTime start, DateTime end, bool singleScan, bool wide = true, long? members = SmallGroup)
     {
         var plan = QueryStoreRankedHarness.Parse(json);
-        var context = new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown, QueryStoreWideEligible: wide);
+        var context = new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown, QueryStoreWideEligible: wide, QueryStoreGroupMembers: members);
         var (compiled, error) = ComposeCompiler.CompileCore(plan, context, singleScan);
         Assert.True(error is null, error);
         return compiled!.Sql;
@@ -39,24 +42,30 @@ public sealed class ComposeQueryStoreRankedSingleScanTests
         (text.Length - text.Replace(needle, string.Empty, StringComparison.Ordinal).Length) / needle.Length;
 
     [Theory]
-    [InlineData("module_name", "hour", 24, true)]
-    [InlineData("database_name", "hour", 24, true)]
-    [InlineData("server", "hour", 24, true)]
-    [InlineData("module_name", "hour", 100, true)]      /* the bound: 100 buckets is still bounded */
-    [InlineData("module_name", "hour", 101, false)]     /* one bucket past it */
-    [InlineData("module_name", "minute", 24, false)]    /* 1,440 buckets */
-    [InlineData("query_hash", "hour", 24, false)]       /* a group as large as the fact rows */
-    [InlineData("query_hash", "minute", 1, false)]
-    public void TheWideRoute_ReadsTheFactRowsOnce_OnlyWhereTheBaseCteIsBounded(string group, string bucket, int hours, bool single)
+    [InlineData("module_name", "hour", 24, 100L, true)]
+    [InlineData("database_name", "hour", 24, 100L, true)]
+    [InlineData("server", "hour", 24, 43L, true)]
+    [InlineData("module_name", "hour", 100, 100L, true)]      /* the bucket cap: 100 buckets is still bounded */
+    [InlineData("module_name", "hour", 101, 100L, false)]     /* one bucket past it */
+    [InlineData("module_name", "minute", 24, 100L, false)]    /* 1,440 buckets */
+    [InlineData("query_hash", "hour", 24, 100L, false)]       /* a group as large as the fact rows */
+    [InlineData("query_hash", "minute", 1, 100L, false)]
+    [InlineData("module_name", "hour", 24, 40_000L, true)]    /* 24 x 40,000 = 960,000 base rows, under the 1,000,000 bound */
+    [InlineData("module_name", "hour", 24, 41_666L, true)]    /* 999,984 */
+    [InlineData("module_name", "hour", 24, 41_667L, false)]   /* 1,000,008: one member past the bound */
+    [InlineData("module_name", "hour", 100, 10_000L, true)]   /* 100 x 10,000 = 1,000,000: the bound itself */
+    [InlineData("module_name", "hour", 100, 30_000L, false)]  /* 100 x 30,000 = 3 million rows is about 1.3 GB of temp: two scans */
+    [InlineData("module_name", "hour", 24, null, false)]      /* unknown members: two scans */
+    public void TheWideRoute_ReadsTheFactRowsOnce_OnlyWhereTheBaseCteIsBounded(string group, string bucket, int hours, long? members, bool single)
     {
         var json = Json(group, bucket);
-        var sql = Sql(json, Day, Day.AddHours(hours), singleScan: true);
+        var sql = Sql(json, Day, Day.AddHours(hours), singleScan: true, members: members);
         Assert.Equal(single, sql.Contains("rank_base AS (", StringComparison.Ordinal));
         Assert.Equal(single ? 1 : 2, Occurrences(sql, "collect.query_store_interval_wide"));
-        Assert.Equal(!single, ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(QueryStoreRankedHarness.Parse(json), Day, Day.AddHours(hours)));
+        Assert.Equal(!single, ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(QueryStoreRankedHarness.Parse(json), Day, Day.AddHours(hours), members));
 
         /* The oracle switch is the old text whatever the gate says. */
-        var old = Sql(json, Day, Day.AddHours(hours), singleScan: false);
+        var old = Sql(json, Day, Day.AddHours(hours), singleScan: false, members: members);
         Assert.DoesNotContain("rank_base", old, StringComparison.Ordinal);
         Assert.Equal(2, Occurrences(old, "collect.query_store_interval_wide"));
     }
@@ -75,7 +84,7 @@ public sealed class ComposeQueryStoreRankedSingleScanTests
 
         /* A panel that is not a RankedTimeSeries reads the rows once and never asks for a second scan. */
         var ranked = QueryStoreRankedHarness.Parse("{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"topN\":10,\"groupBy\":[\"query_hash\"],\"viz\":\"table\"}");
-        Assert.False(ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(ranked, Day, Day.AddHours(24)));
+        Assert.False(ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(ranked, Day, Day.AddHours(24), null));
     }
 
     [Fact]
