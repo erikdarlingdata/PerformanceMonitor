@@ -988,7 +988,7 @@ BEGIN
                 .Replace("__DEFINITION__", "(server_id, first_execution_time)", StringComparison.Ordinal)
             + (wide
                 ? optionalIndex.Replace("__NAME__", "ix___TABLE___collection_time_brin", StringComparison.Ordinal)
-                    .Replace("__DEFINITION__", "USING brin (collection_time) WITH (autosummarize = on)", StringComparison.Ordinal)
+                    .Replace("__DEFINITION__", "USING brin (collection_time) WITH (autosummarize = off)", StringComparison.Ordinal)
                 : @"
 
     CREATE TRIGGER trg_plan_regression_daily_late
