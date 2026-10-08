@@ -196,7 +196,8 @@ public partial class JobHistoryTab : UserControl
             JobHistoryWindowTruncatedBanner,
             () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryDataStartAsync(serverId, startUtc, endUtc)),
             startUtc, endUtc, read, zone, inUtc: serverId is null,
-            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen));
+            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen),
+            onFloor: floor => RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(floor, DateTime.UtcNow));
     }
 
     /// <summary>
@@ -222,7 +223,8 @@ public partial class JobHistoryTab : UserControl
     /// <param name="superseded">True when a newer load has started: checked after the probe answers and before the banner is written.</param>
     internal static System.Threading.Tasks.Task ShowJobHistoryDataStartAsync(
         TextBlock banner, Func<System.Threading.Tasks.Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc,
-        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc, Func<bool>? superseded = null)
+        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc, Func<bool>? superseded = null,
+        Action<DateTime?>? onFloor = null)
     {
         var runTimes = read.Where(r => r.RunDateTimeUtc.HasValue).Select(r => r.RunDateTimeUtc!.Value).ToList();
 
@@ -246,6 +248,7 @@ public partial class JobHistoryTab : UserControl
                 if (superseded?.Invoke() == true) return;
 
                 ServerTab.ApplyWindowFloorToBanner(banner, ServerTab.EarlierOfFloorAndRowShown(floor, ServerTab.EarliestRowShown(runTimes, t => t)), startUtc, zone);
+                onFloor?.Invoke(floor); /* #5562 R7: the picker's data-start note takes the floor this probe found */
                 Word();
             });
     }

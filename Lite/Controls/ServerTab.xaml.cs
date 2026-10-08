@@ -299,6 +299,7 @@ public partial class ServerTab : UserControl
 
         /* Chart hover tooltips */
         CorrelatedLanes.Initialize(_dataService, _serverId, GetPickerZone);
+        CorrelatedLanes.DataStartFound += start => FeedDataStart("overview", start); /* #5562 R7: the Overview lanes' blocking note */
         /* #4766: the six slicers word their time axis and range caption in the tab's display zone. */
         foreach (var slicer in new[] { ActiveQueriesSlicer, QueryStatsSlicer, ProcStatsSlicer, QueryStoreSlicer, BlockingSlicer, DeadlockSlicer })
             slicer.DisplayZone = GetPickerZone;

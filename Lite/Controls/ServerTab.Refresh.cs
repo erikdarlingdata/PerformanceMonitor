@@ -612,12 +612,9 @@ public partial class ServerTab : UserControl
             $"[{_server.DisplayName}] {relation}", startUtc, endUtc, ct);
         ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());
 
-        /* #5562: the picker's 'Data starts ...' note takes its start from the probe this tab already awaited (the Queries
-           grid's, the primary surface), else the archive's static retention edge. No new query. */
-        if (relation == QueryWindowRelation.QueryStats)
-        {
-            RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(floor, DateTime.UtcNow);
-        }
+        /* #5562 R7: the picker's 'Data starts ...' note takes its start from the probe this site already awaited, for the page
+           on screen (every relation, not only the Queries grid's), else the archive's static retention edge. No new query. */
+        FeedDataStart(LiteTimeRange.CollectorOfRelation(relation), floor);
     }
 
     /// <summary>

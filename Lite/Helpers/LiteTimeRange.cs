@@ -207,11 +207,11 @@ internal static class LiteTimeRange
         "tempdb" => "tempdb_stats",
         "Blocking" => subTab switch
         {
-            "Trends" => "dmv_blocking_snapshot",
+            "Trends" => "blocked_process_report",
             "Current Waits" => "waiting_tasks",
             "Blocked Process Reports" => "blocked_process_report",
             "Deadlocks" => "deadlocks",
-            "Blocking Stats" => "dmv_blocking_snapshot",
+            "Blocking Stats" => "deadlocks",
             _ => null
         },
         "Perfmon" => "perfmon_stats",
@@ -221,6 +221,27 @@ internal static class LiteTimeRange
         "Plan Cache" => "plan_cache_stats",
         "Session Stats" => "session_stats",
         "System Events" => subTab == "Default Trace" ? "default_trace_events" : "system_health_events",
+        _ => null
+    };
+
+    /// <summary>The collector a floor probe's relation measures (#5562 R7), the key a banner site feeds the picker's data start under; null for a relation with no scheduled collector.</summary>
+    internal static string? CollectorOfRelation(QueryWindowRelation relation) => relation switch
+    {
+        QueryWindowRelation.QueryStats => "query_stats",
+        QueryWindowRelation.ProcedureStats => "procedure_stats",
+        QueryWindowRelation.QueryStoreStats => "query_store",
+        QueryWindowRelation.PlanCorrection => "plan_correction",
+        QueryWindowRelation.BlockedProcessReports => "blocked_process_report",
+        QueryWindowRelation.Deadlocks => "deadlocks",
+        QueryWindowRelation.DmvBlockingSnapshots => "dmv_blocking_snapshot",
+        QueryWindowRelation.QuerySnapshots => "query_snapshots",
+        QueryWindowRelation.SystemHealthEvents => "system_health_events",
+        QueryWindowRelation.DefaultTraceEvents => "default_trace_events",
+        QueryWindowRelation.LongQueryCompletions => "long_query_completions",
+        QueryWindowRelation.WaitingTasks => "waiting_tasks",
+        QueryWindowRelation.MemoryPressureEvents => "memory_pressure_events",
+        QueryWindowRelation.JobHistory => "job_history",
+        QueryWindowRelation.WaitStats => "wait_stats",
         _ => null
     };
 
