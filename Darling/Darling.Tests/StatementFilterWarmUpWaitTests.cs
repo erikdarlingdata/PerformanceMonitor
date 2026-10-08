@@ -20,20 +20,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Serializes the classes that stage a fake start-up warm-up (#5484). The registered warm-up is process-wide, so a
-/// fake that is still running while another class judges a large document would hold that class up for the wait.
-/// </summary>
-[CollectionDefinition("statement-filter-warm-up", DisableParallelization = true)]
-public sealed class StatementFilterWarmUpCollection
-{
-}
-
-/// <summary>
 /// #5478, #5484: a call that judges a large document waits for a running start-up warm-up, but only until one deadline
 /// (3 s after the warm-up started), only when it judges at least 256 KB, and the alert engine's fire path awaits instead
 /// of blocking. The MCP and web sweep waits the same way.
 /// </summary>
-[Collection("statement-filter-warm-up")]
+[Collection("timing")]
 public sealed class StatementFilterWarmUpWaitTests
 {
     private static long Ticks(TimeSpan span) => (long)(span.TotalSeconds * Stopwatch.Frequency);

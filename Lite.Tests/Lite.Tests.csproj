@@ -52,6 +52,8 @@
     <Compile Include="..\Darling\Darling.Tests\GuardStageScanner.cs" Link="GuardStageScanner.cs" />
     <!-- #5559: the one gate every STA test helper takes, so no two test classes touch WPF's shared descriptor caches at once. -->
     <Compile Include="..\Darling\Darling.Tests\WpfStaGate.cs" Link="WpfStaGate.cs" />
+    <!-- #5602: the timing scanner, so both suites keep a clock-starting class in the one `timing` collection by one detector. -->
+    <Compile Include="..\Darling\Darling.Tests\TimingTestScanner.cs" Link="TimingTestScanner.cs" />
   </ItemGroup>
 
   <ItemGroup>

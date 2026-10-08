@@ -39,6 +39,7 @@ namespace PerformanceMonitorLite.Tests;
 /// that actually distinguishes them: when <c>GetUsedDataSizeMb()</c> returns, the holder has NOT yet been
 /// released.</para>
 /// </summary>
+[Collection("timing")]
 public class StatusBarSizeReadLockTests
 {
     private static readonly TimeSpan WriteLockHold = TimeSpan.FromSeconds(10);
