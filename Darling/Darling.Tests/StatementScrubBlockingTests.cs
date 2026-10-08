@@ -463,7 +463,8 @@ public sealed partial class StatementCollectionCensusTests
     /// seconds ceiling failed on a busy machine, because a busy machine slows a correct judge too. So the 4 MB
     /// seconds-per-megabyte is compared with a 1 MB baseline measured in the SAME run, each the fastest of a few
     /// runs: load scales both, a quadratic judge makes the 4 MB rate about four times the baseline's, and a linear
-    /// one keeps the two equal. The 2.5 limit sits between. The absolute ceiling is only a hang backstop, far above
+    /// one keeps the two equal. The 2.5 limit sits between. Both sides take the fastest of three runs (#5561: the big side took two,
+    /// so a stall across both could fail a correct judge). The absolute ceiling is only a hang backstop, far above
     /// anything a loaded machine produces.
     /// </summary>
     [Fact]
@@ -480,9 +481,9 @@ public sealed partial class StatementCollectionCensusTests
         await TimeDeadlocksAsync(Small);
 
         var bprBase = await FastestRateAsync(TimeBprAsync, Small, 3);
-        var bprBig = await FastestRateAsync(TimeBprAsync, Big, 2);
+        var bprBig = await FastestRateAsync(TimeBprAsync, Big, 3);
         var deadlockBase = await FastestRateAsync(TimeDeadlocksAsync, Small, 3);
-        var deadlockBig = await FastestRateAsync(TimeDeadlocksAsync, Big, 2);
+        var deadlockBig = await FastestRateAsync(TimeDeadlocksAsync, Big, 3);
 
         TestContext.Current.SendDiagnosticMessage(
             $"R4 timing: {bprBig.Count} reports in {bprBig.Seconds:F2} s ({bprBig.SecondsPerMegabyte:F3} s/MB; 1 MB baseline {bprBase.SecondsPerMegabyte:F3} s/MB), "

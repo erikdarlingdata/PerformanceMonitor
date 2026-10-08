@@ -376,6 +376,7 @@ public partial class ViewerServerTab : UserControl
 
     private async Task LoadInnerTabAsync(int tabIndex)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             switch (tabIndex)
@@ -387,7 +388,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadLatchSpinlockAsync();
                     break;
                 case QueriesInnerTabIndex:
-                    await LoadQueriesAsync();
+                    await LoadQueriesAsync(timer);
                     break;
                 case PlanViewerInnerTabIndex:
                     /* No data feed: plans are pushed into the host by OpenPlanTab (a "View Plan" click),
@@ -434,7 +435,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadSystemEventsAsync();
                     break;
                 case LongQueriesInnerTabIndex:
-                    await LoadLongQueriesAsync();
+                    await LoadLongQueriesAsync(timer);
                     break;
 
                 /* #2530: the PostgreSQL run. Explicit arms, never the default: falling through to
@@ -476,7 +477,25 @@ public partial class ViewerServerTab : UserControl
         {
             StatusChanged?.Invoke($"refresh failed: {ex.Message}");
         }
+        finally
+        {
+            /* Walk finding D15: a slow load (over ViewerLoadTimer.SlowLoadThresholdMs) names its tab and where the time went. */
+            var slow = timer.Finish(InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header));
+            /* #5555: this load's clock is a local handed down to the loaders this method calls (Walk finding D15: a loader wraps each
+               store read in Timed(timer, ...)), not a field. A read that starts outside this load (a Daily Summary drill into
+               Top Queries, a slicer drag) passes null, so it cannot append its phases to this load's line, finished or live, or
+               rename it. */
+            if (slow is not null)
+            {
+                ViewerLogger.Warn("SlowLoad", $"[{_server.DisplayName}] {slow}");
+            }
+        }
     }
+
+    /// <summary>The name a slow-load line gives a tab that sets no sub-surface of its own: the tab's header text, or its index
+    /// when the header is not plain text or the tab is unknown.</summary>
+    internal static string InnerTabLoadName(int tabIndex, object? header) =>
+        header is string text && !string.IsNullOrWhiteSpace(text) ? text.Trim() : $"inner tab {tabIndex}";
 
     private async Task LoadOverviewChartsAsync()
     {
