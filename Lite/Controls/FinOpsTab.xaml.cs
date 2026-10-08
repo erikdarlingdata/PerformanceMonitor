@@ -81,6 +81,12 @@ public partial class FinOpsTab : UserControl
     {
         InitializeComponent();
         /* #5562: every list opened on the last 24 hours (1d); the heatmap on 30 days (1mo). */
+        /* R5: the lists and the heatmap read "hours back from now", so each picker is rolling only (the heatmap in whole days). */
+        LiteTimeRange.ConfigureFinOpsPicker(ResourceUsageTimeRangePicker, LiteTimeRange.FinOpsMinSpan);
+        LiteTimeRange.ConfigureFinOpsPicker(WaitStatsTimeRangePicker, LiteTimeRange.FinOpsMinSpan);
+        LiteTimeRange.ConfigureFinOpsPicker(ExpensiveQueriesTimeRangePicker, LiteTimeRange.FinOpsMinSpan);
+        LiteTimeRange.ConfigureFinOpsPicker(HighImpactTimeRangePicker, LiteTimeRange.FinOpsMinSpan);
+        LiteTimeRange.ConfigureFinOpsPicker(ObjectHeatmapWindowPicker, LiteTimeRange.FinOpsHeatmapMinSpan);
         var day = TimeRangePresets.FromLegacyHours(24)!;
         ResourceUsageTimeRangePicker.Value = day;
         WaitStatsTimeRangePicker.Value = day;

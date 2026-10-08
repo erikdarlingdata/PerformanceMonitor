@@ -93,17 +93,16 @@ public partial class JobHistoryTab : UserControl
 
         try
         {
-            var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
 
             /* #4966: the window's start is worked out ONCE, and the read and the data-start probe both take that instant: the note is
                worded against the window the rows were read over. The open tabs' clocks are taken here, on the UI thread (they are
                UI objects), and the read gets them as a plain snapshot. */
             var nowUtc = DateTime.UtcNow;
-            var startUtc = nowUtc.AddHours(-hoursBack);
+            var (startUtc, rangeEndUtc) = LiteTimeRange.BoundsOf(RangePicker, 24, nowUtc);
             var openTabClocks = _openTabClocks?.Invoke();
 
-            var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks));
+            var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc));
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
@@ -148,7 +147,7 @@ public partial class JobHistoryTab : UserControl
                a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
                the underlying read still hit the cap. */
             JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, all.Count, RowCap);
-            AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
+            AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, since={startUtc:O}, until={(rangeEndUtc.HasValue ? rangeEndUtc.Value.ToString("O") : "now")}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -161,7 +160,7 @@ public partial class JobHistoryTab : UserControl
             /* #4966: the rows are bound and the loading note is down; the note comes last, from the UNFILTERED read (all): the Status
                and Category filters narrow the grid on the client and say nothing about where the data starts. A probe that fails
                costs the note and never the grid. */
-            await ShowDataStartNoteAsync(serverId, readClocks, startUtc, nowUtc, all, gen);
+            await ShowDataStartNoteAsync(serverId, readClocks, startUtc, rangeEndUtc ?? nowUtc, all, gen);
         }
         catch (Exception ex)
         {
@@ -414,11 +413,6 @@ public partial class JobHistoryTab : UserControl
         }
 
         CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
-    }
-
-    private int GetSelectedHoursBack()
-    {
-        return LiteTimeRange.HoursBackOf(RangePicker, 24);
     }
 
     private int? GetSelectedServerId()

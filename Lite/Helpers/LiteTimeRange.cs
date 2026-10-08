@@ -19,6 +19,23 @@ namespace PerformanceMonitorLite.Helpers;
 /// </summary>
 internal static class LiteTimeRange
 {
+    /// <summary>The shortest FinOps list range: every FinOps read is whole hours back from now (#5562 R5).</summary>
+    internal static readonly TimeSpan FinOpsMinSpan = TimeSpan.FromHours(1);
+
+    /// <summary>The shortest heatmap window: the heatmap reads whole days.</summary>
+    internal static readonly TimeSpan FinOpsHeatmapMinSpan = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// A FinOps picker (#5562 R5): compact, rolling only (no calendar period, no start-and-end, no 'since') and at least
+    /// <paramref name="minSpan"/>, because the read behind it is "hours back from now" and could not honor a finished range.
+    /// </summary>
+    internal static void ConfigureFinOpsPicker(TimeRangePicker picker, TimeSpan minSpan)
+    {
+        picker.Compact = true;
+        picker.RollingOnly = true;
+        picker.MinSpan = minSpan;
+    }
+
     /// <summary>The range a fresh install opens on: the old default of four hours.</summary>
     internal static TimeRangeSpec Default => TimeRangeSpec.Relative(TimeSpan.FromHours(4));
 
@@ -56,6 +73,50 @@ internal static class LiteTimeRange
         var range = picker.Resolve();
         return range != null ? WindowFor(range).hoursBack : fallbackHours;
     }
+
+    /// <summary>
+    /// The window a history read takes: the picker's start and, for a range that has finished, its exclusive end (#5562).
+    /// A rolling or live range ('Past 24 hours', 'Today', 'since X') has no end bound (<c>null</c>), so rows collected after
+    /// <paramref name="nowUtc"/> are never cut. <paramref name="fallbackHours"/> when the held range cannot be used right now.
+    /// </summary>
+    internal static (DateTime startUtc, DateTime? endUtc) BoundsOf(TimeRangePicker picker, int fallbackHours, DateTime nowUtc)
+    {
+        var range = picker.Resolve();
+        if (range == null)
+        {
+            return (nowUtc.AddHours(-fallbackHours), null);
+        }
+
+        return BoundsOf(range, nowUtc);
+    }
+
+    /// <summary><see cref="BoundsOf(TimeRangePicker, int, DateTime)"/> for a range already resolved.</summary>
+    internal static (DateTime startUtc, DateTime? endUtc) BoundsOf(ResolvedTimeRange range, DateTime nowUtc)
+    {
+        if (range.Spec.WholeHours is { } hours && hours > 0)
+        {
+            return (nowUtc.AddHours(-hours), null);
+        }
+
+        return (range.StartUtc, range.IsLive ? null : range.EndUtc);
+    }
+
+    /// <summary>
+    /// The longest span Alert History offers (#5562 R8; the old "All" item is gone): a typed length equal to how long Lite keeps
+    /// the alert log, 365 days at most. The alert log is archived like every signal table and its archive files are deleted
+    /// <see cref="RetentionService.ArchiveRetentionMonths"/> months back (RetentionService.cs:34), so on Lite that is 3 months,
+    /// 89 to 92 days at <paramref name="utcNow"/>, rounded up to whole days.
+    /// </summary>
+    internal static TimeSpan AlertHistoryLongest(DateTime utcNow)
+    {
+        var kept = utcNow - utcNow.AddMonths(-RetentionService.ArchiveRetentionMonths);
+        var days = Math.Ceiling(kept.TotalDays);
+        return TimeSpan.FromDays(Math.Min(days, 365));
+    }
+
+    /// <summary>What to type for <see cref="AlertHistoryLongest"/>: "92d".</summary>
+    internal static string AlertHistoryLongestText(DateTime utcNow)
+        => ((int)AlertHistoryLongest(utcNow).TotalDays) + "d";
 
     /// <summary>True when <paramref name="range"/> carries its own instants rather than 'the last N hours'.</summary>
     internal static bool HasExplicitInstants(ResolvedTimeRange range) => range.Spec.WholeHours is not > 0;
