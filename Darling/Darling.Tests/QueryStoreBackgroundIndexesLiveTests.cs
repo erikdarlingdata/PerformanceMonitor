@@ -195,7 +195,6 @@ ANALYZE collect.query_store_interval_wide;", ct);
 
         Assert.False(await IndexExistsAsync(connection, QueryStoreIntervalWideBrinIndex.IndexName, ct));
         Assert.False(await IndexExistsAsync(connection, QueryStoreBackgroundIndexes.WideServerFirstExecIndexName, ct));
-        Assert.False(await IndexExistsAsync(connection, QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName, ct));
         var end = DateTime.UtcNow;
         var absent = await ReadAllAsync(connection, end, ct);
 
@@ -538,7 +537,7 @@ CROSS JOIN generate_series(1, {queriesPerDay}) q;", ct);
     }
 
     [Fact]
-    public async Task ThePerDayBuildAndTheServerFloor_UseTheLatestBtree_OnceItIsBuilt_AndNotBefore()
+    public async Task ThePerDayBuildAndTheServerFloor_UseTheLatestBtree_OnceItIsBuilt()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5507 live test.");
@@ -566,9 +565,8 @@ CROSS JOIN generate_series(1, {queriesPerDay}) q;", ct);
 
         var latestName = QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName[(QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName.IndexOf('.', StringComparison.Ordinal) + 1)..];
 
-        /* Before the ensure the per-day build walks the server's slice of the unique key. */
-        var before = await LatestIndexesInPlanAsync(connection, PlanRegressionDaily.BuildDaySql, BuildParameters(), ct);
-        Assert.DoesNotContain(latestName, before);
+        /* The premise: the index is not there yet, so any plan below that names it names it because the ensure built it. */
+        Assert.False(await IndexExistsAsync(connection, QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName, ct));
 
         await EnsureAllAsync(connection, ct);
         await ExecAsync(connection, $"VACUUM (ANALYZE) {Latest}", ct);

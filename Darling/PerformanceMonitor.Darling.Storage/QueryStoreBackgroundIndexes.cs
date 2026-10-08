@@ -128,10 +128,13 @@ public static class QueryStoreBackgroundIndexes
     /// A btree on <c>collect.query_store_interval_latest (server_id, first_execution_time)</c> (#5507), built
     /// <c>CONCURRENTLY</c> (the table is a plain heap), the twin of <see cref="WideServerFirstExec"/>.
     ///
-    /// <para><b>Why.</b> <c>PlanRegressionDaily</c>'s per-day build, the live half of the PLAN_REGRESSION fact, the
-    /// drill-down table twin and the read gate's floor all bound <c>server_id</c> and <c>first_execution_time</c> on
+    /// <para><b>Why.</b> <c>PlanRegressionDaily</c>'s per-day build, the live half of the PLAN_REGRESSION fact, its
+    /// table route (<c>PlanRegressionTableSql</c>), the drill-down table twin and the read gate's floor all bound
+    /// <c>server_id</c> and <c>first_execution_time</c> on
     /// this table. In <c>ux_query_store_interval_latest</c> <c>first_execution_time</c> is the last of seven columns,
-    /// behind five high-cardinality ones, so the bound cannot narrow the range and the scan reads every index entry
+    /// behind five other key columns, three of them high-cardinality (<c>runtime_stats_interval_id</c>,
+    /// <c>plan_id</c>, <c>query_id</c>; <c>database_name</c> and <c>replica_role</c> are not), so the bound cannot
+    /// narrow the range and the scan reads every index entry
     /// the server has. V153's <c>idx_query_store_interval_latest_first_exec</c> leads with <c>first_execution_time</c>
     /// alone, so it serves the retention purge (#4608) but not a per-server read. This index leads with
     /// <c>server_id</c>, so the bound becomes the range and a build reads only its server's two days. V153's index

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -73,17 +74,20 @@ public sealed class QueryStoreBackgroundIndexesTests
         /* #5507. Each read of collect.query_store_interval_latest that bounds server_id and first_execution_time, with the
            bound it carries; in ux_query_store_interval_latest first_execution_time is the seventh column, so only a btree
            that leads with server_id turns the bound into a range. */
-        var reads = new (string Name, string Sql, string Server, string Bound)[]
+        var reads = new (string Name, string Sql, string Table, string Server, string Bound)[]
         {
-            ("PlanRegressionDaily.BuildDaySql", PlanRegressionDaily.BuildDaySql, "l.server_id = $1", "l.first_execution_time >= $4::timestamp"),
-            ("QueryStoreIntervalLatest.PlainTableFloorSql", QueryStoreIntervalLatest.PlainTableFloorSql, "t.server_id = $1", "MIN(t.first_execution_time)"),
+            ("PlanRegressionDaily.BuildDaySql", PlanRegressionDaily.BuildDaySql, "collect.query_store_interval_latest", "l.server_id = $1", "l.first_execution_time >= $4::timestamp"),
+            ("QueryStoreIntervalLatest.PlainTableFloorSql", QueryStoreIntervalLatest.PlainTableFloorSql, "collect.query_store_interval_latest", "t.server_id = $1", "MIN(t.first_execution_time)"),
+            ("PgFactCollector.PlanRegressionDailySql, live half", PgFactCollector.PlanRegressionDailySql, "FROM query_store_interval_latest AS l", "l.server_id = $1::integer", "l.first_execution_time >= $4::timestamp"),
+            ("PgFactCollector.PlanRegressionTableSql", PgFactCollector.PlanRegressionTableSql, "FROM query_store_interval_latest", "WHERE server_id = $1", "first_execution_time >= $4"),
+            ("PgDrillDownCollector.RegressedQueriesTableSql", PgDrillDownCollector.RegressedQueriesTableSql, "FROM query_store_interval_latest", "WHERE server_id = $1", "first_execution_time >= $7"),
         };
 
-        foreach (var (name, sql, server, bound) in reads)
+        foreach (var (name, sql, table, server, bound) in reads)
         {
             Assert.True(sql.Contains(server, StringComparison.Ordinal), name + " must filter on the server");
             Assert.True(sql.Contains(bound, StringComparison.Ordinal), name + " must carry its first_execution_time bound");
-            Assert.Contains("collect.query_store_interval_latest", sql, StringComparison.Ordinal);
+            Assert.True(sql.Contains(table, StringComparison.Ordinal), name + " must read the latest table");
         }
 
         Assert.Contains("(server_id, first_execution_time)", Latest.PlainCreateSql);

@@ -204,6 +204,11 @@ RETURNING server_id, day;";
     /// this statement, in one transaction. When nothing has expired no summary statement runs at all. This relies on every
     /// summary day having a built row, which <see cref="BuildDayAsync"/> keeps true: it deletes and re-inserts the day's
     /// summary rows and upserts the built row in one transaction, a day with no wide rows included.</para>
+    ///
+    /// <para>Lock order: the cleanup locks the built row, then the summary rows; <see cref="BuildDayAsync"/> locks the
+    /// summary rows, then the built row. This is the order <c>PlanRegressionDaily</c>'s cleanup has against its build, and
+    /// it is kept. A cleanup and a build for the same (server, day) on two services can in principle deadlock; PostgreSQL
+    /// resolves that by aborting one side, which runs again on the next hourly tick.</para>
     /// </summary>
     public const string GcSummarySql = @"
 DELETE FROM collect.query_store_top_daily
