@@ -62,6 +62,13 @@ internal static class DarlingJobReader
     /// latest does not depend on the clock, and the ordering stays on the collector-computed duration rather
     /// than on either clock. $1 server_id.
     ///
+    /// <para>The snapshot counts only while it is the collector's CURRENT answer: the collector writes no row when no
+    /// job is running, so the newest row can be weeks old. The latest SUCCESSFUL <c>running_jobs</c> run in
+    /// <c>collection_log</c> (a SUCCESS with zero rows for a run that found nothing) decides: rows stored means the
+    /// newest snapshot is that run's; none stored means nothing is running, unless a snapshot newer than that log row
+    /// exists (the log row is stamped when the run ends, after its rows are stored). A server with no such log row keeps
+    /// the newest snapshot. The same text as the viewer's <c>ViewerDataService.RunningJobsSql</c>.</para>
+    ///
     /// <para>The conversion follows the server's time zone, so a job that started before a daylight saving
     /// change lands at its real UTC time rather than an hour off (#4793). Before that it subtracted the ONE
     /// newest collected offset, which was right only for a job that started after the last change.</para>
@@ -85,6 +92,33 @@ internal static class DarlingJobReader
             SELECT MAX(collection_time)
             FROM v_running_jobs
             WHERE server_id = $1
+        )
+        AND   (
+            NOT EXISTS
+            (
+                SELECT 1
+                FROM collection_log
+                WHERE server_id = $1
+                AND   collector_name = 'running_jobs'
+                AND   status = 'SUCCESS'
+            )
+            OR EXISTS
+            (
+                SELECT 1
+                FROM
+                (
+                    SELECT collection_time, rows_collected
+                    FROM collection_log
+                    WHERE server_id = $1
+                    AND   collector_name = 'running_jobs'
+                    AND   status = 'SUCCESS'
+                    ORDER BY collection_time DESC
+                    LIMIT 1
+                ) AS last_run
+                WHERE last_run.rows_collected IS NULL
+                OR    last_run.rows_collected > 0
+                OR    v_running_jobs.collection_time > last_run.collection_time
+            )
         )
         ORDER BY current_duration_seconds DESC
         """;
