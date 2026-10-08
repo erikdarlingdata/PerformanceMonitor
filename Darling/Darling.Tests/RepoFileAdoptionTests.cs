@@ -249,6 +249,9 @@ public sealed class RepoFileAdoptionTests
         "ViewTemplatesTests.cs",
         "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
+        /* #5586: its compose.js pin slices each renderer call up to the `break;` that ends its switch case, and its halo pin
+           splits app.css on line breaks to take the `.chart .bar-value` rule as one line. */
+        "WebChartWidthBehaviourTests.cs",
         /* #5245: pins that the filtered reads' catalog rows, dispatch entries and FILTERED list agree, over
            DarlingWebEndpoints.cs and the js tree. */
         "WebDatabaseFilterReadsTests.cs",

@@ -20,9 +20,24 @@ import { el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLi
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-/* viewBox geometry — the SVG scales to its container width via CSS (width:100%, height:auto). */
-const W = 1000;
-const H = 320;
+/* Line and scatter charts draw at the width their container really has (#5586): one SVG unit is one CSS pixel in both
+   directions, so the axis text keeps its size on a wide panel and on a phone. CHART_DEFAULT_W is the width a chart is drawn
+   at before it is on the page and measured (it is built before it is mounted); the first measurement redraws it before the
+   first paint. CHART_MIN_W keeps the plot box from collapsing in a very narrow container (the host clips the rest). It is 200
+   so that a phone-width panel (a 260 px box) is drawn at its own width, with nothing clipped, in all three renderers. */
+const CHART_DEFAULT_W = 1000;
+const CHART_MIN_W = 200;
+const H = 300;
+/* A pointer drag shorter than this many CSS pixels is a click, not a brush. */
+const BRUSH_MIN_PX = 8;
+/* The ranked bar chart is drawn at its box's real width like the line and scatter charts (#5586); its row geometry is its own.
+   A label is at most BAR_LABEL_CHARS characters, and its 12px text is about BAR_CHAR_PX px a character (0.63 em, a little over the
+   average so a capital-heavy name still fits). The gutters reserve BAR_CHAR_BUDGET_PX a character, 16 % more, so text up to
+   0.73 em a character (a wide font, a run of capitals) still stays inside its gutter and the box. */
+const BAR_LABEL_CHARS = 30;
+const BAR_CHAR_PX = 7.6;
+const BAR_CHAR_BUDGET_PX = BAR_CHAR_PX * 1.16;
+const BAR_TRACK_MIN = 40;
 /* Top margin leaves headroom for the y-axis unit caption to sit fully clear of the top tick's label. */
 const M = { l: 58, r: 16, t: 26, b: 30 };
 const PLOT_H = H - M.t - M.b;
@@ -33,6 +48,141 @@ function svg(tag, attrs) {
   const node = document.createElementNS(SVG_NS, tag);
   if (attrs) for (const [k, v] of Object.entries(attrs)) if (v != null) node.setAttribute(k, String(v));
   return node;
+}
+
+/* x-axis label room (#5586). An axis label is 11px tabular text, about 6.6px per character; two neighbours want a gap
+   between them. The tick count is how many labels fit across the plot, so none overlap at 360 px and a wide panel gets
+   more ticks, not wider ones. */
+const X_LABEL_CHAR_PX = 6.6;
+const X_LABEL_GAP_PX = 32;
+const X_MAX_INTERVALS = 10;
+
+/* The last width each chart was measured at, by chart key (#5586): a line chart's menuKey (zoomableLineChart sets one) or the
+   widthKey a caller passes (the composed panels pass their panel id, and the scatter has no menuKey). Panels re-render on
+   every poll and a new chart is built before it is on the page, so it is first drawn at the width its predecessor measured:
+   the observer's first report is then within a pixel and skips the redraw, and each poll builds a chart once, not twice. A
+   chart with no key is drawn at CHART_DEFAULT_W and redrawn once, as before. */
+const plotWidths = new Map();
+const PLOT_WIDTH_KEYS = 200;
+
+/** The width a chart with this key is first drawn at. */
+function seedPlotW(key) {
+  return key != null && plotWidths.has(key) ? plotWidths.get(key) : CHART_DEFAULT_W;
+}
+
+function rememberPlotW(key, w) {
+  if (key == null) return;
+  plotWidths.delete(key);
+  plotWidths.set(key, w);
+  if (plotWidths.size > PLOT_WIDTH_KEYS) plotWidths.delete(plotWidths.keys().next().value);
+}
+
+/** The estimated width in px of the widest of these axis labels. */
+function labelsPx(labels) {
+  let chars = 0;
+  for (const l of labels) chars = Math.max(chars, String(l).length);
+  return chars * X_LABEL_CHAR_PX;
+}
+
+/**
+ * How many evenly spaced intervals a time axis `plotW` px wide can carry (one more label than that): 0 when not even two
+ * labels fit (the axis then keeps one), at most X_MAX_INTERVALS.
+ */
+function xTickIntervals(plotW, labels) {
+  const px = labelsPx(labels);
+  if (plotW < 2 * px + 8) return 0;
+  /* The first and last labels are anchored inward (start and end), so the pair next to each edge needs half a label more than
+     a middle pair does: 1.5 labels and a gap per interval holds for every pair. */
+  return Math.max(1, Math.min(X_MAX_INTERVALS, Math.floor(plotW / (1.5 * px + X_LABEL_GAP_PX))));
+}
+
+/**
+ * The x ticks of a time axis (#5586): { times, seconds }. No two labels may read the same, at any width and window. The tick
+ * count follows the plot width (xTickIntervals); a step of a minute or more puts the ticks on whole minutes and caps the
+ * count at the window's minutes, so a brush-zoomed span of a few minutes does not repeat HH:mm. A window too short for one
+ * minute per tick shows HH:mm:ss and puts the ticks on whole seconds, capped at the window's seconds. The two end ticks keep
+ * the exact domain bounds; the ticks between are floored onto the whole minute (second), which keeps them distinct from both
+ * ends because each step is at least that unit. A window across a clock change repeats a wall-clock hour, so the caller then
+ * labels every tick with its zone (`withZone`: "01:00 AM EDT", "01:00 AM EST"), which keeps the labels distinct; the width
+ * estimate counts that suffix.
+ */
+function xTickPlan(tMin, spanMs, plotW, crossesDay, withZone = false) {
+  if (spanMs === 0) return { times: [tMin], seconds: false };
+  const tMax = tMin + spanMs;
+  const widthIntervals = (seconds) => xTickIntervals(plotW, [tMin, tMin + spanMs / 2, tMax].map((t) => axisTime(new Date(t), crossesDay, seconds, withZone)));
+  const evenTicks = (n, unit) => {
+    const times = [tMin];
+    for (let i = 1; i < n; i++) times.push(Math.floor((tMin + (spanMs * i) / n) / unit) * unit);
+    times.push(tMax);
+    return times;
+  };
+  const byWidth = widthIntervals(false);
+  if (byWidth === 0) return { times: [tMin], seconds: false };
+  const nMinutes = Math.min(byWidth, Math.floor(spanMs / 60000));
+  if (nMinutes >= 2 || (nMinutes === 1 && byWidth === 1)) return { times: evenTicks(nMinutes, 60000), seconds: false };
+  const nSeconds = Math.min(widthIntervals(true), Math.floor(spanMs / 1000));
+  if (nSeconds < 1) return { times: [tMin], seconds: true };
+  return { times: evenTicks(nSeconds, 1000), seconds: true };
+}
+
+/**
+ * Keeps a plot drawn at the width its container really has (#5586). Observes `host` (the plot's box: it is 100% wide and
+ * its height is fixed, so the plot never feeds back into the size it watches) and calls `draw(width)` when the width
+ * changes by a pixel or more. The first measurement draws at once, so a chart built before it was mounted is redrawn
+ * before the first paint; later changes are coalesced to one draw per animation frame. A height-only change, a change
+ * under a pixel and a host that is not laid out (width 0) draw nothing. The observer is disconnected once the host has left
+ * the page (a removed element reports a final size, which is when the check runs), so panels that re-render on every
+ * refresh leave none behind. `drawnW` is the width the chart was first built at (seedPlotW(key)); every measurement is
+ * remembered under `key`.
+ */
+function watchPlotWidth(host, draw, key, drawnW) {
+  if (typeof ResizeObserver !== "function") return;
+  let pendingW = null;
+  let frame = 0;
+  let first = true;
+  let seen = false;
+  let observer = null;
+  const stop = () => {
+    if (observer) observer.disconnect();
+    observer = null;
+    if (frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
+    frame = 0;
+    pendingW = null;
+  };
+  const apply = () => {
+    frame = 0;
+    const w = pendingW;
+    pendingW = null;
+    if (!observer) return;
+    if (!host.isConnected) { stop(); return; }
+    if (w == null || Math.abs(w - drawnW) < 1) return;
+    drawnW = w;
+    draw(w);
+  };
+  observer = new ResizeObserver((entries) => {
+    if (!observer) return;
+    if (!host.isConnected) {
+      if (seen) stop();
+      return;
+    }
+    seen = true;
+    const box = entries && entries.length ? entries[entries.length - 1].contentRect : host.getBoundingClientRect();
+    if (!(box.width > 0)) return;
+    const w = Math.max(CHART_MIN_W, box.width);
+    rememberPlotW(key, w);
+    /* Only the first measurement draws at once, whether or not it changed the width (a seeded chart's first report is
+       usually within a pixel and draws nothing); a later change waits for its frame. */
+    const wasFirst = first;
+    first = false;
+    if (Math.abs(w - (pendingW == null ? drawnW : pendingW)) < 1) return;
+    pendingW = w;
+    if (wasFirst || typeof requestAnimationFrame !== "function") {
+      apply();
+    } else if (!frame) {
+      frame = requestAnimationFrame(apply);
+    }
+  });
+  observer.observe(host);
 }
 
 /**
@@ -85,6 +235,7 @@ function svg(tag, attrs) {
 export function renderLineChart(spec) {
   const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
+  const widthKey = menuKey || spec.widthKey || null;
   const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
   /* Legend hide/isolate: a hidden series is dropped from everything below (the y-domain, the stack, the drawn
      marks, the hover tooltip and the CSV) so the axis rescales to what is visible. The legend still lists it,
@@ -130,11 +281,6 @@ export function renderLineChart(spec) {
   const tMin = hasWindow ? windowStart : dataTMin;
   const tMax = hasWindow ? windowEnd : dataTMax;
   const spanMs = tMax - tMin;
-
-  /* A dual-axis overlay reserves a right gutter for its own tick labels + unit caption (#1606); without
-     one the geometry is byte-for-byte the original. All right-edge math below uses these, never M.r. */
-  const plotRight = series2 ? W - 56 : W - M.r;
-  const plotW = plotRight - M.l;
 
   /* A numeric reader: null/NaN reads as null for line/area (a gap), or 0 for a stacked mode (a continuous baseline). */
   const readVal = (r, key) => {
@@ -183,400 +329,429 @@ export function renderLineChart(spec) {
   const yMin = scale.min;
   const yMax = scale.max;
 
-  /* A single bucket spans no time (spanMs === 0), so every point shares tMin; center it rather than pinning
-     it to the left axis, where a lone dot reads as a glitch. */
-  const scaleX = (t) => (spanMs === 0 ? M.l + plotW / 2 : M.l + ((t - tMin) / spanMs) * plotW);
   const scaleY = (v) => M.t + (1 - (v - yMin) / (yMax - yMin)) * PLOT_H;
   /* Plotted points clamp into the plot box so a value above a clamped (pct) domain can't draw outside it. */
   const plotY = (v) => Math.max(M.t, Math.min(M.t + PLOT_H, scaleY(v)));
   const baseY = plotY(0);
 
-  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img" });
-  /* The series clip to the plot box. A zoomed chart keeps one neighbour point just outside each edge of the span
-     (applyChartZoom) so the line reaches the axis edge; this clip cuts that segment off at the edge. */
-  const clipId = "plot-clip-" + (++clipSeq);
-  const clipDef = svg("clipPath", { id: clipId });
-  clipDef.appendChild(svg("rect", { x: M.l, y: M.t, width: plotW, height: PLOT_H }));
-  root.appendChild(clipDef);
-  const clipAttr = `url(#${clipId})`;
+  /* The plot is built for a width and rebuilt when the container's width changes (watchPlotWidth below); every width-
+     dependent value lives inside buildPlot, so a rebuild cannot keep a stale one. A rebuild draws from the same data and
+     spec, so the zoom window, the hidden series and the annotations are unchanged; it never fetches. A drag in progress
+     is cancelled with the old plot (its overlay is gone, and pointer capture ends with it). */
+  const tooltip = el("div", { class: "chart-tooltip" });
+  let annotationKey = [];
+  let cur = null;
+  const buildPlot = (W) => {
+    /* A dual-axis overlay reserves a right gutter for its own tick labels + unit caption (#1606); without
+       one the geometry is byte-for-byte the original. All right-edge math below uses these, never M.r. */
+    const plotRight = series2 ? W - 56 : W - M.r;
+    const plotW = plotRight - M.l;
+    /* A single bucket spans no time (spanMs === 0), so every point shares tMin; center it rather than pinning
+       it to the left axis, where a lone dot reads as a glitch. */
+    const scaleX = (t) => (spanMs === 0 ? M.l + plotW / 2 : M.l + ((t - tMin) / spanMs) * plotW);
+    const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, style: `width:${W}px;height:${H}px`, class: "plot-svg", role: "img" });
+    /* The series clip to the plot box. A zoomed chart keeps one neighbour point just outside each edge of the span
+       (applyChartZoom) so the line reaches the axis edge; this clip cuts that segment off at the edge. */
+    const clipId = "plot-clip-" + (++clipSeq);
+    const clipDef = svg("clipPath", { id: clipId });
+    clipDef.appendChild(svg("rect", { x: M.l, y: M.t, width: plotW, height: PLOT_H }));
+    root.appendChild(clipDef);
+    const clipAttr = `url(#${clipId})`;
 
-  /* Horizontal gridlines + y labels (on the nice tick values). */
-  const axis = svg("g", { class: "axis" });
-  for (const val of scale.ticks) {
-    const y = scaleY(val);
-    axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: plotRight, y2: y }));
-    const label = svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" });
-    label.textContent = formatValue(val);
-    axis.appendChild(label);
-  }
-
-  /* Y-axis unit caption. Skipped for "%" (the tick labels already carry the unit, and stacking a caption
-     on the top tick collided with its label — the design review's must-fix); for bare-number axes it sits
-     in the extra top headroom reserved above (well clear of the top tick's label). */
-  if (unit && unit !== "%") {
-    const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
-    cap.textContent = unit;
-    axis.appendChild(cap);
-  }
-
-  /* Vertical gridlines + x labels (6 ticks). The label widens to include the calendar date when the domain
-     spans more than one day, so a window crossing midnight is unambiguous even if it is under 24h wide. */
-  /* #2802: derived from the DOMAIN bounds, not the data's first/last point — a same-day burst inside a 24h window
-     that crosses midnight must still carry the calendar date. Byte-for-byte the old value with no window passed
-     (the domain bounds ARE the first/last data point then). */
-  const crossesDay = new Date(tMin).toDateString() !== new Date(tMax).toDateString();
-  const X_TICKS = 5;
-  /* One bucket spans no time, so the evenly-spaced loop would stack X_TICKS identical labels on the centered
-     point. Draw a single centered gridline + time label instead. */
-  const xTickTimes = spanMs === 0 ? [tMin] : Array.from({ length: X_TICKS + 1 }, (_, i) => tMin + (spanMs * i) / X_TICKS);
-  for (let i = 0; i < xTickTimes.length; i++) {
-    const t = xTickTimes[i];
-    const x = scaleX(t);
-    axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
-    const anchor = xTickTimes.length === 1 ? "middle" : i === 0 ? "start" : i === xTickTimes.length - 1 ? "end" : "middle";
-    const label = svg("text", {
-      x: Math.min(Math.max(x, M.l + 2), plotRight - 2),
-      y: H - 8,
-      "text-anchor": anchor,
-    });
-    label.textContent = axisTime(new Date(t), crossesDay);
-    axis.appendChild(label);
-  }
-  /* Dual-axis overlay (#1606): the series2 values get their OWN nice scale on a right-hand axis — tick
-     labels + unit caption in the reserved right gutter, so two measures of different magnitudes read
-     together without either flattening the other. */
-  let scaleY2 = null;
-  if (series2) {
-    let m2 = -Infinity;
-    let n2 = Infinity;
-    for (const { r } of rows) {
-      const v = r[series2.key];
-      if (v == null || isNaN(v)) continue;
-      const num = Number(v);
-      if (num > m2) m2 = num;
-      if (num < n2) n2 = num;
-    }
-    if (m2 === -Infinity) { m2 = 1; n2 = 0; }
-    n2 = Math.min(0, n2);
-    if (m2 === n2) m2 = n2 + 1;
-    const s2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true);
-    scaleY2 = (v) => M.t + (1 - (v - s2.min) / (s2.max - s2.min)) * PLOT_H;
-    const fmt2 = series2.formatValue || ((v) => String(v));
-    for (const val of s2.ticks) {
-      const y = scaleY2(val);
-      const label = svg("text", { x: plotRight + 8, y: y + 4, "text-anchor": "start", fill: normalizeColor(series2.color) });
-      label.textContent = fmt2(val);
+    /* Horizontal gridlines + y labels (on the nice tick values). */
+    const axis = svg("g", { class: "axis" });
+    for (const val of scale.ticks) {
+      const y = scaleY(val);
+      axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: plotRight, y2: y }));
+      const label = svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" });
+      label.textContent = formatValue(val);
       axis.appendChild(label);
     }
-    if (series2.unit && series2.unit !== "%") {
-      const cap2 = svg("text", { class: "axis-unit", x: plotRight + 8, y: 11, "text-anchor": "start", fill: normalizeColor(series2.color) });
-      cap2.textContent = series2.unit;
-      axis.appendChild(cap2);
-    }
-  }
 
-  root.appendChild(axis);
-
-  const xs = rows.map((p) => scaleX(p.t.getTime()));
-
-  if (stackedBar) {
-    /* Time-series stacked BAR: one vertical bar per bucket, segmented bottom-up by series using the same cumulative
-       tops as the stacked area. Bar width is a fraction of the per-bucket spacing, centered on the bucket and clamped
-       into the plot; a sub-pixel segment is dropped so a dense window degrades cleanly toward a filled band. */
-    /* Bar width = one bucket's on-screen width. With no window the buckets tile the axis, so plotW/rows.length IS
-       the bucket width (byte-for-byte the original). With a #2802 window the buckets can be sparse — plotW/rows.length
-       would then draw each bar far wider than a bucket and overlap its neighbours — so measure the tightest adjacent
-       gap (one bucket) and use that; fall back to the tiling width when there is only one bar to place. */
-    let barW;
-    if (hasWindow && xs.length > 1) {
-      let minGap = Infinity;
-      for (let i = 1; i < xs.length; i++) {
-        const g = xs[i] - xs[i - 1];
-        if (g > 0 && g < minGap) minGap = g;
-      }
-      barW = Math.max(1, (isFinite(minGap) ? minGap : plotW / rows.length) * 0.7);
-    } else {
-      barW = Math.max(1, (plotW / rows.length) * 0.7);
+    /* Y-axis unit caption. Skipped for "%" (the tick labels already carry the unit, and stacking a caption
+       on the top tick collided with its label — the design review's must-fix); for bare-number axes it sits
+       in the extra top headroom reserved above (well clear of the top tick's label). */
+    if (unit && unit !== "%") {
+      const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
+      cap.textContent = unit;
+      axis.appendChild(cap);
     }
-    for (let i = 0; i < rows.length; i++) {
-      const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
-      for (let k = 0; k < series.length; k++) {
-        const yTop = plotY(stackTops[i][k]);
-        const yBot = plotY(k === 0 ? 0 : stackTops[i][k - 1]);
-        const h = yBot - yTop;
-        if (h < 0.5) continue;
-        root.appendChild(
-          svg("rect", { class: "series-bar", x: bx, y: yTop, width: barW, height: h, fill: normalizeColor(series[k].color) })
-        );
+
+    /* Vertical gridlines + x labels (6 ticks). The label widens to include the calendar date when the domain
+       spans more than one day, so a window crossing midnight is unambiguous even if it is under 24h wide. */
+    /* #2802: derived from the DOMAIN bounds, not the data's first/last point — a same-day burst inside a 24h window
+       that crosses midnight must still carry the calendar date. Byte-for-byte the old value with no window passed
+       (the domain bounds ARE the first/last data point then). */
+    const crossesDay = new Date(tMin).toDateString() !== new Date(tMax).toDateString();
+    /* The tick count follows the plot width (#5586): as many evenly spaced labels as fit side by side with a gap, so none
+       overlap on a phone and a wide panel gets more of them, not wider ones. */
+    /* A window whose start and end have different UTC offsets in the browser's zone crosses a clock change: the repeated hour
+       would read the same twice, so every label then carries the zone's short name. One offset: the label is unchanged. */
+    const withZone = new Date(tMin).getTimezoneOffset() !== new Date(tMax).getTimezoneOffset();
+    const xPlan = xTickPlan(tMin, spanMs, plotW, crossesDay, withZone);
+    /* One bucket spans no time, so the evenly-spaced loop would stack identical labels on the centered point. The plan then
+       holds a single tick: one centered gridline + time label. */
+    const xTickTimes = xPlan.times;
+    for (let i = 0; i < xTickTimes.length; i++) {
+      const t = xTickTimes[i];
+      const x = scaleX(t);
+      axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
+      const anchor = xTickTimes.length === 1 ? (spanMs === 0 ? "middle" : "start") : i === 0 ? "start" : i === xTickTimes.length - 1 ? "end" : "middle";
+      const label = svg("text", {
+        x: Math.min(Math.max(x, M.l + 2), plotRight - 2),
+        y: H - 8,
+        "text-anchor": anchor,
+      });
+      label.textContent = axisTime(new Date(t), crossesDay, xPlan.seconds, withZone);
+      axis.appendChild(label);
+    }
+    /* Dual-axis overlay (#1606): the series2 values get their OWN nice scale on a right-hand axis — tick
+       labels + unit caption in the reserved right gutter, so two measures of different magnitudes read
+       together without either flattening the other. */
+    let scaleY2 = null;
+    if (series2) {
+      let m2 = -Infinity;
+      let n2 = Infinity;
+      for (const { r } of rows) {
+        const v = r[series2.key];
+        if (v == null || isNaN(v)) continue;
+        const num = Number(v);
+        if (num > m2) m2 = num;
+        if (num < n2) n2 = num;
+      }
+      if (m2 === -Infinity) { m2 = 1; n2 = 0; }
+      n2 = Math.min(0, n2);
+      if (m2 === n2) m2 = n2 + 1;
+      const s2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true);
+      scaleY2 = (v) => M.t + (1 - (v - s2.min) / (s2.max - s2.min)) * PLOT_H;
+      const fmt2 = series2.formatValue || ((v) => String(v));
+      for (const val of s2.ticks) {
+        const y = scaleY2(val);
+        const label = svg("text", { x: plotRight + 8, y: y + 4, "text-anchor": "start", fill: normalizeColor(series2.color) });
+        label.textContent = fmt2(val);
+        axis.appendChild(label);
+      }
+      if (series2.unit && series2.unit !== "%") {
+        const cap2 = svg("text", { class: "axis-unit", x: plotRight + 8, y: 11, "text-anchor": "start", fill: normalizeColor(series2.color) });
+        cap2.textContent = series2.unit;
+        axis.appendChild(cap2);
       }
     }
-  } else if (stacked) {
-    if (rows.length === 1) {
-      /* A single bucket has no horizontal extent, so each band's polygon collapses to a zero-area sliver that
-         paints nothing (.series-area has no stroke). Draw a dot at each series' cumulative stack top instead —
-         the position the hover dots already use in stacked mode — so a warming-up stacked panel shows its one
-         reading rather than a blank grid. */
-      for (let k = 0; k < series.length; k++) {
-        root.appendChild(svg("circle", { class: "series-dot", cx: xs[0], cy: plotY(stackTops[0][k]), r: 4, fill: normalizeColor(series[k].color) }));
-      }
-    } else {
-      /* Filled bands drawn top series first so lower bands paint over the seams; each band is bounded above by its
-         own cumulative top and below by the previous series' cumulative top (the x-axis for series 0). */
-      for (let k = series.length - 1; k >= 0; k--) {
-        const top = [];
-        const bottom = [];
-        for (let i = 0; i < rows.length; i++) {
-          top.push(xs[i] + "," + plotY(stackTops[i][k]));
-          bottom.push(xs[i] + "," + plotY(k === 0 ? 0 : stackTops[i][k - 1]));
+
+    root.appendChild(axis);
+
+    const xs = rows.map((p) => scaleX(p.t.getTime()));
+
+    if (stackedBar) {
+      /* Time-series stacked BAR: one vertical bar per bucket, segmented bottom-up by series using the same cumulative
+         tops as the stacked area. Bar width is a fraction of the per-bucket spacing, centered on the bucket and clamped
+         into the plot; a sub-pixel segment is dropped so a dense window degrades cleanly toward a filled band. */
+      /* Bar width = one bucket's on-screen width. With no window the buckets tile the axis, so plotW/rows.length IS
+         the bucket width (byte-for-byte the original). With a #2802 window the buckets can be sparse — plotW/rows.length
+         would then draw each bar far wider than a bucket and overlap its neighbours — so measure the tightest adjacent
+         gap (one bucket) and use that; fall back to the tiling width when there is only one bar to place. */
+      let barW;
+      if (hasWindow && xs.length > 1) {
+        let minGap = Infinity;
+        for (let i = 1; i < xs.length; i++) {
+          const g = xs[i] - xs[i - 1];
+          if (g > 0 && g < minGap) minGap = g;
         }
-        bottom.reverse();
-        root.appendChild(
-          svg("polygon", {
-            class: "series-area",
-            "clip-path": clipAttr,
-            points: top.concat(bottom).join(" "),
-            fill: normalizeColor(series[k].color),
-            "fill-opacity": "0.72",
-          })
-        );
+        barW = Math.max(1, (isFinite(minGap) ? minGap : plotW / rows.length) * 0.7);
+      } else {
+        barW = Math.max(1, (plotW / rows.length) * 0.7);
       }
-    }
-  } else {
-    /* Area fill (each series to the baseline) then the line on top; or just the line. Nulls drop the gap. */
-    for (const s of series) {
-      const linePts = [];
       for (let i = 0; i < rows.length; i++) {
-        const v = readVal(rows[i].r, s.key);
-        if (v == null) continue;
-        linePts.push(xs[i] + "," + plotY(v));
+        const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
+        for (let k = 0; k < series.length; k++) {
+          const yTop = plotY(stackTops[i][k]);
+          const yBot = plotY(k === 0 ? 0 : stackTops[i][k - 1]);
+          const h = yBot - yTop;
+          if (h < 0.5) continue;
+          root.appendChild(
+            svg("rect", { class: "series-bar", x: bx, y: yTop, width: barW, height: h, fill: normalizeColor(series[k].color) })
+          );
+        }
       }
-      /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
-         reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
-      if (linePts.length === 1) {
-        const [cx, cy] = linePts[0].split(",");
-        root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(s.color) }));
-        continue;
+    } else if (stacked) {
+      if (rows.length === 1) {
+        /* A single bucket has no horizontal extent, so each band's polygon collapses to a zero-area sliver that
+           paints nothing (.series-area has no stroke). Draw a dot at each series' cumulative stack top instead —
+           the position the hover dots already use in stacked mode — so a warming-up stacked panel shows its one
+           reading rather than a blank grid. */
+        for (let k = 0; k < series.length; k++) {
+          root.appendChild(svg("circle", { class: "series-dot", cx: xs[0], cy: plotY(stackTops[0][k]), r: 4, fill: normalizeColor(series[k].color) }));
+        }
+      } else {
+        /* Filled bands drawn top series first so lower bands paint over the seams; each band is bounded above by its
+           own cumulative top and below by the previous series' cumulative top (the x-axis for series 0). */
+        for (let k = series.length - 1; k >= 0; k--) {
+          const top = [];
+          const bottom = [];
+          for (let i = 0; i < rows.length; i++) {
+            top.push(xs[i] + "," + plotY(stackTops[i][k]));
+            bottom.push(xs[i] + "," + plotY(k === 0 ? 0 : stackTops[i][k - 1]));
+          }
+          bottom.reverse();
+          root.appendChild(
+            svg("polygon", {
+              class: "series-area",
+              "clip-path": clipAttr,
+              points: top.concat(bottom).join(" "),
+              fill: normalizeColor(series[k].color),
+              "fill-opacity": "0.72",
+            })
+          );
+        }
       }
-      if (linePts.length < 2) continue;
-      if (filled) {
-        const first = linePts[0].split(",")[0];
-        const last = linePts[linePts.length - 1].split(",")[0];
-        root.appendChild(
-          svg("polygon", {
-            class: "series-area",
-            "clip-path": clipAttr,
-            points: `${first},${baseY} ${linePts.join(" ")} ${last},${baseY}`,
-            fill: normalizeColor(s.color),
-            "fill-opacity": "0.15",
-          })
+    } else {
+      /* Area fill (each series to the baseline) then the line on top; or just the line. Nulls drop the gap. */
+      for (const s of series) {
+        const linePts = [];
+        for (let i = 0; i < rows.length; i++) {
+          const v = readVal(rows[i].r, s.key);
+          if (v == null) continue;
+          linePts.push(xs[i] + "," + plotY(v));
+        }
+        /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
+           reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
+        if (linePts.length === 1) {
+          const [cx, cy] = linePts[0].split(",");
+          root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(s.color) }));
+          continue;
+        }
+        if (linePts.length < 2) continue;
+        if (filled) {
+          const first = linePts[0].split(",")[0];
+          const last = linePts[linePts.length - 1].split(",")[0];
+          root.appendChild(
+            svg("polygon", {
+              class: "series-area",
+              "clip-path": clipAttr,
+              points: `${first},${baseY} ${linePts.join(" ")} ${last},${baseY}`,
+              fill: normalizeColor(s.color),
+              "fill-opacity": "0.15",
+            })
+          );
+        }
+        root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color) }));
+      }
+    }
+
+    /* The dual-axis overlay line (#1606): plotted against ITS axis (scaleY2), clamped into the plot box,
+       nulls dropped as gaps — same discipline as a primary line. Always a plain line (never filled/stacked). */
+    if (series2 && scaleY2) {
+      const pts2 = [];
+      for (let i = 0; i < rows.length; i++) {
+        const v = rows[i].r[series2.key];
+        if (v == null || isNaN(v)) continue;
+        const y2 = Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(v))));
+        pts2.push(xs[i] + "," + y2);
+      }
+      if (pts2.length === 1) {
+        /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped
+           series, so "a dot per series" holds for the right axis too. */
+        const [cx, cy] = pts2[0].split(",");
+        root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(series2.color) }));
+      } else if (pts2.length >= 2) {
+        root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
+      }
+    }
+
+    /* Render-only threshold reference lines (design D3): a horizontal dashed guide at each in-domain value (the value
+       runs along the y axis here). An out-of-domain threshold is skipped, never clamped onto an edge — a clamped line
+       would read as a real reference at the wrong value. Drawn above the series, below the hover overlay. */
+    if (Array.isArray(thresholds)) {
+      for (const tv of thresholds) {
+        if (tv == null || isNaN(tv) || tv < yMin || tv > yMax) continue;
+        const ty = scaleY(tv);
+        root.appendChild(thresholdLine(M.l, ty, plotRight, ty, plotRight - 4, ty - 4, "end", formatValue(tv)));
+      }
+    }
+
+    /* Hover overlay: a transparent rect over the plot capturing mousemove. */
+    const hoverLine = svg("line", { class: "hover-line", y1: M.t, y2: M.t + PLOT_H, style: "display:none" });
+    root.appendChild(hoverLine);
+    const hoverDots = svg("g", { style: "display:none" });
+    root.appendChild(hoverDots);
+    const overlay = svg("rect", { x: M.l, y: M.t, width: plotW, height: PLOT_H, fill: "transparent" });
+    root.appendChild(overlay);
+
+    /* Event-annotation overlays (design D5): a vertical marker at each event's time, one color per source (drawn ON
+       TOP of the hover overlay so each marker's native <title> — source · label · local time — is hoverable, matching
+       the ranked charts' native-title idiom). The visible line is thin + non-interactive; a wider transparent hit line
+       carries the title. Out-of-window events are skipped, not clamped (the backend scopes them to the panel window,
+       but a marker outside the plotted domain would otherwise pile onto an edge); dense windows just fill toward a band. */
+    annotationKey = [];
+    if (Array.isArray(annotations) && annotations.length) {
+      const g = svg("g", { class: "annotations" });
+      annotations.forEach((layer, li) => {
+        const color = normalizeColor(ANNOTATION_COLORS[li % ANNOTATION_COLORS.length]);
+        let drawn = 0;
+        for (const ev of layer.events || []) {
+          const t = parseUtc(ev.ts);
+          if (!t) continue;
+          const ms = t.getTime();
+          if (ms < tMin || ms > tMax) continue;
+          const mx = scaleX(ms);
+          g.appendChild(svg("line", { class: "annotation-line", x1: mx, y1: M.t, x2: mx, y2: M.t + PLOT_H, stroke: color }));
+          const hit = svg("line", { class: "annotation-hit", x1: mx, y1: M.t, x2: mx, y2: M.t + PLOT_H });
+          const title = svg("title");
+          const lbl = ev.label == null || ev.label === "" ? "" : String(ev.label);
+          title.textContent = layer.displayName + (lbl ? " · " + lbl : "") + " · " + t.toLocaleString();
+          hit.appendChild(title);
+          g.appendChild(hit);
+          drawn++;
+        }
+        if (drawn > 0) annotationKey.push({ label: layer.displayName, color, count: drawn });
+      });
+      root.appendChild(g);
+    }
+
+    /* Brush-zoom (#1606): pointerdown + setPointerCapture on the overlay (capture keeps the drag alive across
+       the annotation hit-lines drawn above, and off-plot release still lands here). A drag of 8 or more px (a viewBox unit is a
+       CSS pixel, #5586) draws
+       a selection band and calls onZoom(fromMs, toMs); anything shorter is a click, ignored. The mousemove
+       tooltip suppresses while a drag is live so it never repaints under the band. */
+    let dragFromX = null;
+    const brushRect = svg("rect", { class: "brush-rect", y: M.t, height: PLOT_H, style: "display:none" });
+    root.appendChild(brushRect);
+    const toVbX = (clientX) => {
+      const rect = root.getBoundingClientRect();
+      return ((clientX - rect.left) / rect.width) * W;
+    };
+    const vbToTime = (vbX) => tMin + (Math.max(0, Math.min(1, (vbX - M.l) / (plotW || 1))) * spanMs);
+    if (onZoom) {
+      overlay.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0) return;
+        dragFromX = toVbX(ev.clientX);
+        overlay.setPointerCapture(ev.pointerId);
+      });
+      overlay.addEventListener("pointermove", (ev) => {
+        if (dragFromX == null) return;
+        const x = toVbX(ev.clientX);
+        const left = Math.max(M.l, Math.min(dragFromX, x));
+        const right = Math.min(plotRight, Math.max(dragFromX, x));
+        brushRect.setAttribute("x", left);
+        brushRect.setAttribute("width", Math.max(0, right - left));
+        brushRect.style.display = "";
+      });
+      overlay.addEventListener("pointerup", (ev) => {
+        if (dragFromX == null) return;
+        const from = dragFromX;
+        dragFromX = null;
+        brushRect.style.display = "none";
+        const to = toVbX(ev.clientX);
+        if (Math.abs(to - from) < BRUSH_MIN_PX) return; /* a click, not a brush */
+        const t1 = vbToTime(Math.min(from, to));
+        const t2 = vbToTime(Math.max(from, to));
+        if (t2 > t1) onZoom(t1, t2);
+      });
+      overlay.addEventListener("pointercancel", () => {
+        dragFromX = null;
+        brushRect.style.display = "none";
+      });
+    }
+
+    /* The index of the drawn point nearest a viewBox x, or -1 when no point sits on the plot. The hover tooltip names this
+       point, and so does the chart menu's right-click time (#5230), so the two always agree. */
+    const nearestPointIdx = (vbX) => {
+      let idx = -1;
+      let best = Infinity;
+      for (let i = 0; i < xs.length; i++) {
+        /* A zoom's off-plot neighbour points exist only to carry the line to the edge; they are not hoverable. */
+        if (xs[i] < M.l - 0.5 || xs[i] > plotRight + 0.5) continue;
+        const d = Math.abs(xs[i] - vbX);
+        if (d < best) {
+          best = d;
+          idx = i;
+        }
+      }
+      return idx;
+    };
+
+    overlay.addEventListener("mousemove", (ev) => {
+      if (dragFromX != null) return; /* brushing — the band owns the pointer */
+      const rect = root.getBoundingClientRect();
+      const vbX = ((ev.clientX - rect.left) / rect.width) * W;
+      const idx = nearestPointIdx(vbX);
+      if (idx < 0) return;
+      const { t, r } = rows[idx];
+      const px = xs[idx];
+
+      hoverLine.setAttribute("x1", px);
+      hoverLine.setAttribute("x2", px);
+      hoverLine.style.display = "";
+
+      /* Dots sit at each series' plotted position: its cumulative top when stacked, its own value otherwise. */
+      while (hoverDots.firstChild) hoverDots.removeChild(hoverDots.firstChild);
+      for (let k = 0; k < series.length; k++) {
+        const v = readVal(r, series[k].key);
+        if (!usesStack && v == null) continue;
+        const cy = usesStack ? plotY(stackTops[idx][k]) : plotY(v);
+        hoverDots.appendChild(svg("circle", { class: "hover-dot", cx: px, cy, r: 3.5, fill: normalizeColor(series[k].color) }));
+      }
+      if (series2 && scaleY2) {
+        const v2 = r[series2.key];
+        if (v2 != null && !isNaN(v2)) {
+          const cy2 = Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(v2))));
+          hoverDots.appendChild(svg("circle", { class: "hover-dot", cx: px, cy: cy2, r: 3.5, fill: normalizeColor(series2.color) }));
+        }
+      }
+      hoverDots.style.display = "";
+
+      /* Tooltip is built with textContent only (values may include untrusted series labels). */
+      while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
+      tooltip.appendChild(el("div", { class: "t-time", text: t.toLocaleString() }));
+      for (const s of series) {
+        const v = r[s.key];
+        tooltip.appendChild(
+          el("div", { class: "t-row" }, [
+            el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) }),
+            el("span", { text: s.label }),
+            el("span", { class: "t-val", text: v == null || isNaN(v) ? "—" : formatValue(v) }),
+          ])
         );
       }
-      root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color) }));
-    }
-  }
-
-  /* The dual-axis overlay line (#1606): plotted against ITS axis (scaleY2), clamped into the plot box,
-     nulls dropped as gaps — same discipline as a primary line. Always a plain line (never filled/stacked). */
-  if (series2 && scaleY2) {
-    const pts2 = [];
-    for (let i = 0; i < rows.length; i++) {
-      const v = rows[i].r[series2.key];
-      if (v == null || isNaN(v)) continue;
-      const y2 = Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(v))));
-      pts2.push(xs[i] + "," + y2);
-    }
-    if (pts2.length === 1) {
-      /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped
-         series, so "a dot per series" holds for the right axis too. */
-      const [cx, cy] = pts2[0].split(",");
-      root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(series2.color) }));
-    } else if (pts2.length >= 2) {
-      root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
-    }
-  }
-
-  /* Render-only threshold reference lines (design D3): a horizontal dashed guide at each in-domain value (the value
-     runs along the y axis here). An out-of-domain threshold is skipped, never clamped onto an edge — a clamped line
-     would read as a real reference at the wrong value. Drawn above the series, below the hover overlay. */
-  if (Array.isArray(thresholds)) {
-    for (const tv of thresholds) {
-      if (tv == null || isNaN(tv) || tv < yMin || tv > yMax) continue;
-      const ty = scaleY(tv);
-      root.appendChild(thresholdLine(M.l, ty, plotRight, ty, plotRight - 4, ty - 4, "end", formatValue(tv)));
-    }
-  }
-
-  /* Hover overlay: a transparent rect over the plot capturing mousemove. */
-  const hoverLine = svg("line", { class: "hover-line", y1: M.t, y2: M.t + PLOT_H, style: "display:none" });
-  root.appendChild(hoverLine);
-  const hoverDots = svg("g", { style: "display:none" });
-  root.appendChild(hoverDots);
-  const overlay = svg("rect", { x: M.l, y: M.t, width: plotW, height: PLOT_H, fill: "transparent" });
-  root.appendChild(overlay);
-
-  /* Event-annotation overlays (design D5): a vertical marker at each event's time, one color per source (drawn ON
-     TOP of the hover overlay so each marker's native <title> — source · label · local time — is hoverable, matching
-     the ranked charts' native-title idiom). The visible line is thin + non-interactive; a wider transparent hit line
-     carries the title. Out-of-window events are skipped, not clamped (the backend scopes them to the panel window,
-     but a marker outside the plotted domain would otherwise pile onto an edge); dense windows just fill toward a band. */
-  const annotationKey = [];
-  if (Array.isArray(annotations) && annotations.length) {
-    const g = svg("g", { class: "annotations" });
-    annotations.forEach((layer, li) => {
-      const color = normalizeColor(ANNOTATION_COLORS[li % ANNOTATION_COLORS.length]);
-      let drawn = 0;
-      for (const ev of layer.events || []) {
-        const t = parseUtc(ev.ts);
-        if (!t) continue;
-        const ms = t.getTime();
-        if (ms < tMin || ms > tMax) continue;
-        const mx = scaleX(ms);
-        g.appendChild(svg("line", { class: "annotation-line", x1: mx, y1: M.t, x2: mx, y2: M.t + PLOT_H, stroke: color }));
-        const hit = svg("line", { class: "annotation-hit", x1: mx, y1: M.t, x2: mx, y2: M.t + PLOT_H });
-        const title = svg("title");
-        const lbl = ev.label == null || ev.label === "" ? "" : String(ev.label);
-        title.textContent = layer.displayName + (lbl ? " · " + lbl : "") + " · " + t.toLocaleString();
-        hit.appendChild(title);
-        g.appendChild(hit);
-        drawn++;
+      if (series2) {
+        const v2 = r[series2.key];
+        const fmt2 = series2.formatValue || ((x) => String(x));
+        tooltip.appendChild(
+          el("div", { class: "t-row" }, [
+            el("span", { class: "swatch", style: "background:" + normalizeColor(series2.color) }),
+            el("span", { text: series2.label }),
+            el("span", { class: "t-val", text: v2 == null || isNaN(v2) ? "—" : fmt2(v2) }),
+          ])
+        );
       }
-      if (drawn > 0) annotationKey.push({ label: layer.displayName, color, count: drawn });
+      const renderedX = (px / W) * rect.width;
+      tooltip.style.display = "block";
+      /* Clamp to the box the reader can see: below CHART_MIN_W (200 px) the SVG is wider than its clipped host (#5586). */
+      const visibleW = plotHost.clientWidth > 0 ? Math.min(rect.width, plotHost.clientWidth) : rect.width;
+      tooltip.style.left = Math.min(renderedX + 12, visibleW - tooltip.offsetWidth - 4) + "px";
+      tooltip.style.top = "8px";
     });
-    root.appendChild(g);
-  }
 
-  const chart = el("div", { class: "chart" }, [root]);
-  const tooltip = el("div", { class: "chart-tooltip" });
+    overlay.addEventListener("mouseleave", () => {
+      hoverLine.style.display = "none";
+      hoverDots.style.display = "none";
+      tooltip.style.display = "none";
+    });
+    cur = { root, nearestPointIdx, toVbX };
+    return root;
+  };
+
+  const seedW = seedPlotW(widthKey);
+  const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(seedW)]);
+  const chart = el("div", { class: "chart" }, [plotHost]);
   chart.appendChild(tooltip);
   chart.appendChild(buildLegend(series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries, onSelect, legendHidden, onLegend));
   if (annotationKey.length) chart.appendChild(buildAnnotationLegend(annotationKey));
-
-  /* Brush-zoom (#1606): pointerdown + setPointerCapture on the overlay (capture keeps the drag alive across
-     the annotation hit-lines drawn above, and off-plot release still lands here). A drag ≥ 8 viewBox px draws
-     a selection band and calls onZoom(fromMs, toMs); anything shorter is a click, ignored. The mousemove
-     tooltip suppresses while a drag is live so it never repaints under the band. */
-  let dragFromX = null;
-  const brushRect = svg("rect", { class: "brush-rect", y: M.t, height: PLOT_H, style: "display:none" });
-  root.appendChild(brushRect);
-  const toVbX = (clientX) => {
-    const rect = root.getBoundingClientRect();
-    return ((clientX - rect.left) / rect.width) * W;
-  };
-  const vbToTime = (vbX) => tMin + (Math.max(0, Math.min(1, (vbX - M.l) / (plotW || 1))) * spanMs);
-  if (onZoom) {
-    overlay.addEventListener("pointerdown", (ev) => {
-      if (ev.button !== 0) return;
-      dragFromX = toVbX(ev.clientX);
-      overlay.setPointerCapture(ev.pointerId);
-    });
-    overlay.addEventListener("pointermove", (ev) => {
-      if (dragFromX == null) return;
-      const x = toVbX(ev.clientX);
-      const left = Math.max(M.l, Math.min(dragFromX, x));
-      const right = Math.min(plotRight, Math.max(dragFromX, x));
-      brushRect.setAttribute("x", left);
-      brushRect.setAttribute("width", Math.max(0, right - left));
-      brushRect.style.display = "";
-    });
-    overlay.addEventListener("pointerup", (ev) => {
-      if (dragFromX == null) return;
-      const from = dragFromX;
-      dragFromX = null;
-      brushRect.style.display = "none";
-      const to = toVbX(ev.clientX);
-      if (Math.abs(to - from) < 8) return; /* a click, not a brush */
-      const t1 = vbToTime(Math.min(from, to));
-      const t2 = vbToTime(Math.max(from, to));
-      if (t2 > t1) onZoom(t1, t2);
-    });
-    overlay.addEventListener("pointercancel", () => {
-      dragFromX = null;
-      brushRect.style.display = "none";
-    });
-  }
-
-  /* The index of the drawn point nearest a viewBox x, or -1 when no point sits on the plot. The hover tooltip names this
-     point, and so does the chart menu's right-click time (#5230), so the two always agree. */
-  const nearestPointIdx = (vbX) => {
-    let idx = -1;
-    let best = Infinity;
-    for (let i = 0; i < xs.length; i++) {
-      /* A zoom's off-plot neighbour points exist only to carry the line to the edge; they are not hoverable. */
-      if (xs[i] < M.l - 0.5 || xs[i] > plotRight + 0.5) continue;
-      const d = Math.abs(xs[i] - vbX);
-      if (d < best) {
-        best = d;
-        idx = i;
-      }
-    }
-    return idx;
-  };
-
-  overlay.addEventListener("mousemove", (ev) => {
-    if (dragFromX != null) return; /* brushing — the band owns the pointer */
-    const rect = root.getBoundingClientRect();
-    const vbX = ((ev.clientX - rect.left) / rect.width) * W;
-    const idx = nearestPointIdx(vbX);
-    if (idx < 0) return;
-    const { t, r } = rows[idx];
-    const px = xs[idx];
-
-    hoverLine.setAttribute("x1", px);
-    hoverLine.setAttribute("x2", px);
-    hoverLine.style.display = "";
-
-    /* Dots sit at each series' plotted position: its cumulative top when stacked, its own value otherwise. */
-    while (hoverDots.firstChild) hoverDots.removeChild(hoverDots.firstChild);
-    for (let k = 0; k < series.length; k++) {
-      const v = readVal(r, series[k].key);
-      if (!usesStack && v == null) continue;
-      const cy = usesStack ? plotY(stackTops[idx][k]) : plotY(v);
-      hoverDots.appendChild(svg("circle", { class: "hover-dot", cx: px, cy, r: 3.5, fill: normalizeColor(series[k].color) }));
-    }
-    if (series2 && scaleY2) {
-      const v2 = r[series2.key];
-      if (v2 != null && !isNaN(v2)) {
-        const cy2 = Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(v2))));
-        hoverDots.appendChild(svg("circle", { class: "hover-dot", cx: px, cy: cy2, r: 3.5, fill: normalizeColor(series2.color) }));
-      }
-    }
-    hoverDots.style.display = "";
-
-    /* Tooltip is built with textContent only (values may include untrusted series labels). */
-    while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
-    tooltip.appendChild(el("div", { class: "t-time", text: t.toLocaleString() }));
-    for (const s of series) {
-      const v = r[s.key];
-      tooltip.appendChild(
-        el("div", { class: "t-row" }, [
-          el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) }),
-          el("span", { text: s.label }),
-          el("span", { class: "t-val", text: v == null || isNaN(v) ? "—" : formatValue(v) }),
-        ])
-      );
-    }
-    if (series2) {
-      const v2 = r[series2.key];
-      const fmt2 = series2.formatValue || ((x) => String(x));
-      tooltip.appendChild(
-        el("div", { class: "t-row" }, [
-          el("span", { class: "swatch", style: "background:" + normalizeColor(series2.color) }),
-          el("span", { text: series2.label }),
-          el("span", { class: "t-val", text: v2 == null || isNaN(v2) ? "—" : fmt2(v2) }),
-        ])
-      );
-    }
-    const renderedX = (px / W) * rect.width;
-    tooltip.style.display = "block";
-    tooltip.style.left = Math.min(renderedX + 12, rect.width - tooltip.offsetWidth - 4) + "px";
-    tooltip.style.top = "8px";
-  });
-
-  overlay.addEventListener("mouseleave", () => {
-    hoverLine.style.display = "none";
-    hoverDots.style.display = "none";
+  watchPlotWidth(plotHost, (width) => {
     tooltip.style.display = "none";
-  });
+    const old = cur.root;
+    plotHost.replaceChild(buildPlot(width), old);
+  }, widthKey, seedW);
 
   /* Export Data to CSV writes every loaded point, the same as the Viewer, not just the zoomed span (exportPoints
      is the unzoomed set a zoomable chart passes). */
@@ -592,11 +767,11 @@ export function renderLineChart(spec) {
      GetNearestSeries does the same. No series with a value gives no wait, and the menu offers the generic item. */
   const pickAt = atTime
     ? (clientX, clientY) => {
-        const idx = nearestPointIdx(toVbX(clientX));
+        const idx = cur.nearestPointIdx(cur.toVbX(clientX));
         if (idx < 0) return undefined;
         const picked = { t: rows[idx].t.getTime() };
         if (atTime.item === "wait") {
-          const rect = root.getBoundingClientRect();
+          const rect = cur.root.getBoundingClientRect();
           const vbY = rect.height ? ((clientY - rect.top) / rect.height) * H : 0;
           let best = Infinity;
           for (let k = 0; k < series.length; k++) {
@@ -612,7 +787,7 @@ export function renderLineChart(spec) {
         return picked;
       }
     : null;
-  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, pickAt }, exportRows);
+  attachChartMenu(chart, () => cur.root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, pickAt }, exportRows);
   return chart;
 }
 
@@ -620,11 +795,13 @@ export function renderLineChart(spec) {
  * Render a horizontal RANKED bar chart into a returned `.chart` node (the compose "bar" viz — a topN result).
  * spec: { items:[{label,value,color?}], formatValue?, unit? } — items already ordered (value DESC) + bounded by
  * the query's topN. Bars scale to the largest value; each carries a native SVG <title> for the full label+value.
- * Rendered at a per-row height so a tall list stays readable (the container scrolls; the SVG never squashes).
+ * Rendered at a per-row height so a tall list stays readable (the container scrolls; the SVG never squashes), at the width its box has (a
+ * resize redraws it; a `widthKey` names the chart so a poll's rebuild is drawn at the width it had).
  * onSelect (design D6): when an item carries a `drill` ([{dimension, value}]), its bar becomes clickable and calls
  * onSelect(item.drill) so the caller can re-run the panel filtered to that category (a transient drill-down).
  */
 export function renderBarChart(spec) {
+  const widthKey = spec.widthKey || null;
   const { items, formatValue = (v) => String(v), thresholds = null, onSelect = null } = spec;
   const rows = (items || []).filter((d) => d && d.value != null && !isNaN(d.value));
   if (!rows.length) return el("div", { class: "chart" }, [emptyStrip("No values to chart.")]);
@@ -635,55 +812,78 @@ export function renderBarChart(spec) {
 
   const rowH = 26;
   const gap = 8;
-  const labelW = 220;
-  const valueW = 110;
-  const barLeft = labelW + 8;
-  const barW = W - barLeft - valueW;
+  /* The height follows the bar count, not the width, so the plot box never feeds back into the width it watches. */
   const height = M.t + shown.length * (rowH + gap);
-
-  const root = svg("svg", { viewBox: `0 0 ${W} ${height}`, preserveAspectRatio: "xMinYMin meet", role: "img" });
-
-  shown.forEach((d, i) => {
-    const y = M.t + i * (rowH + gap);
-    const val = Number(d.value);
-    const w = Math.max(1, (val / domainMax) * barW);
-    const color = normalizeColor(d.color);
-
-    const label = svg("text", { class: "bar-label", x: labelW, y: y + rowH * 0.7, "text-anchor": "end" });
-    label.textContent = trunclabel(d.label);
-
-    const drillable = !!(onSelect && d.drill);
-    const track = svg("rect", { class: drillable ? "bar-track drillable" : "bar-track", x: barLeft, y, width: barW, height: rowH, rx: 3 });
-    const bar = svg("rect", { class: drillable ? "bar drillable" : "bar", x: barLeft, y, width: w, height: rowH, rx: 3, fill: color });
-    const title = svg("title");
-    title.textContent = (d.label == null || d.label === "" ? "—" : String(d.label)) + " · " + formatValue(val) + (drillable ? " · click to filter" : "");
-    bar.appendChild(title);
-    if (drillable) {
-      const fire = () => onSelect(d.drill);
-      bar.addEventListener("click", fire);
-      track.addEventListener("click", fire);
+  const valueTexts = shown.map((d) => formatValue(Number(d.value)));
+  /* The label gutter fits the longest label (at most BAR_LABEL_CHARS characters) and takes at most 35 % of the width, and
+     the value gutter fits the longest value, both by the 12px text's width (#5586): the text is drawn at its CSS size at
+     any panel width, so a narrow panel truncates the label rather than scaling it down. */
+  const buildBars = (W) => {
+    const longestLabel = Math.max(...shown.map((d) => Math.min(BAR_LABEL_CHARS, String(d.label == null || d.label === "" ? "—" : d.label).length)));
+    const valueW = Math.round(Math.max(...valueTexts.map((t) => t.length)) * BAR_CHAR_BUDGET_PX + 12);
+    /* Rounded UP: a gutter rounded down can hold one character fewer than the longest label ("AdvWork" read "AdvWo…"). */
+    let labelW = Math.ceil(Math.min(longestLabel * BAR_CHAR_BUDGET_PX + 8, Math.max(72, W * 0.35)));
+    /* The box never overflows (#5586): when the track would fall under its 40 px minimum, the label column gives way first, down
+       to 2 characters and the ellipsis (still budgeted by BAR_CHAR_BUDGET_PX, so a wide font fits), and no further. */
+    if (W - (labelW + 8) - valueW < BAR_TRACK_MIN) {
+      labelW = Math.min(labelW, Math.max(Math.ceil(3 * BAR_CHAR_BUDGET_PX + 8), Math.floor(W - valueW - BAR_TRACK_MIN - 8)));
     }
+    const labelChars = Math.min(BAR_LABEL_CHARS, Math.max(2, Math.floor((labelW - 8) / BAR_CHAR_BUDGET_PX)));
+    const barLeft = labelW + 8;
+    const barW = Math.max(BAR_TRACK_MIN, W - barLeft - valueW);
 
-    const value = svg("text", { class: "bar-value", x: barLeft + w + 6, y: y + rowH * 0.7 });
-    value.textContent = formatValue(val);
+    const root = svg("svg", { viewBox: `0 0 ${W} ${height}`, width: W, height, style: `width:${W}px;height:${height}px`, class: "plot-svg", role: "img" });
 
-    root.appendChild(label);
-    root.appendChild(track);
-    root.appendChild(bar);
-    root.appendChild(value);
-  });
+    const valueLayer = [];
+    shown.forEach((d, i) => {
+      const y = M.t + i * (rowH + gap);
+      const val = Number(d.value);
+      const w = Math.max(1, (val / domainMax) * barW);
+      const color = normalizeColor(d.color);
 
-  /* Render-only threshold reference lines (design D3): a ranked bar's value runs along the x axis, so each in-domain
-     threshold draws a VERTICAL dashed guide across the bars (value label at the top). Out-of-domain values skip. */
-  if (Array.isArray(thresholds)) {
-    for (const tv of thresholds) {
-      if (tv == null || isNaN(tv) || tv < 0 || tv > domainMax) continue;
-      const tx = barLeft + (tv / domainMax) * barW;
-      root.appendChild(thresholdLine(tx, M.t, tx, height, tx, M.t - 4, "middle", formatValue(tv)));
+      const label = svg("text", { class: "bar-label", x: labelW, y: y + rowH * 0.7, "text-anchor": "end" });
+      label.textContent = trunclabel(d.label, labelChars);
+
+      const drillable = !!(onSelect && d.drill);
+      const track = svg("rect", { class: drillable ? "bar-track drillable" : "bar-track", x: barLeft, y, width: barW, height: rowH, rx: 3 });
+      const bar = svg("rect", { class: drillable ? "bar drillable" : "bar", x: barLeft, y, width: w, height: rowH, rx: 3, fill: color });
+      const title = svg("title");
+      title.textContent = (d.label == null || d.label === "" ? "—" : String(d.label)) + " · " + valueTexts[i] + (drillable ? " · click to filter" : "");
+      bar.appendChild(title);
+      if (drillable) {
+        const fire = () => onSelect(d.drill);
+        bar.addEventListener("click", fire);
+        track.addEventListener("click", fire);
+      }
+
+      const value = svg("text", { class: "bar-value", x: barLeft + w + 6, y: y + rowH * 0.7 });
+      value.textContent = valueTexts[i];
+
+      root.appendChild(label);
+      root.appendChild(track);
+      root.appendChild(bar);
+      valueLayer.push(value);
+    });
+
+    /* Render-only threshold reference lines (design D3): a ranked bar's value runs along the x axis, so each in-domain
+       threshold draws a VERTICAL dashed guide across the bars (value label at the top). Out-of-domain values skip. */
+    if (Array.isArray(thresholds)) {
+      for (const tv of thresholds) {
+        if (tv == null || isNaN(tv) || tv < 0 || tv > domainMax) continue;
+        const tx = barLeft + (tv / domainMax) * barW;
+        root.appendChild(thresholdLine(tx, M.t, tx, height, tx, M.t - 4, "middle", formatValue(tv)));
+      }
     }
-  }
+    /* The value texts go on top (#5586): the dashed line draws over the bar fills, where a long bar crosses it, but stops at a
+       number (the .bar-value halo in the panel colour). */
+    for (const value of valueLayer) root.appendChild(value);
+    return root;
+  };
 
-  const chart = el("div", { class: "chart chart-bar" }, [root]);
+  const seedW = seedPlotW(widthKey);
+  const plotHost = el("div", { class: "chart-plot", style: `height:${height}px` }, [buildBars(seedW)]);
+  watchPlotWidth(plotHost, (width) => plotHost.replaceChild(buildBars(width), plotHost.firstChild), widthKey, seedW);
+  const chart = el("div", { class: "chart chart-bar" }, [plotHost]);
   if (rows.length > MAX_BARS) {
     chart.appendChild(el("div", { class: "chart-note", text: `Showing the top ${MAX_BARS} of ${rows.length}.` }));
   }
@@ -772,6 +972,7 @@ export function renderPieChart(spec) {
  * spec: { items:[{label, x, y, drill?}], formatX?, formatY?, unitX?, unitY?, onSelect? }
  */
 export function renderScatterChart(spec) {
+  const widthKey = spec.widthKey || null;
   const { items, formatX = (v) => String(v), formatY = (v) => String(v), unitX = null, unitY = null, onSelect = null } = spec;
   const pts = (items || []).filter((d) => d && d.x != null && !isNaN(d.x) && d.y != null && !isNaN(d.y));
   if (!pts.length) return el("div", { class: "chart" }, [emptyStrip("No paired values to plot.")]);
@@ -780,60 +981,77 @@ export function renderScatterChart(spec) {
   const yMax = Math.max(...pts.map((d) => Number(d.y)));
   const sx = niceScale(0, xMax > 0 ? xMax : 1, Y_TICKS, null);
   const sy = niceScale(0, yMax > 0 ? yMax : 1, Y_TICKS, null);
-  const plotRight = W - M.r;
-  const plotW = plotRight - M.l;
-  const scaleX = (v) => M.l + ((v - sx.min) / (sx.max - sx.min)) * plotW;
-  const scaleY = (v) => M.t + (1 - (v - sy.min) / (sy.max - sy.min)) * PLOT_H;
+  const buildPlot = (W) => {
+    const plotRight = W - M.r;
+    const plotW = plotRight - M.l;
+    const scaleX = (v) => M.l + ((v - sx.min) / (sx.max - sx.min)) * plotW;
+    const scaleY = (v) => M.t + (1 - (v - sy.min) / (sy.max - sy.min)) * PLOT_H;
 
-  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img" });
-  const axis = svg("g", { class: "axis" });
-  for (const val of sy.ticks) {
-    const y = scaleY(val);
-    axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: plotRight, y2: y }));
-    const label = svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" });
-    label.textContent = formatY(val);
-    axis.appendChild(label);
-  }
-  for (const val of sx.ticks) {
-    const x = scaleX(val);
-    axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
-    const label = svg("text", { x: Math.min(Math.max(x, M.l + 2), plotRight - 2), y: H - 8, "text-anchor": "middle" });
-    label.textContent = formatX(val);
-    axis.appendChild(label);
-  }
-  if (unitY && unitY !== "%") {
-    const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
-    cap.textContent = unitY;
-    axis.appendChild(cap);
-  }
-  if (unitX) {
-    const cap = svg("text", { class: "axis-unit", x: plotRight, y: H - 8, "text-anchor": "end" });
-    cap.textContent = unitX;
-    axis.appendChild(cap);
-  }
-  root.appendChild(axis);
+    const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, style: `width:${W}px;height:${H}px`, class: "plot-svg", role: "img" });
+    const axis = svg("g", { class: "axis" });
+    for (const val of sy.ticks) {
+      const y = scaleY(val);
+      axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: plotRight, y2: y }));
+      const label = svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" });
+      label.textContent = formatY(val);
+      axis.appendChild(label);
+    }
+    /* Every x gridline is drawn at any width; a narrow plot labels every second (third, ...) tick so the value labels do not
+       overlap (#5586). The first and the last tick always keep their label: the stride counts from the first, and a stride
+       tick too close to the last gives way to it. */
+    const lastTick = sx.ticks.length - 1;
+    const xStride = Math.max(1, Math.ceil((1.5 * labelsPx(sx.ticks.map((v) => formatX(v))) + X_LABEL_GAP_PX) / (plotW / Math.max(1, lastTick))));
+    for (let ti = 0; ti < sx.ticks.length; ti++) {
+      const val = sx.ticks[ti];
+      const x = scaleX(val);
+      axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
+      const labelled = ti === 0 || ti === lastTick || (ti % xStride === 0 && lastTick - ti >= xStride);
+      if (!labelled) continue;
+      /* The first and the last label are anchored inward, as the line chart's are, so the last never runs off the right edge. */
+      const label = svg("text", { x: ti === 0 ? M.l : ti === lastTick ? plotRight : x, y: H - 8, "text-anchor": ti === 0 ? "start" : ti === lastTick ? "end" : "middle" });
+      label.textContent = formatX(val);
+      axis.appendChild(label);
+    }
+    if (unitY && unitY !== "%") {
+      const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
+      cap.textContent = unitY;
+      axis.appendChild(cap);
+    }
+    if (unitX) {
+      /* Top right, level with the y unit caption: at the bottom right it sat on the last tick label (#5586). */
+      const cap = svg("text", { class: "axis-unit", x: plotRight, y: 11, "text-anchor": "end" });
+      cap.textContent = unitX;
+      axis.appendChild(cap);
+    }
+    root.appendChild(axis);
 
-  for (const d of pts) {
-    const drillable = !!(onSelect && d.drill);
-    const dot = svg("circle", {
-      class: drillable ? "scatter-dot drillable" : "scatter-dot",
-      cx: scaleX(Number(d.x)),
-      cy: Math.max(M.t, Math.min(M.t + PLOT_H, scaleY(Number(d.y)))),
-      r: 5,
-      fill: normalizeColor(d.color || CATEGORICAL_COLORS[0]),
-      "fill-opacity": "0.75",
-    });
-    const title = svg("title");
-    title.textContent =
-      (d.label == null || d.label === "" ? "—" : String(d.label)) +
-      " · " + formatX(Number(d.x)) + " · " + formatY(Number(d.y)) +
-      (drillable ? " · click to filter" : "");
-    dot.appendChild(title);
-    if (drillable) dot.addEventListener("click", () => onSelect(d.drill));
-    root.appendChild(dot);
-  }
+    for (const d of pts) {
+      const drillable = !!(onSelect && d.drill);
+      const dot = svg("circle", {
+        class: drillable ? "scatter-dot drillable" : "scatter-dot",
+        cx: scaleX(Number(d.x)),
+        cy: Math.max(M.t, Math.min(M.t + PLOT_H, scaleY(Number(d.y)))),
+        r: 5,
+        fill: normalizeColor(d.color || CATEGORICAL_COLORS[0]),
+        "fill-opacity": "0.75",
+      });
+      const title = svg("title");
+      title.textContent =
+        (d.label == null || d.label === "" ? "—" : String(d.label)) +
+        " · " + formatX(Number(d.x)) + " · " + formatY(Number(d.y)) +
+        (drillable ? " · click to filter" : "");
+      dot.appendChild(title);
+      if (drillable) dot.addEventListener("click", () => onSelect(d.drill));
+      root.appendChild(dot);
+    }
 
-  return el("div", { class: "chart chart-scatter" }, [root]);
+    return root;
+  };
+
+  const seedW = seedPlotW(widthKey);
+  const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(seedW)]);
+  watchPlotWidth(plotHost, (width) => plotHost.replaceChild(buildPlot(width), plotHost.firstChild), widthKey, seedW);
+  return el("div", { class: "chart chart-scatter" }, [plotHost]);
 }
 
 /** Bounds on how much a ranked chart draws before it stops reading (the container scrolls a bar list; a pie pools). */
@@ -841,9 +1059,9 @@ const MAX_BARS = 30;
 const MAX_SLICES = 9;
 
 /** Truncate a bar's category label to keep it inside the label gutter. */
-function trunclabel(s) {
+function trunclabel(s, max = BAR_LABEL_CHARS) {
   const flat = String(s == null || s === "" ? "—" : s);
-  return flat.length > 30 ? flat.slice(0, 29) + "…" : flat;
+  return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
 }
 
 /** SVG path `d` for a donut wedge from a1° to a2° (0° = 3 o'clock, angles increase clockwise in SVG's y-down space). */
@@ -1159,7 +1377,7 @@ function inlineStyledSvgClone(root) {
     copy[i].setAttribute("style", decl);
   });
   const box = root.getBoundingClientRect();
-  clone.setAttribute("width", String(Math.round(box.width) || W));
+  clone.setAttribute("width", String(Math.round(box.width) || CHART_DEFAULT_W));
   clone.setAttribute("height", String(Math.round(box.height) || H));
   clone.setAttribute("xmlns", SVG_NS);
   return clone;
@@ -1197,7 +1415,7 @@ function menuFileStem(title) {
 const chartMenuStates = new Map();
 const MENU_STATE_TTL_MS = 90000;
 
-function attachChartMenu(chart, root, opts, rows) {
+function attachChartMenu(chart, rootOf, opts, rows) {
   const { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, pickAt } = opts;
   const owner = {};
   const held = menuKey ? chartMenuStates.get(menuKey) : null;
@@ -1248,7 +1466,7 @@ function attachChartMenu(chart, root, opts, rows) {
         }
         /* Safari only honours the click for a clipboard write that is started at once, so the item takes the
            still-rendering PNG as a promise instead of awaiting it first. */
-        await nav.clipboard.write([new ClipboardItem({ "image/png": chartPngBlob(root) })]);
+        await nav.clipboard.write([new ClipboardItem({ "image/png": chartPngBlob(rootOf()) })]);
         say("Image copied.");
       } catch (e) {
         say("Copy failed: " + (e && e.message ? e.message : "the browser refused."));
@@ -1259,7 +1477,7 @@ function attachChartMenu(chart, root, opts, rows) {
     label: CHART_MENU_LABELS.save,
     run: async () => {
       try {
-        const blob = await chartPngBlob(root);
+        const blob = await chartPngBlob(rootOf());
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -1387,8 +1605,8 @@ function attachChartMenu(chart, root, opts, rows) {
     e.preventDefault();
     const box = chart.getBoundingClientRect();
     /* Only a click on the drawing itself names a time: the legend, the status line, the ⋯ button and the open menu do not,
-       and Shift+F10 on the button lands here with the button as the target (#5230). `root` is the plot's SVG. */
-    const onPlot = !!pickAt && !!e.target && root.contains(e.target);
+       and Shift+F10 on the button lands here with the button as the target (#5230). `rootOf()` is the plot's current SVG (a resize rebuilds it). */
+    const onPlot = !!pickAt && !!e.target && rootOf().contains(e.target);
     const at = onPlot ? pickAt(e.clientX, e.clientY) : undefined;
     open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top), at ? at.t : undefined, at ? at.wait : undefined);
   });
