@@ -228,6 +228,9 @@ public partial class FinOpsTab
             FinOpsTopAvgGrid.ItemsSource = topConsumers.ByAvg;
             var dbSizeSummary = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
             FinOpsDbSizeChart.ItemsSource = dbSizeSummary;
+            /* A server with no CPU sample in the window is stale or not collecting: its latest sizes can be days old, so the chart is
+               hidden rather than shown as if they were current. */
+            FinOpsDbSizeChartGroup.Visibility = data.ShowsDatabaseSizeChart ? Visibility.Visible : Visibility.Collapsed;
             /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
             var chartCaption = DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
             FinOpsDbSizeChartCaption.Text = chartCaption ?? "";
@@ -239,6 +242,7 @@ public partial class FinOpsTab
             FinOpsTopTotalGrid.ItemsSource = null;
             FinOpsTopAvgGrid.ItemsSource = null;
             FinOpsDbSizeChart.ItemsSource = null;
+            FinOpsDbSizeChartGroup.Visibility = Visibility.Collapsed;
             FinOpsDbSizeChartCaption.Text = "";
             FinOpsDbSizeChartCaption.Visibility = Visibility.Collapsed;
             FinOpsProvisioningTrendGrid.ItemsSource = null;
@@ -294,9 +298,10 @@ public partial class FinOpsTab
         }
 
         /* CPU text + bars */
-        FinOpsAvgCpuText.Text = $"{data.AvgCpuPct:N2}%";
-        FinOpsP95CpuText.Text = $"{data.P95CpuPct:N2}%";
-        FinOpsMaxCpuText.Text = $"{data.MaxCpuPct}%";
+        /* A window with no CPU sample shows dashes and empty bars: the 0s the read returns came from nothing. */
+        FinOpsAvgCpuText.Text = data.AvgCpuText;
+        FinOpsP95CpuText.Text = data.P95CpuText;
+        FinOpsMaxCpuText.Text = data.MaxCpuText;
         FinOpsCpuSamplesText.Text = data.CpuSamples.ToString("N0");
         /* On an Azure SQL Database the count is its vCores, named as vCores, and n/a where its service objective names none: the
            scheduler count it can see is never shown as the CPU it is given. */
@@ -305,9 +310,9 @@ public partial class FinOpsTab
         /* The in-use count is n/a where it was not collected (NULL on an Azure SQL Database), never 0; the maximum shows as stored. */
         FinOpsWorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);
 
-        SetBar(FinOpsAvgCpuBar, FinOpsAvgCpuFilled, FinOpsAvgCpuEmpty, (double)data.AvgCpuPct);
-        SetBar(FinOpsP95CpuBar, FinOpsP95CpuFilled, FinOpsP95CpuEmpty, (double)data.P95CpuPct);
-        SetBar(FinOpsMaxCpuBar, FinOpsMaxCpuFilled, FinOpsMaxCpuEmpty, data.MaxCpuPct);
+        SetBar(FinOpsAvgCpuBar, FinOpsAvgCpuFilled, FinOpsAvgCpuEmpty, data.HasCpuSample ? (double)data.AvgCpuPct : 0);
+        SetBar(FinOpsP95CpuBar, FinOpsP95CpuFilled, FinOpsP95CpuEmpty, data.HasCpuSample ? (double)data.P95CpuPct : 0);
+        SetBar(FinOpsMaxCpuBar, FinOpsMaxCpuFilled, FinOpsMaxCpuEmpty, data.HasCpuSample ? data.MaxCpuPct : 0);
 
         /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
         var stolenPct = FinOpsUtilizationFigures.StolenMemoryPct(data.TotalMemoryMb, data.BufferPoolMb);

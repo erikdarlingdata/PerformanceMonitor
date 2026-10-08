@@ -126,6 +126,20 @@ public class UtilizationEfficiencyRow
     /// </summary>
     public bool HasCpuSample => ProvisioningStatus.Length > 0;
 
+    /// <summary>The Avg CPU figure: a dash when the window held no CPU sample (<see cref="HasCpuSample"/> false), never the 0.00% that
+    /// came from nothing.</summary>
+    public string AvgCpuText => HasCpuSample ? $"{AvgCpuPct:N2}%" : "-";
+
+    /// <summary>The P95 CPU figure: a dash when the window held no CPU sample, never a 0.00%.</summary>
+    public string P95CpuText => HasCpuSample ? $"{P95CpuPct:N2}%" : "-";
+
+    /// <summary>The Max CPU figure: a dash when the window held no CPU sample, never a 0%.</summary>
+    public string MaxCpuText => HasCpuSample ? $"{MaxCpuPct}%" : "-";
+
+    /// <summary>False when the window held no CPU sample: the server is stale or its CPU collector is off, and its latest database
+    /// sizes may be days old, so the Allocated vs Used chart is hidden rather than shown as current.</summary>
+    public bool ShowsDatabaseSizeChart => HasCpuSample;
+
     // FinOps cost — proportional to server monthly budget
     public decimal MonthlyCost { get; set; }
     public decimal AnnualCost => MonthlyCost * 12m;

@@ -92,6 +92,57 @@ public sealed class StorageGrowthNoHistoryLiveTests
     }
 
     [Fact]
+    public async Task ASixDayHistoryGivesARealSevenDayBaseline_AndNothingFor30Days()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live storage growth test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteRowsAsync(connection, ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* A store that has run for 6 days: the oldest sample is 6 days back, one day from the 7-day mark and so inside the tolerance, so
+               it is the 7-day baseline. "flat" never changed, so its baseline equals its current size and its growth is a real 0. Neither
+               has a sample near 30 days ago, so the 30-day figures are unknown. */
+            foreach (var (daysAgo, grown, flat) in new[] { (6, 600m, 500m), (4, 700m, 500m), (2, 900m, 500m), (0, 1000m, 500m) })
+            {
+                await SeedAsync(connection, "grown", now.AddDays(-daysAgo), grown, ct);
+                await SeedAsync(connection, "flat", now.AddDays(-daysAgo), flat, ct);
+            }
+
+            await using var viewer = new ViewerDataService(cs!);
+            var rows = await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct);
+
+            var grownRow = Assert.Single(rows, r => r.DatabaseName == "grown");
+            Assert.Equal(600m, grownRow.Size7dAgoMb);
+            Assert.Equal(400m, grownRow.Growth7dMb);
+            Assert.Null(grownRow.Size7dAgoNote);
+            Assert.Null(grownRow.Size30dAgoMb);
+            Assert.Null(grownRow.Growth30dMb);
+            Assert.Equal("No sample from 30 days ago", grownRow.Size30dAgoNote);
+
+            var flatRow = Assert.Single(rows, r => r.DatabaseName == "flat");
+            Assert.Equal(500m, flatRow.Size7dAgoMb);
+            Assert.Equal(0m, flatRow.Growth7dMb);
+            Assert.Null(flatRow.Size30dAgoMb);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    [Fact]
     public async Task AStaleServerReadsGrowthAsUnknown_AndTheRateUsesTheRealElapsedDays()
     {
         var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");

@@ -336,4 +336,102 @@ VALUES ($1, $2, $3, 'GrowthSrv', $4, 7, 1, 'ROWS', $5, $6, $7, NULL)";
         Assert.DoesNotContain("collection_time <= $2", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collection_time <= $3", sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task ASixDayHistory_GivesARealSevenDayBaseline_AndNothingFor30Days()
+    {
+        // A store that has run for 6 days: its oldest sample is 6 days back, exactly one day from the 7-day mark, so it is the 7-day
+        // baseline (the walk's "Size 7d Ago" equal to current was a database that did not change in those 6 days). 30 days has no sample.
+        foreach (var (size, daysAgo) in new[] { (600.0, 6), (700.0, 5), (800.0, 3), (900.0, 1), (1000.0, 0) })
+            await SeedAsync("grow", size, daysAgo);
+
+        var row = await ReadAsync("grow");
+
+        Assert.Equal(600m, row.Size7dAgoMb);
+        Assert.Equal(400m, row.Growth7dMb);
+        Assert.Null(row.Size7dAgoNote);
+        Assert.Null(row.Size30dAgoMb);
+        Assert.Null(row.Growth30dMb);
+        Assert.Null(row.GrowthPct30d);
+        Assert.Equal("No sample from 30 days ago", row.Size30dAgoNote);
+    }
+
+    [Fact]
+    public async Task ASixDayHistoryOfAnUnchangedDatabase_ReadsTheSevenDayBaselineAsCurrent_AndGrowthAsZero()
+    {
+        // The baseline is the sample, not a fallback: an unchanged database reads equal to current because it is.
+        foreach (var daysAgo in new[] { 6, 4, 2, 0 })
+            await SeedAsync("flat", 500, daysAgo);
+
+        var row = await ReadAsync("flat");
+
+        Assert.Equal(500m, row.Size7dAgoMb);
+        Assert.Equal(0m, row.Growth7dMb);
+        Assert.Null(row.Size30dAgoMb);
+    }
+}
+
+/// <summary>
+/// The Utilization card for a window with no CPU sample (a stale server, or one whose CPU collector is off). The read returns 0 for
+/// the three CPU figures then, and the card used to print 0.00%, 0.00% and 0% and to draw the database sizes chart as if current.
+/// The figures show a dash and the chart is hidden. Darling's Viewer has the same tab and the same tests.
+/// </summary>
+public sealed class FinOpsUtilizationNoCpuTests
+{
+    private static UtilizationEfficiencyRow Row(string provisioningStatus) => new()
+    {
+        ProvisioningStatus = provisioningStatus,
+        AvgCpuPct = 0m,
+        P95CpuPct = 0m,
+        MaxCpuPct = 0
+    };
+
+    [Fact]
+    public void NoCpuSample_ShowsDashesForEveryCpuFigure_NotZeros()
+    {
+        var row = Row("");
+
+        Assert.False(row.HasCpuSample);
+        Assert.Equal("-", row.AvgCpuText);
+        Assert.Equal("-", row.P95CpuText);
+        Assert.Equal("-", row.MaxCpuText);
+    }
+
+    [Fact]
+    public void ACpuSample_ShowsTheMeasuredFigures_EvenWhenTheyAreZero()
+    {
+        var row = Row("OVER_PROVISIONED");
+        row.AvgCpuPct = 12.5m;
+        row.P95CpuPct = 40m;
+        row.MaxCpuPct = 77;
+
+        Assert.Equal($"{12.5m:N2}%", row.AvgCpuText);
+        Assert.Equal($"{40m:N2}%", row.P95CpuText);
+        Assert.Equal("77%", row.MaxCpuText);
+
+        var idle = Row("OVER_PROVISIONED");
+        Assert.Equal($"{0m:N2}%", idle.AvgCpuText);
+        Assert.Equal("0%", idle.MaxCpuText);
+    }
+
+    [Theory]
+    [InlineData("", false)]
+    [InlineData("RIGHT_SIZED", true)]
+    [InlineData("NOT_APPLICABLE", true)]
+    public void TheSizesChart_IsShownOnlyWhenTheWindowHeldACpuSample(string status, bool shown) =>
+        Assert.Equal(shown, Row(status).ShowsDatabaseSizeChart);
+
+    [Fact]
+    public void TheTab_PaintsTheTextFromTheRow_EmptiesTheBars_AndHidesTheChart()
+    {
+        var tab = ParitySource.ReadFile("Lite/Controls/FinOpsTab.xaml.cs");
+
+        Assert.Contains("AvgCpuText.Text = data.AvgCpuText;", tab, StringComparison.Ordinal);
+        Assert.Contains("P95CpuText.Text = data.P95CpuText;", tab, StringComparison.Ordinal);
+        Assert.Contains("MaxCpuText.Text = data.MaxCpuText;", tab, StringComparison.Ordinal);
+        Assert.DoesNotContain("$\"{data.AvgCpuPct:N2}%\"", tab, StringComparison.Ordinal);
+        Assert.Contains("data.HasCpuSample ? (double)data.AvgCpuPct : 0", tab, StringComparison.Ordinal);
+        Assert.Contains("DbSizeChartGroup.Visibility = data is { ShowsDatabaseSizeChart: true }", tab, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"DbSizeChartGroup\"", ParitySource.ReadFile("Lite/Controls/FinOpsTab.xaml"), StringComparison.Ordinal);
+    }
 }

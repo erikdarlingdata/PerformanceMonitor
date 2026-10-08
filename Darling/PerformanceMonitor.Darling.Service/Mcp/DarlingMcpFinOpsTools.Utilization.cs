@@ -26,7 +26,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "utilization: fixed 24h verdict, health score, cost, 7-day trend.";
 
     internal const string UtilizationViewGuide =
-        "utilization reads a fixed 24-hour window and a fixed 7-day trend; hours_back other than 24 and limit other than 10 are refused. verdict is RIGHT_SIZED, OVER_PROVISIONED, UNDER_PROVISIONED or NOT_APPLICABLE, and null when the window holds no CPU sample. health_score is 0-100: CPU 40%, memory 30%, storage 30% (memory and storage 30:30 when there is no CPU sample, with health_score_note saying so); health_band is good at 80 and above, fair at 60 and above, else poor. stolen_memory_pct is (total server memory - buffer pool) / total server memory; buffer_pool_pct is buffer pool / physical memory. free_space_pct is the latest database-size snapshot's free share, 100 when none exists. monthly_cost_usd comes from the server's registered monthly cost and annual_cost_usd is 12 times it; both are null when no cost is set or it is 0 or less. Percentages are rounded to 0.1. A server with no memory sample answers status empty (or not_collected when its engine cannot supply one) instead of this payload. On engine edition 5 memory_basis is memory_limit and cpu_count is the vCore count (null when the service objective names none). Text numbers use the invariant culture. Times are UTC.";
+        "utilization reads a fixed 24-hour window and a fixed 7-day trend; hours_back other than 24 and limit other than 10 are refused. verdict is RIGHT_SIZED, OVER_PROVISIONED, UNDER_PROVISIONED or NOT_APPLICABLE, and null when the window holds no CPU sample. health_score is 0-100: CPU 40%, memory 30%, storage 30% (health_score is null when there is no CPU sample, with health_score_note saying so; cpu.avg_cpu_pct, p95_cpu_pct and max_cpu_pct are null then too, never 0); health_band is good at 80 and above, fair at 60 and above, else poor. stolen_memory_pct is (total server memory - buffer pool) / total server memory; buffer_pool_pct is buffer pool / physical memory. free_space_pct is the latest database-size snapshot's free share, 100 when none exists. monthly_cost_usd comes from the server's registered monthly cost and annual_cost_usd is 12 times it; both are null when no cost is set or it is 0 or less. Percentages are rounded to 0.1. A server with no memory sample answers status empty (or not_collected when its engine cannot supply one) instead of this payload. On engine edition 5 memory_basis is memory_limit and cpu_count is the vCore count (null when the service objective names none). Text numbers use the invariant culture. Times are UTC.";
 
     private static async Task<string> ReadUtilizationAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit, CancellationToken ct)
@@ -79,9 +79,10 @@ public sealed partial class DarlingMcpFinOpsTools
             free_space_pct_reason = totals is null ? "no database size snapshot" : null,
             cpu = new
             {
-                avg_cpu_pct = Math.Round(dto.AvgCpuPct, 1, MidpointRounding.AwayFromZero),
-                p95_cpu_pct = Math.Round(dto.P95CpuPct, 1, MidpointRounding.AwayFromZero),
-                max_cpu_pct = dto.MaxCpuPct,
+                /* With no CPU sample in the window the three figures are null, never the 0 the read returns for nothing. */
+                avg_cpu_pct = hasCpu ? Math.Round(dto.AvgCpuPct, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
+                p95_cpu_pct = hasCpu ? Math.Round(dto.P95CpuPct, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
+                max_cpu_pct = hasCpu ? dto.MaxCpuPct : (int?)null,
                 cpu_samples = dto.CpuSamples,
                 cpu_count = noVcores ? (int?)null : dto.CpuCount,
                 cpu_count_reason = noVcores ? "service objective names no vCores" : null,
