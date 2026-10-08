@@ -381,8 +381,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::integer)",
                     CollectionIdGenerator.Next(), t, ServerId, ServerName, latchClass, 1000L, 20000L, 50L, requests, delta, 5L, interval);
             }
 
-            foreach (var (t, spinlockName, collisions, spins, interval) in new (DateTime, string, long, long, int?)[]
+            foreach (var (t, spinlockName, collisions, spins, interval) in new (DateTime, string?, long, long, int?)[]
             {
+                /* #5495: a row with no spinlock name (the column is nullable) has the biggest total here and still never reaches
+                   the page: the earlier read's join on the name dropped it before the LIMIT, and the new read keeps that. */
+                (newer, null, 999999L, 1L, 60),
                 (older, "LOCK_HASH", 40000L, 200000L, null),
                 (newer, "LOCK_HASH", 60000L, 300000L, 60),
                 (newer, "SOS_CACHESTORE", 0L, 0L, 0),
@@ -397,7 +400,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::integer)",
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     @"INSERT INTO spinlock_stats (collection_id, collection_time, server_id, server_name, spinlock_name, collisions, spins, spins_per_collision, sleep_time, backoffs, delta_collisions, delta_spins, delta_sleep_time, delta_backoffs, sample_interval_seconds)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::integer)",
-                    CollectionIdGenerator.Next(), t, ServerId, ServerName, spinlockName, 900000L, 5000000L, 5.5d, 100L, 200L, collisions, spins, 3L, 7L, interval);
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, (object?)spinlockName ?? DBNull.Value, 900000L, 5000000L, 5.5d, 100L, 200L, collisions, spins, 3L, 7L, interval);
             }
 
             var latch = await DarlingMcpLatchSpinlockTools.GetLatchStats(postgres, ServerName);
