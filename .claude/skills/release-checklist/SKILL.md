@@ -108,10 +108,10 @@ Spin up temporary instances with the Azure CLI (`az`) and AWS CLI (`aws`):
 2. Add the Azure logical server to a Darling instance (a local scratch service or an existing dogfooding instance) and let it collect 2+ cycles.
 3. Verify against the store (psql or the web dashboard):
    - `database_size_stats` / size collectors cover ALL databases, not just master (the #1631 fallback class)
-   - server row shows engine edition 5 and collectors inapplicable to Azure SQL DB are SKIPPED as not-applicable, not erroring
+   - server row shows engine edition 5, and no collector that does not apply to Azure SQL DB errors. The SQL Agent collectors (`running_jobs`, `job_history`, `agent_status`) are marked not applicable when the server is added (`add_servers` answers "Agent surface: not applicable") and never run, so they leave no `collection_log` row and no health entry. That is the expected result, not a gap (verified v3.10.0)
    - `collection_log` clean for the cloud server across the cycles
    - the serverless DB's 60s auto-pause + resume (error 40613 transients) does not wedge collection — rows resume after the pause without a service restart
-4. Firewall churn: DELETE the allow rule, wait 3–5 minutes, re-add it. Collection must resume on its own without restarting the service. (CAVEAT, verified v3.2.0: a bare rule-deletion often does NOT sever an actively-collecting client — connection pooling keeps the open connection alive and Azure gates only NEW connections — so treat a no-outage result as inconclusive rather than a pass; the recovery logic's authoritative validation is the unit suites.)
+4. Firewall churn: DELETE the allow rule, wait 3–5 minutes, re-add it. Collection must resume on its own without restarting the service. (CAVEAT, verified v3.2.0: a bare rule-deletion often does NOT sever an actively-collecting client — connection pooling keeps the open connection alive and Azure gates only NEW connections — so treat a no-outage result as inconclusive rather than a pass; the recovery logic's authoritative validation is the unit suites.) To force a real outage (verified v3.10.0): open admin sessions in each user database BEFORE deleting the rule, in case the machine you test from shares the Darling host's egress IP. Delete the rule, wait 6 minutes for it to take effect, then KILL Darling's sessions (`program_name` = `PerformanceMonitorDarling`) from those sessions. KILL is denied in master even for the server admin, so collectors pooled on master keep running. Collectors that open new connections then hit 40615: the `collection_log` message must name the firewall, and those collectors must store rows again after the rule is re-added, with the service's `started_at` unchanged.
 5. Clean up: `az group delete --name rg-release-test --yes --no-wait`
 
 **AWS RDS:** (same `SQL_TEST_PASSWORD` throwaway as above)
@@ -132,7 +132,7 @@ Spin up temporary instances with the Azure CLI (`az`) and AWS CLI (`aws`):
    aws ec2 revoke-security-group-ingress --group-id <sg-id> --protocol tcp --port 1433 --cidr 0.0.0.0/0 --region us-east-1
    ```
 
-Success criteria: no collector errors in the store's `collection_log` for either cloud server, all applicable collectors landing rows, capability skips recorded as skips rather than failures.
+Success criteria: no collector errors in the store's `collection_log` for either cloud server, all applicable collectors landing rows, no inapplicable collector recorded as a failure (RDS records them as capability skips; Azure SQL DB never runs them).
 
 ### 6. Lite Collector Validation
 

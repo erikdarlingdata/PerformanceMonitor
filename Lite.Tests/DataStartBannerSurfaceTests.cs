@@ -39,6 +39,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Duration Trends chart reads its own full-range buckets, with its axis pinned the same way.</para>
 /// </summary>
 [Collection("server-time-helper")]
+[Trait("Cost", "Slow")]
 public sealed class DataStartBannerSurfaceTests : IDisposable
 {
     private const int ServerId = 4343;

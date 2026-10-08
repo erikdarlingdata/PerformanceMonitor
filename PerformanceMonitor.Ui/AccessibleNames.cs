@@ -240,6 +240,7 @@ public static class AccessibleNames
         }
 
         watch.Active = true;
+        HookColumnOrder(row);
 
         if (!watch.Hooked)
         {
@@ -291,6 +292,64 @@ public static class AccessibleNames
         }));
     }
 
+    private sealed class GridOrderWatch
+    {
+        public bool RefreshPending;
+    }
+
+    private static readonly DependencyProperty GridOrderWatchProperty = DependencyProperty.RegisterAttached(
+        "GridOrderWatch", typeof(GridOrderWatch), typeof(AccessibleNames), new PropertyMetadata(null));
+
+    /// <summary>
+    /// The row name reads the first two columns in DISPLAY order, so dragging a column header to a new place changes it. One
+    /// handler per grid, hooked when its first row is named: a static handler on the grid's own event, so it lives and dies with the grid.
+    /// </summary>
+    private static void HookColumnOrder(DataGridRow row)
+    {
+        if (ItemsControl.ItemsControlFromItemContainer(row) is DataGrid grid && grid.GetValue(GridOrderWatchProperty) is null)
+        {
+            grid.SetValue(GridOrderWatchProperty, new GridOrderWatch());
+            grid.ColumnDisplayIndexChanged += OnColumnDisplayIndexChanged;
+        }
+    }
+
+    private static void OnColumnDisplayIndexChanged(object? sender, DataGridColumnEventArgs e)
+    {
+        /* One drag moves several columns' DisplayIndex: read the rows once, at Loaded priority, when the new order has settled. */
+        if (sender is not DataGrid grid || grid.GetValue(GridOrderWatchProperty) is not GridOrderWatch { RefreshPending: false } order)
+        {
+            return;
+        }
+
+        order.RefreshPending = true;
+        grid.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            order.RefreshPending = false;
+            RefreshRealizedRows(grid);
+        }));
+    }
+
+    /// <summary>Re-reads the name of every realized row under <paramref name="node"/>; a row is not searched for rows inside it.</summary>
+    private static void RefreshRealizedRows(DependencyObject node)
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+        {
+            var child = VisualTreeHelper.GetChild(node, i);
+
+            if (child is DataGridRow row)
+            {
+                if (row.GetValue(RowWatchProperty) is TextWatch { Active: true } watch)
+                {
+                    RefreshRow(row, watch);
+                }
+            }
+            else
+            {
+                RefreshRealizedRows(child);
+            }
+        }
+    }
+
     private static void RefreshRow(DataGridRow row, TextWatch watch)
     {
         var grid = ItemsControl.ItemsControlFromItemContainer(row) as DataGrid;
@@ -323,7 +382,7 @@ public static class AccessibleNames
             }
 
             var title = VisibleText(column.Header);
-            parts.Add(string.IsNullOrWhiteSpace(title) ? text : title + " " + text);
+            parts.Add(Cap(string.IsNullOrWhiteSpace(title) ? text : title + " " + text));
 
             if (parts.Count == 2)
             {
@@ -343,10 +402,15 @@ public static class AccessibleNames
         }
     }
 
+    /// <summary>Longest part of a row name. A query text column would otherwise put the whole statement in the name, and a screen reader reads it again at every focus.</summary>
+    private const int MaxPartLength = 80;
+
+    private static string Cap(string part) => part.Length <= MaxPartLength ? part : part.Substring(0, MaxPartLength - 3).TrimEnd() + "...";
+
     /// <summary>
     /// True when <paramref name="node"/> shows nothing: only empty text blocks inside layout panels and plain borders. Every text
     /// block met is added to <paramref name="leaves"/> (empty or not) so the caller can watch them. Anything else, including a
-    /// panel or border with a background, is content.
+    /// panel or border that draws a colour, is content, but the text inside it is still collected.
     /// </summary>
     private static bool IsBlank(DependencyObject node, List<TextBlock> leaves)
     {
@@ -366,31 +430,63 @@ public static class AccessibleNames
 
     private static void Collect(DependencyObject node, List<TextBlock> leaves, ref bool blank)
     {
+        /* Collapsed or hidden: not on screen, so neither its text nor its presence is content (a template that hides one
+           element beside another). A template that SWAPS elements later (a trigger, a selector) is not followed: no CellTemplate
+           in Lite or the Viewer does that, and only a text or Content change makes the cell look again. */
+        if (node is UIElement { Visibility: not Visibility.Visible })
+        {
+            return;
+        }
+
         switch (node)
         {
             case TextBlock tb:
                 leaves.Add(tb);
                 return;
-            case Panel { Background: not null }:
-            case Border { Background: not null }:
-            case Border { BorderBrush: not null }:
-                blank = false;
+            case Panel panel:
+                /* A coloured panel is content, but the text on it (a heat-map cell: a tinted border around the value) is still read. */
+                blank &= !Draws(panel.Background);
+                CollectChildren(node, leaves, ref blank);
                 return;
-            case Panel:
+            case Border border:
+                blank &= !Draws(border.Background) && !Draws(border.BorderBrush);
+                CollectChildren(node, leaves, ref blank);
+                return;
             case Decorator:
             case ContentPresenter:
-                for (var i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+                CollectChildren(node, leaves, ref blank);
+                return;
+            case System.Windows.Controls.Primitives.ButtonBase:
+                /* A check box, a button: visible content that is not text. */
+                blank = false;
+                return;
+            case ContentControl control:
+                /* A user control such as the bar cell (a value over a thin bar): read the text inside it. Content that has not
+                   been given a visual tree yet is not judged blank. */
+                if (VisualTreeHelper.GetChildrenCount(node) == 0 && control.Content is not null)
                 {
-                    Collect(VisualTreeHelper.GetChild(node, i), leaves, ref blank);
+                    blank = false;
                 }
 
+                CollectChildren(node, leaves, ref blank);
                 return;
             default:
-                /* A check box, a button, an image, a shape: visible content that is not text. */
+                /* An image, a shape: visible content that is not text. */
                 blank = false;
                 return;
         }
     }
+
+    private static void CollectChildren(DependencyObject node, List<TextBlock> leaves, ref bool blank)
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+        {
+            Collect(VisualTreeHelper.GetChild(node, i), leaves, ref blank);
+        }
+    }
+
+    /// <summary>True for a brush that shows something: not null and not fully transparent (a hit-test panel, a heat cell with no heat).</summary>
+    private static bool Draws(Brush? brush) => brush is not null && !(brush is SolidColorBrush { Color.A: 0 });
 
     /// <summary>Points the watch at exactly <paramref name="sources"/>: removes handlers from text blocks no longer read, adds them to new ones.</summary>
     private static void Retarget(TextWatch watch, List<TextBlock> sources)
@@ -534,21 +630,32 @@ public static class AccessibleNames
         }
 
         var descriptor = DependencyPropertyDescriptor.FromProperty(TextBlock.TextProperty, typeof(TextBlock));
-        EventHandler handler = (_, _) =>
-        {
-            object? current = element switch
-            {
-                TabItem t => t.Header,
-                System.Windows.Controls.Primitives.DataGridColumnHeader h => h.Content,
-                _ => null,
-            };
-            Name(element, current);
-        };
+        EventHandler handler = (_, _) => Name(element, CurrentHeader(element));
         descriptor.AddValueChanged(source, handler);
         s_watcherCount++;
         element.SetValue(WatcherProperty, new Watcher { Source = source, Handler = handler });
         fe.Unloaded -= OnUnloaded;
         fe.Unloaded += OnUnloaded;
+        /* Unloaded takes the text watcher off, and a header put back at the same size gets no SizeChanged (a fixed-width column:
+           Alert History "Time", Job History "Run Time"), so its text could change while it was out and nothing would look again.
+           Loaded looks again, the way cells and rows already do. Hooked here, once per element, and left on. */
+        fe.Loaded -= OnHeaderLoaded;
+        fe.Loaded += OnHeaderLoaded;
+    }
+
+    private static object? CurrentHeader(DependencyObject element) => element switch
+    {
+        TabItem t => t.Header,
+        System.Windows.Controls.Primitives.DataGridColumnHeader h => h.Content,
+        _ => null,
+    };
+
+    private static void OnHeaderLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is DependencyObject element)
+        {
+            Name(element, CurrentHeader(element));
+        }
     }
 
     private static void Unwatch(DependencyObject element)
