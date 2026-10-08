@@ -435,6 +435,41 @@ public sealed class DarlingSecuritySplitLiveTests
         }
     }
 
+    /// <summary>#5555: the status bar's store size is the self-metrics row the Viewer reads as its least-privilege role. If that
+    /// role could not SELECT <c>collect.store_metrics</c> the recorded read would always fail and the live walk would run again every
+    /// five minutes. The standard install covers it twice: the blanket <c>GRANT SELECT ON ALL TABLES IN SCHEMA collect</c> (a store
+    /// upgraded from before the table existed picks it up when the service re-provisions the roles, which it does on every start) and the default privileges that
+    /// grant every table created later.</summary>
+    [Fact]
+    public async Task Roles_ViewerCanRunTheRecordedStoreSizeRead_OnCollectStoreMetrics()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var owner = new NpgsqlConnection(connectionString);
+        await owner.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(owner, ct);
+
+        await CreateTestRolesAndGrantsAsync(owner, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var viewer = new NpgsqlConnection(RoleConnectionString(connectionString, ViewerRole));
+            await viewer.OpenAsync(ct);
+            Assert.True(await HasPrivAsync(viewer, "collect.store_metrics", "SELECT", ct));
+            await using var recorded = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeSql, viewer);
+            _ = await recorded.ExecuteScalarAsync(ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DropTestRolesAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     [Fact]
     public async Task CompressedHypertable_SetSchema_StaysReadableByLeastPrivilegeRole()
     {
