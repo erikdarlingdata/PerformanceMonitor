@@ -936,6 +936,170 @@ ORDER BY 1;";
         }
 
         var drop = await DropExpiredAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
-        return ahead.Outcome == StepOutcome.Done ? ahead : drop;
+
+        /* A pass that created days AND dropped days reports both counts, so the hourly "changed" tally is not short by
+           the drops (#5571). */
+        return ahead.Outcome == StepOutcome.Done ? ahead with { Count = ahead.Count + drop.Count } : drop;
+    }
+
+    /// <summary>What one <see cref="RunMaintenancePassAsync"/> did: partitions created or dropped, and tables whose step failed.</summary>
+    public readonly record struct PassResult(int Changed, int Failed);
+
+    /// <summary>
+    /// The hourly step (#5571): for each table, in order, <see cref="RunMaintenanceAsync"/> (create ahead with the DEFAULT
+    /// drain, then drop expired days and the legacy table once it is bounded below the cutoff), then
+    /// <see cref="AnalyzeIfDueAsync"/>. It does nothing for a table that is not promoted yet, so it is safe before and
+    /// during the Phase A task. One table's failure is logged and counted and never stops the other table; a lock
+    /// timeout (55P03) is <see cref="StepOutcome.RetryLater"/>, already logged once by the step, and is not a failure.
+    /// If a failure closed the connection it is reopened for the next table. Shutdown (cancellation) propagates.
+    /// </summary>
+    public static Task<PassResult> RunMaintenancePassAsync(
+        NpgsqlConnection connection, DateTime utcNow, ILogger logger, CancellationToken cancellationToken) =>
+        RunMaintenancePassAsync(connection, All, utcNow, logger, cancellationToken);
+
+    internal static async Task<PassResult> RunMaintenancePassAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<IntervalTable> tables,
+        DateTime utcNow,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var changed = 0;
+        var failed = 0;
+        foreach (var table in tables)
+        {
+            try
+            {
+                var result = await RunMaintenanceAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
+                if (result.Outcome == StepOutcome.Done)
+                {
+                    changed += result.Count;
+                }
+
+                if (result.Outcome != StepOutcome.NotReady)
+                {
+                    await AnalyzeIfDueAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failed++;
+                logger.LogWarning(
+                    "Query Store interval table {Table}: partition maintenance failed ({Message}); the other table still runs and the next pass retries.",
+                    table.Parent, ex.Message);
+
+                if (connection.State != System.Data.ConnectionState.Open)
+                {
+                    try
+                    {
+                        await connection.CloseAsync().ConfigureAwait(false);
+                        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception reopen) when (reopen is not OperationCanceledException)
+                    {
+                        logger.LogWarning("Query Store interval partition maintenance could not reopen its connection: {Message}", reopen.Message);
+                    }
+                }
+            }
+        }
+
+        return new PassResult(changed, failed);
+    }
+
+    /// <summary>
+    /// The once-per-start background task (#5571), never awaited on the startup path and never throwing: wait
+    /// <paramref name="delay"/>, then Phase A for each table in order (arm, validate, promote, ANALYZE; each table on its
+    /// own connection, one table's failure never stops the other), then the Query Store index ensures
+    /// (<see cref="QueryStoreBackgroundIndexes.RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/>),
+    /// then promotion again for any table whose promotion was <see cref="StepOutcome.Refused"/> (a parent index had no
+    /// legacy child, which the index ensure has just built). The order is the plan's: the VALIDATE and a concurrent
+    /// <c>CREATE INDEX CONCURRENTLY</c> on the legacy table conflict, so the indexes wait for Phase A.
+    /// </summary>
+    public static Task RunDelayedAsync(
+        NpgsqlDataSource postgres,
+        ILogger logger,
+        TimeSpan delay,
+        IReadOnlyList<QueryStoreBackgroundIndexes.IndexSpec> specs,
+        CancellationToken cancellationToken) =>
+        RunDelayedAsync(
+            logger,
+            delay,
+            All,
+            async (table, token) =>
+            {
+                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                return await RunPromotionAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
+            },
+            token => QueryStoreBackgroundIndexes.RunDelayedAsync(postgres, logger, TimeSpan.Zero, specs, token),
+            cancellationToken);
+
+    /// <summary><see cref="RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/> with the two actions injected, so the order and the isolation run without a store.</summary>
+    internal static async Task RunDelayedAsync(
+        ILogger logger,
+        TimeSpan delay,
+        IReadOnlyList<IntervalTable> tables,
+        Func<IntervalTable, CancellationToken, Task<StepResult>> promote,
+        Func<CancellationToken, Task> ensureIndexes,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+
+            var refused = new List<IntervalTable>();
+            foreach (var table in tables)
+            {
+                if (await TryPromoteAsync(logger, table, promote, cancellationToken).ConfigureAwait(false) == StepOutcome.Refused)
+                {
+                    refused.Add(table);
+                }
+            }
+
+            try
+            {
+                await ensureIndexes(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogWarning("Query Store index ensure failed after the partition steps: {Message}", ex.Message);
+            }
+
+            foreach (var table in refused)
+            {
+                await TryPromoteAsync(logger, table, promote, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogInformation("Query Store interval partition promotion was cancelled at shutdown; the next start continues from the catalogs' state.");
+        }
+        catch (Exception ex)
+        {
+            logger.LogInformation(
+                "Query Store interval partition promotion stopped at shutdown: {ExceptionType}: {Message}; the next start continues.",
+                ex.GetType().Name, ex.Message);
+        }
+    }
+
+    private static async Task<StepOutcome?> TryPromoteAsync(
+        ILogger logger,
+        IntervalTable table,
+        Func<IntervalTable, CancellationToken, Task<StepResult>> promote,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await promote(table, cancellationToken).ConfigureAwait(false);
+            logger.LogInformation(
+                "Query Store interval table {Table}: promotion step ended {Outcome} ({Detail}).", table.Parent, result.Outcome, result.Detail);
+            return result.Outcome;
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                "Query Store interval table {Table}: promotion failed ({Message}); the other table still runs and the next start retries.",
+                table.Parent, ex.Message);
+            return null;
+        }
     }
 }

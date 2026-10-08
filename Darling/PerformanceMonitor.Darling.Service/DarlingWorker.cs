@@ -436,6 +436,27 @@ public sealed class DarlingWorker : BackgroundService
         new("composer performance tuning", StoreObjectConvergenceStage.Tuning, StoreObjectChangeSignal.InPlace,
             (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct),
             (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, hourly: true, ct)),
+
+        /* #5571 Phase B: the day partitions of the two Query Store interval tables. Create every missing day through
+           today + 3 (the DEFAULT drain is the default), drop whole expired days (and the legacy table once it is
+           bounded below the cutoff), ANALYZE the parent when a day has passed. Catalog-only, 5 s lock_timeout per DDL.
+           It does nothing for a table that is not promoted yet (Phase A is the background task that promotes). Last in
+           the list and in the Tuning segment, so on the start path it runs BEFORE the collectors and every hour after
+           that, inside this pass's budget: one lock timeout costs an hour, not the 24 h purge's day. One table's
+           failure never stops the other; a failure is thrown after both ran so the pass counts it. Counted as a delta:
+           partitions created or dropped. */
+        new("query store interval partitions", StoreObjectConvergenceStage.Tuning, StoreObjectChangeSignal.Delta,
+            async (connection, logger, ct) =>
+            {
+                var pass = await QueryStoreIntervalPartitions.RunMaintenancePassAsync(connection, DateTime.UtcNow, logger, ct);
+                if (pass.Failed > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"{pass.Failed} Query Store interval table(s) failed partition maintenance; each failure is logged above and the next pass retries.");
+                }
+
+                return pass.Changed;
+            }),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
@@ -2678,8 +2699,12 @@ LIMIT 1";
            QueryStoreBackgroundIndexes.StartDelay after start so their heap reads stay off the post-restart IO burst,
            one after another, each failure-isolated. Launched after migrations confirm the tables exist, never awaited
            on the startup path, one attempt per start, and RunDelayedAsync never throws. Drained with the other
-           background work. */
-        var queryStoreIndexes = QueryStoreBackgroundIndexes.RunDelayedAsync(
+           background work.
+           #5571: the same task first runs Phase A of the day partitions (arm, validate, promote, then ANALYZE) for each
+           of the two interval tables, then these index ensures, because the VALIDATE and a CREATE INDEX CONCURRENTLY on
+           the legacy table conflict. It never blocks collectors or startup. Phase B (create ahead, drop expired) is the
+           "query store interval partitions" convergence step, which runs before the collectors and every hour. */
+        var queryStoreIndexes = QueryStoreIntervalPartitions.RunDelayedAsync(
             postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, QueryStoreBackgroundIndexes.All, stoppingToken);
 
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
