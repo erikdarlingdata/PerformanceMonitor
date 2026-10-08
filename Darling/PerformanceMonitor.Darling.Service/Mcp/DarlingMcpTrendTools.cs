@@ -189,8 +189,8 @@ public sealed class DarlingMcpTrendTools
 
         /* #5562: stays at 168 h. The re-time on a large store read 11.2 s cold at 30 days even with the LIKE predicate (DarlingTrendReader.PerfmonTrendSql,
            which saved 1.3 s cold): the compressed perfmon_stats data is grouped by server only, so the read decodes every counter's name no matter which
-           counter was asked for. A month is too slow to offer (#5574 tracks compressing the data by counter so it can reach 30 days); the ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_perfmon_trend"), out var windowEnd);
+           counter was asked for. A month is too slow to offer (#5574 tracks compressing the data by counter so it can reach 30 days); this keeps the 168-hour overload, as its WebReadReach row says. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);

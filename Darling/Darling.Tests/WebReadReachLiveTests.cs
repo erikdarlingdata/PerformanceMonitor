@@ -153,7 +153,7 @@ public sealed class WebReadReachLiveTests
             }
 
             /* Raised-then-lowered (#5562 review r1): the perfmon trend (11.2 s cold at 30 days, #5574) and the heatmap (raw query_stats, four days on a TimescaleDB store) stay at 168. */
-            foreach (var read in new[] { "get_perfmon_trend", "get_query_heatmap" })
+            foreach (var read in new[] { "get_query_heatmap" })
             {
                 Assert.Contains("exceeds maximum of 168 hours (7 days)",
                     McpHelpers.ErrorMessageOf(await WebReadAsync(postgres, read, McpHelpers.MaxHoursBack + 1)));

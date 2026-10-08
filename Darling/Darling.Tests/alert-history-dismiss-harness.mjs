@@ -75,7 +75,9 @@ globalThis.fetch = async (url, init) => {
 };
 const readsOf = () => urls.filter((u) => u.includes("/get_alert_history")).map((u) => Object.fromEntries(new URL(u, "http://x").searchParams));
 
-const T0 = Date.now();
+// The page trims a reply to the range start (review r1 H2), so the clock sits just after the fixed alert times.
+const T0 = Date.UTC(2026, 0, 1, 12, 0, 0) + 60000;
+Date.now = () => T0 + 30000;
 const row = (i, over = {}) => ({
   alert_time: new Date(T0 - 60000 - i * 60000).toISOString(),
   server_id: 1, server_name: "srv-a", stored_server_name: "srv-a", metric_name: "High CPU " + i,
@@ -159,7 +161,7 @@ try {
       out.all = posts.map((p) => ({ url: p.url, contentType: p.contentType, keys: p.req.alerts }));
     },
     async chunks() {
-      const many = Array.from({ length: 1500 }, (_, i) => row(i + 1));
+      const many = Array.from({ length: 1500 }, (_, i) => row(i + 1, { alert_time: new Date(T0 - 60000 - i * 30000).toISOString() })); // 30 s apart so all 1500 sit inside the default day
       alertsReply = { alerts: many, truncated: false };
       const main = newMain(); await renderAlerts(main);
       alertsReply = { alerts: [], truncated: false };

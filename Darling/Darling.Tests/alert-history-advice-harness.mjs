@@ -81,7 +81,9 @@ globalThis.fetch = async (url, init) => {
 const detailReadsOf = () => urls.filter((u) => u.includes("/get_alert_details")).map((u) => Object.fromEntries(new URL(u, "http://x").searchParams));
 const readsOf = () => urls.filter((u) => u.includes("/get_alert_history")).map((u) => Object.fromEntries(new URL(u, "http://x").searchParams));
 
-const T0 = Date.now();
+// The page trims a reply to the range start (review r1 H2), so the clock sits just after the fixed alert times.
+const T0 = Date.UTC(2026, 0, 1, 12, 0, 0) + 60000;
+Date.now = () => T0 + 30000;
 const row = (i, over = {}) => ({
   alert_time: new Date(T0 - 60000 - i * 60000).toISOString(),
   server_id: 1, server_name: "srv-a", stored_server_name: "srv-a", metric_name: "High CPU " + i,

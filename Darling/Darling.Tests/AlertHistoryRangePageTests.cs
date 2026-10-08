@@ -34,9 +34,11 @@ public sealed class AlertHistoryRangePageTests
         Assert.DoesNotContain("limit: 200 }", page);
         Assert.Contains("readTool(\"get_alert_history\", req.params)", page);
         // #5562: the range is the shared picker's spec, read as of each read; a finished range also sends its end.
-        Assert.Contains("const w = windowOfSpec(choices.spec);", page);
-        Assert.Contains("hours_back: w ? w.hours : DEFAULT_HOURS", page);
-        Assert.Contains("as_of: w ? w.asOf : null", page);
+        Assert.Contains("windowResultOfSpec(choices.spec);", page);
+        Assert.Contains("hours_back: w.hours", page);
+        Assert.Contains("as_of: w.asOf", page);
+        // Review r1 H2: the reply is trimmed to the range start, since the read takes whole hours.
+        Assert.Contains("trimAlertsToStart(res.data.alerts || [], req.startMs)", page);
         Assert.Contains("limit: choices.limit", page);
         Assert.Contains("server_name: choices.server || null", page);
         Assert.Contains("include_dismissed: choices.dismissed ? \"true\" : null", page);
