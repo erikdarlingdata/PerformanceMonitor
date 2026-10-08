@@ -55,11 +55,12 @@ public sealed class SelfAlertFailedSendRetryTests
     };
 
     /* #5489: Collection Stopped is a state alert now, so a delivered fire is NOT repeated after the cooldown (see
-       CollectionStoppedStateAlertTests). The two tests below that pin "a delivered fire waits the whole cooldown
-       and then fires again" run for the arms that still repeat per cooldown. */
+       CollectionStoppedStateAlertTests). #5493 did the same for Capture Down and Agent Not Running (see
+       StateSelfAlertTests). The two tests below that pin "a delivered fire waits the whole cooldown and then fires
+       again" run for the one arm left that repeats per cooldown: the cost regression, a threshold alert. */
     public static TheoryData<Arm> CooldownRepeatArms => new()
     {
-        Arm.CaptureDown, Arm.AgentDown, Arm.CostRegression,
+        Arm.CostRegression,
     };
 
     /* The delivery shapes the channels really produce, as PgAlertFailedSendRetryTests and AlertEngineTests build

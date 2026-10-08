@@ -42,6 +42,10 @@ public sealed class SelfAlertFailedSendCensusTests
 
     private const string ArmHandOff = "AfterSelfFire";
     private const string RetryHandOff = "NoteRetrySend";
+
+    /* #5493: the lasting-state self-alerts hand their answer to the state alert tracker (NoteStateSend(metric, grain, answer)),
+       which is NoteRetrySend over the shared state retries. */
+    private const string StateHandOff = "NoteStateSend";
     private const string DocumentHandOff = "RecordDocumentDeliveredAsync";
 
     /// <summary>
@@ -97,7 +101,7 @@ public sealed class SelfAlertFailedSendCensusTests
         @"\bawait\s+FireAsync\(", RegexOptions.CultureInvariant);
 
     private static readonly Regex HandOffCall = new(
-        @"\b(?<callee>" + ArmHandOff + "|" + RetryHandOff + "|" + DocumentHandOff + @")\s*\(",
+        @"\b(?<callee>" + ArmHandOff + "|" + RetryHandOff + "|" + StateHandOff + "|" + DocumentHandOff + @")\s*\(",
         RegexOptions.CultureInvariant);
 
     /// <summary>One <c>await FireAsync(</c> in code (not in a comment or a literal): where it is, its enclosing
@@ -241,7 +245,9 @@ public sealed class SelfAlertFailedSendCensusTests
     /// <summary>Whether <paramref name="callee"/> is the call that acts on a send's answer in
     /// <paramref name="method"/>: the document stamp for a daily document, the retry hand-offs for every arm.</summary>
     private static bool IsHandOffFor(string method, string callee) =>
-        Digests.Contains(method) ? callee == DocumentHandOff : callee is ArmHandOff or RetryHandOff;
+        /* #5493: NoteStateSend is the state alerts' hand-off and forwards to NoteRetrySend; that forwarding is not a send's hand-off. */
+        method != StateHandOff
+        && (Digests.Contains(method) ? callee == DocumentHandOff : callee is ArmHandOff or RetryHandOff or StateHandOff);
 
     /// <summary>The hand-off that receives <paramref name="site"/>'s answer: the first one in the same method
     /// after the call and before the method's next <c>FireAsync</c>, or null when there is none. A hand-off that
@@ -274,7 +280,8 @@ public sealed class SelfAlertFailedSendCensusTests
         var handOffs = HandOffs(EvaluatorCode.Value);
 
         Assert.True(
-            handOffs.Count(h => h.Callee == ArmHandOff) >= 15 && handOffs.Count(h => h.Callee == RetryHandOff) >= 3,
+            handOffs.Count(h => h.Callee == ArmHandOff) >= 6 && handOffs.Count(h => h.Callee == RetryHandOff) >= 3
+            && handOffs.Count(h => h.Callee == StateHandOff) >= 11,
             $"expected the evaluator's AfterSelfFire and NoteRetrySend calls, found {handOffs.Count} hand-off(s) in all");
         Assert.DoesNotContain(handOffs, h => h.Method == "");
         Assert.All(handOffs, h => Assert.NotEmpty(h.Arguments));
@@ -379,7 +386,7 @@ public sealed class SelfAlertFailedSendCensusTests
 
             if (kept.Count != handed.Count)
             {
-                var callees = Digests.Contains(method) ? DocumentHandOff : $"{ArmHandOff} or {RetryHandOff}";
+                var callees = Digests.Contains(method) ? DocumentHandOff : $"{ArmHandOff}, {RetryHandOff} or {StateHandOff}";
 
                 problems.Add(
                     $"{method} keeps {kept.Count} FireAsync answer(s) (lines {string.Join(", ", kept.Select(s => s.Line))}) "
@@ -423,25 +430,15 @@ public sealed class SelfAlertFailedSendCensusTests
     /// hand-off with the wrong interval still compiles, and back-dates the stamp so the gate opens early or never.
     /// </summary>
     [Theory]
-    [InlineData("ApplyAgDatabaseHealthAsync", 1, "AgSyncFellBehindMetric", "SharedCooldown")]
     [InlineData("ApplyDiskPressureAsync", 0, "DiskPressureMetric", "SharedCooldown")]
-    [InlineData("ApplyCustomRuleHealthAsync", 0, "CustomRuleHealthMetric", "SharedCooldown")]
     [InlineData("ApplyStaleMuteRulesAsync", 0, "StaleMuteMetric", "StaleMuteRefire")]
     [InlineData("ApplyStoreSettingsAsync", 0, "StoreSettingsMetric", "StoreSettingsRefire")]
     /* #5288: the web and MCP certificate alerts are one body, ApplyListenerTlsCertificateAsync, which fires and
        reports under its listener descriptor's metric (the band.Metric precedent below), so ONE row covers both
        listeners. The interval is still the shared daily WebTlsCertRefire. */
     [InlineData("ApplyListenerTlsCertificateAsync", 0, "tls.ExpiryMetric", "WebTlsCertRefire")]
-    [InlineData("ApplyFleetGateAsync", 0, "FleetGateMetric", "SharedCooldown")]
-    [InlineData("ApplyStoreJobCadenceAsync", 0, "JobCadenceMetric", "SharedCooldown")]
-    [InlineData("ApplyRetentionHoldsAsync", 0, "RetentionHoldMetric", "SharedCooldown")]
-    [InlineData("ApplyRawPurgeOverHorizonAsync", 0, "RawPurgeOverHorizonMetric", "SharedCooldown")]
     [InlineData("ApplyToastSlackAsync", 0, "ToastSlackMetric", "ToastSlackRefire")]
     [InlineData("ApplyCheckpointerPressureAsync", 0, "CheckpointerPressureMetric", "SharedCooldown")]
-    [InlineData("ApplyPolicyJobsStuckAsync", 0, "band.Metric", "SharedCooldown")]
-    [InlineData("ApplyPolicyJobsStuckAsync", 1, "band.Metric", "SharedCooldown")]
-    [InlineData("ApplyPolicyJobsStuckAsync", 2, "band.Metric", "SharedCooldown")]
-    [InlineData("ApplyPolicyJobsStuckAsync", 3, "band.Metric", "SharedCooldown")]
     public void ArmHandsItsSendsAnswerToAfterSelfFire_WithItsOwnMetricAndInterval(
         string method, int send, string metric, string interval)
     {
@@ -467,5 +464,48 @@ public sealed class SelfAlertFailedSendCensusTests
         Assert.True(arguments[0] == metric, $"{method} line {handOff.Line}: AfterSelfFire reports under {arguments[0]}, not {metric}");
         Assert.True(arguments[4] == interval, $"{method} line {handOff.Line}: AfterSelfFire passes {arguments[4]} as the interval, not {interval}");
         Assert.True(arguments[5] == site.Variable, $"{method} line {handOff.Line}: AfterSelfFire is given {arguments[5]}, not the answer kept at line {site.Line} ({site.Variable})");
+    }
+
+    /// <summary>
+    /// #5493: one case per lasting-state self-alert. Its send's answer goes to <c>NoteStateSend(metric, grain,
+    /// answer)</c>, which keeps the failed-send retry on the shared state retries; there is no cooldown stamp to
+    /// back-date, because the alert repeats only per <c>connection_refire_minutes</c> (or to send again an alert no
+    /// channel took). The send carries the metric, and the hand-off reports under that same metric and takes that
+    /// send's own answer.
+    /// </summary>
+    [Theory]
+    [InlineData("ApplyCaptureDownAsync", 0, "CaptureDownMetric")]
+    [InlineData("ApplyAgentNotRunningAsync", 0, "AgentDownMetric")]
+    [InlineData("ApplyAgDatabaseHealthAsync", 1, "AgSyncFellBehindMetric")]
+    [InlineData("ApplyCustomRuleHealthAsync", 0, "CustomRuleHealthMetric")]
+    [InlineData("ApplyFleetGateAsync", 0, "FleetGateMetric")]
+    [InlineData("ApplyStoreJobCadenceAsync", 0, "JobCadenceMetric")]
+    [InlineData("ApplyRetentionHoldsAsync", 0, "RetentionHoldMetric")]
+    [InlineData("ApplyRawPurgeOverHorizonAsync", 0, "RawPurgeOverHorizonMetric")]
+    [InlineData("ApplyPolicyJobsStuckAsync", 0, "band.Metric")]
+    [InlineData("ApplyPolicyJobsStuckAsync", 1, "band.Metric")]
+    [InlineData("ApplyPolicyJobsStuckAsync", 2, "band.Metric")]
+    [InlineData("ApplyPolicyJobsStuckAsync", 3, "band.Metric")]
+    public void StateAlertHandsItsSendsAnswerToNoteStateSend_WithItsOwnMetric(string method, int send, string metric)
+    {
+        var code = EvaluatorCode.Value;
+        var sites = FireSites(code);
+        var kept = sites.Where(s => s.Method == method && s.KeepsResult).ToList();
+
+        Assert.True(send < kept.Count, $"{method} keeps {kept.Count} FireAsync answer(s); this case names send {send}");
+
+        var site = kept[send];
+        var sent = CallArguments(code, code.IndexOf('(', site.Index));
+        Assert.True(sent.Count > 2 && sent[2] == metric, $"{method} send {send} (line {site.Line}) carries {(sent.Count > 2 ? sent[2] : "no metric")}, not {metric}");
+
+        var handOff = HandOffFollowing(site, sites, HandOffs(code));
+        Assert.True(handOff is not null, $"{method} send {send} (line {site.Line}) is not handed to NoteStateSend before the method's next send");
+        Assert.True(handOff.Callee == StateHandOff, $"{method} send {send} (line {site.Line}) is handed to {handOff.Callee}, not NoteStateSend");
+
+        /* NoteStateSend(metric, grainKey, delivery) */
+        var arguments = handOff.Arguments;
+        Assert.True(arguments.Count == 3, $"{method} line {handOff.Line}: NoteStateSend takes 3 arguments, found {arguments.Count}");
+        Assert.True(arguments[0] == metric, $"{method} line {handOff.Line}: NoteStateSend reports under {arguments[0]}, not {metric}");
+        Assert.True(arguments[2] == site.Variable, $"{method} line {handOff.Line}: NoteStateSend is given {arguments[2]}, not the answer kept at line {site.Line} ({site.Variable})");
     }
 }
