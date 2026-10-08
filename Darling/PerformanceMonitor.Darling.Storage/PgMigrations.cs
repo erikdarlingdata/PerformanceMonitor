@@ -732,8 +732,12 @@ ALTER TABLE config.config_notification
     /// privileges and pins <c>search_path</c> to <c>pg_catalog, pg_temp</c>, so it names every object schema-qualified;
     /// and the <c>collect</c> schema's blanket <c>GRANT SELECT ON ALL TABLES</c> covers a table a migration introduces.
     /// Every statement is idempotent, so a second run changes nothing. No index on
-    /// <c>query_store_interval_latest</c> is added here: V153's index on <c>first_execution_time</c> serves the per-day
-    /// builds, whose predicate bounds that column.</para>
+    /// <c>query_store_interval_latest</c> is added here. V153's index on <c>first_execution_time</c> alone serves the
+    /// retention purge, which has no <c>server_id</c>; it does not serve the per-day builds, which bound
+    /// <c>server_id</c> and <c>first_execution_time</c>. That read's index, a btree on
+    /// <c>(server_id, first_execution_time)</c>, is built in the background (#5507,
+    /// <c>QueryStoreBackgroundIndexes.LatestServerFirstExec</c>), not by a rung, because a rung's build would run inside
+    /// the startup transaction and could pass the migration silence limit on a large store.</para>
     /// </summary>
     private const string V168Sql = @"
 /* V168 (#5448): per-day per-plan totals for PLAN_REGRESSION's closed days, and the trigger that marks a day stale when

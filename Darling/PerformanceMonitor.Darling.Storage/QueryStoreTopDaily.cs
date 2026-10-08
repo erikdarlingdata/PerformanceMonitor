@@ -179,24 +179,36 @@ WHERE d.day >= s.filled_since::date + 1
 ORDER BY d.day, s.server_id
 LIMIT $5;";
 
-    /// <summary>Removes days older than the wide table's retention, less a day, and every row of a server that is not
-    /// enabled. $1 now, $2 retention days. Returns the built rows removed.</summary>
-    public const string GcSql = @"
-WITH summary AS
-(
-    DELETE FROM collect.query_store_top_daily
-    WHERE day < ($1 - make_interval(days => $2))::date - 1
-       OR server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled)
-    RETURNING 1
-),
-built AS
-(
-    DELETE FROM collect.query_store_top_daily_built
-    WHERE day < ($1 - make_interval(days => $2))::date - 1
-       OR server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled)
-    RETURNING 1
-)
-SELECT (SELECT count(*) FROM built)::bigint;";
+    /// <summary>
+    /// Removes the expired built rows (days older than the wide table's retention, less a day, and every row of a server
+    /// that is not enabled) and returns their keys. $1 now, $2 retention days. The first of the cleanup's two steps; see
+    /// <see cref="GcSummarySql"/> for the second and for why the cleanup is driven from this small table.
+    /// </summary>
+    public const string GcBuiltSql = @"
+DELETE FROM collect.query_store_top_daily_built
+WHERE day < ($1 - make_interval(days => $2))::date - 1
+   OR server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled)
+RETURNING server_id, day;";
+
+    /// <summary>
+    /// Removes one expired (server, day) of summary rows: $1 server_id, $2 day. The predicate is the two leading columns of
+    /// <c>ux_query_store_top_daily</c> with constants, so it is an index probe that reads nothing but that day's rows.
+    ///
+    /// <para><b>Why two steps, driven from the built table</b> (#5507, the shape <c>PlanRegressionDaily</c> took in #5448).
+    /// The built table holds one row per server and day (a few hundred), the summary table holds every query of every
+    /// day. A delete on the summary table with its own <c>day &lt; X OR server_id NOT IN (...)</c> predicate cannot use the
+    /// unique index and reads every summary row on every hourly tick, even when nothing is due; the same predicate on the
+    /// built table is cheap only because that table is small. Joining the summary delete to the expired built rows in ONE
+    /// statement does not fix it: the planner cannot know how few rows the first delete returns and picks a hash join with
+    /// a sequential scan of the summary. So the cleanup deletes the built rows first, then removes each returned key with
+    /// this statement, in one transaction. When nothing has expired no summary statement runs at all. This relies on every
+    /// summary day having a built row, which <see cref="BuildDayAsync"/> keeps true: it deletes and re-inserts the day's
+    /// summary rows and upserts the built row in one transaction, a day with no wide rows included.</para>
+    /// </summary>
+    public const string GcSummarySql = @"
+DELETE FROM collect.query_store_top_daily
+WHERE server_id = $1::integer
+AND   day = $2::date;";
 
     /// <summary>One planned build.</summary>
     public readonly record struct Build(int ServerId, DateOnly Day, int Pass);
@@ -232,16 +244,37 @@ SELECT (SELECT count(*) FROM built)::bigint;";
     }
 
     /// <summary>Removes the days below the retention horizon, and every row of a server that is not enabled, from both
-    /// tables; returns how many built (server, day) rows went.</summary>
+    /// tables, in ONE transaction (the summary and its built rows never disagree about which days exist); returns how many
+    /// built (server, day) rows went. The built rows go first and name the summary rows to remove
+    /// (<see cref="GcSummarySql"/>).</summary>
     public static async Task<long> GcAsync(
         NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        await using var command = new NpgsqlCommand(GcSql, connection) { CommandTimeout = CommandTimeoutSeconds };
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var expired = new List<(int ServerId, DateOnly Day)>();
+        await using (var command = new NpgsqlCommand(GcBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                expired.Add((reader.GetInt32(0), reader.GetFieldValue<DateOnly>(1)));
+            }
+        }
+
+        foreach (var (serverId, day) in expired)
+        {
+            await using var summary = new NpgsqlCommand(GcSummarySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            summary.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            summary.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            await summary.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return expired.Count;
     }
 
     /// <summary>
