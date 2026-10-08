@@ -21,10 +21,12 @@ namespace Darling.Tests;
 /// #5515: a server with no job run or trace event for hours missed the 6-hour probe and went straight to the
 /// unbounded MAX, which opens every chunk of the server's slice (5,426 blocks a call on job_history, 3,758 on
 /// default_trace_events, on the 43-server store). The ladder tries a week between the two. These pins run
-/// against a live store and check both halves of the contract: the answer is the unbounded MAX's answer in every
-/// case (a watermark behind the store's re-reads stored rows, one ahead of it skips new ones), and the whole-slice
+/// against a live store and check both halves of the contract: the answer is the unbounded MAX's answer for the
+/// columns tested (a watermark behind the store's re-reads stored rows, one ahead of it skips new ones; job_history's
+/// run_datetime, which does not rise with collection_time, can read older, which only widens a re-read), and the whole-slice
 /// read runs only when the week found nothing. Counted with Npgsql's own command log, as the cache's pins are
-/// (<see cref="CommandCountingLoggerFactory"/>).
+/// (<see cref="CommandCountingLoggerFactory"/>). The server-scoped reads, the cpu_utilization pair read and the
+/// Azure per-database read all use the ladder.
 /// </summary>
 [Trait("Stage", "Live")]
 [Collection("live-postgres")]
@@ -158,6 +160,159 @@ public sealed class QuietServerWatermarkLadderLiveTests
         }
     }
 
+    private static string PairBounded =>
+        DarlingCollectorRunner.BuildServerWatermarkPairSql("cpu_utilization_stats", "sample_time", "sample_time_utc", bounded: true);
+
+    private static string PairUnbounded =>
+        DarlingCollectorRunner.BuildServerWatermarkPairSql("cpu_utilization_stats", "sample_time", "sample_time_utc", bounded: false);
+
+    private static string DbBounded =>
+        DarlingCollectorRunner.BuildServerWatermarkForDatabaseSql("deadlocks", "deadlock_time", "database_name", bounded: true);
+
+    private static string DbUnbounded =>
+        DarlingCollectorRunner.BuildServerWatermarkForDatabaseSql("deadlocks", "deadlock_time", "database_name", bounded: false);
+
+    private const string QuietDatabase = "QuietDb";
+
+    /// <summary>The #3778 pair read (cpu_utilization) takes the same week rung: a server whose newest sample is
+    /// days old is answered by the week, and only a server quiet longer, or with no row, runs the unbounded pair.</summary>
+    [Fact]
+    public async Task ThePairRead_OfAQuietServer_IsAnsweredByTheWeek_AndOnlyAnOlderOrEmptyOneRunsTheUnboundedPair()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Pg), "Set DARLING_TEST_PG to run the #5515 quiet-server pins.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var loggerFactory = new CommandCountingLoggerFactory();
+        await using var dataSource = new NpgsqlDataSourceBuilder(Pg!).UseLoggerFactory(loggerFactory).Build();
+        await using (var migrate = await dataSource.OpenConnectionAsync(ct))
+        {
+            await PgMigrations.MigrateAsync(migrate, ct);
+        }
+
+        var log = loggerFactory.Provider;
+        var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
+        await CleanAsync(dataSource, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* No row at all: (null, false) after the 6-hour probe, the week and the unbounded pair. */
+            log.Reset();
+            Assert.Equal((null, false), await runner.GetLastCollectedTimeWithFrameAsync(
+                ServerId, "cpu_utilization_stats", "sample_time", "sample_time_utc", ct));
+            Assert.Equal(2, log.CountContaining(PairBounded));
+            Assert.Equal(1, log.CountContaining(PairUnbounded) - log.CountContaining(PairBounded));
+
+            /* Newest sample two days ago: past the 6-hour probe, inside the week. No unbounded read. */
+            var twoDays = DateTime.UtcNow.Date - TimeSpan.FromDays(2) + TimeSpan.FromHours(3);
+            await InsertCpuAsync(dataSource, 1, twoDays, ct);
+            log.Reset();
+            Assert.Equal((twoDays, true), await runner.GetLastCollectedTimeWithFrameAsync(
+                ServerId, "cpu_utilization_stats", "sample_time", "sample_time_utc", ct));
+            Assert.Equal(2, log.CountContaining(PairBounded));
+            Assert.Equal(0, log.CountContaining(PairUnbounded) - log.CountContaining(PairBounded));
+
+            /* Newest sample twenty days ago: past the week, so the unbounded pair still finds it. */
+            await CleanAsync(dataSource, ct);
+            var old = DateTime.UtcNow.Date - TimeSpan.FromDays(20) + TimeSpan.FromHours(1);
+            await InsertCpuAsync(dataSource, 2, old, ct);
+            log.Reset();
+            Assert.Equal((old, true), await runner.GetLastCollectedTimeWithFrameAsync(
+                ServerId, "cpu_utilization_stats", "sample_time", "sample_time_utc", ct));
+            Assert.Equal(1, log.CountContaining(PairUnbounded) - log.CountContaining(PairBounded));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The per-database read (the Azure deadlock, blocked-process and long-query collectors call it with no
+    /// floor, once per database per cycle) takes the same week rung: a quiet database whose last row is days old
+    /// stops paying the unbounded read every cycle.</summary>
+    [Fact]
+    public async Task ThePerDatabaseRead_OfAQuietDatabase_IsAnsweredByTheWeek_AndOnlyAnOlderOrEmptyOneRunsTheUnboundedRead()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Pg), "Set DARLING_TEST_PG to run the #5515 quiet-server pins.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var loggerFactory = new CommandCountingLoggerFactory();
+        await using var dataSource = new NpgsqlDataSourceBuilder(Pg!).UseLoggerFactory(loggerFactory).Build();
+        await using (var migrate = await dataSource.OpenConnectionAsync(ct))
+        {
+            await PgMigrations.MigrateAsync(migrate, ct);
+        }
+
+        var log = loggerFactory.Provider;
+        var runner = new DarlingCollectorRunner(dataSource, new CollectorDeltaCalculator());
+        await CleanAsync(dataSource, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* No row for the database: null after all three reads. */
+            log.Reset();
+            Assert.Null(await runner.GetLastCollectedTimeForDatabaseAsync(
+                ServerId, "deadlocks", "deadlock_time", "database_name", QuietDatabase, ct));
+            Assert.Equal(2, log.CountContaining(DbBounded));
+            Assert.Equal(1, log.CountContaining(DbUnbounded) - log.CountContaining(DbBounded));
+
+            /* Newest deadlock two days ago: past the 6-hour probe, inside the week. No unbounded read. */
+            var twoDays = DateTime.UtcNow.Date - TimeSpan.FromDays(2) + TimeSpan.FromHours(3);
+            await InsertDeadlockAsync(dataSource, 1, twoDays, ct);
+            log.Reset();
+            Assert.Equal(twoDays, await runner.GetLastCollectedTimeForDatabaseAsync(
+                ServerId, "deadlocks", "deadlock_time", "database_name", QuietDatabase, ct));
+            Assert.Equal(2, log.CountContaining(DbBounded));
+            Assert.Equal(0, log.CountContaining(DbUnbounded) - log.CountContaining(DbBounded));
+
+            /* Newest deadlock twenty days ago: past the week, so the unbounded read still finds it. */
+            await CleanAsync(dataSource, ct);
+            var old = DateTime.UtcNow.Date - TimeSpan.FromDays(20) + TimeSpan.FromHours(1);
+            await InsertDeadlockAsync(dataSource, 2, old, ct);
+            log.Reset();
+            Assert.Equal(old, await runner.GetLastCollectedTimeForDatabaseAsync(
+                ServerId, "deadlocks", "deadlock_time", "database_name", QuietDatabase, ct));
+            Assert.Equal(1, log.CountContaining(DbUnbounded) - log.CountContaining(DbBounded));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Pg!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task InsertCpuAsync(NpgsqlDataSource dataSource, long id, DateTime sampleTime, CancellationToken ct)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        using var command = new NpgsqlCommand(@"
+INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1, $2, $3, $4, $5, $5, 1, 1)", connection);
+        command.Parameters.AddWithValue(id + 9_300_000);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(sampleTime, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue("QUIET-WM-SRV");
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(sampleTime, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task InsertDeadlockAsync(NpgsqlDataSource dataSource, long id, DateTime deadlockTime, CancellationToken ct)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        using var command = new NpgsqlCommand(@"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name)
+VALUES ($1, $2, $3, $4, $2, '<deadlock/>', $5)", connection);
+        command.Parameters.AddWithValue(id + 9_300_000);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(deadlockTime, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue("QUIET-WM-SRV");
+        command.Parameters.AddWithValue(QuietDatabase);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task<DateTime?> UnboundedMaxAsync(NpgsqlDataSource dataSource, CancellationToken ct)
     {
         await using var connection = await dataSource.OpenConnectionAsync(ct);
@@ -204,7 +359,7 @@ VALUES ($1, $2, $3, $4, $5)", connection);
 
     private static async Task CleanAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var table in new[] { "default_trace_events", "job_history" })
+        foreach (var table in new[] { "default_trace_events", "job_history", "cpu_utilization_stats", "deadlocks" })
         {
             using var command = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = $1", connection);
             command.Parameters.AddWithValue(ServerId);

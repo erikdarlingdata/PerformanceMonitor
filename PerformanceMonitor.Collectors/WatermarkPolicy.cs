@@ -128,8 +128,9 @@ public static class WatermarkPolicy
     /// <c>collection_time &gt; now - RecentWatermarkWindow</c> first. Every chunk older than the window is
     /// excluded outright — the same chunk exclusion <see cref="ReadFloor"/> relies on — so the probe costs
     /// one recent, almost-certainly-uncompressed chunk instead of the whole retained history. If the probe
-    /// finds a row, it IS the true unbounded MAX: nothing outside the window can be newer than something
-    /// inside it. Only when the probe finds NOTHING — a gap wider than the window, or a genuinely empty
+    /// finds a row, it is the true unbounded MAX for a column that rises with <c>collection_time</c>: nothing
+    /// outside the window can be newer than something inside it (job_history's <c>run_datetime</c> does not rise
+    /// with it, so there a hit can be older than the unbounded MAX; see <see cref="WidenedWatermarkWindow"/>). Only when the probe finds NOTHING — a gap wider than the window, or a genuinely empty
     /// table — does the caller try <see cref="WidenedWatermarkWindow"/> (#5515) and then re-run the true unbounded MAX. That fallback is what makes the technique
     /// exact rather than approximate: unlike <see cref="ClampCatchup"/>, nothing here ever substitutes a
     /// floor for a real answer.</para>
@@ -152,10 +153,17 @@ public static class WatermarkPolicy
     /// by the chunks of that week, and only a server quiet for longer, or with no row at all, still pays the
     /// unbounded read, once, because the runner's watermark cache keeps the answer afterwards.
     ///
-    /// <para>The answer is the same one the unbounded MAX gives, by the argument <see cref="RecentWatermarkWindow"/>
-    /// already makes: the probe bounds <c>collection_time</c>, the partitioning column, and a row outside the
-    /// window cannot hold a newer value than a row inside it. A miss here is not a first run either, so the
-    /// unbounded read still follows it.</para>
+    /// <para>The answer is never newer than the unbounded MAX, and it equals it for every column that rises with
+    /// <c>collection_time</c> (<c>instance_id</c> read as "the newest batch's id", <c>event_time</c>, query
+    /// stats times), by the argument <see cref="RecentWatermarkWindow"/> already makes: the probe bounds
+    /// <c>collection_time</c>, the partitioning column, and a row outside the window cannot hold a newer value than
+    /// a row inside it. The exception is job_history's <c>run_datetime</c>: sysjobhistory stamps a step with its
+    /// START time but the row is written when the step ENDS, so a row stored recently can carry an older value
+    /// than one stored earlier, and a windowed MAX can come back OLDER than the unbounded one. That only widens
+    /// the caller's re-read (the watermark minus its lookback moves back) and its natural-key dedupe drops the
+    /// repeats, so nothing is skipped. A miss here is not a first run either, so the unbounded read still
+    /// follows it. Every caller of the ladder uses this window: the server-scoped read, the pair read and the
+    /// per-database read.</para>
     /// </summary>
     public static readonly TimeSpan WidenedWatermarkWindow = TimeSpan.FromDays(7);
 }

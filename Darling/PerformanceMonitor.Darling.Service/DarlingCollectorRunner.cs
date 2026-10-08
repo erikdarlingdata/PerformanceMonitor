@@ -4878,8 +4878,11 @@ public sealed class DarlingCollectorRunner
                used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
                measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
                the SAME partitioning column first (chunk exclusion prunes everything older), then, on a miss,
-               the week before it (#5515), and only on a second miss fall back to the true unbounded MAX below. The value is identical either way — see
-               RecentWatermarkWindow's remarks for why a hit can never differ from the unbounded answer. */
+               the week before it (#5515), and only on a second miss fall back to the true unbounded MAX below. A
+               hit is never NEWER than the unbounded answer, and equals it whenever the column rises with
+               collection_time (instance_id, event_time); see WatermarkPolicy.RecentWatermarkWindow's remarks. For
+               job_history's run_datetime, which does not, a hit can be OLDER than the unbounded MAX, which only
+               widens the caller's re-read; its natural-key dedupe drops the repeats. */
             var autoWindow = collectedSince is null;
             var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
 
@@ -4983,8 +4986,8 @@ public sealed class DarlingCollectorRunner
 
             /* #4197: same probe-then-confirm as the sibling above — see its remarks. collectedSince
                non-null (query_store's clamped floor) is unchanged; null now means "bound to
-               RecentWatermarkWindow, fall back to the true unbounded pair only on a miss" instead of
-               "always unbounded". */
+               RecentWatermarkWindow, then WidenedWatermarkWindow (#5515), fall back to the true unbounded pair
+               only on a second miss" instead of "always unbounded". */
             var autoWindow = collectedSince is null;
             var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
 
@@ -5014,7 +5017,31 @@ public sealed class DarlingCollectorRunner
 
             if (autoWindow)
             {
-                /* Neither column had a row in the window — fall back to the true unbounded pair, the
+                /* #5515: neither column had a row in RecentWatermarkWindow — try the week first, the sibling's
+                   second rung, so a quiet server's pair read is answered by seven days of chunks instead of
+                   every chunk in retention. The same bounded statement with an older bound. */
+                using (var widened = new NpgsqlCommand(sql, connection))
+                {
+                    widened.CommandTimeout = CommandTimeoutSeconds;
+                    widened.Parameters.AddWithValue(serverId);
+                    widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                        DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                    using var widenedReader = await widened.ExecuteReaderAsync(cancellationToken);
+                    if (await widenedReader.ReadAsync(cancellationToken))
+                    {
+                        if (!widenedReader.IsDBNull(0))
+                        {
+                            return (widenedReader.GetDateTime(0), true);
+                        }
+
+                        if (!widenedReader.IsDBNull(1))
+                        {
+                            return (widenedReader.GetDateTime(1), false);
+                        }
+                    }
+                }
+
+                /* Neither column had a row in the week — fall back to the true unbounded pair, the
                    sibling's exact reasoning: this is not query_store's clamped path, so a miss here is not
                    necessarily a first run. */
                 using var fallback = new NpgsqlCommand(
@@ -6699,8 +6726,9 @@ RETURNING s.state_key";
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
             /* #4197: same probe-then-confirm as the server-scoped twins. collectedSince non-null (Azure
-               SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first and
-               falls back to the true unbounded read only on a miss, instead of skipping straight to it. */
+               SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first, then
+               (#5515) to WidenedWatermarkWindow, and falls back to the true unbounded read only on a second
+               miss, instead of skipping straight to it. */
             var autoWindow = collectedSince is null;
             var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
 
@@ -6724,6 +6752,23 @@ RETURNING s.state_key";
 
             if (autoWindow)
             {
+                /* #5515: the same second rung as the server-scoped twin. A database whose newest row is days old
+                   (a quiet Azure database's last deadlock or blocked-process report) missed the 6 h probe on
+                   every cycle and paid the unbounded read each time, per database; the week answers it. */
+                using (var widened = new NpgsqlCommand(sql, connection))
+                {
+                    widened.CommandTimeout = CommandTimeoutSeconds;
+                    widened.Parameters.AddWithValue(serverId);
+                    widened.Parameters.AddWithValue(databaseName);
+                    widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                        DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                    var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+                    if (widenedResult is DateTime widenedDt)
+                    {
+                        return (widenedDt, true);
+                    }
+                }
+
                 using var fallback = new NpgsqlCommand(
                     BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: false), connection);
                 fallback.CommandTimeout = CommandTimeoutSeconds;
