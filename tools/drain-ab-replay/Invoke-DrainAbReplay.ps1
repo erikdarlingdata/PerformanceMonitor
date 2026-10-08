@@ -44,7 +44,8 @@ param(
     # -Compare A B: B lands here as the first free positional argument (-Compare A,B works too).
     [Parameter(ParameterSetName = 'Compare', Position = 0)] [string] $CompareB = '',
 
-    # Safety: without this the run refuses unless every row of collect.servers has is_enabled = false.
+    # Safety: without this the run refuses unless every server in config.config_monitored_servers (the table the
+    # service collects from; collect.servers on an older schema) has is_enabled = false.
     [Parameter(ParameterSetName = 'Run')] [switch] $IKnowThisIsACopy,
 
     # Rate: measured rows/hour x RateScale. 1.0 reproduces the collectors' measured write rate.
@@ -481,12 +482,20 @@ try {
     }
     $servers = @($servers)
     if ($servers.Count -eq 0) { throw 'collect.servers is empty: there are no server ids to write rows for.' }
-    $enabled = @($servers | Where-Object { $_.enabled })
-    Write-Info ("collect.servers: {0} server(s), {1} enabled" -f $servers.Count, $enabled.Count)
-    if ($enabled.Count -gt 0 -and -not $IKnowThisIsACopy) {
-        throw "Refusing to run: $($enabled.Count) server(s) in collect.servers are enabled, so real collectors may be writing here. Point this at a restored copy with every server disabled, or pass -IKnowThisIsACopy."
+    Write-Info ("collect.servers: {0} server id(s) to write rows for" -f $servers.Count)
+    # The service collects from the servers enabled in config.config_monitored_servers (StoreConfigProvider), so that
+    # is the table the safety check reads. collect.servers only supplies the server ids. An older schema without the
+    # config table falls back to collect.servers.is_enabled.
+    $gateTable = 'collect.servers'
+    if ((Invoke-Psql "SELECT (to_regclass('config.config_monitored_servers') IS NOT NULL)::int;")[0] -eq '1') {
+        $gateTable = 'config.config_monitored_servers'
     }
-    if ($enabled.Count -gt 0) { Write-Warning "$($enabled.Count) enabled server(s); -IKnowThisIsACopy was passed." }
+    $enabledCount = [int](Invoke-Psql "SELECT count(*) FROM $gateTable WHERE is_enabled;")[0]
+    Write-Info ("{0}: {1} enabled server(s)" -f $gateTable, $enabledCount)
+    if ($enabledCount -gt 0 -and -not $IKnowThisIsACopy) {
+        throw "Refusing to run: $enabledCount server(s) in $gateTable are enabled, so real collectors may be writing here. Point this at a restored copy with every server disabled, or pass -IKnowThisIsACopy."
+    }
+    if ($enabledCount -gt 0) { Write-Warning "$enabledCount enabled server(s) in $gateTable; -IKnowThisIsACopy was passed." }
 
     # ---- clock offset (server minus this host) -----------------------------------------------------
     $c0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0
@@ -867,7 +876,7 @@ FROM batch_rows AS b;
         $no++
     }
     Write-Host ''
-    Write-Host ("Plan: {0} clients, {1:F2} tx/s (rate scale {2}), servers {3} ({4} enabled), tables:" -f $nclients, $totalTxps, $RateScale, $servers.Count, $enabled.Count)
+    Write-Host ("Plan: {0} clients, {1:F2} tx/s (rate scale {2}), servers {3} ({4} enabled), tables:" -f $nclients, $totalTxps, $RateScale, $servers.Count, $enabledCount)
     $scriptMeta | ForEach-Object { Write-Host ("  {0,-34} weight {1,5}  batch {2,5} rows" -f $_.name, $_.weight, $_.batch) }
     Write-Host ''
 

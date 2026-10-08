@@ -70,7 +70,7 @@ It does not replace the real collectors:
 
 ## Safety
 
-- It refuses to run unless every row in `collect.servers` has `is_enabled = false`, or you pass `-IKnowThisIsACopy`.
+- It refuses to run unless every server in `config.config_monitored_servers` has `is_enabled = false`, or you pass `-IKnowThisIsACopy`. That is the table the service collects from. On an older schema without it, the check reads `collect.servers`.
 - It writes only the collector insert and upsert shapes above. It never drops, truncates or alters anything. The
   only other statements are `SELECT`s and the rolled-back validation run.
 - The connection comes from parameters only. `-Password` is handed to `psql` and `pgbench` through `PGPASSWORD` for
