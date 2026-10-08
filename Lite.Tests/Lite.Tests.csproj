@@ -61,6 +61,9 @@
     <!-- system_health event samples (one per feeder event; shapes per sp_HealthParser xpath) for the
          System Events reader round-trip tests. Mirrors Darling.Tests' Fixtures\SystemHealth set. -->
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The shared time range cases and tests (#5562): one file each, linked from Darling.Tests so both assemblies run the same grammar. -->
+    <None Include="..\Darling\Darling.Tests\Fixtures\time-range-cases.json" Link="Fixtures\time-range-cases.json" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="..\Darling\Darling.Tests\TimeRangeTests.cs" Link="TimeRangeTests.cs" />
     <!-- Lite's MCP host source, copied beside the test binary (it lives outside this project directory, so the
          default Compile glob never sees it) so HostHeaderGuardTests can pin that the #1648 DNS-rebinding
          middleware is installed FIRST, ahead of MapMcp. Mirrors Darling.Tests' guard on its two hosts — the

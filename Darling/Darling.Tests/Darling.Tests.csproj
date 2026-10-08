@@ -50,6 +50,8 @@
   <ItemGroup>
     <!-- system_health event samples for SystemHealthParser (one per feeder event; shapes per sp_HealthParser xpath). -->
     <None Include="Fixtures\FinOpsIndexAnalysis\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The shared time range grammar cases (#5562); the web harness reads the same file. -->
+    <None Include="Fixtures\time-range-cases.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- real, scrubbed system_health event captures for SystemHealthParserRealEventTests -->
     <None Include="Fixtures\SystemHealth\real\*.xml" CopyToOutputDirectory="PreserveNewest" />
