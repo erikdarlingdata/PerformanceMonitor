@@ -379,8 +379,6 @@ public class FinOpsFleetReadParityTests : IDisposable
         Assert.Equal("", noCpu.ProvisioningStatus);
     }
 
-    /// <summary>One collected <c>server_properties</c> row, which is what makes a server known to the fleet read.
-    /// The NOT NULL edition and hardware columns are filled with values the read never looks at.</summary>
     /// <summary>
     /// One server, one health score: the Server Inventory's Health column (the fleet read) and the Utilization tab's badge score the same server
     /// from the same inputs. The inventory used to score the 24-hour average CPU against a fixed memory and storage term, so servers with
@@ -436,6 +434,8 @@ public class FinOpsFleetReadParityTests : IDisposable
         Assert.NotEqual(inventoryScores[0], inventoryScores[1]);
     }
 
+    /// <summary>One collected <c>server_properties</c> row, which is what makes a server known to the fleet read.
+    /// The NOT NULL edition and hardware columns are filled with values the read never looks at.</summary>
     private static void SeedServerProperties(DuckDBConnection conn, int serverId, string serverName, long collectionId, DateTime collectionTime) =>
         Exec(conn, @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name,
                       edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb)
