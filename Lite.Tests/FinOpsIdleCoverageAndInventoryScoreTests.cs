@@ -159,42 +159,41 @@ VALUES ($1, $2, $3, 'IdleSrv', 'DbElsewhere', '0xE', 1, 10, 20, 1)", _nextId++, 
 }
 
 /// <summary>
-/// The Server Inventory grid's health score is built from the server's 24-hour CPU average plus two defaults (memory 80, storage 50%
-/// free). A server with no CPU sample used to score from the defaults alone (about 90); it now has no score and the grid shows a dash,
-/// the same rule as the Utilization badge.
+/// The Server Inventory grid's health score is the Utilization tab's score for the same server: p95 CPU, buffer pool share and
+/// free space, through <see cref="FinOpsHealthCalculator.Score"/>. A server with no CPU sample has no score and the grid shows a dash.
 /// </summary>
 public sealed class FinOpsInventoryHealthScoreTests
 {
     [Fact]
-    public void NoCpuSample_HasNoScore_AndTheRowShowsTheNoScoreColorAndNote()
+    public void NoScore_ShowsTheNoScoreColorAndNote()
     {
-        Assert.Null(FinOpsHealthCalculator.InventoryScore(null));
-
-        var row = new ServerPropertyRow { HealthScore = FinOpsHealthCalculator.InventoryScore(null) };
+        var row = new ServerPropertyRow { HealthScore = null };
 
         Assert.Null(row.HealthScore);
         Assert.Equal(FinOpsHealthCalculator.NoScoreColor, row.HealthScoreColor);
-        Assert.Equal(FinOpsHealthCalculator.NoScoreNote, row.HealthScoreNote);
+        Assert.Equal(FinOpsHealthCalculator.NoInventoryScoreNote, row.HealthScoreNote);
+        // L5: the dash also shows for a server with no memory sample, so the note must not blame the CPU alone.
+        Assert.Contains("memory sample", row.HealthScoreNote, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ACpuSample_ScoresFromCpuPlusTheDefaults_InTheScoresOwnColor()
+    public void AScore_IsInTheScoresOwnColor()
     {
-        // 40% CPU -> 100 - 40*50/70 = 71; memory default 80; storage default (50% free) 100: 71*0.4 + 80*0.3 + 100*0.3 = 82.
-        var score = FinOpsHealthCalculator.InventoryScore(40m);
+        // p95 40% CPU -> 71; buffer pool 50% of RAM -> 100; 50% free -> 100: 71*0.4 + 100*0.3 + 100*0.3 = 88.
+        var score = FinOpsHealthCalculator.Score(true, 40m, 1000, 500, 50m);
         var row = new ServerPropertyRow { HealthScore = score };
 
-        Assert.Equal(82, score);
-        Assert.Equal(FinOpsHealthCalculator.ScoreColor(82), row.HealthScoreColor);
+        Assert.Equal(88, score);
+        Assert.Equal(FinOpsHealthCalculator.ScoreColor(88), row.HealthScoreColor);
         Assert.Null(row.HealthScoreNote);
     }
 
     [Fact]
-    public void TheTab_ScoresTheInventoryThroughTheSharedRule()
+    public void TheTab_NoLongerScoresTheInventoryFromDefaults()
     {
         var tab = ParitySource.ReadFile("Lite/Controls/FinOpsTab.xaml.cs");
 
-        Assert.Contains("item.HealthScore = FinOpsHealthCalculator.InventoryScore(item.AvgCpuPct);", tab, StringComparison.Ordinal);
+        Assert.DoesNotContain("InventoryScore(", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("var memScore = 80;", tab, StringComparison.Ordinal);
     }
 }

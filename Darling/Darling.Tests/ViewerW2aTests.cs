@@ -346,7 +346,7 @@ public sealed class ViewerServerSummaryDisplayTests
     public void LastCollectionDisplay_TreatsStoredValueAsUtc_ShownLocal()
     {
         var storedUtc = new DateTime(2026, 7, 3, 3, 30, 45, DateTimeKind.Unspecified);
-        var expected = DateTime.SpecifyKind(storedUtc, DateTimeKind.Utc).ToLocalTime().ToString("HH:mm:ss");
+        var expected = DateTime.SpecifyKind(storedUtc, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         Assert.Equal(expected, new ServerSummaryItem { LastCollectionTime = storedUtc }.LastCollectionDisplay);
     }
 

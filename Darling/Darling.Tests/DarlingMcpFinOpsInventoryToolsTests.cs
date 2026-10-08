@@ -85,14 +85,18 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
     }
 
     [Theory]
-    [InlineData(null, 100, "good")]
-    [InlineData(35.0, 100, "good")]
-    [InlineData(100.0, 100, "poor")]
-    public void Row_HealthScoreAndBand_ComeFromTheSharedFigures(double? cpu, int _, string band)
+    [InlineData(null, 8000, 50.0, "good")]
+    [InlineData(35.0, 8000, 50.0, "good")]
+    [InlineData(100.0, 3000, 20.0, "poor")]
+    public void Row_HealthScoreAndBand_ComeFromTheSharedFigures(double? cpu, int bufferPoolMb, double freePct, string band)
     {
-        var metrics = new ServerMetricsDto(cpu is double c ? (decimal)c : null, 10m, 0, "RIGHT_SIZED");
+        /* The row's score is the fleet read's HealthScore, the Utilization view's own rule over p95 CPU, buffer pool and free space. */
+        int? fleetScore = cpu is double p95
+            ? FinOpsUtilizationFigures.HealthScore(true, (decimal)p95, 16384, bufferPoolMb, (decimal)freePct)
+            : null;
+        var metrics = new ServerMetricsDto(cpu is double c ? (decimal)c : null, 10m, 0, "RIGHT_SIZED", fleetScore);
         var row = Row(Dto(), metrics);
-        var expectedScore = FinOpsInventoryFigures.HealthScoreOrNull(metrics.AvgCpuPct);
+        var expectedScore = metrics.HealthScore;
         if (expectedScore is not int score)
         {
             /* No CPU sample: a dash (null score and band) with the note, never a score built from the memory and storage defaults. */
@@ -100,7 +104,8 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
             // The wire writes no null fields, so a missing key and a null are the same dash.
             Assert.False(row.TryGetProperty("health_score", out var scoreField) && scoreField.ValueKind != System.Text.Json.JsonValueKind.Null);
             Assert.False(row.TryGetProperty("health_band", out var bandField) && bandField.ValueKind != System.Text.Json.JsonValueKind.Null);
-            Assert.Equal(FinOpsHealthCalculator.NoScoreNote, row.GetProperty("health_score_note").GetString());
+            Assert.Equal(FinOpsHealthCalculator.NoInventoryScoreNote, row.GetProperty("health_score_note").GetString());
+            Assert.Contains("memory sample", row.GetProperty("health_score_note").GetString()!, StringComparison.Ordinal);
             return;
         }
 
@@ -201,7 +206,7 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
     [InlineData(true)]
     public void DefaultLimit_OfTheWidestRowOfEachType_FitsTheDefaultResponseBudget(bool azure)
     {
-        var metrics = new ServerMetricsDto(63.45m, 98765.4m, 12, "RIGHT_SIZED");
+        var metrics = new ServerMetricsDto(63.45m, 98765.4m, 12, "RIGHT_SIZED", 87);
         var page = Enumerable.Range(1, DarlingMcpFinOpsInventoryTools.DefaultLimit)
             .Select(n => azure ? AzureDto(n) : OnPremDto(n)).ToList();
         var byId = page.ToDictionary(d => d.ServerId, _ => metrics);

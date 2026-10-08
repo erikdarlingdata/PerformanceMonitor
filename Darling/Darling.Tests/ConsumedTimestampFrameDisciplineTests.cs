@@ -855,6 +855,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// </summary>
     private static readonly (string File, string Method, string Renderer)[] RenderWrappers =
     [
+        /* The Overview card's Last Collect text (D4 of the final walk): the stored collection time is naive UTC and
+           FormatLastCollect hands it to the UTC renderer with the display zone, only choosing the format (time alone
+           for today, date and time otherwise), so the frame is the renderer's own and the wrapper adds no conversion. */
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Overview.cs", "FormatLastCollect", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "FormatForDisplay"),
         /* #4766: the Default Trace row's bare renderer. A time read from the stored server wall clock cannot say which

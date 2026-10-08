@@ -302,7 +302,21 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             var viewerRows = await viewer.GetJobHistoryAsync(since, null, 2000, ct);
             var storage = await DarlingJobHistoryReader.GetAsync(postgres, since, null, 2000, 60, cancellationToken: ct);
 
-            var expected = storage.Select(ViewerJobHistoryRow.From).ToList();
+            /* D5: the viewer stamps each row with its own server's clock, which the storage reader's row does not carry, and
+               ServerClock serializes as {} whatever it holds. So the clock is checked on its own (every row has one, and it is the
+               clock the fleet's collected offsets give that row's server), and the rest of the row is compared through From
+               with that same clock. */
+            var clocks = await viewer.GetServerClocksAsync(null, ct);
+            Assert.Equal(storage.Count, viewerRows.Count);
+            for (var i = 0; i < viewerRows.Count; i++)
+            {
+                var clock = viewerRows[i].Clock;
+                Assert.NotNull(clock);
+                var fleetClock = ViewerTimeHelper.ClockForServerOrMachine(clocks, storage[i].ServerId, TimeZoneInfo.Local, DateTime.UtcNow);
+                Assert.Equal(fleetClock.OffsetMinutesAt(AsOf), clock.OffsetMinutesAt(AsOf));
+            }
+
+            var expected = storage.Select((dto, i) => ViewerJobHistoryRow.From(dto, viewerRows[i].Clock)).ToList();
             Assert.Equal(6 + 0, viewerRows.Count(r => r.ServerId == ServerA || r.ServerId == ServerB));
             Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(viewerRows));
             /* Alpha's local 08:00 is 13:00 UTC: the conversion survived the move. */

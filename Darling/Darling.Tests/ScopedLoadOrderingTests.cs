@@ -556,7 +556,9 @@ public sealed class ScopedLoadOrderingTests
 
     /// <summary>
     /// Offsets of the paints: an assignment into a XAML-generated control's UI property, or a call to one of
-    /// the two helpers that push a list into a grid. Derived from the shape rather than from a per-site list
+    /// the two helpers that push a list into a grid, or <c>ShowAlerts</c>, which holds the Alerts history tab's whole
+    /// paint (#5542 L6 moved it out of <c>LoadAlertsAsync</c> so a test can drive it with rows): the call sits below
+    /// the supersession check with no await between, which keeps the rule true for every paint inside it. Derived from the shape rather than from a per-site list
     /// of surface names, so a paint added to a guarded method is covered without a second edit here.
     /// <paramref name="site"/>'s chrome allowance is subtracted — a button re-enabled in a <c>finally</c> has
     /// to fire whoever won the race.
@@ -568,7 +570,7 @@ public sealed class ScopedLoadOrderingTests
         return Regex.Matches(
                 body,
                 PaintTarget + @"\s*=(?!=)|\.\s*UpdateData\s*\(|\bApplyViewModel\s*\("
-                + @"|\bSet\w*ComparisonMode\s*\(")
+                + @"|\bSet\w*ComparisonMode\s*\(|\bShowAlerts\s*\(")
             .Where(m => !chrome.Any(c => m.Value.Replace(" ", "", StringComparison.Ordinal)
                 .StartsWith(c, StringComparison.Ordinal)))
             .Select(m => m.Index)

@@ -331,6 +331,10 @@ public static class ServerCardStatusRules
 public class ServerSummaryItem
 {
     public string DisplayName { get; set; } = "";
+
+    /// <summary>What a screen reader announces for an Overview card item: the server's name, not the type name.</summary>
+    public override string ToString() => DisplayName;
+
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
 

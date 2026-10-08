@@ -343,7 +343,7 @@ public partial class FinOpsTab : UserControl
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
                 var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
                 var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
-                data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
+                data.FreeSpacePct = FinOpsHealthCalculator.FreeSpacePct(totalStorageMb, totalFreeMb);
             }
 
             UpdateUtilizationSummary(data);
@@ -378,6 +378,9 @@ public partial class FinOpsTab : UserControl
             TopTotalGrid.ItemsSource = topTotal;
             TopAvgGrid.ItemsSource = topAvg;
             DbSizeChart.ItemsSource = dbSizeSummary;
+            /* A server with no CPU sample in the window is stale or not collecting: its latest sizes can be days old, so the chart is
+               hidden rather than shown as if they were current. */
+            DbSizeChartGroup.Visibility = data is { ShowsDatabaseSizeChart: true } ? Visibility.Visible : Visibility.Collapsed;
             /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
             var chartCaption = dbSizeSummary is null ? null : DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
             DbSizeChartCaption.Text = chartCaption ?? "";
@@ -436,9 +439,10 @@ public partial class FinOpsTab : UserControl
         }
 
         /* CPU text + bars */
-        AvgCpuText.Text = $"{data.AvgCpuPct:N2}%";
-        P95CpuText.Text = $"{data.P95CpuPct:N2}%";
-        MaxCpuText.Text = $"{data.MaxCpuPct}%";
+        /* A window with no CPU sample shows dashes and empty bars: the 0s the read returns came from nothing. */
+        AvgCpuText.Text = data.AvgCpuText;
+        P95CpuText.Text = data.P95CpuText;
+        MaxCpuText.Text = data.MaxCpuText;
         CpuSamplesText.Text = data.CpuSamples.ToString("N0");
         /* On an Azure SQL Database the count is its vCores, named as vCores, and n/a where its service objective names none: the
            scheduler count it can see is never shown as the CPU it is given. */
@@ -447,9 +451,9 @@ public partial class FinOpsTab : UserControl
         /* The in-use count is n/a where it was not collected (NULL on an Azure SQL Database), never 0; the maximum shows as stored. */
         WorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);
 
-        SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, (double)data.AvgCpuPct);
-        SetBar(P95CpuBar, P95CpuFilled, P95CpuEmpty, (double)data.P95CpuPct);
-        SetBar(MaxCpuBar, MaxCpuFilled, MaxCpuEmpty, data.MaxCpuPct);
+        SetBar(AvgCpuBar, AvgCpuFilled, AvgCpuEmpty, data.HasCpuSample ? (double)data.AvgCpuPct : 0);
+        SetBar(P95CpuBar, P95CpuFilled, P95CpuEmpty, data.HasCpuSample ? (double)data.P95CpuPct : 0);
+        SetBar(MaxCpuBar, MaxCpuFilled, MaxCpuEmpty, data.HasCpuSample ? data.MaxCpuPct : 0);
 
         /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
         var stolenPct = data.TotalMemoryMb > 0
@@ -834,13 +838,8 @@ public partial class FinOpsTab : UserControl
                 async () => await Task.Run(() => _dataService!.GetServerMetricsAsync()));
             if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
 
-            // Compute health scores for each server
-            foreach (var item in data)
-            {
-                /* A server with no CPU sample in the window has a null average and so no score (a dash): memory and storage here are
-                   defaults, and a score made only of defaults says nothing about the server. */
-                item.HealthScore = FinOpsHealthCalculator.InventoryScore(item.AvgCpuPct);
-            }
+            /* The Health column comes with the collected overlay (FinOpsServerInventory.ApplyCollectedMetrics): the same score the Utilization
+               tab shows for the server, from its p95 CPU, buffer pool and free space. A server with no CPU sample has none (a dash). */
 
             _serverInventoryCache = data;
             _serverInventoryCacheTime = DateTime.Now;

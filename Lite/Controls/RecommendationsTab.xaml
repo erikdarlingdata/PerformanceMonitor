@@ -140,7 +140,15 @@
                 <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,6,0"
                            FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
                 <ComboBox x:Name="ServerSelector" Width="260" DisplayMemberPath="DisplayNameWithIntent"
-                          SelectionChanged="ServerSelector_SelectionChanged"/>
+                          AutomationProperties.Name="Server"
+                          SelectionChanged="ServerSelector_SelectionChanged">
+                    <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
+                    <ComboBox.ItemContainerStyle>
+                        <Style TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding DisplayNameWithIntent, Mode=OneTime}"/>
+                        </Style>
+                    </ComboBox.ItemContainerStyle>
+                </ComboBox>
                 <Button x:Name="RefreshButton" Content="Refresh" Padding="12,4"
                         Margin="12,0,0,0"
                         Click="RefreshButton_Click"

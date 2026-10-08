@@ -201,6 +201,20 @@ public sealed class UtilizationEfficiencyRow
     /// </summary>
     public bool HasCpuSample => ProvisioningStatus.Length > 0;
 
+    /// <summary>The Avg CPU figure: a dash when the window held no CPU sample (<see cref="HasCpuSample"/> false), never the 0.00% that
+    /// came from nothing.</summary>
+    public string AvgCpuText => HasCpuSample ? $"{AvgCpuPct:N2}%" : "-";
+
+    /// <summary>The P95 CPU figure: a dash when the window held no CPU sample, never a 0.00%.</summary>
+    public string P95CpuText => HasCpuSample ? $"{P95CpuPct:N2}%" : "-";
+
+    /// <summary>The Max CPU figure: a dash when the window held no CPU sample, never a 0%.</summary>
+    public string MaxCpuText => HasCpuSample ? $"{MaxCpuPct}%" : "-";
+
+    /// <summary>False when the window held no CPU sample: the server is stale or its CPU collector is off, and its latest database
+    /// sizes may be days old, so the Allocated vs Used chart is hidden rather than shown as current.</summary>
+    public bool ShowsDatabaseSizeChart => HasCpuSample;
+
     // FinOps cost — proportional to the server's monthly budget (0 = hidden)
     public decimal MonthlyCost { get; set; }
     public decimal AnnualCost => FinOpsCost.Annual(MonthlyCost);
@@ -603,12 +617,12 @@ public sealed class ServerPropertyRow
     public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
     /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
-    /// not a score built from the memory and storage defaults (<see cref="FinOpsInventoryFigures.HealthScoreOrNull"/>).</summary>
+    /// not a score built from the memory and storage defaults (<see cref="FinOpsUtilizationFigures.HealthScore(bool, decimal, int, int, decimal)"/>).</summary>
     public int? HealthScore { get; set; }
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
     /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
-    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoScoreNote;
+    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
 }
 
 /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid).</summary>

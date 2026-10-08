@@ -14,22 +14,18 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The Server Inventory figures the desktop grid computes itself: the health score, the Standard-edition license warning
+/// The Server Inventory figures the desktop grid computes itself: the Standard-edition license warning
 /// and the Azure SQL Database hardware blanks and note. Expected values are worked out by hand.
 /// </summary>
 public sealed class FinOpsInventoryViewerFiguresTests
 {
     [Theory]
-    [InlineData(null, 90)]
-    [InlineData(35, 84)]
-    [InlineData(0, 94)]
-    [InlineData(100, 54)]
-    public void HealthScore_IsTheWeightedTermsWithMemory80AndStorage100(int? avgCpu, int expected)
-    {
-        int? cpu = avgCpu is int a ? FinOpsHealthCalculator.CpuScore(a) : null;
-        Assert.Equal(expected, FinOpsHealthCalculator.Overall(cpu, 80, FinOpsHealthCalculator.StorageScore(50)));
-        Assert.Equal(expected, FinOpsInventoryFigures.HealthScore(avgCpu));
-    }
+    [InlineData(true, 35, 16384, 8000, 50, 90)]   // cpu 75, memory 100 (buffer pool 49% of RAM), storage 100: 30 + 30 + 30
+    [InlineData(true, 100, 16384, 3000, 20, 40)]  // cpu 0, memory 60 (18% of RAM), storage 75: 0 + 18 + 22.5
+    [InlineData(false, 0, 16384, 8000, 50, 100)]  // no CPU sample: the CPU term is left out, memory and storage keep 30:30
+    public void HealthScore_IsTheUtilizationRule_OverP95BufferPoolAndFreeSpace(
+        bool hasCpu, int p95, int physicalMb, int bufferPoolMb, int freePct, int expected) =>
+        Assert.Equal(expected, FinOpsUtilizationFigures.HealthScore(hasCpu, p95, physicalMb, bufferPoolMb, freePct));
 
     [Theory]
     [InlineData(59, "poor")]
@@ -52,6 +48,16 @@ public sealed class FinOpsInventoryViewerFiguresTests
         var row = new ServerPropertyRow { Edition = edition, EngineEdition = 2, CpuCount = cpus, PhysicalMemoryMb = memoryMb };
         Assert.Equal(expected, row.LicenseWarning);
         Assert.Equal(expected, FinOpsInventoryFigures.LicenseWarning(edition, 2, cpus, memoryMb));
+    }
+
+    /// <summary>L5 (#5542): the inventory score is a dash both with no CPU sample and with no memory sample, so the dash's note names both reasons.</summary>
+    [Fact]
+    public void NoScoreNote_NamesTheMissingMemorySampleAsWellAsTheCpuSample()
+    {
+        var row = new ServerPropertyRow { HealthScore = null };
+        Assert.Equal(FinOpsHealthCalculator.NoInventoryScoreNote, row.HealthScoreNote);
+        Assert.Contains("CPU sample", row.HealthScoreNote, System.StringComparison.Ordinal);
+        Assert.Contains("memory sample", row.HealthScoreNote, System.StringComparison.Ordinal);
     }
 
     [Fact]

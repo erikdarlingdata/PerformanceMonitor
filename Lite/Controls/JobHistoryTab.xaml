@@ -131,7 +131,7 @@
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="Run Time" FontWeight="Bold" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="RunTimeHeaderText" Text="Run Time" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>

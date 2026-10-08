@@ -169,7 +169,8 @@ public static class AgTopology
     /// </summary>
     public static List<AgTopologyCard> BuildCards(
         IReadOnlyList<AgTopologyReplicaRow> replicas,
-        IReadOnlyList<AgTopologyDatabaseRow> databases)
+        IReadOnlyList<AgTopologyDatabaseRow> databases,
+        DateTime? nowUtc = null)
     {
         ArgumentNullException.ThrowIfNull(replicas);
         ArgumentNullException.ThrowIfNull(databases);
@@ -202,8 +203,22 @@ public static class AgTopology
                 worst = Worse(worst, database.SynchronizationStateSeverity);
             }
 
+            /* D10 of the final walk: the badge describes the snapshot, so it can only be as current as the snapshot.
+               When the caller passes the clock, a card whose newest replica snapshot is older than the fleet's offline
+               mark (ServerHealthThresholds.OfflineThreshold, the same 30 minutes the web page's #5489 rule and the
+               Offline band use) reads "Stale" and ranks Warning, whatever the old rows said: 13 days after the last
+               collection a row that read Healthy is a memory. Warning, never Unknown, which is the lowest value and
+               would sort the stale card below a healthy one. Without the clock (the pre-existing callers and pins)
+               nothing is stale. */
+            var isStale = nowUtc.HasValue && nowUtc.Value - first.CollectionTime > ServerHealthThresholds.OfflineThreshold;
+            if (isStale && worst < HealthSeverity.Warning)
+            {
+                worst = HealthSeverity.Warning;
+            }
+
             var card = new AgTopologyCard
             {
+                IsStale = isStale,
                 ServerId = first.ServerId,
                 ServerName = first.ServerName,
                 AgName = first.AgName,
@@ -589,6 +604,7 @@ public static class AgTopology
             hash.Add(card.DatabaseCollectionTime);
             hash.Add(card.PrimaryReplica);
             hash.Add(card.Severity);
+            hash.Add(card.IsStale);
 
             hash.Add(card.Replicas.Count);
             foreach (var replica in card.Replicas)
@@ -873,6 +889,11 @@ public sealed class AgTopologyCard : AgTopologyObservable
     public string? PrimaryReplica { get; set; }
     public HealthSeverity Severity { get; set; }
 
+    /// <summary>True when the newest replica snapshot is older than <see cref="ServerHealthThresholds.OfflineThreshold"/>
+    /// (set by <see cref="AgTopology.BuildCards"/> when it is given the clock): the badge says "Stale" and the band is
+    /// at least Warning.</summary>
+    public bool IsStale { get; set; }
+
     /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475) — taken from the card's first
     /// replica row, which is the same value every replica of this AG stores (the engine stamps one group_id
     /// per AG, identically on every replica). Null on a card built entirely from rows collected before this
@@ -889,7 +910,7 @@ public sealed class AgTopologyCard : AgTopologyObservable
     public ObservableCollection<AgTopologyDatabase> Databases { get; } = new();
 
     public string AgNameDisplay => string.IsNullOrWhiteSpace(AgName) ? "—" : AgName!;
-    public string SeverityLabel => AgTopology.SeverityLabel(Severity);
+    public string SeverityLabel => IsStale ? "Stale" : AgTopology.SeverityLabel(Severity);
     public bool HasDatabases => Databases.Count > 0;
 
     public string PrimaryDisplay => string.IsNullOrWhiteSpace(PrimaryReplica)
@@ -939,6 +960,7 @@ public sealed class AgTopologyCard : AgTopologyObservable
         DatabaseCollectionTime = latest.DatabaseCollectionTime;
         PrimaryReplica = latest.PrimaryReplica;
         Severity = latest.Severity;
+        IsStale = latest.IsStale;
         GroupId = latest.GroupId;
 
         AgTopology.Reconcile(

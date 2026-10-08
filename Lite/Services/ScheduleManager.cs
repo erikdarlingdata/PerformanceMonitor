@@ -771,19 +771,72 @@ public class ScheduleManager
         }
     }
 
+    /// <summary>One Settings > Collector Schedules row: what the server's schedule matches, whose schedule it is, and
+    /// why the match is "Custom" when it is.</summary>
+    internal sealed record ServerScheduleSummary(string Preset, string Status, string PresetDetail);
+
+    /// <summary>Status text for a server that follows the default schedule.</summary>
+    internal const string StatusUsesDefault = "Uses default";
+
+    /// <summary>Status text for a server with its own schedule.</summary>
+    internal const string StatusOwnSchedule = "Own schedule";
+
     /// <summary>
-    /// Detects which preset matches a server's active schedule.
+    /// The Preset, Status and Preset tooltip of one Settings row, all read from the one schedule list the server runs
+    /// on (its own, or the default). Preset says which preset's intervals that list matches; Status says whose list it
+    /// is. They are different questions, so "Custom" next to "Uses default" is a true pair: the default schedule has
+    /// been edited, or kept an interval an older version shipped (deadlocks was 1 minute before #1963 made it 5).
+    /// The tooltip names the intervals that differ, so the reader can see why.
     /// </summary>
-    public string GetActivePresetForServer(string serverId)
+    internal ServerScheduleSummary GetServerScheduleSummary(string serverId)
     {
         lock (_lock)
         {
-            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
-                ? over.Collectors
-                : _defaultSchedule;
-
-            return DetectPreset(schedules);
+            var hasOverride = _serverOverrides.TryGetValue(serverId, out var over);
+            var schedules = hasOverride ? over!.Collectors : _defaultSchedule;
+            return new ServerScheduleSummary(
+                DetectPreset(schedules),
+                hasOverride ? StatusOwnSchedule : StatusUsesDefault,
+                DescribePresetMatch(schedules));
         }
+    }
+
+    /// <summary>
+    /// One sentence on how a schedule list relates to the presets: that it matches one, or which preset is closest and
+    /// which collector intervals differ from it (first five).
+    /// </summary>
+    internal static string DescribePresetMatch(List<CollectorSchedule> schedules)
+    {
+        var matched = DetectPreset(schedules);
+        if (matched != "Custom")
+        {
+            return $"Every collector interval matches the {matched} preset.";
+        }
+
+        string? closest = null;
+        List<string>? closestDiffs = null;
+        foreach (var (presetName, intervals) in s_presets)
+        {
+            var diffs = new List<string>();
+            foreach (var (collector, freq) in intervals)
+            {
+                var schedule = schedules.FirstOrDefault(s =>
+                    s.Name.Equals(collector, StringComparison.OrdinalIgnoreCase));
+                if (schedule != null && schedule.FrequencyMinutes != freq)
+                {
+                    diffs.Add($"{collector} {schedule.FrequencyMinutes}m ({presetName} {freq}m)");
+                }
+            }
+            if (closestDiffs == null || diffs.Count < closestDiffs.Count)
+            {
+                closest = presetName;
+                closestDiffs = diffs;
+            }
+        }
+
+        var shown = string.Join(", ", closestDiffs!.Take(5));
+        var more = closestDiffs!.Count > 5 ? $" and {closestDiffs.Count - 5} more" : "";
+        return $"Custom: no preset matches. Closest is {closest}; these intervals differ: {shown}{more}.";
     }
 
     // ──────────────────────────────────────────────────────────────────

@@ -1324,7 +1324,14 @@
                             <TextBlock Text="Server:" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
                             <ComboBox x:Name="RecommendationsServerSelector" Width="260" VerticalAlignment="Center"
                                       Style="{StaticResource DarkCombo}"
+                                      AutomationProperties.Name="Server"
                                       SelectionChanged="RecommendationsServerSelector_SelectionChanged">
+                                <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
+                                <ComboBox.ItemContainerStyle>
+                                    <Style TargetType="ComboBoxItem" BasedOn="{StaticResource DarkComboItem}">
+                                        <Setter Property="AutomationProperties.Name" Value="{Binding DisplayName, Mode=OneTime}"/>
+                                    </Style>
+                                </ComboBox.ItemContainerStyle>
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding DisplayName}"/>

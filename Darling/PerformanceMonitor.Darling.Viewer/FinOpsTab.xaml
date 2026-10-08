@@ -255,7 +255,14 @@
             <TextBlock Text="Server:" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
             <ComboBox x:Name="ServerSelector" Width="260" VerticalAlignment="Center"
                       Style="{StaticResource DarkCombo}"
+                      AutomationProperties.Name="Server"
                       SelectionChanged="ServerSelector_SelectionChanged">
+                <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
+                <ComboBox.ItemContainerStyle>
+                    <Style TargetType="ComboBoxItem" BasedOn="{StaticResource DarkComboItem}">
+                        <Setter Property="AutomationProperties.Name" Value="{Binding PickerLabel, Mode=OneTime}"/>
+                    </Style>
+                </ComboBox.ItemContainerStyle>
                 <ComboBox.ItemTemplate>
                     <DataTemplate>
                         <TextBlock Text="{Binding PickerLabel}"/>
@@ -456,7 +463,7 @@
                                         </DataGrid>
                                     </GroupBox>
                                 </Grid>
-                                <GroupBox Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10" Foreground="{DynamicResource ForegroundBrush}">
+                                <GroupBox x:Name="FinOpsDbSizeChartGroup" Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10" Foreground="{DynamicResource ForegroundBrush}">
                                     <DockPanel>
                                         <TextBlock x:Name="FinOpsDbSizeChartCaption" DockPanel.Dock="Bottom" Visibility="Collapsed" Margin="8,2,8,4" TextWrapping="Wrap" FontSize="11.5" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                         <ItemsControl x:Name="FinOpsDbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">

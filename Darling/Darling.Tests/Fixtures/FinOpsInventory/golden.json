@@ -6,7 +6,8 @@
         "AvgCpuPct": 38.7500000000000000,
         "StorageTotalGb": 3.0488281250000000,
         "IdleDbCount": 1,
-        "ProvisioningStatus": "UNDER_PROVISIONED"
+        "ProvisioningStatus": "UNDER_PROVISIONED",
+        "HealthScore": 27
       }
     },
     {
@@ -15,7 +16,8 @@
         "AvgCpuPct": null,
         "StorageTotalGb": null,
         "IdleDbCount": null,
-        "ProvisioningStatus": null
+        "ProvisioningStatus": null,
+        "HealthScore": null
       }
     },
     {
@@ -24,7 +26,8 @@
         "AvgCpuPct": 7.0000000000000000,
         "StorageTotalGb": null,
         "IdleDbCount": null,
-        "ProvisioningStatus": "OVER_PROVISIONED"
+        "ProvisioningStatus": "OVER_PROVISIONED",
+        "HealthScore": 86
       }
     },
     {
@@ -33,7 +36,8 @@
         "AvgCpuPct": 10.3333333333333333,
         "StorageTotalGb": 0.50000000000000000000,
         "IdleDbCount": 0,
-        "ProvisioningStatus": "OVER_PROVISIONED"
+        "ProvisioningStatus": "OVER_PROVISIONED",
+        "HealthScore": null
       }
     }
   ],

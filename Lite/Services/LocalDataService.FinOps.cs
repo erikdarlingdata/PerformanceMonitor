@@ -126,6 +126,20 @@ public class UtilizationEfficiencyRow
     /// </summary>
     public bool HasCpuSample => ProvisioningStatus.Length > 0;
 
+    /// <summary>The Avg CPU figure: a dash when the window held no CPU sample (<see cref="HasCpuSample"/> false), never the 0.00% that
+    /// came from nothing.</summary>
+    public string AvgCpuText => HasCpuSample ? $"{AvgCpuPct:N2}%" : "-";
+
+    /// <summary>The P95 CPU figure: a dash when the window held no CPU sample, never a 0.00%.</summary>
+    public string P95CpuText => HasCpuSample ? $"{P95CpuPct:N2}%" : "-";
+
+    /// <summary>The Max CPU figure: a dash when the window held no CPU sample, never a 0%.</summary>
+    public string MaxCpuText => HasCpuSample ? $"{MaxCpuPct}%" : "-";
+
+    /// <summary>False when the window held no CPU sample: the server is stale or its CPU collector is off, and its latest database
+    /// sizes may be days old, so the Allocated vs Used chart is hidden rather than shown as current.</summary>
+    public bool ShowsDatabaseSizeChart => HasCpuSample;
+
     // FinOps cost — proportional to server monthly budget
     public decimal MonthlyCost { get; set; }
     public decimal AnnualCost => MonthlyCost * 12m;
@@ -148,13 +162,8 @@ public class UtilizationEfficiencyRow
     /// on every edition. A window with no CPU sample (<see cref="HasCpuSample"/> false) leaves the CPU term out: its p95 is a 0
     /// that came from nothing, and scoring that 0 would hand the server a full 100.
     /// </summary>
-    public int ComputeHealthScore()
-    {
-        var bpRatio = PhysicalMemoryMb > 0 ? (decimal)BufferPoolMb / PhysicalMemoryMb : 0m;
-        int? cpuScore = HasCpuSample ? FinOpsHealthCalculator.CpuScore(P95CpuPct) : null;
-        return FinOpsHealthCalculator.Overall(
-            cpuScore, FinOpsHealthCalculator.MemoryScore(bpRatio), FinOpsHealthCalculator.StorageScore(FreeSpacePct));
-    }
+    public int ComputeHealthScore() =>
+        FinOpsHealthCalculator.Score(HasCpuSample, P95CpuPct, PhysicalMemoryMb, BufferPoolMb, FreeSpacePct);
 }
 
 public class DatabaseResourceUsageRow
@@ -412,12 +421,13 @@ public class ServerPropertyRow
 
     // Health score (Increment 6)
     /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
-    /// not a score built from the memory and storage defaults (<see cref="FinOpsHealthCalculator.InventoryScore"/>).</summary>
+    /// not a score built from memory and storage alone. It is the Utilization tab's score for the same server
+    /// (<see cref="FinOpsHealthCalculator.Score"/>), read by <see cref="LocalDataService.GetServerMetricsAsync"/>.</summary>
     public int? HealthScore { get; set; }
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
     /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
-    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoScoreNote;
+    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
 }
 
 public class StorageGrowthRow
@@ -501,6 +511,10 @@ public static class FinOpsHealthCalculator
 
     /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
     public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
+    /// <summary>The tooltip on the dash shown in place of a health score on the Server Inventory. That score is null for two reasons: the last 24 hours hold no
+    /// CPU sample, or no memory sample has been collected (memory_stats off in the schedule, or not yet run on a new server). The row does not say which,
+    /// so the note names both. The Utilization view keeps <see cref="NoScoreNote"/>: it has no row at all without a memory sample.</summary>
+    public const string NoInventoryScoreNote = "No health score: the last 24 hours hold no CPU sample, or no memory sample has been collected.";
 
     public static int CpuScore(decimal p95Pct)
     {
@@ -538,15 +552,21 @@ public static class FinOpsHealthCalculator
         return (memory * 30 + storage * 30) / 60;
     }
 
+    /// <summary>Free space as a percent of allocated; 100 when nothing is allocated (no snapshot, or an empty one).</summary>
+    public static decimal FreeSpacePct(decimal allocatedMb, decimal freeMb) =>
+        allocatedMb > 0 ? freeMb / allocatedMb * 100m : 100m;
+
     /// <summary>
-    /// The Server Inventory grid's score from the server's 24-hour average CPU: CPU, a default memory term of 80 (the inventory has no
-    /// buffer pool ratio) and a default storage term (no file-level free space). Null when there is no CPU sample (<paramref name="avgCpuPct"/>
-    /// null), the same rule as the drill-down badge: the defaults alone must not read as a score for a server nothing was measured on.
+    /// THE health score, the one rule every surface uses: the FinOps Utilization badge and the Server Inventory grid's Health column. CPU is
+    /// the 24-hour p95, memory is the buffer pool's share of physical memory, storage is the free share of the newest database-size snapshot
+    /// (<see cref="FreeSpacePct"/>). A window with no CPU sample (<paramref name="hasCpuSample"/> false) leaves the CPU term out: its p95 is a 0
+    /// that came from nothing, and scoring that 0 would hand the server a full 100.
     /// </summary>
-    public static int? InventoryScore(decimal? avgCpuPct)
+    public static int Score(bool hasCpuSample, decimal p95CpuPct, long physicalMemoryMb, long bufferPoolMb, decimal freeSpacePct)
     {
-        if (avgCpuPct is not decimal avgCpu) return null;
-        return Overall(CpuScore(avgCpu), 80, StorageScore(50));
+        var bpRatio = physicalMemoryMb > 0 ? (decimal)bufferPoolMb / physicalMemoryMb : 0m;
+        int? cpuScore = hasCpuSample ? CpuScore(p95CpuPct) : null;
+        return Overall(cpuScore, MemoryScore(bpRatio), StorageScore(freeSpacePct));
     }
 
     public static string ScoreColor(int score) => score switch

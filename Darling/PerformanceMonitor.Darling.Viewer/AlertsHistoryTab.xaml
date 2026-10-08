@@ -126,7 +126,7 @@
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="Time" FontWeight="Bold" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="AlertTimeHeaderText" Text="Time" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>

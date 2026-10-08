@@ -16,6 +16,7 @@ using System.Windows.Media;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -674,6 +675,11 @@ public sealed class ServerSummaryItem
     private static readonly SolidColorBrush s_unknownBrush = MakeBrush("#888888");
 
     public string DisplayName { get; set; } = "";
+
+    /// <summary>What a screen reader announces for an Overview card: UI Automation names a list item by its text, and the default text is
+    /// the type name ("PerformanceMonitor.Darling.Viewer.ServerSummaryItem").</summary>
+    public override string ToString() => DisplayName;
+
     public string ServerName { get; set; } = "";
     public int ServerId { get; set; }
     public bool? IsOnline { get; set; }
@@ -1090,8 +1096,20 @@ public sealed class ServerSummaryItem
     /// was collected, and none of it is retained, which is what the row says.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(LastCollectionTime.Value, "HH:mm:ss")
+        ? FormatLastCollect(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayZone(), DateTime.UtcNow)
         : IsOnline == false ? "None retained" : "Never";
+
+    /// <summary>
+    /// The Last Collect time as the card words it (D4 of the final walk, the twin of Lite's
+    /// <c>FormatLastCollect</c>): <paramref name="lastCollectionUtc"/> (naive UTC) in <paramref name="zone"/>, as
+    /// "HH:mm:ss" when that wall time falls on today's date in the same zone and with its date
+    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from last week does not read as one from this morning.
+    /// </summary>
+    internal static string FormatLastCollect(DateTime lastCollectionUtc, TimeZoneInfo zone, DateTime nowUtc)
+    {
+        var isToday = DisplayZone.ToDisplay(lastCollectionUtc, zone).Date == DisplayZone.ToDisplay(nowUtc, zone).Date;
+        return ViewerTimeHelper.FormatForDisplay(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+    }
 
     /* Collection status. The (IsOnline, CollectionStale, AwaitingFirstCollection) triple is resolved by
        ServerCollectionStatusRules.Classify and nowhere else in the viewer — the sidebar row's dot carried its
