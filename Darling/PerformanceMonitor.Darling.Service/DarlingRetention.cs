@@ -771,15 +771,25 @@ public static class DarlingRetention
             }
 
             /* #3953: the latest-snapshot interval table, at its own 15-day horizon on first_execution_time (the
-               monitored clock the table partitions on). The batched DELETE, which is compressed-chunk safe; the
+               monitored clock the table partitions on). The row-capped batched DELETE (#5569); the
                table is a plain heap until its hypertable conversion lands, and drop_chunks joins this block then,
-               in collection_log's shape above. Its pending-replay rows go at the same horizon: a batch still
+               in collection_log's shape above (the ctid row cap below is plain-heap only, #1564; a hypertable
+               conversion has to retire it). Its pending-replay rows go at the same horizon: a batch still
                pending after 15 days can no longer reach a window the table serves, and a removed server's rows
                would otherwise stay forever. Failure-isolated like every sibling. */
+            /* #5569: row-capped and adaptive, not one whole-day slice. A day of this table is millions of
+               rows, so the slice form's single DELETE passed the command timeout on a large store, rolled
+               back, and the next pass picked the same doomed day. The capped form commits per batch, halves
+               its cap on a timeout, and orders by the first_execution_time btree (V153), so progress
+               survives a timeout and the next pass resumes at the oldest remaining rows. The table is a
+               plain heap, so the ctid cap is safe (the plan dimension's reasoning, RowCappedDeleteSql). */
             var intervalLatestDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalLatest.TableName,
-                TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.TableName, "first_execution_time"),
+                RowCappedDeleteSql(
+                    "collect." + QueryStoreIntervalLatest.TableName, "first_execution_time", IntervalDeleteRowCap),
                 utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken,
+                batchSize: IntervalDeleteRowCap,
+                adaptiveRowCapTimeColumn: "first_execution_time",
                 pacer: walPacer);
             var intervalPendingDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalLatest.PendingTableName,
@@ -805,10 +815,15 @@ public static class DarlingRetention
                sibling. The purge deletes row by row on first_execution_time, so the table floor the read gate
                checks (MIN(first_execution_time)) advances as it runs, and reads below raw's floor stop 26 h
                above it (L = max(window start, filled_since, table floor + 26 h, the purge-edge margin)). */
+            /* #5569: the same row-capped adaptive drain as the latest table above, for the same reason (a
+               whole day of the wide table timed out on every pass and removed nothing). */
             var intervalWideDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalWide.TableName,
-                TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.TableName, "first_execution_time"),
+                RowCappedDeleteSql(
+                    "collect." + QueryStoreIntervalWide.TableName, "first_execution_time", IntervalDeleteRowCap),
                 utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken,
+                batchSize: IntervalDeleteRowCap,
+                adaptiveRowCapTimeColumn: "first_execution_time",
                 pacer: walPacer);
             var intervalWidePendingDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalWide.PendingTableName,
@@ -1218,6 +1233,15 @@ public static class DarlingRetention
     internal const int PlanDimDeleteRowCap = 50_000;
 
     /// <summary>
+    /// The CEILING on rows per statement for the two Query Store interval tables' purges (#5569), the same
+    /// adaptive drain the plan dimension uses (<see cref="NextPlanDimBatchCap"/> grows it on fast batches and
+    /// halves it on a timeout, between <see cref="PlanDimDeleteRowFloor"/> and this). Their rows have no TOAST
+    /// (~1.1 KB each), so a batch at this ceiling is far cheaper than a plan-dim batch; the adaptive sizing
+    /// finds the real rate on each store.
+    /// </summary>
+    internal const int IntervalDeleteRowCap = PlanDimDeleteRowCap;
+
+    /// <summary>
     /// The plan dimension's purge statement: capped by ROW COUNT rather than by a time slice (#2386).
     ///
     /// <para><b>Why the time slice cannot work here.</b> <see cref="TimeSlicedDeleteSql"/> bounds work at
@@ -1246,6 +1270,55 @@ public static class DarlingRetention
         $"DELETE FROM {table} WHERE ctid IN ("
       + $"SELECT ctid FROM {table} WHERE {timeColumn} < $1 "
       + $"ORDER BY {timeColumn} LIMIT {cap})";
+
+    /// <summary>
+    /// <see cref="RowCappedDeleteSql"/> with a forward-moving keyset cursor and <c>RETURNING</c> the time column
+    /// (#5569), the statement the adaptive drain runs. With <paramref name="hasCursor"/> the subquery adds
+    /// <c>AND {timeColumn} &gt;= $2</c> so the ordered index scan starts at the cursor instead of the bottom of
+    /// the index, where the entries of rows earlier batches deleted still sit until vacuum (batch k would
+    /// otherwise re-read the k-1 batches before it: O(n^2) over a large backlog). The first batch of a pass
+    /// has no cursor and starts at the bottom. <c>RETURNING</c> hands back the deleted rows' time values so the
+    /// caller can take their maximum as the next cursor.
+    /// </summary>
+    internal static string CursoredRowCappedDeleteSql(string table, string timeColumn, int cap, bool hasCursor) =>
+        $"DELETE FROM {table} WHERE ctid IN ("
+      + $"SELECT ctid FROM {table} WHERE {timeColumn} < $1 "
+      + (hasCursor ? $"AND {timeColumn} >= $2 " : string.Empty)
+      + $"ORDER BY {timeColumn} LIMIT {cap}) RETURNING {timeColumn}";
+
+    /// <summary>
+    /// Runs one <see cref="CursoredRowCappedDeleteSql"/> batch and returns the rows it deleted and the largest
+    /// time value among them (null when it deleted nothing), the next batch's cursor. The statement autocommits,
+    /// so a batch that completes is durable; one that times out rolls back whole.
+    /// </summary>
+    internal static async Task<(int Deleted, DateTime? MaxDeleted)> ExecuteCursoredBatchAsync(
+        NpgsqlConnection connection, string table, string timeColumn, int cap, DateTime cutoff, DateTime? cursor,
+        CancellationToken cancellationToken)
+    {
+        using var command = new NpgsqlCommand(
+            CursoredRowCappedDeleteSql(table, timeColumn, cap, cursor is not null), connection)
+        { CommandTimeout = DeleteTimeoutSeconds };
+        command.Parameters.AddWithValue(cutoff);
+        if (cursor is not null)
+        {
+            command.Parameters.AddWithValue(cursor.Value);
+        }
+
+        var count = 0;
+        DateTime? max = null;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            count++;
+            var value = reader.GetDateTime(0);
+            if (max is null || value > max)
+            {
+                max = value;
+            }
+        }
+
+        return (count, max);
+    }
 
     /// <summary>
     /// A row-capped purge with NO <c>ORDER BY</c> (#4250 item 3) — the sibling of
@@ -1539,9 +1612,9 @@ public static class DarlingRetention
     /// finishes in one batch.
     ///
     /// <para>Two shapes, chosen by <paramref name="adaptiveRowCapTimeColumn"/>. Null — every table but the
-    /// plan dimension — runs <paramref name="deleteSql"/> (a <see cref="TimeSlicedDeleteSql"/> or
+    /// plan dimension and the two Query Store interval tables (#5569) — runs <paramref name="deleteSql"/> (a <see cref="TimeSlicedDeleteSql"/> or
     /// single-shot statement) unchanged, with the connection and command — a single bound cutoff parameter
-    /// — reused across the whole drain. Set (the plan dimension, #4130) ignores <paramref name="deleteSql"/>
+    /// — reused across the whole drain. Set (the plan dimension, #4130, and the interval tables, #5569) ignores <paramref name="deleteSql"/>
     /// and rebuilds each batch from <see cref="RowCappedDeleteSql"/> at whatever cap
     /// <see cref="NextPlanDimBatchCap"/> has chosen, with <see cref="RunPlanDimBatchAsync"/> retrying a
     /// COMMAND-TIMEOUT batch at half its cap instead of failing the table outright — the field failure this
@@ -1626,6 +1699,19 @@ public static class DarlingRetention
                    not a stored fact about the table, so nothing carries a shrunk cap into tomorrow. */
                 var cap = batchSize;
 
+                /* The keyset cursor (#5569, the coordinator's O(n^2) point): the largest time value the previous
+                   batch deleted. Without it every batch is "ORDER BY time LIMIT n" from the BOTTOM of the index,
+                   and the index entries of the rows earlier batches deleted stay until vacuum removes them (they
+                   cannot be marked dead while an older snapshot exists), so batch k re-reads the k-1 batches
+                   before it: quadratic over a backlog of millions. The first batch starts at the bottom (that is
+                   the one lower-bound lookup per pass); every later batch starts AT the cursor. A cursor equal
+                   to the last value is correct, not a stall: the bound is inclusive, so rows tied at that value
+                   that did not fit the previous cap are still taken, and a batch always deletes the rows it
+                   returns, so the cursor can only move forward. A row inserted below the cursor mid-pass is
+                   left for the next pass. A timed-out attempt rolls back and retries at half the cap from the
+                   SAME cursor, because the cursor only advances after an attempt succeeds. */
+                DateTime? cursor = null;
+
                 drained = await DrainBatchesAsync(
                     async ct =>
                     {
@@ -1634,19 +1720,22 @@ public static class DarlingRetention
                             async (attemptCap, attemptCt) =>
                             {
                                 batches++;
-                                using var attempt = new NpgsqlCommand(
-                                    RowCappedDeleteSql(tableName, adaptiveRowCapTimeColumn, attemptCap),
-                                    connection)
-                                { CommandTimeout = DeleteTimeoutSeconds };
-                                attempt.Parameters.AddWithValue(cutoff);
-                                var affected = await attempt.ExecuteNonQueryAsync(attemptCt);
+                                var (affected, maxDeleted) = await ExecuteCursoredBatchAsync(
+                                    connection, tableName, adaptiveRowCapTimeColumn, attemptCap, cutoff, cursor,
+                                    attemptCt);
                                 deleted += affected;
+                                if (maxDeleted is not null)
+                                {
+                                    cursor = maxDeleted;
+                                }
+
                                 return affected;
                             },
                             cap,
                             PlanDimDeleteRowFloor,
                             ct,
-                            logger);
+                            logger,
+                            tableName);
 
                         var walBytes = await WalSinceAsync(walBefore, ct);
                         cap = NextPlanDimBatchCap(
@@ -1888,7 +1977,8 @@ public static class DarlingRetention
         int cap,
         int floorCap,
         CancellationToken cancellationToken,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        string? tableName = null)
     {
         while (true)
         {
@@ -1902,8 +1992,8 @@ public static class DarlingRetention
             {
                 var retryCap = Math.Max(floorCap, cap / 2);
                 logger?.LogWarning(
-                    "Plan-dim purge batch at cap {Cap} hit the command timeout after {Elapsed:F0}s ({Failure}); retrying at {RetryCap}",
-                    cap, stopwatch.Elapsed.TotalSeconds, DescribePurgeFailure(ex), retryCap);
+                    "Purge batch of {Table} at cap {Cap} hit the command timeout after {Elapsed:F0}s ({Failure}); retrying at {RetryCap}",
+                    tableName ?? "query_plan_dim", cap, stopwatch.Elapsed.TotalSeconds, DescribePurgeFailure(ex), retryCap);
                 cap = retryCap;
             }
         }

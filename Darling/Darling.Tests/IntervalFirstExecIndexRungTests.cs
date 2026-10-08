@@ -20,8 +20,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins Darling rung V153 (#4608, split #4615): a plain btree on <c>first_execution_time</c> for
-/// <c>query_store_interval_latest</c> (V143) only — the column both the daily retention sweep's
-/// <see cref="DarlingRetention.TimeSlicedDeleteSql"/> filters on and the read gate's per-server floor
+/// <c>query_store_interval_latest</c> (V143) only — the column the retention sweep filters on (the one-day slice then, the row-capped cursor form since #5569, pinned in <c>QueryStoreIntervalPurgeRowCappedTests</c>) and the read gate's per-server floor
 /// reads. V154 (<c>IntervalFirstExecIndexWideRungTests</c>) is the twin rung for
 /// <c>query_store_interval_wide</c>'s index, split into its own rung so each index build gets its own
 /// migration-command-timeout window. This file's "I am the top rung" claim moved to that class now that
@@ -137,7 +136,7 @@ public sealed class IntervalFirstExecIndexRungTests
     }
 
     /// <summary>
-    /// The purge's plan (<see cref="DarlingRetention.TimeSlicedDeleteSql"/>) against the migrated schema
+    /// The one-day-slice purge's plan (<see cref="DarlingRetention.TimeSlicedDeleteSql"/>, still the shape of the other tables' purges; the interval tables moved to the row-capped cursor form in #5569) against the migrated schema
     /// uses the new index for its outer scan and both <c>min()</c> subqueries — no Seq Scan (or the
     /// equivalent full-index walk a leading-column-less plan would take) on the table. Seeded with rows
     /// spanning two days so both the "nothing to delete" and the min()-subquery shapes are exercised.
