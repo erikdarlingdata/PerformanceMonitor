@@ -68,6 +68,11 @@ public partial class App : Application
            failure. */
         ViewerLogger.Initialize();
 
+        /* #5565: the grids' column filters survive a restart, in a file beside viewer-preferences.json. */
+        ColumnFilterStore.Install(
+            Path.Combine(Path.GetDirectoryName(ViewerPreferencesStore.DefaultFilePath())!, "column-filters.json"),
+            message => ViewerLogger.Warn("ColumnFilterStore", message));
+
         /* #3577: the operator's per-theme color overrides live beside viewer-settings.json, in the viewer's
            own per-user directory - LOCAL to this machine, never in the store or the control plane, because
            a color is a preference of the person at this screen and not a fact about the fleet. The path
