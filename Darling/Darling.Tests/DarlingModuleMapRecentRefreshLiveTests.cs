@@ -158,6 +158,164 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
         });
     }
 
+    /// <summary>A wall-clock-relative second-precision instant, for the start-up and daily refreshes: their
+    /// full-read fallback is <see cref="DarlingModuleMap.RefreshSql"/>, whose window is <c>now() - 2 days</c>.</summary>
+    private static DateTime Ago(TimeSpan span)
+    {
+        var t = DateTime.UtcNow - span;
+        return new DateTime(t.Ticks - (t.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
+    }
+
+    private static async Task<bool> InMapAsync(NpgsqlConnection c, string sqlHandle, CancellationToken ct) =>
+        await ObjectNameForAsync(c, sqlHandle, ct) is not null;
+
+    [Fact]
+    public async Task TheStartUpRefresh_WithAWatermark_ReadsTheRepairSlackBehindIt_NotTwoDays()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            /* #5519: the map holds one handle and a watermark three hours back. A second handle was stamped an hour
+               before that watermark: the hourly read (watermark less ten minutes) never covers it, and the start-up
+               read must (it repairs what the old two-day read repaired). A third is newer than the watermark, and a
+               fourth sits 35 hours behind it, past the repair slack, where the two-day read no longer goes. */
+            var watermark = Ago(TimeSpan.FromHours(3));
+            await InsertProcAsync(connection, watermark, "0xSTART_SEED", "seed", ct);
+            await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct);
+            Assert.Equal(watermark, await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
+
+            await InsertProcAsync(connection, watermark.AddHours(-1), "0xSTART_BEHIND", "behind", ct);
+            await InsertProcAsync(connection, watermark.AddHours(-35), "0xSTART_FAR", "far", ct);
+            await InsertProcAsync(connection, watermark.AddMinutes(30), "0xSTART_NEW", "new", ct);
+
+            /* The seed row at the watermark is re-read too: the slack reaches back past it. */
+            Assert.Equal(3, await DarlingModuleMap.RefreshAtStartAsync(connection, null, ct));
+            Assert.True(await InMapAsync(connection, "0xSTART_NEW", ct));
+            Assert.True(await InMapAsync(connection, "0xSTART_BEHIND", ct));
+            Assert.False(await InMapAsync(connection, "0xSTART_FAR", ct));
+            Assert.Equal(watermark.AddMinutes(30), await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
+        });
+    }
+
+    [Fact]
+    public async Task ALateCommittedRow_StampedADayBeforeTheDaily_IsRepairedByTheDailyAndTheStartUpRefresh()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            /* #5519 review: the hourly refresh keeps the watermark near now, so a daily that fires every 24 hours
+               has to reach back a day plus the lateness, not a few hours. Another server's rows (stamped 20 minutes
+               ago) have moved the shared watermark; server A's row, stamped 20 hours ago, commits only now, behind
+               it. The hourly read (watermark less ten minutes) cannot see it, and a daily or start-up read that only
+               reached six hours behind the watermark never repaired it either, so its handle read "(ad hoc)" once raw
+               procedure_stats aged out. */
+            var watermark = Ago(TimeSpan.FromMinutes(20));
+            await InsertProcAsync(connection, watermark, "0xLATE_SEED", "seed", ct);
+            await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct);
+            Assert.Equal(watermark, await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
+
+            await InsertProcAsync(connection, Ago(TimeSpan.FromHours(20)), "0xLATE_DAILY", "late-daily", ct);
+            await InsertProcAsync(connection, Ago(TimeSpan.FromHours(26)), "0xLATE_START", "late-start", ct);
+
+            /* The hourly path cannot see either row. */
+            Assert.Equal(1, await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct));
+            Assert.False(await InMapAsync(connection, "0xLATE_DAILY", ct));
+            Assert.False(await InMapAsync(connection, "0xLATE_START", ct));
+
+            /* The daily repairs both (a row stamped 26 hours before it is inside the 30-hour span), and the start-up
+               read covers the same span. */
+            Assert.Equal(3, await DarlingModuleMap.RefreshAsync(connection, null, ct));
+            Assert.True(await InMapAsync(connection, "0xLATE_DAILY", ct));
+            Assert.True(await InMapAsync(connection, "0xLATE_START", ct));
+
+            await ExecAsync(connection, "DELETE FROM collect.module_map WHERE sql_handle IN ('0xLATE_DAILY','0xLATE_START')", ct);
+            Assert.Equal(3, await DarlingModuleMap.RefreshAtStartAsync(connection, null, ct));
+            Assert.True(await InMapAsync(connection, "0xLATE_DAILY", ct));
+            Assert.True(await InMapAsync(connection, "0xLATE_START", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheStartUpRefresh_WithNoWatermark_ReadsTheFullTwoDays()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            await InsertProcAsync(connection, Ago(TimeSpan.FromHours(30)), "0xSTART_OLD", "old", ct);
+            await InsertProcAsync(connection, Ago(TimeSpan.FromHours(2)), "0xSTART_RECENT", "recent", ct);
+            Assert.Null(await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
+
+            Assert.Equal(2, await DarlingModuleMap.RefreshAtStartAsync(connection, null, ct));
+            Assert.True(await InMapAsync(connection, "0xSTART_OLD", ct));
+            Assert.True(await InMapAsync(connection, "0xSTART_RECENT", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheStartUpRefresh_WithAWatermarkButAnEmptyMap_ReadsTheFullTwoDays()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            var watermark = Ago(TimeSpan.FromHours(3));
+            await InsertProcAsync(connection, watermark, "0xSTART_E1", "one", ct);
+            await InsertProcAsync(connection, watermark.AddHours(-1), "0xSTART_E2", "two", ct);
+            await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct);
+
+            /* The map is rebuilt empty while its state row survives: the watermark vouches for nothing. */
+            await ExecAsync(connection, "DELETE FROM collect.module_map", ct);
+            Assert.NotNull(await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
+
+            Assert.Equal(2, await DarlingModuleMap.RefreshAtStartAsync(connection, null, ct));
+            Assert.True(await InMapAsync(connection, "0xSTART_E1", ct));
+            Assert.True(await InMapAsync(connection, "0xSTART_E2", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheDailyRefresh_WithAWatermark_RepairsRowsCommittedLate_WithinTheRepairSlack_OnlyThere()
+    {
+        await RunLiveAsync(async (connection, ct) =>
+        {
+            /* The hourly path misses a row committed more than ten minutes after its collection_time, because the
+               watermark has moved past it. The daily refresh reads DailyRepairSlack (30 hours) behind the watermark:
+               it repairs rows three and ten hours behind, and leaves one 40 hours behind, where the old read (two
+               days) caught all three. */
+            var watermark = Ago(TimeSpan.FromHours(3));
+            await InsertProcAsync(connection, watermark, "0xDAILY_SEED", "seed", ct);
+            await DarlingModuleMap.RefreshRecentAsync(connection, null, DateTime.UtcNow, ct);
+
+            await InsertProcAsync(connection, watermark.AddHours(-3), "0xDAILY_LATE", "late", ct);
+            await InsertProcAsync(connection, watermark.AddHours(-10), "0xDAILY_LATE10", "late10", ct);
+            await InsertProcAsync(connection, watermark.AddHours(-40), "0xDAILY_TOOLATE", "toolate", ct);
+
+            Assert.Equal(3, await DarlingModuleMap.RefreshAsync(connection, null, ct));
+            Assert.True(await InMapAsync(connection, "0xDAILY_LATE", ct));
+            Assert.True(await InMapAsync(connection, "0xDAILY_LATE10", ct));
+            Assert.False(await InMapAsync(connection, "0xDAILY_TOOLATE", ct));
+            Assert.Equal(watermark, await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
+        });
+    }
+
+    [Fact]
+    public void SinceFor_TakesTheCallersSlack_AndStillStopsAtTheLookbackFloor()
+    {
+        var now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Unspecified);
+        /* #5519 review: the span covers the daily's own 24-hour cadence plus a margin, and stays inside the lookback. */
+        Assert.True(DarlingModuleMap.DailyRepairSlack > TimeSpan.FromHours(24));
+        Assert.True(DarlingModuleMap.DailyRepairSlack <= DarlingModuleMap.MaxLookback);
+        Assert.Equal(now.AddHours(-33), DarlingModuleMap.SinceFor(now.AddHours(-3), now, DarlingModuleMap.DailyRepairSlack));
+        Assert.Equal(now - DarlingModuleMap.MaxLookback, DarlingModuleMap.SinceFor(now.AddDays(-5), now, DarlingModuleMap.DailyRepairSlack));
+        Assert.False(DarlingModuleMap.IsCappedByLookback(now.AddHours(-3), now, DarlingModuleMap.DailyRepairSlack));
+        Assert.True(DarlingModuleMap.IsCappedByLookback(now.AddDays(-5), now, DarlingModuleMap.DailyRepairSlack));
+    }
+
+    [Fact]
+    public void TheWorker_RunsTheStartUpRefreshOnTheWatermark_AndKeepsTheDailyRefreshOnItsRepairRead()
+    {
+        var worker = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        Assert.Equal(1, worker.Split("DarlingModuleMap.RefreshAtStartAsync(").Length - 1);
+        Assert.Equal(1, worker.Split("DarlingModuleMap.RefreshAsync(").Length - 1);
+        Assert.Contains("DarlingModuleMap.RefreshAtStartAsync(tuningConnection", worker, StringComparison.Ordinal);
+        Assert.Contains("DarlingModuleMap.RefreshAsync(moduleMapConnection", worker, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task TheDailyRefresh_AdvancesTheWatermarkToo()
     {

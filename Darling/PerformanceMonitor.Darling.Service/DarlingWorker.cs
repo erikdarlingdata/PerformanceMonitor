@@ -2942,12 +2942,15 @@ LIMIT 1";
                 tuningConnection, StoreObjectConvergenceStage.Tuning, startupConvergence, stoppingToken);
             // The retained sql_handle->module map (#1568 object_name for OLD query_stats windows the CAGG serves,
             // after procedure_stats raw drops at 4d): create it, then seed it from recent procedure_stats.
+            /* #5519: at start the refresh reads from the watermark, like the hourly path, instead of re-reading two
+               days of procedure_stats on every restart (88 to 103 s of store time per call); the two-day read
+               stays for an empty map or one with no watermark. */
             /* NOT a convergence-list step (#3817): the refresh is a DATA upsert that already has a periodic
                home on the daily purge tick, and the table ensure is inseparable from it here because the
                refresh is gated on the bool it returns. */
             if (await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken))
             {
-                await DarlingModuleMap.RefreshAsync(tuningConnection, _logger, stoppingToken);
+                await DarlingModuleMap.RefreshAtStartAsync(tuningConnection, _logger, stoppingToken);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -11794,7 +11797,9 @@ AND   j.hypertable_name = '{relation}'", connection))
         DarlingFileLoggerProvider.SweepOldFiles(DarlingFileLoggerProvider.DefaultLogDirectory());
 
         /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
-           CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
+           CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. #5519: with a watermark
+           it re-reads from DailyRepairSlack behind it, not a flat two days; that span is the repair for rows
+           the hourly path missed by committing more than WatermarkSlack late. */
         await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
         await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
 
