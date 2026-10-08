@@ -29,7 +29,7 @@ const COLUMNS = [
   { key: "impact_band", label: "Band" },
   { key: "database_name", label: "Database" },
   { key: "query_hash", label: "Query hash", mono: true },
-  { key: "sample_query_text", label: "Query preview", wrap: true },
+  { key: "sample_query_text", label: "Query preview", wrap: true, valueList: false },
   { key: "total_executions", label: "Executions", format: "int" },
   { key: "total_cpu_ms", label: "CPU", format: "ms" },
   { key: "cpu_share_pct", label: "CPU %", format: "num1" },

@@ -67,6 +67,8 @@ public partial class AlertsHistoryTab : UserControl
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
         /* #5562 R8: the old list's "All" is one choice again, the span the alert table keeps (90 days), not a year. */
         TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.AlertHistoryLongestChoice, "All");
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }

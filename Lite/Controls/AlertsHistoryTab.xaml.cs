@@ -69,6 +69,8 @@ public partial class AlertsHistoryTab : UserControl
         /* R8: "All" is a span of 365 days, longer than anything Lite keeps (archive files are deleted by whole month, 3 months
            back, so rows older than 3 months survive until their month's file goes), through the shared control's longest choice. */
         RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, "All");
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }

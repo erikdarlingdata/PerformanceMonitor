@@ -48,6 +48,8 @@ public partial class JobHistoryTab : UserControl
         RangePicker.SetLongestChoice(LiteTimeRange.JobHistoryLongestChoice, "Last Year");
         /* #5562 M1: typed times and calendar periods are read in the zone the grid words its rows in (see PickerZone). */
         RangePicker.ZoneProvider = PickerZone;
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }

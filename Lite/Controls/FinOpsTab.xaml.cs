@@ -1074,6 +1074,10 @@ public partial class FinOpsTab : UserControl
 
     private async void ServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        /* #5565: the tab's grids keep their column filters per server, so the scope follows the selector - also while
+           the list repopulates, when the early return below skips the rest. */
+        ColumnFilterScope.SetServer(this, (ServerSelector.SelectedItem as ServerConnection)?.Id);
+
         if (_populatingServers) return; // same-server list repopulation, not a switch — see RefreshServerList
 
         ResetStorageDrill(); // a new server invalidates any open object/index drill
