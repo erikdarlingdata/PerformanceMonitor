@@ -381,6 +381,61 @@ public class FinOpsFleetReadParityTests : IDisposable
 
     /// <summary>One collected <c>server_properties</c> row, which is what makes a server known to the fleet read.
     /// The NOT NULL edition and hardware columns are filled with values the read never looks at.</summary>
+    /// <summary>
+    /// One server, one health score: the Server Inventory's Health column (the fleet read) and the Utilization tab's badge score the same server
+    /// from the same inputs. The inventory used to score the 24-hour average CPU against a fixed memory and storage term, so servers with
+    /// different buffer pools and free space all read the same number beside a Utilization score that differed.
+    /// </summary>
+    [Fact]
+    public async Task ServerMetrics_HealthScore_EqualsTheUtilizationScore_PerServer()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var now = DateTime.UtcNow;
+        long nextId = -1;
+        // (id, name, cpu samples, physical MB, buffer pool MB, total MB, used MB)
+        var servers = new (int Id, string Name, int[] Cpu, int PhysMb, int BpMb, int TotalMb, int UsedMb)[]
+        {
+            (101, "HEALTHY", [10, 12, 14], 65536, 40000, 100000, 40000),
+            (102, "STRAINED", [60, 85, 95], 16384, 15800, 100000, 97000),
+        };
+
+        using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+            foreach (var sv in servers)
+            {
+                SeedServerProperties(conn, sv.Id, sv.Name, nextId--, now);
+                foreach (var cpu in sv.Cpu)
+                    Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                                 VALUES ($1,$2,$3,$4,$2,$5,1)", nextId--, now.AddHours(-1), sv.Id, sv.Name, cpu);
+                Exec(conn, @"INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name,
+                              total_physical_memory_mb, available_physical_memory_mb, target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+                             VALUES ($1,$2,$3,$4,$5,1000,$5,$5,$6)", nextId--, now, sv.Id, sv.Name, sv.PhysMb, sv.BpMb);
+                Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+                              file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+                             VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',$5,$6)", nextId--, now, sv.Id, sv.Name, sv.TotalMb, sv.UsedMb);
+            }
+        }
+
+        var svc = new LocalDataService(initializer);
+        var fleet = await svc.GetServerMetricsAsync();
+        var inventoryScores = new System.Collections.Generic.List<int?>();
+
+        foreach (var sv in servers)
+        {
+            var util = (await svc.GetUtilizationEfficiencyAsync(sv.Id))!;
+            var sizes = await svc.GetDatabaseSizeLatestAsync(sv.Id);
+            util.FreeSpacePct = FinOpsHealthCalculator.FreeSpacePct(DatabaseSizeRow.AllocatedTotalMb(sizes), DatabaseSizeRow.FreeTotalMb(sizes));
+
+            Assert.Equal(util.ComputeHealthScore(), fleet[sv.Id].HealthScore);
+            inventoryScores.Add(fleet[sv.Id].HealthScore);
+        }
+
+        Assert.NotEqual(inventoryScores[0], inventoryScores[1]);
+    }
+
     private static void SeedServerProperties(DuckDBConnection conn, int serverId, string serverName, long collectionId, DateTime collectionTime) =>
         Exec(conn, @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name,
                       edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb)

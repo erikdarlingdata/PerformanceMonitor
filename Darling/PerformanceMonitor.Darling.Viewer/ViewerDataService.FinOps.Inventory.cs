@@ -35,10 +35,11 @@ public sealed partial class ViewerDataService
         DarlingFinOpsInventoryReader.ServerMetricsSqlFor(coverage, idleCutoffUtc, watermarkUtc);
 
     /// <summary>One fleet server's overlay metrics — <see cref="GetServerMetricsAsync"/>'s per-row result.</summary>
-    public readonly record struct ServerMetricsRow(decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus)
+    public readonly record struct ServerMetricsRow(
+        decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus, int? HealthScore = null)
     {
         public static ServerMetricsRow From(ServerMetricsDto dto) =>
-            new(dto.AvgCpuPct, dto.StorageTotalGb, dto.IdleDbCount, dto.ProvisioningStatus);
+            new(dto.AvgCpuPct, dto.StorageTotalGb, dto.IdleDbCount, dto.ProvisioningStatus, dto.HealthScore);
     }
 
     /// <summary>Every server's overlay metrics in one round trip (#4227); the read lives in Storage and the rollup probe stays cached here.</summary>

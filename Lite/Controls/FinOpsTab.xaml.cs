@@ -343,7 +343,7 @@ public partial class FinOpsTab : UserControl
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
                 var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
                 var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
-                data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
+                data.FreeSpacePct = FinOpsHealthCalculator.FreeSpacePct(totalStorageMb, totalFreeMb);
             }
 
             UpdateUtilizationSummary(data);
@@ -834,13 +834,8 @@ public partial class FinOpsTab : UserControl
                 async () => await Task.Run(() => _dataService!.GetServerMetricsAsync()));
             if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
 
-            // Compute health scores for each server
-            foreach (var item in data)
-            {
-                /* A server with no CPU sample in the window has a null average and so no score (a dash): memory and storage here are
-                   defaults, and a score made only of defaults says nothing about the server. */
-                item.HealthScore = FinOpsHealthCalculator.InventoryScore(item.AvgCpuPct);
-            }
+            /* The Health column comes with the collected overlay (FinOpsServerInventory.ApplyCollectedMetrics): the same score the Utilization
+               tab shows for the server, from its p95 CPU, buffer pool and free space. A server with no CPU sample has none (a dash). */
 
             _serverInventoryCache = data;
             _serverInventoryCacheTime = DateTime.Now;

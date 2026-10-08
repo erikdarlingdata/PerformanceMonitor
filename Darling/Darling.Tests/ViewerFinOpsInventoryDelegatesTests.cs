@@ -49,7 +49,7 @@ public sealed class ViewerFinOpsInventoryDelegatesTests
         Assert.Contains("FinOpsInventoryFigures.LicenseWarning(", row, StringComparison.Ordinal);
         Assert.Contains("FinOpsInventoryFigures.HardwareNote(", row, StringComparison.Ordinal);
         Assert.Contains("FinOpsInventoryFigures.PhysicalMemoryMb(", row, StringComparison.Ordinal);
-        Assert.Contains("FinOpsInventoryFigures.HealthScoreOrNull(", loader, StringComparison.Ordinal);
+        Assert.Contains("item.HealthScore = row.HealthScore;", loader, StringComparison.Ordinal);
         Assert.DoesNotContain("FinOpsHealthCalculator.Overall(", loader, StringComparison.Ordinal);
         Assert.DoesNotContain("Standard limited to", row, StringComparison.Ordinal);
     }
