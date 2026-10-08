@@ -25,7 +25,7 @@
     },
     "rules": {
       "listCap": 1000,
-      "capNote": "Showing 1,000 of {N} values. Search to find the rest.  N is the count of distinct real values (the Blanks entry is not counted) and uses a comma thousands separator. The note shows when the entries the search shows are cut off by the cap.",
+      "capNote": "Showing 1,000 of {N} values. Search to find the rest.  N is the count of distinct real values the search matches (the Blanks entry is not counted; with no search that is every value) and uses a comma thousands separator. The note shows when the cap cuts the matches off.",
       "noTicksNote": "No values are ticked, so no rows show.",
       "modeChoice": "All entries ticked: None. Otherwise fewer unticked than ticked: Hide the unticked. Otherwise ShowOnly the ticked. Counts take every distinct value of the rows (and the blank entry when the rows have a blank cell), not just the entries the search shows."
     }
