@@ -30,7 +30,16 @@ public static class JobHistoryCap
     /// belongs to the read, so a column filter that narrows the grid must not take the label away while the read is still
     /// cut at the cap: every writer of the count text, the load and the column-filter handler alike, builds it here.
     /// </summary>
-    public static string CountText(int shownCount, int readCount, int cap)
+    public static string CountText(int shownCount, int readCount, int cap) =>
+        CountText(shownCount, readCount, cap, "run(s)");
+
+    /// <summary>
+    /// <see cref="CountText(int, int, int)"/> for any list whose read is cut at a row cap, with the noun it counts
+    /// ("run(s)", "alert(s)"). The Alert History tab (D7 of the final walk) reads its newest 500 and said a bare
+    /// "500 alert(s)" at 24 hours and at 7 days, which reads as the whole answer; it now says "500 alert(s) (showing
+    /// the newest 500)" whenever the read reached the cap, however a column filter narrows the grid afterwards.
+    /// </summary>
+    public static string CountText(int shownCount, int readCount, int cap, string noun)
     {
         if (shownCount <= 0)
         {
@@ -38,6 +47,6 @@ public static class JobHistoryCap
         }
 
         var label = Label(readCount, cap);
-        return label.Length > 0 ? $"{shownCount} run(s) ({label})" : $"{shownCount} run(s)";
+        return label.Length > 0 ? $"{shownCount} {noun} ({label})" : $"{shownCount} {noun}";
     }
 }

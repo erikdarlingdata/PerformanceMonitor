@@ -59,11 +59,15 @@ public sealed class ViewerJobHistoryRow
     public bool IsLongRunning { get; init; }
 
     /// <summary>The viewer row for a store row (<see cref="DarlingJobHistoryRow"/>); the times are already naive UTC.</summary>
-    public static ViewerJobHistoryRow From(DarlingJobHistoryRow dto)
+    public static ViewerJobHistoryRow From(DarlingJobHistoryRow dto) => From(dto, null);
+
+    /// <summary><see cref="From(DarlingJobHistoryRow)"/> stamped with the row's own server's clock (D5 of the final walk).</summary>
+    public static ViewerJobHistoryRow From(DarlingJobHistoryRow dto, ServerClock? clock)
     {
         ArgumentNullException.ThrowIfNull(dto);
         return new()
         {
+            Clock = clock,
             ServerId = dto.ServerId,
             ServerName = dto.ServerName,
             InstanceId = dto.InstanceId,
@@ -103,12 +107,22 @@ public sealed class ViewerJobHistoryRow
     /// the row's own wall clock said.
     /// </summary>
     public string RunTimeLocal => RunDateTimeUtc is { } t
-        ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
+        ? ForRowDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
         : "";
+
+    /// <summary>This row's own server's clock (its time zone where one is known, else its UTC offset; the viewer
+    /// machine's offset while none is collected), stamped by <see cref="ViewerDataService.GetJobHistoryAsync"/> from the
+    /// fleet's clocks, as Alert History's rows are (D5 of the final walk). Server mode converts on it, so a SQL Server's
+    /// jobs read in that server's hour whichever server tab is open, and with none open they no longer read in the
+    /// machine's. Null (a row built without one) falls back to the active server's clock.</summary>
+    public ServerClock? Clock { get; init; }
+
+    private DateTime ForRowDisplay(DateTime naiveUtc) =>
+        ViewerTimeHelper.ConvertToDisplay(naiveUtc, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock);
 
     /// <summary><see cref="LastSuccessfulRunUtc"/> as the plain wall time, for the reason <see cref="RunTimeLocal"/> gives.</summary>
     public string LastSuccessfulRunLocal => LastSuccessfulRunUtc is { } t
-        ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
+        ? ForRowDisplay(t).ToString("yyyy-MM-dd HH:mm:ss")
         : "Never";
 
     public string DurationFormatted => FormatDuration(RunDurationSeconds);
@@ -163,10 +177,14 @@ public sealed partial class ViewerDataService
         var dtos = await DarlingJobHistoryReader.GetAsync(
             _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken);
 
+        /* D5: each row converts on its own server's clock, read from the fleet's held clocks (ServerClockCache), the way
+           Alert History's rows do, not on whichever server tab happens to be active. */
+        var clocks = await _alertClocks.GetAsync(cancellationToken);
+        var nowUtc = DateTime.UtcNow;
         var rows = new List<ViewerJobHistoryRow>(dtos.Count);
         foreach (var dto in dtos)
         {
-            rows.Add(ViewerJobHistoryRow.From(dto));
+            rows.Add(ViewerJobHistoryRow.From(dto, ViewerTimeHelper.ClockForServerOrMachine(clocks, dto.ServerId, TimeZoneInfo.Local, nowUtc)));
         }
 
         return rows;

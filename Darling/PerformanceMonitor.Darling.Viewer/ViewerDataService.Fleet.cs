@@ -325,10 +325,19 @@ public sealed class FleetRollup
         ? "All 1 server healthy"
         : $"All {TotalServers} servers healthy";
 
-    /// <summary>"Monitoring N servers" subtitle for the fleet header.</summary>
-    public string MonitoringText => TotalServers == 1
-        ? "Monitoring 1 server"
-        : $"Monitoring {TotalServers} servers";
+    /// <summary>The registered fleet size when this roll-up counts only the servers the Overview search leaves
+    /// (<see cref="OverviewCardView.BuildRollup"/>); null when it counts the whole fleet.</summary>
+    public int? FilteredOfTotal { get; internal set; }
+
+    /// <summary>"Monitoring N servers" subtitle for the fleet header; "Monitoring N of M servers" while the
+    /// Overview search narrows it to N of the M registered.</summary>
+    public string MonitoringText => FilteredOfTotal.HasValue
+        ? FilteredOfTotal.Value == 1
+            ? $"Monitoring {TotalServers} of 1 server"
+            : $"Monitoring {TotalServers} of {FilteredOfTotal.Value} servers"
+        : TotalServers == 1
+            ? "Monitoring 1 server"
+            : $"Monitoring {TotalServers} servers";
 
     /// <summary>"N server(s)" for the collection-failures total line.</summary>
     public string CollectionFailuresText => ServersWithCollectionFailures == 1

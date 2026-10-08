@@ -38,6 +38,13 @@ public partial class AlertsHistoryTab : UserControl
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
+
+    /// <summary>The read's row cap (D7): the newest 500 alerts. The count text says "showing the newest 500" when the read
+    /// reached it (<see cref="JobHistoryCap.CountText(int, int, int, string)"/>).</summary>
+    internal const int RowCap = 500;
+
+    /// <summary>How many rows the last read returned, before any column filter: the cap belongs to the read.</summary>
+    private int _lastReadRowCount;
     private readonly DispatcherTimer _staleDataTimer;
 
     /* #4766: the clock of the open server tab for a server id, or null when that server has no tab open. */
@@ -100,7 +107,7 @@ public partial class AlertsHistoryTab : UserControl
             var dataService = _dataService;
             var (alerts, collectedClocks) = await System.Threading.Tasks.Task.Run(async () =>
             {
-                var rows = await dataService.GetAlertHistoryAsync(hoursBack, 500, serverId);
+                var rows = await dataService.GetAlertHistoryAsync(hoursBack, RowCap, serverId);
                 return (rows, await ReadCollectedClocksAsync(dataService, rows));
             });
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
@@ -115,7 +122,10 @@ public partial class AlertsHistoryTab : UserControl
 
             var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
             NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AlertCountIndicator.Text = displayCount > 0 ? $"{displayCount} alert(s)" : "";
+            AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+            /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
+            _lastReadRowCount = alerts.Count;
+            AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
             AppLogger.Debug("AlertsHistory", $"Loaded {displayCount} alert(s) (query returned {alerts.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
