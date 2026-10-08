@@ -40,7 +40,7 @@
  */
 
 import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
-import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
+import { renderPanel, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
@@ -643,7 +643,7 @@ function topQueriesCard(server, ctx, ranking, picker) {
     } else if (queries.length) {
       parts.push(
         emptyStrip(
-          "None of these rows carries both a query_hash and a database name, which is what get_query_trend " +
+          "None of these rows carries both a query hash and a database name, which is what the query trend " +
             "keys on, so there is nothing here to trend."
         )
       );
@@ -912,6 +912,8 @@ export function dailySummaryPanels(server) {
       const grid = VIZ.table(data, {
         rowsKey: "days",
         columns: DAILY_RANGE_COLUMNS,
+        /* Click-through 10: newest day first, as the other grids open. */
+        orderRows: newestFirst("summary_date"),
         emptyText:
           "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one.",
       });
@@ -1046,6 +1048,8 @@ function line(title, read, params, rowsKey, xKey, series, opts = {}) {
     emptyText: opts.emptyText,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */
     sourceKey: opts.sourceKey,
+    /* The panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */
+    hideWhenNotCollected: opts.hideWhenNotCollected === true,
     span: opts.span ?? 1,
     /* The chart menu's "at This Time" item opens the SQL Server Queries or Blocking tab, so a panel on a registry
        without them (the one PostgreSQL line) passes atTime: false. A chart offers the one item that matches it, as the
@@ -1634,7 +1638,7 @@ export const SERVER_TABS = [
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
           emptyText:
-            "No Query Store rows, no query_store fan-out run and no query_store_health capture for this " +
+            "No Query Store rows, no Query Store collection run and no Query Store health capture for this " +
             "server in this window. The read says which of those it found rather than showing an empty grid.",
         },
         {
@@ -1996,6 +2000,8 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "collectors",
           columns: COLLECTOR_COLUMNS,
+          /* Click-through 10: worst first, not A to Z. */
+          orderRows: worstFirst,
           emptyText: "No collection log rows for this server yet.",
           /* #5227: a row is the way into that collector's run history (the Collection Log below). */
           onRow: (row, tr) => {
@@ -2088,6 +2094,8 @@ export const POSTGRES_TABS = [
           format: "pct",
           unit: "%",
           emptyText: "No CPU samples in this window. This is an Amazon Aurora feature — on a stock PostgreSQL target this panel is permanently empty.",
+          /* Click-through 3: on a server that is not Aurora the read answers "not collected", and the panel is not drawn. */
+          hideWhenNotCollected: true,
           atTime: false,
         }
       ),
@@ -2150,6 +2158,8 @@ export const POSTGRES_TABS = [
           viz: "table",
           rowsKey: "collectors",
           columns: COLLECTOR_COLUMNS,
+          /* Click-through 10: worst first, not A to Z. */
+          orderRows: worstFirst,
           emptyText: "No collection log rows for this server yet.",
         },
         {
@@ -4853,7 +4863,7 @@ const COLLECTOR_COLUMNS = [
   { key: "run_at", label: "Run at", hideWhenEmpty: true },
   { key: "next_run_utc", label: "Next run", format: "time", hideWhenEmpty: true },
   { key: "run_time_note", label: "Run time", wrap: true, hideWhenEmpty: true },
-  { key: "last_error", label: "Last Error", wrap: true },
+  { key: "last_error", label: "Last Error", wrap: true, plain: true },
   /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
      plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
      Collection Health surface that still hides it. note_summary, not the raw last_note: it carries the
@@ -4861,21 +4871,21 @@ const COLLECTOR_COLUMNS = [
      one, composed server-side from the shared formatter so this table cannot render it a third way.
      A collector's label=value counts read as its latest NOTED run's ("latest run:" only when every run
      carried them), never a window total. */
-  { key: "note_summary", label: "Note", wrap: true },
+  { key: "note_summary", label: "Note", wrap: true, plain: true },
   /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
      found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
      column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so
      this table cannot render the sentence a second way. */
-  { key: "output_finding", label: "Output", wrap: true },
+  { key: "output_finding", label: "Output", wrap: true, plain: true },
   /* #4620: why a collector that stopped doing what it used to do reads WARNING. The Status column already
      showed the floor, but no column showed the sentence behind it, so a regressed row read WARNING with
      every other cell blank. Composed server-side from the shared formatter, like the two columns above. */
-  { key: "regression_finding", label: "Regression", wrap: true },
+  { key: "regression_finding", label: "Regression", wrap: true, plain: true },
   /* #5249: a PostgreSQL collector this server's engine does not collect (a collector this engine kind can never run: an Aurora-only reader on stock PostgreSQL, the sampler on Aurora) has no log row,
      so the server lists it with status not_collected and the sentence saying why. The status paints with the
      neutral Unknown band, not an error one: a gate is not a fault. Left out unless a row has a message, so a
      server with no such collector (and every SQL Server tab) shows no column of dashes. */
-  { key: "message", label: "Why not collected", wrap: true, hideWhenEmpty: true },
+  { key: "message", label: "Why not collected", wrap: true, hideWhenEmpty: true, plain: true },
 ];
 
 const HEAVIEST_COLUMNS = [

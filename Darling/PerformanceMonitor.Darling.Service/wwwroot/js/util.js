@@ -8,7 +8,8 @@
 
 /*
  * Shared leaf utilities for Darling Web (#1562): DOM builders, UTC->local time, value formatters, and the API
- * fetch helper. This module imports only database-filter-reads.js, which is pure data and imports nothing (so it is
+ * fetch helper. This module imports only database-filter-reads.js (pure data) and plain-text.js (pure text rules), neither of which imports
+ * anything (so it is
  * still the base of the module DAG: app/panels/charts/pages all import it, so there is no import cycle). Two rules are
  * enforced HERE so every caller inherits them:
  *   R4 (XSS): the el() builder assigns untrusted text ONLY through textContent / text nodes; it throws if a
@@ -18,6 +19,7 @@
  */
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
+import { plainText } from "./plain-text.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -755,7 +757,7 @@ async function classifyResponse(resp) {
 
   if (!resp.ok) {
     const msg = body && typeof body.error === "string" ? body.error
-      : isEnvelope ? body.message
+      : isEnvelope ? plainText(body.message)
       : "Request failed (HTTP " + resp.status + ")";
     return { kind: "error", message: msg, status: resp.status };
   }
@@ -764,9 +766,11 @@ async function classifyResponse(resp) {
      Data payloads never carry a top-level message, so this never misfires on real data. */
   if (isEnvelope) {
     if (body.status === "error" || body.status === "invalid") {
-      return { kind: "error", message: body.message, status: resp.status };
+      return { kind: "error", message: plainText(body.message), status: resp.status };
     }
-    return { kind: "empty", status: body.status, message: body.message, hints: body.hints || null, data: body };
+    /* The message is the one the page shows: the service wrote it for an MCP client, so its internal names are put into
+       words here (click-through 3 and 4). The envelope itself, in `data`, stays as the service sent it. */
+    return { kind: "empty", status: body.status, message: plainText(body.message), hints: body.hints || null, data: body };
   }
 
   if (resp.ok && raw && body === null) {

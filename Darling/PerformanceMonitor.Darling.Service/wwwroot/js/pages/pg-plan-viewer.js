@@ -21,6 +21,7 @@
 
 import { el } from "../util.js";
 import { copyText, downloadText } from "../grid-tools.js";
+import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 
 const UNPARSED_NOTE = "This stored plan is not valid JSON (the log line may have been cut), so it is shown as stored and Download is off.";
 const CAPTURE_NOTE = "This capture's figures; other captures of the same shape may differ.";
@@ -139,7 +140,8 @@ export function pgPlanCell(server, row) {
       draw();
     });
     host.appendChild(button);
-    if (open) host.appendChild(panelFor(row));
+    if (open) dockPanelUnderRow(host, panelFor(row));
+    else undockPanel(host);
   };
   draw();
   return host;

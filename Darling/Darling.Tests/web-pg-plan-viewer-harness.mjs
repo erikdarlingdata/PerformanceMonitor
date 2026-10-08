@@ -55,8 +55,11 @@ const scenarios = {
     out.hasDownload = cell.byText("Download .json") !== null;
     out.expanded = cell.byText("Hide plan").attrs["aria-expanded"];
     out.fetches = fetches.length;
+    out.openClass = cell.className;
+    out.hasSpacer = cell.all((n) => n.className === "plan-spacer").length === 1;
     cell.byText("Hide plan").click();
     out.preAfterHide = pre(cell) !== null;
+    out.closedClass = cell.className;
   },
   async textOnly() {
     viewer.resetPgPlanViewer();

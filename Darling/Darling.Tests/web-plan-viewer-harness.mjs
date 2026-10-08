@@ -78,8 +78,11 @@ const scenarios = {
     out.hasCopy = cell.byText("Copy") !== null;
     out.hasDownload = cell.byText("Download .sqlplan") !== null;
     out.noHashCell = viewer.storedPlanCell("srv-a", { query_hash: null }).textContent;
+    out.openClass = cell.className;
+    out.hasSpacer = cell.all((n) => n.className === "plan-spacer").length === 1;
     cell.byText("Hide plan").click();
     out.closed = pre(cell) === null;
+    out.closedClass = cell.className;
   },
   async textOnly() {
     planReply(XML);

@@ -41,6 +41,45 @@ internal static class DarlingGatedCollectorRows
     /// <summary>The status word on a gated row: the same word the <c>not_collected</c> envelope uses.</summary>
     internal const string NotCollectedStatus = "not_collected";
 
+    /// <summary>The two Always On collectors. On a SQL Server without Always On they run and log HEALTHY with zero rows.</summary>
+    private static readonly string[] AlwaysOnCollectors = { "ag_database_replica_states", "ag_replica_states" };
+
+    /// <summary>The sentence on a not-applicable Always On row.</summary>
+    internal const string AlwaysOnOffMessage = "Always On availability groups are not enabled on this server, so there is nothing for this collector to read.";
+
+    internal static bool IsAlwaysOnCollector(string collectorName) =>
+        Array.IndexOf(AlwaysOnCollectors, collectorName) >= 0;
+
+    /// <summary>
+    /// True when the server's latest <c>server_properties</c> snapshot says Always On (HADR) is off. No snapshot, or a
+    /// failed read, is false: with no evidence the log-driven rows stand as they are.
+    /// </summary>
+    internal static async Task<bool> AlwaysOnOffAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var properties = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, serverId, cancellationToken);
+            return properties is { IsHadrEnabled: false };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// One <c>not_collected</c> row per Always On collector that <paramref name="loggedRows"/> lists, in collector-name order,
+    /// with the same three keys as the engine-gated rows.
+    /// </summary>
+    internal static IReadOnlyList<object> AlwaysOnOffRows(IEnumerable<CollectorHealth> loggedRows) =>
+        loggedRows
+            .Select(r => r.CollectorName)
+            .Where(IsAlwaysOnCollector)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .Select(n => (object)new { collector = n, status = NotCollectedStatus, message = AlwaysOnOffMessage })
+            .ToList();
+
     /// <summary>
     /// The rows for <paramref name="serverName"/>, or none when the server is not PostgreSQL, the engine read
     /// fails, or nothing is gated. Reads the server's engine edition and kind from the registry, then asks
