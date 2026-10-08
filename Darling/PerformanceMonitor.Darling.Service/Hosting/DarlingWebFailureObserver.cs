@@ -32,11 +32,16 @@ internal sealed class DarlingWebFailureObserver
 {
     private readonly RequestDelegate _next;
     private readonly ILogger _logger;
+    private readonly DarlingHttpRefusalLog _preAuthThrottle;
 
-    public DarlingWebFailureObserver(RequestDelegate next, ILogger logger)
+    /// <param name="preAuthThrottle">Round 2, L1: the throttle for the failure line of a request that has not passed the auth gate
+    /// (<see cref="DarlingWebFailureLog.RequestTracking.PassedAuth"/>). The host passes the refusal log it created for this started
+    /// server, so a rebind starts with a clean budget.</param>
+    public DarlingWebFailureObserver(RequestDelegate next, ILogger logger, DarlingHttpRefusalLog preAuthThrottle)
     {
         _next = next;
         _logger = logger;
+        _preAuthThrottle = preAuthThrottle;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -69,7 +74,26 @@ internal sealed class DarlingWebFailureObserver
         }
         catch (Exception ex)
         {
-            DarlingWebFailureLog.Report(_logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex);
+            /* Round 2, L1: this arm now also sees throws from compression, the Host guard and the auth gate, so the request may
+               not be authenticated. Such a line goes through the refusal log's throttle (once per source per window); the answer
+               below is unchanged. A request that got through the gate keeps the unthrottled line it always had. */
+            if (tracking.PassedAuth)
+            {
+                DarlingWebFailureLog.Report(_logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex);
+            }
+            else
+            {
+                var decision = _preAuthThrottle.Observe(
+                    DarlingRefusalGate.PreAuthFailure, DarlingHttpRefusalLog.DescribeSource(context.Connection.RemoteIpAddress), DateTime.UtcNow);
+                if (decision.Log)
+                {
+                    DarlingWebFailureLog.Report(_logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex);
+                }
+                else
+                {
+                    DarlingWebFailureLog.MarkReported();
+                }
+            }
 
             /* Only log, per the ruling, once the response has already started -- there is no header or body left to change. */
             if (!context.Response.HasStarted)

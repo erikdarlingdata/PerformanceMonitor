@@ -584,7 +584,7 @@ public sealed class DarlingWebFailureHandlingTests
         builder.Logging.ClearProviders();
         var app = builder.Build();
         var capturing = new CapturingLogger<DarlingWebHostService>();
-        app.UseMiddleware<DarlingWebFailureObserver>(capturing);
+        app.UseMiddleware<DarlingWebFailureObserver>(capturing, new DarlingHttpRefusalLog());
         app.Use((HttpContext _, RequestDelegate _) => throw new InvalidOperationException("gate fault"));
         await app.StartAsync();
         using var server = app.GetTestServer();
@@ -596,6 +596,58 @@ public sealed class DarlingWebFailureHandlingTests
         Assert.Equal(1, capturing.Inner.CountAtLevel(LogLevel.Error));
         Assert.Single(capturing.Inner.Lines);
         Assert.Contains("/api/anything", capturing.Inner.Joined, StringComparison.Ordinal);
+        /* The line is the catch arm's own (it carries the exception type), not the post-check's "no cause of its own" line; and it
+           is the only one, so a Report plus a ReportUnlogged for one request would fail here. */
+        Assert.Contains(nameof(InvalidOperationException), capturing.Inner.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("unreported", capturing.Inner.Joined, StringComparison.Ordinal);
+    }
+
+    /// <summary>Round 2, L1: the observer sits ahead of the Host guard and the auth gate, so a throw before the request has passed
+    /// the auth gate may belong to a caller nobody authenticated. Its line goes through the refusal log's throttle: the same
+    /// source throwing five times logs once. The answer is a 500 each time. After the gate (a request that passed auth), every
+    /// failure still writes its line.</summary>
+    [Fact]
+    public async Task APreAuthThrowRepeated_LogsWithinTheThrottle_WhileAPostAuthThrowLogsEveryTime()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        var capturing = new CapturingLogger<DarlingWebHostService>();
+        app.UseMiddleware<DarlingWebFailureObserver>(capturing, new DarlingHttpRefusalLog());
+        app.Use((HttpContext context, RequestDelegate next) =>
+        {
+            if (context.Request.Path.StartsWithSegments("/pre"))
+            {
+                throw new InvalidOperationException("pre-auth fault");
+            }
+
+            DarlingWebFailureLog.NotePassedAuth();
+            throw new InvalidOperationException("post-auth fault");
+        });
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        for (var i = 0; i < 5; i++)
+        {
+            var ctx = await Send(server, "/pre/anything");
+            Assert.Equal(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
+        }
+
+        await WaitForLinesAsync(capturing.Inner, 1);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(1, capturing.Inner.CountAtLevel(LogLevel.Error));
+        Assert.Single(capturing.Inner.Lines);
+
+        for (var i = 0; i < 3; i++)
+        {
+            await Send(server, "/api/anything");
+        }
+
+        await WaitForLinesAsync(capturing.Inner, 4);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(4, capturing.Inner.CountAtLevel(LogLevel.Error));
+        Assert.Equal(4, capturing.Inner.Lines.Count);
     }
 
     /// <summary>S5: the line names the server as the registry does when the read resolved one, and otherwise passes the request
@@ -608,7 +660,7 @@ public sealed class DarlingWebFailureHandlingTests
         builder.Logging.ClearProviders();
         var app = builder.Build();
         var capturing = new CapturingLogger<DarlingWebHostService>();
-        app.UseMiddleware<DarlingWebFailureObserver>(capturing);
+        app.UseMiddleware<DarlingWebFailureObserver>(capturing, new DarlingHttpRefusalLog());
         app.MapGet("/api/__test/resolved", () =>
         {
             DarlingWebFailureLog.NoteResolvedServer("example-sql-01");

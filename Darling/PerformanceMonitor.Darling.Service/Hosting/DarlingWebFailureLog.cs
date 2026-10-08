@@ -113,6 +113,11 @@ internal static class DarlingWebFailureLog
 
         /// <summary>The name the registry resolved the read's server to, or null when the read resolved none.</summary>
         public string? ServerName { get; set; }
+
+        /// <summary>True once the request got through the auth gate (or, on a server with none, the Host guard), so a throw after
+        /// that point is a signed-in caller's failure. A throw before it can come from a caller nobody has authenticated, and the
+        /// observer sends that line through a throttle (L1, round 2).</summary>
+        public bool PassedAuth { get; set; }
     }
 
     private static readonly System.Threading.AsyncLocal<RequestTracking?> s_requestReported = new();
@@ -127,7 +132,16 @@ internal static class DarlingWebFailureLog
         return box;
     }
 
-    private static void MarkReported()
+    /// <summary>Round 2, L1: the auth gate (or the Host guard of a server with none) calls this once the request is let through.
+    /// Ignored outside a tracked request.</summary>
+    internal static void NotePassedAuth()
+    {
+        if (s_requestReported.Value is { } box) box.PassedAuth = true;
+    }
+
+    /// <summary>Ticks the request's tracking as reported without writing a line: the observer's throttled arm uses it when the
+    /// throttle folded the line, so the post-check does not write a second one for the same request.</summary>
+    internal static void MarkReported()
     {
         var box = s_requestReported.Value;
         if (box is not null) box.Reported = true;
@@ -190,8 +204,11 @@ internal static class DarlingWebFailureLog
     /// <summary>
     /// The ONE log line for a failed request (#4276): a Warning for a timeout, an Error for anything else,
     /// naming the route, the elapsed milliseconds, the kind, the exception type and the SQLSTATE. No
-    /// throttle — unlike <c>DarlingHttpRefusalLog</c>'s refusals, a failed READ on an operator's own LAN
-    /// dashboard is not adversary-shaped traffic, so there is no flood to bound. <paramref name="route"/> is
+    /// throttle here — unlike <c>DarlingHttpRefusalLog</c>'s refusals, a failed READ on an operator's own LAN
+    /// dashboard is not adversary-shaped traffic, so there is no flood to bound. That holds for a request that got through the auth
+    /// gate. The observer sits ahead of the Host guard and the auth gate, so a throw from one of those, or from compression,
+    /// may belong to a caller nobody has authenticated: the observer sends THAT line through the refusal log's throttle before it
+    /// calls this (<see cref="RequestTracking.PassedAuth"/>). <paramref name="route"/> is
     /// request-supplied (the backstop passes <c>context.Request.Path.Value</c> straight off the wire), so it
     /// goes through <see cref="DarlingHttpRefusalLog.Sanitize"/> the same way that log sanitizes a Host
     /// header, before either branch below writes it.

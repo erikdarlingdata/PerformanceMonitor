@@ -996,23 +996,21 @@ public sealed class DarlingWebHostService : BackgroundService
            started server so a rebind starts with a clean budget. */
         var refusals = new DarlingHttpRefusalLog();
 
-        /* Pipeline order: response compression (#4188) runs FIRST of all, ahead of every gate below — it only
-           transforms an OUTGOING body (Content-Encoding), never a routing or auth decision, so it costs
-           nothing to wrap the gates' own refusal bodies and the login page in it too. Then the Host-allowlist
-           middleware runs on EVERY request (both modes) as the DNS-rebinding guard — it must stay FIRST after
-           compression, ahead of the #4276 backstop too (see HostHeaderGuardTests, #1648): that guard is the
-           fix for a previously-exploited hole, and a handler ahead of it would itself be new unauthenticated
-           surface on the tokenless loopback bind. Then (network mode, or the token-keeping degraded loopback-only
-           server, see requireTokenWhenLoopbackOnly) the auth middleware, then the
-           #4276 failure backstop, then the no-store stamp on /api/* responses, then DarlingWebEndpoints.MapAll
-           -> UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
-           UseEndpoints at the tail, so the static-file middleware sits behind these gates and serves the SPA
-           for non-API paths. */
-        /* W12: the failure observer is the outermost middleware. It decides nothing before next() runs (see
-           DarlingWebFailureObserver), so it adds no surface ahead of the Host guard; it is a class, not an app.Use lambda, and the
-           Host guard stays the first app.Use (HostHeaderGuardTests). It is the #4276 backstop folded in: route exceptions are caught
-           and answered here as before, and a 5xx nothing reported leaves its one line here. */
-        app.UseMiddleware<DarlingWebFailureObserver>(_logger);
+        /* Pipeline order: the failure observer (W12, which folded in the #4276 backstop), then response compression (#4188), then the
+           Host-allowlist/DNS-rebinding guard (both modes), then (network mode, or the token-keeping degraded loopback-only server,
+           see requireTokenWhenLoopbackOnly) the auth middleware, then a marker that the request has passed the gate, then the
+           no-store stamp on /api/* responses, then DarlingWebEndpoints.MapAll -> UseDefaultFiles -> UseStaticFiles.
+           WebApplication auto-inserts UseRouting at the head and UseEndpoints at the tail, so the static-file middleware sits
+           behind these gates and serves the SPA for non-API paths.
+
+           The observer is outermost so a throw from compression, the Host guard or the auth gate is logged too. It decides
+           nothing about a request before next() runs (no refusal, no write, no read of the body), so it adds no unauthenticated
+           surface ahead of the Host guard, which stays the first app.Use (HostHeaderGuardTests, #1648: that guard is the fix for a
+           previously-exploited hole, and a handler that DECIDED anything ahead of it would be new surface on the tokenless loopback
+           bind). Compression only transforms an OUTGOING body (Content-Encoding), never a routing or auth decision, so it costs
+           nothing to wrap the gates' own refusal bodies and the login page in it. A throw before the marker below comes from a
+           request nobody has authenticated, so the observer's line for it goes through the refusals throttle (round 2, L1). */
+        app.UseMiddleware<DarlingWebFailureObserver>(_logger, refusals);
 
         app.UseResponseCompression();
 
@@ -1238,6 +1236,14 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             });
         }
+
+        /* Round 2, L1: past this point a request has passed the auth gate (or, on a server with no gate, the Host guard), so a throw
+           from here on is a failure of a caller the service let in and the observer logs it unthrottled, as the #4276 backstop did. */
+        app.Use(async (context, next) =>
+        {
+            DarlingWebFailureLog.NotePassedAuth();
+            await next(context);
+        });
 
         /* #4276, W12: the failure backstop is no longer here. It is DarlingWebFailureObserver, registered FIRST (before response
            compression), so a throw from the Host guard, the auth gate or compression is logged too, and still once per request. */

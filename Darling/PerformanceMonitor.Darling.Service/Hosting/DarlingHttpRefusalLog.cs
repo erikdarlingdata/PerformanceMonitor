@@ -41,6 +41,11 @@ internal enum DarlingRefusalGate
     /// SUCCESSFULLY authenticated subject (the role-mapping denial) stays a direct log line instead: it
     /// is the audit trail, and reaching it costs the caller a real IdP handshake.</summary>
     SignIn,
+
+    /// <summary>A throw from response compression, the Host guard or the auth gate itself, before the request was let through
+    /// (round 2, L1). Not a refusal: the failure observer uses this key to throttle the failure line it writes for a caller nobody
+    /// has authenticated, so a request that makes a gate throw repeatedly cannot fill the log with stack traces.</summary>
+    PreAuthFailure,
 }
 
 /// <summary>
@@ -264,6 +269,7 @@ internal sealed class DarlingHttpRefusalLog
         DarlingRefusalGate.SourceCidr => "source address allowlist (network.allowFrom)",
         DarlingRefusalGate.ReadOnlySeat => "read-only seat (web.network.oidc viewerRoles)",
         DarlingRefusalGate.SignIn => "OIDC sign-in flow (web.network.oidc)",
+        DarlingRefusalGate.PreAuthFailure => "failure before the request was authenticated",
         _ => gate.ToString(),
     };
 
