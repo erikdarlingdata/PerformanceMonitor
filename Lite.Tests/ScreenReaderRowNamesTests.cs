@@ -290,20 +290,37 @@ public class ScreenReaderRowNamesTests
             }
 
             var watchersBefore = AccessibleNames.WatcherCount;
-            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
 
-            for (var i = 0; i < 2000; i++)
+            /* A handler that allocates per call allocates in EVERY window below; a one-off cost the runtime pays on this thread
+               (the JIT moving a handler to its optimised code, a type or static first reached on the CI machine) lands in one
+               window at most. CI saw 23704 bytes once over 640,000 calls, which is the second kind, so the proof is the
+               smallest window: a real per-call allocation can never make it zero. */
+            long Window(int passes)
             {
-                foreach (var element in elements)
+                var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+
+                for (var i = 0; i < passes; i++)
                 {
-                    foreach (var handler in handlers)
+                    foreach (var element in elements)
                     {
-                        handler(element, args);
+                        foreach (var handler in handlers)
+                        {
+                            handler(element, args);
+                        }
                     }
                 }
+
+                return GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
             }
 
-            var allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+            Window(500);
+            var allocated = long.MaxValue;
+
+            for (var w = 0; w < 5; w++)
+            {
+                allocated = Math.Min(allocated, Window(400));
+            }
+
             var watchersAfter = AccessibleNames.WatcherCount;
             window.Close();
             return (allocated, watchersBefore, watchersAfter);

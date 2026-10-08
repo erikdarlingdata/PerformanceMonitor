@@ -170,7 +170,11 @@ public sealed class ViewerServerSetSyncTests
 
         Assert.Matches(@"\bservers\s*=\s*_fleet\s*\.\s*All\b", overview);
         Assert.Matches(@"\blist\s*=\s*servers\s*\.\s*ToList\s*\(", overview);
-        Assert.Matches(@"totalServerCount\s*:\s*list\s*\.\s*Count\b", overview);
+        /* The roll-up goes through OverviewCardView.BuildRollup (the Overview search narrows it, D9): its registered
+           count is still list.Count, and the count a search-box change rebuilds the roll-up with (the
+           _overviewRegisteredCount field) is stored from that same list.Count. */
+        Assert.Matches(new Regex(@"\bBuildRollup\s*\([^;]*,\s*list\s*\.\s*Count\s*,", RegexOptions.Singleline), overview);
+        Assert.Matches(@"\b_overviewRegisteredCount\s*=\s*list\s*\.\s*Count\b", overview);
 
         /* The database state editor lists the servers Settings was handed, and Settings is handed the fleet
            when it opens, so an editor opened after the reload lists the reloaded set. */
