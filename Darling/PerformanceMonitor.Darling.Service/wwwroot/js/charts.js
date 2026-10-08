@@ -29,9 +29,10 @@ const CHART_MIN_W = 300;
 const H = 300;
 /* A pointer drag shorter than this many CSS pixels is a click, not a brush. */
 const BRUSH_MIN_PX = 8;
-/* The ranked bar chart still draws in a fixed 1000-wide viewBox that CSS scales (xMinYMin meet), so its text scales with the
-   panel; it shares none of the line/scatter geometry. */
-const BAR_W = 1000;
+/* The ranked bar chart is drawn at its box's real width like the line and scatter charts (#5586); its row geometry is its own.
+   A label is at most BAR_LABEL_CHARS characters, and its 12px text is about BAR_CHAR_PX px a character (0.63 em, a little over the average so a capital-heavy name still fits). */
+const BAR_LABEL_CHARS = 30;
+const BAR_CHAR_PX = 7.6;
 /* Top margin leaves headroom for the y-axis unit caption to sit fully clear of the top tick's label. */
 const M = { l: 58, r: 16, t: 26, b: 30 };
 const PLOT_H = H - M.t - M.b;
@@ -784,11 +785,13 @@ export function renderLineChart(spec) {
  * Render a horizontal RANKED bar chart into a returned `.chart` node (the compose "bar" viz — a topN result).
  * spec: { items:[{label,value,color?}], formatValue?, unit? } — items already ordered (value DESC) + bounded by
  * the query's topN. Bars scale to the largest value; each carries a native SVG <title> for the full label+value.
- * Rendered at a per-row height so a tall list stays readable (the container scrolls; the SVG never squashes).
+ * Rendered at a per-row height so a tall list stays readable (the container scrolls; the SVG never squashes), at the width its box has (a
+ * resize redraws it; a `widthKey` names the chart so a poll's rebuild is drawn at the width it had).
  * onSelect (design D6): when an item carries a `drill` ([{dimension, value}]), its bar becomes clickable and calls
  * onSelect(item.drill) so the caller can re-run the panel filtered to that category (a transient drill-down).
  */
 export function renderBarChart(spec) {
+  const widthKey = spec.widthKey || null;
   const { items, formatValue = (v) => String(v), thresholds = null, onSelect = null } = spec;
   const rows = (items || []).filter((d) => d && d.value != null && !isNaN(d.value));
   if (!rows.length) return el("div", { class: "chart" }, [emptyStrip("No values to chart.")]);
@@ -799,55 +802,68 @@ export function renderBarChart(spec) {
 
   const rowH = 26;
   const gap = 8;
-  const labelW = 220;
-  const valueW = 110;
-  const barLeft = labelW + 8;
-  const barW = BAR_W - barLeft - valueW;
+  /* The height follows the bar count, not the width, so the plot box never feeds back into the width it watches. */
   const height = M.t + shown.length * (rowH + gap);
+  const valueTexts = shown.map((d) => formatValue(Number(d.value)));
+  /* The label gutter fits the longest label (at most BAR_LABEL_CHARS characters) and takes at most a third of the width, and
+     the value gutter fits the longest value, both by the 12px text's width (#5586): the text is drawn at its CSS size at
+     any panel width, so a narrow panel truncates the label rather than scaling it down. */
+  const buildBars = (W) => {
+    const longestLabel = Math.max(...shown.map((d) => Math.min(BAR_LABEL_CHARS, String(d.label == null || d.label === "" ? "—" : d.label).length)));
+    const labelW = Math.round(Math.min(longestLabel * BAR_CHAR_PX + 8, Math.max(72, W * 0.35)));
+    const labelChars = Math.min(BAR_LABEL_CHARS, Math.max(2, Math.floor((labelW - 8) / BAR_CHAR_PX)));
+    const valueW = Math.round(Math.max(...valueTexts.map((t) => t.length)) * BAR_CHAR_PX + 12);
+    const barLeft = labelW + 8;
+    const barW = Math.max(40, W - barLeft - valueW);
 
-  const root = svg("svg", { viewBox: `0 0 ${BAR_W} ${height}`, preserveAspectRatio: "xMinYMin meet", role: "img" });
+    const root = svg("svg", { viewBox: `0 0 ${W} ${height}`, width: W, height, style: `width:${W}px;height:${height}px`, class: "plot-svg", role: "img" });
 
-  shown.forEach((d, i) => {
-    const y = M.t + i * (rowH + gap);
-    const val = Number(d.value);
-    const w = Math.max(1, (val / domainMax) * barW);
-    const color = normalizeColor(d.color);
+    shown.forEach((d, i) => {
+      const y = M.t + i * (rowH + gap);
+      const val = Number(d.value);
+      const w = Math.max(1, (val / domainMax) * barW);
+      const color = normalizeColor(d.color);
 
-    const label = svg("text", { class: "bar-label", x: labelW, y: y + rowH * 0.7, "text-anchor": "end" });
-    label.textContent = trunclabel(d.label);
+      const label = svg("text", { class: "bar-label", x: labelW, y: y + rowH * 0.7, "text-anchor": "end" });
+      label.textContent = trunclabel(d.label, labelChars);
 
-    const drillable = !!(onSelect && d.drill);
-    const track = svg("rect", { class: drillable ? "bar-track drillable" : "bar-track", x: barLeft, y, width: barW, height: rowH, rx: 3 });
-    const bar = svg("rect", { class: drillable ? "bar drillable" : "bar", x: barLeft, y, width: w, height: rowH, rx: 3, fill: color });
-    const title = svg("title");
-    title.textContent = (d.label == null || d.label === "" ? "—" : String(d.label)) + " · " + formatValue(val) + (drillable ? " · click to filter" : "");
-    bar.appendChild(title);
-    if (drillable) {
-      const fire = () => onSelect(d.drill);
-      bar.addEventListener("click", fire);
-      track.addEventListener("click", fire);
+      const drillable = !!(onSelect && d.drill);
+      const track = svg("rect", { class: drillable ? "bar-track drillable" : "bar-track", x: barLeft, y, width: barW, height: rowH, rx: 3 });
+      const bar = svg("rect", { class: drillable ? "bar drillable" : "bar", x: barLeft, y, width: w, height: rowH, rx: 3, fill: color });
+      const title = svg("title");
+      title.textContent = (d.label == null || d.label === "" ? "—" : String(d.label)) + " · " + valueTexts[i] + (drillable ? " · click to filter" : "");
+      bar.appendChild(title);
+      if (drillable) {
+        const fire = () => onSelect(d.drill);
+        bar.addEventListener("click", fire);
+        track.addEventListener("click", fire);
+      }
+
+      const value = svg("text", { class: "bar-value", x: barLeft + w + 6, y: y + rowH * 0.7 });
+      value.textContent = valueTexts[i];
+
+      root.appendChild(label);
+      root.appendChild(track);
+      root.appendChild(bar);
+      root.appendChild(value);
+    });
+
+    /* Render-only threshold reference lines (design D3): a ranked bar's value runs along the x axis, so each in-domain
+       threshold draws a VERTICAL dashed guide across the bars (value label at the top). Out-of-domain values skip. */
+    if (Array.isArray(thresholds)) {
+      for (const tv of thresholds) {
+        if (tv == null || isNaN(tv) || tv < 0 || tv > domainMax) continue;
+        const tx = barLeft + (tv / domainMax) * barW;
+        root.appendChild(thresholdLine(tx, M.t, tx, height, tx, M.t - 4, "middle", formatValue(tv)));
+      }
     }
+    return root;
+  };
 
-    const value = svg("text", { class: "bar-value", x: barLeft + w + 6, y: y + rowH * 0.7 });
-    value.textContent = formatValue(val);
-
-    root.appendChild(label);
-    root.appendChild(track);
-    root.appendChild(bar);
-    root.appendChild(value);
-  });
-
-  /* Render-only threshold reference lines (design D3): a ranked bar's value runs along the x axis, so each in-domain
-     threshold draws a VERTICAL dashed guide across the bars (value label at the top). Out-of-domain values skip. */
-  if (Array.isArray(thresholds)) {
-    for (const tv of thresholds) {
-      if (tv == null || isNaN(tv) || tv < 0 || tv > domainMax) continue;
-      const tx = barLeft + (tv / domainMax) * barW;
-      root.appendChild(thresholdLine(tx, M.t, tx, height, tx, M.t - 4, "middle", formatValue(tv)));
-    }
-  }
-
-  const chart = el("div", { class: "chart chart-bar" }, [root]);
+  const seedW = seedPlotW(widthKey);
+  const plotHost = el("div", { class: "chart-plot", style: `height:${height}px` }, [buildBars(seedW)]);
+  watchPlotWidth(plotHost, (width) => plotHost.replaceChild(buildBars(width), plotHost.firstChild), widthKey, seedW);
+  const chart = el("div", { class: "chart chart-bar" }, [plotHost]);
   if (rows.length > MAX_BARS) {
     chart.appendChild(el("div", { class: "chart-note", text: `Showing the top ${MAX_BARS} of ${rows.length}.` }));
   }
@@ -964,14 +980,15 @@ export function renderScatterChart(spec) {
        overlap (#5586). The first and the last tick always keep their label: the stride counts from the first, and a stride
        tick too close to the last gives way to it. */
     const lastTick = sx.ticks.length - 1;
-    const xStride = Math.max(1, Math.ceil((labelsPx(sx.ticks.map((v) => formatX(v))) + X_LABEL_GAP_PX) / (plotW / Math.max(1, lastTick))));
+    const xStride = Math.max(1, Math.ceil((1.5 * labelsPx(sx.ticks.map((v) => formatX(v))) + X_LABEL_GAP_PX) / (plotW / Math.max(1, lastTick))));
     for (let ti = 0; ti < sx.ticks.length; ti++) {
       const val = sx.ticks[ti];
       const x = scaleX(val);
       axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
       const labelled = ti === 0 || ti === lastTick || (ti % xStride === 0 && lastTick - ti >= xStride);
       if (!labelled) continue;
-      const label = svg("text", { x: Math.min(Math.max(x, M.l + 2), plotRight - 2), y: H - 8, "text-anchor": "middle" });
+      /* The first and the last label are anchored inward, as the line chart's are, so the last never runs off the right edge. */
+      const label = svg("text", { x: ti === 0 ? M.l : ti === lastTick ? plotRight : x, y: H - 8, "text-anchor": ti === 0 ? "start" : ti === lastTick ? "end" : "middle" });
       label.textContent = formatX(val);
       axis.appendChild(label);
     }
@@ -981,7 +998,8 @@ export function renderScatterChart(spec) {
       axis.appendChild(cap);
     }
     if (unitX) {
-      const cap = svg("text", { class: "axis-unit", x: plotRight, y: H - 8, "text-anchor": "end" });
+      /* Top right, level with the y unit caption: at the bottom right it sat on the last tick label (#5586). */
+      const cap = svg("text", { class: "axis-unit", x: plotRight, y: 11, "text-anchor": "end" });
       cap.textContent = unitX;
       axis.appendChild(cap);
     }
@@ -1021,9 +1039,9 @@ const MAX_BARS = 30;
 const MAX_SLICES = 9;
 
 /** Truncate a bar's category label to keep it inside the label gutter. */
-function trunclabel(s) {
+function trunclabel(s, max = BAR_LABEL_CHARS) {
   const flat = String(s == null || s === "" ? "—" : s);
-  return flat.length > 30 ? flat.slice(0, 29) + "…" : flat;
+  return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
 }
 
 /** SVG path `d` for a donut wedge from a1° to a2° (0° = 3 o'clock, angles increase clockwise in SVG's y-down space). */
@@ -1339,7 +1357,7 @@ function inlineStyledSvgClone(root) {
     copy[i].setAttribute("style", decl);
   });
   const box = root.getBoundingClientRect();
-  clone.setAttribute("width", String(Math.round(box.width) || BAR_W));
+  clone.setAttribute("width", String(Math.round(box.width) || CHART_DEFAULT_W));
   clone.setAttribute("height", String(Math.round(box.height) || H));
   clone.setAttribute("xmlns", SVG_NS);
   return clone;

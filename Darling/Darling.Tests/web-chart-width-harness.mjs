@@ -1,4 +1,4 @@
-/* Runs the web viewer's shipped charts.js (renderLineChart, renderScatterChart, zoomableLineChart, with util.js) against a
+/* Runs the web viewer's shipped charts.js (renderLineChart, renderScatterChart, renderBarChart, zoomableLineChart, with util.js) against a
    stand-in DOM that has a ResizeObserver and a frame queue, resizes the charts' boxes, and prints what was drawn as one line
    of JSON. WebChartWidthBehaviourTests starts it as
        node web-chart-width-harness.mjs <path to wwwroot/js>
@@ -229,7 +229,7 @@ for (const w of [600, 2000]) {
 /* before it is mounted: the default */
 out.unmounted = geometry(charts.renderLineChart(specFor()));
 out.unmountedScatter = geometry(charts.renderScatterChart(scatterSpec()));
-out.barViewBox = rootOf(charts.renderBarChart({ items: [{ label: "a", value: 1 }] })).attrs.viewBox;
+out.unmountedBar = geometry(charts.renderBarChart({ items: [{ label: "a", value: 1 }] }));
 
 /* 2. a resize redraws once, keeps the zoom window, the hidden series and the annotations, and never fetches */
 const scope = charts.chartZoomScope(4);
@@ -452,5 +452,93 @@ out.distinctLabels = {
     keyedScatter: buildsFor(() => charts.renderScatterChart({ ...scatterSpec(), widthKey: "composed|1|s" })),
     unkeyedLine: buildsFor(() => charts.renderLineChart(specFor())),
   };
+}
+
+/* 10. the ranked bar chart is drawn at its box's width like the line and scatter charts: one unit per pixel at 600 and 2,000 px,
+   a height that follows the bar count alone, labels that fit their gutter and values that fit the right edge. A glyph is
+   BAR_TEST_CHAR_PX wide (12px text at 0.6 em); the browser check measures the real font. */
+{
+  const BAR_TEST_CHAR_PX = 12 * 0.6;
+  const barItems = [
+    { label: "a_rather_long_database_name_that_is_cut_at_thirty", value: 1234567, drill: [{ dimension: "d", value: "x" }] },
+    { label: "master", value: 900000 },
+    { label: "tempdb", value: 450000 },
+    { label: "msdb", value: 12 },
+    { label: "", value: 3 },
+  ];
+  const barSpec = (extra = {}) => ({ items: barItems, formatValue: (v) => v.toLocaleString("en-US") + " ms", thresholds: [600000], onSelect: () => {}, ...extra });
+  const barGeometry = (chart) => {
+    const root = rootOf(chart);
+    const g = geometry(chart);
+    const labels = find(root, (n) => n.tag === "text" && n.attrs.class === "bar-label");
+    const values = find(root, (n) => n.tag === "text" && n.attrs.class === "bar-value");
+    const tracks = find(root, (n) => n.tag === "rect" && String(n.attrs.class).startsWith("bar-track"));
+    const textW = (n) => n.textContent.length * BAR_TEST_CHAR_PX;
+    return {
+      ...g,
+      rows: labels.length,
+      labelLeftMin: Math.min(...labels.map((n) => Number(n.attrs.x) - textW(n))),
+      labelRight: Math.max(...labels.map((n) => Number(n.attrs.x))),
+      trackLeft: Number(tracks[0].attrs.x),
+      trackRight: Number(tracks[0].attrs.x) + Number(tracks[0].attrs.width),
+      valueRightMax: Math.max(...values.map((n) => Number(n.attrs.x) + textW(n))),
+      longestLabel: Math.max(...labels.map((n) => n.textContent.length)),
+      firstLabel: labels[0].textContent,
+      thresholds: find(root, (n) => String(n.attrs.class) === "threshold-line").length,
+    };
+  };
+  out.bar = {};
+  for (const w of [360, 600, 2000]) {
+    const c = charts.renderBarChart(barSpec());
+    mount(c, w);
+    out.bar[w] = barGeometry(c);
+  }
+  const rc = charts.renderBarChart(barSpec());
+  mount(rc, 600);
+  const barBuilds = svgCreated;
+  resize(rc, 2000);
+  const queued = frames.filter(Boolean).length;
+  flush();
+  out.barResize = { queued, redraws: svgCreated - barBuilds, vbW: geometry(rc).vbW };
+  /* the number of bars alone sets the height */
+  const few = charts.renderBarChart(barSpec({ items: barItems.slice(0, 2) }));
+  mount(few, 1500);
+  out.barFew = geometry(few);
+}
+
+/* 11. a poll builds a bar chart once, like the other two */
+{
+  const buildsFor = (make) => {
+    const first = make();
+    mount(first, 1234);
+    const before = svgCreated;
+    const second = make();
+    mount(second, 1234);
+    return { builds: svgCreated - before, vbW: geometry(second).vbW };
+  };
+  out.poll.keyedBar = buildsFor(() => charts.renderBarChart({ items: [{ label: "a", value: 2 }, { label: "b", value: 1 }], widthKey: "composed|2|b" }));
+  out.poll.unkeyedBar = buildsFor(() => charts.renderBarChart({ items: [{ label: "a", value: 2 }, { label: "b", value: 1 }] }));
+}
+
+/* 12. the scatter's end labels stay inside the plot and its x unit caption is clear of the label row */
+{
+  out.scatterEdges = {};
+  for (const w of [600, 2000]) {
+    const c = charts.renderScatterChart(scatterSpec());
+    mount(c, w);
+    const texts = find(rootOf(c), (n) => n.tag === "text");
+    const labels = texts.filter((n) => n.attrs.y === String(300 - 8) && n.attrs.class !== "axis-unit");
+    const last = labels[labels.length - 1];
+    const cap = texts.find((n) => n.attrs.class === "axis-unit" && n.textContent === "ms");
+    out.scatterEdges[w] = {
+      plotRight: w - 16,
+      firstAnchor: labels[0].attrs["text-anchor"],
+      firstX: Number(labels[0].attrs.x),
+      lastAnchor: last.attrs["text-anchor"],
+      lastX: Number(last.attrs.x),
+      captionY: Number(cap.attrs.y),
+      labelRowY: 300 - 8,
+    };
+  }
 }
 console.log(JSON.stringify(out));

@@ -18,12 +18,13 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// A web line or scatter chart is drawn at the width its box really has, one SVG unit per CSS pixel (#5586).
+/// A web line, scatter or ranked bar chart is drawn at the width its box really has, one SVG unit per CSS pixel (#5586).
 ///
 /// <para><b>The defect.</b> Both charts drew a 1000 x 320 viewBox with <c>preserveAspectRatio="none"</c> and CSS gave the
 /// SVG <c>width: 100%</c> but capped its height at 300 px, so above about 940 px the width kept growing while the height
 /// stopped, and the axis text was stretched sideways (about 2.1 times at 2,000 px). Below 1,000 px the whole chart,
-/// text included, shrank.</para>
+/// text included, shrank. The bar chart drew a 1000-wide viewBox that CSS scaled with the panel, so its labels grew on a
+/// wide panel and shrank on a narrow one.</para>
 ///
 /// <para><b>The fix.</b> The chart is drawn for the width of its plot box and redrawn when that width changes, from the
 /// same data and the same spec (so the zoom window, the hidden series and the annotations are unchanged, and nothing is
@@ -89,14 +90,79 @@ public sealed class WebChartWidthBehaviourTests
     }
 
     /// <summary>A chart is built before it is on the page (no width yet): it draws at the default width and the first
-    /// measurement redraws it. The bar chart keeps its own fixed viewBox.</summary>
+    /// measurement redraws it. That holds for the bar chart too.</summary>
     [Fact]
-    public void AChartThatIsNotMountedYet_DrawsAtTheDefaultWidth_AndTheBarChartIsUntouched()
+    public void AChartThatIsNotMountedYet_DrawsAtTheDefaultWidth()
     {
         var r = Run();
         Assert.Equal(1000, r.GetProperty("unmounted").GetProperty("vbW").GetDouble());
         Assert.Equal(1000, r.GetProperty("unmountedScatter").GetProperty("vbW").GetDouble());
-        Assert.StartsWith("0 0 1000 ", r.GetProperty("barViewBox").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1000, r.GetProperty("unmountedBar").GetProperty("vbW").GetDouble());
+    }
+
+    /// <summary>The bar chart's viewBox is as wide as its box and as tall as its bars need (a row each, so the width never
+    /// changes the height), and the SVG's CSS size is the viewBox: equal scales, both one, so the 12px labels are 12px on
+    /// any panel. RED proof: with the old 1000-wide viewBox (<c>preserveAspectRatio="xMinYMin meet"</c>) the viewBox is 1000
+    /// wide at 600 and at 2,000 px.</summary>
+    [Theory]
+    [InlineData(600)]
+    [InlineData(2000)]
+    public void TheBarChart_IsDrawnAtTheBoxWidth_WithEqualScalesOnBothAxes(int width)
+    {
+        var r = Run();
+        var g = r.GetProperty("bar").GetProperty(width.ToString());
+        Assert.Equal(width, g.GetProperty("vbW").GetDouble());
+        Assert.Equal(26d + 5 * 34, g.GetProperty("vbH").GetDouble());
+        Assert.Equal(g.GetProperty("vbW").GetDouble(), g.GetProperty("cssW").GetDouble());
+        Assert.Equal(g.GetProperty("vbH").GetDouble(), g.GetProperty("cssH").GetDouble());
+        Assert.Equal(g.GetProperty("xScale").GetDouble(), g.GetProperty("yScale").GetDouble());
+        Assert.Equal(1d, g.GetProperty("xScale").GetDouble());
+        Assert.Equal(JsonValueKind.Null, g.GetProperty("aspect").ValueKind);
+        Assert.Equal(0, g.GetProperty("transformed").GetInt32());
+        Assert.Equal(5, g.GetProperty("rows").GetInt32());
+        Assert.Equal(1, g.GetProperty("thresholds").GetInt32());
+        // a different bar count changes the height and not the scale
+        var few = r.GetProperty("barFew");
+        Assert.Equal(26d + 2 * 34, few.GetProperty("vbH").GetDouble());
+        Assert.Equal(1d, few.GetProperty("xScale").GetDouble());
+    }
+
+    /// <summary>At 360, 600 and 2,000 px no label runs off the left edge or into its bar track, the value of every bar ends
+    /// inside the box, and a long label is cut to what its gutter holds (most characters on the widest panel). RED proof:
+    /// without the width-driven gutters a 360 px panel keeps the 220 px label gutter and 110 px value gutter of the old
+    /// 1000-wide drawing, and the values run past the right edge.</summary>
+    [Theory]
+    [InlineData(360)]
+    [InlineData(600)]
+    [InlineData(2000)]
+    public void TheBarChart_LabelsAndValues_StayInsideTheBox_AtAnyWidth(int width)
+    {
+        var g = Run().GetProperty("bar").GetProperty(width.ToString());
+        Assert.True(g.GetProperty("labelLeftMin").GetDouble() >= 0, "a label starts left of the box at " + width + " px");
+        Assert.True(g.GetProperty("labelRight").GetDouble() < g.GetProperty("trackLeft").GetDouble(), "a label reaches its track at " + width + " px");
+        Assert.True(g.GetProperty("valueRightMax").GetDouble() <= width, "a value runs past the right edge at " + width + " px");
+        Assert.True(g.GetProperty("trackRight").GetDouble() <= width - 40, "the bar track is too wide for its value at " + width + " px");
+        Assert.EndsWith("\u2026", g.GetProperty("firstLabel").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AWideBarPanel_ShowsMoreOfALongLabel_ThanANarrowOne()
+    {
+        var bar = Run().GetProperty("bar");
+        int Chars(int w) => bar.GetProperty(w.ToString()).GetProperty("longestLabel").GetInt32();
+        Assert.True(Chars(360) < Chars(600), "360 px showed as many label characters as 600 px");
+        Assert.True(Chars(600) < Chars(2000), "600 px showed as many label characters as 2,000 px");
+        Assert.Equal(30, Chars(2000));
+    }
+
+    /// <summary>A resize redraws the bar chart once, on the next frame.</summary>
+    [Fact]
+    public void ABarChartResize_RedrawsOnce()
+    {
+        var z = Run().GetProperty("barResize");
+        Assert.Equal(1, z.GetProperty("queued").GetInt32());
+        Assert.Equal(1, z.GetProperty("redraws").GetInt32());
+        Assert.Equal(2000, z.GetProperty("vbW").GetDouble());
     }
 
     /// <summary>A resize from 600 to 2,000 px redraws once, on the next frame; a repeat within a pixel and a height-only
@@ -253,23 +319,62 @@ public sealed class WebChartWidthBehaviourTests
         Assert.Equal(new[] { "0 ms", "4 ms", "10 ms" }, six.GetProperty("labels").EnumerateArray().Select(l => l.GetString()).ToArray());
     }
 
+    /// <summary>The scatter's first and last x labels are anchored inward, so the last one never runs past the plot's right
+    /// edge, and its x unit caption sits on the top row, not on the label row where it overprinted the last label. RED
+    /// proof: with the middle-anchored, clamped last label and the caption at the bottom right, the last label is a
+    /// "middle" anchor and the caption shares the label row.</summary>
+    [Theory]
+    [InlineData(600)]
+    [InlineData(2000)]
+    public void TheScatter_AnchorsItsEndLabelsInward_AndKeepsTheUnitCaptionOffTheLabelRow(int width)
+    {
+        var e = Run().GetProperty("scatterEdges").GetProperty(width.ToString());
+        Assert.Equal("start", e.GetProperty("firstAnchor").GetString());
+        Assert.Equal("end", e.GetProperty("lastAnchor").GetString());
+        Assert.True(e.GetProperty("lastX").GetDouble() <= e.GetProperty("plotRight").GetDouble());
+        Assert.NotEqual(e.GetProperty("labelRowY").GetDouble(), e.GetProperty("captionY").GetDouble());
+    }
+
     /// <summary>A poll rebuilds every chart. A chart that was measured before (keyed by its menuKey, or the widthKey the
-    /// composed panels and the scatter pass) is drawn at that width, so the observer's first report is within a pixel and
-    /// the build is the only one; a chart with no key is drawn at the default and redrawn once, as before.</summary>
+    /// composed panels pass to the line, scatter and bar charts) is drawn at that width, so the observer's first report is
+    /// within a pixel and the build is the only one; a chart with no key is drawn at the default and redrawn once, as before.</summary>
     [Fact]
     public void AnAlreadyMeasuredChart_IsBuiltOncePerPoll()
     {
         var poll = Run().GetProperty("poll");
-        foreach (var name in new[] { "keyedLine", "widthKeyLine", "keyedScatter" })
+        foreach (var name in new[] { "keyedLine", "widthKeyLine", "keyedScatter", "keyedBar" })
         {
             Assert.Equal(1, poll.GetProperty(name).GetProperty("builds").GetInt32());
             Assert.Equal(1234, poll.GetProperty(name).GetProperty("vbW").GetDouble());
         }
 
         Assert.Equal(2, poll.GetProperty("unkeyedLine").GetProperty("builds").GetInt32());
+        Assert.Equal(2, poll.GetProperty("unkeyedBar").GetProperty("builds").GetInt32());
     }
 
-    /// <summary>Source pins for what the harness cannot see: the stretching viewBox is gone from both charts, the CSS
+    /// <summary>Every composed-panel call of the three renderers passes a width key (the panel's identity, which exists
+    /// for the editor preview too), so no composed chart is built twice per poll. The other callers reach the line chart
+    /// through <c>zoomableLineChart</c>, which always sets a menuKey. A source pin: the harness cannot run compose.js.</summary>
+    [Fact]
+    public void EveryRendererCallInCompose_PassesAWidthKey()
+    {
+        var compose = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "compose.js"));
+        foreach (var renderer in new[] { "renderLineChart", "renderScatterChart", "renderBarChart" })
+        {
+            var at = compose.IndexOf(renderer + "({", StringComparison.Ordinal);
+            Assert.True(at >= 0, renderer + " is no longer called from compose.js");
+            Assert.Single(System.Text.RegularExpressions.Regex.Matches(compose, renderer + @"\(\{"));
+            // the call and the rest of its switch case, up to the case's break
+            var window = compose.Substring(at, compose.IndexOf("break;", at, StringComparison.Ordinal) - at);
+            Assert.Contains("widthKey: widthId", window, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("const widthId = composedPanelId(panelSpec, opts.scope, opts.panelSlot);", compose, StringComparison.Ordinal);
+        var charts = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "charts.js"));
+        Assert.Contains("menuKey: id + \"|\" + scope,", charts, StringComparison.Ordinal);
+    }
+
+    /// <summary>Source pins for what the harness cannot see: the stretching viewBox is gone from all three charts, the CSS
     /// that would stretch the SVG no longer applies to them, and the print rule (a source pin, because a print layout is
     /// not something Node can run) puts the plot SVG back in the flow at the page width.</summary>
     [Fact]
@@ -277,6 +382,8 @@ public sealed class WebChartWidthBehaviourTests
     {
         var charts = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "charts.js"));
         Assert.DoesNotContain("preserveAspectRatio: \"none\"", charts, StringComparison.Ordinal);
+        Assert.DoesNotContain("preserveAspectRatio: \"xMinYMin meet\"", charts, StringComparison.Ordinal);
+        Assert.DoesNotContain("BAR_W", charts, StringComparison.Ordinal);
         Assert.Contains("class: \"plot-svg\"", charts, StringComparison.Ordinal);
 
         var css = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));

@@ -360,6 +360,9 @@ function toRunPanel(p) {
 export function renderComposedResult(result, panelSpec, opts = {}) {
   const rows = Array.isArray(result.rows) ? result.rows : [];
   const nodes = [];
+  /* The panel's identity also keys the width its chart was last measured at (#5586), so a poll's rebuild is drawn at it. Unlike the
+     legend-hide state this holds nothing a collision could mix up, so a panel with no slot (the editor preview) gets a key too. */
+  const widthId = composedPanelId(panelSpec, opts.scope, opts.panelSlot);
 
   /* The transient drill-down chip (design D6) sits above the chart whenever a drill is active — with the pinned
      filter(s), a clear, and (for a server dimension) a jump to that server's detail page. The zoom chip (#1606)
@@ -427,8 +430,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
       const allKeys = series.map((x) => x.key).concat(overlaySeries ? [overlaySeries.key] : []);
       const chartHost = hiddenId != null ? el("div", { class: "zoomable-chart" }) : null;
       const drawChart = () => renderLineChart({
-          /* The panel's identity also keys the width its chart was last measured at (#5586), so a poll's rebuild is drawn at it. */
-          widthKey: hiddenId,
+          widthKey: widthId,
           points,
           xKey: "bucket",
           series,
@@ -479,7 +481,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
       break;
     }
     case "bar":
-      nodes.push(renderBarChart({ items: rankedItems(rows, groupDims), formatValue: fmt, unit: axisUnit(unit), thresholds, onSelect }));
+      nodes.push(renderBarChart({ items: rankedItems(rows, groupDims), formatValue: fmt, unit: axisUnit(unit), thresholds, onSelect, widthKey: widthId }));
       break;
     case "pie":
       nodes.push(renderPieChart({ items: rankedItems(rows, groupDims), formatValue: fmt, onSelect }));
@@ -496,7 +498,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           unitX: axisUnit(unit),
           unitY: axisUnit(overlayUnit),
           onSelect,
-          widthKey: opts.panelSlot != null ? composedPanelId(panelSpec, opts.scope, opts.panelSlot) : null,
+          widthKey: widthId,
         })
       );
       break;

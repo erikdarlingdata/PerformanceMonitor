@@ -560,8 +560,8 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 .chart { width: 100%; position: relative; }
 .chart svg { display: block; width: 100%; height: auto; max-height: 300px; }
-/* Line and scatter charts draw at the width of their box, one SVG unit per CSS pixel (#5586), so the SVG keeps the size its
-   inline style gives it (the .chart svg rule above is for the bar and pie charts). It is out of flow inside .chart-plot: a fixed-width SVG must not stop a narrowing
+/* Line, scatter and bar charts draw at the width of their box, one SVG unit per CSS pixel (#5586), so the SVG keeps the size its
+   inline style gives it (the .chart svg rule above is for the pie chart). It is out of flow inside .chart-plot: a fixed-width SVG must not stop a narrowing
    panel from shrinking, which would hide the narrowing from the width the chart watches. */
 .chart .chart-plot { position: relative; width: 100%; overflow: hidden; }
 .chart svg.plot-svg { position: absolute; left: 0; top: 0; max-height: none; }
@@ -634,7 +634,7 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart .threshold-line { stroke: var(--dim); stroke-width: 1; stroke-dasharray: 6 4; opacity: 0.7; }
 .chart .threshold-label { fill: var(--dim); font-size: 10px; font-variant-numeric: tabular-nums; }
 
-/* A ranked bar chart scrolls vertically inside the panel when its list is tall (the SVG grows per row). */
+/* A ranked bar chart scrolls vertically inside the panel when its list is tall (its plot box grows per row; the width is the panel's, so only the height scrolls). */
 .chart-bar { max-height: 340px; overflow-y: auto; }
 .chart-bar svg { max-height: none; }
 .chart .bar-label { fill: var(--dim); font-size: 12px; }
