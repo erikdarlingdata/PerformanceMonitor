@@ -8,4 +8,4 @@ import { pathToFileURL } from "node:url";
 const jsDir = process.argv[process.argv.length - 1];
 const mod = await import(pathToFileURL(path.join(jsDir, "plain-text.js")).href);
 const inputs = JSON.parse(process.env.HARNESS_INPUT);
-console.log(JSON.stringify({ out: inputs.map((t) => mod.plainText(t)), line: mod.NOT_COLLECTED_LINE }));
+console.log(JSON.stringify({ out: inputs.map((t) => mod.plainText(t)), named: inputs.map((t) => mod.plainTextNamed(t)), line: mod.NOT_COLLECTED_LINE, tools: mod.MCP_TOOL_NAMES, labels: mod.MEASUREMENT_LABELS }));

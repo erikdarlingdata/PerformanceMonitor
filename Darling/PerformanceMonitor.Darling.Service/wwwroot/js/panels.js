@@ -46,7 +46,7 @@ import {
   sourceStrip,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
-import { plainText } from "./plain-text.js";
+import { plainText, plainTextNamed } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 
 /* The AbortSignal for the render currently building panels (#4191). A page sets it (setPanelSignal)
@@ -942,9 +942,11 @@ function cell(row, c) {
         ? applyFormat(c.format, raw)
         : raw == null || raw === ""
           ? "—"
-          : c.plain
-            ? plainText(String(raw))
-            : String(raw);
+          : c.plain === "named"
+            ? plainTextNamed(String(raw))
+            : c.plain
+              ? plainText(String(raw))
+              : String(raw);
   return el("td", { class: cls.join(" ") || null, text });
 }
 

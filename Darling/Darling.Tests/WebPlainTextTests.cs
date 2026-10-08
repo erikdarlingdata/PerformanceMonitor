@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -23,7 +24,9 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class WebPlainTextTests
 {
-    private static string[] Run(string[] inputs, out string notCollectedLine)
+    private static string[] Run(string[] inputs, out string notCollectedLine) => RunDoc(inputs, out notCollectedLine).Out;
+
+    private static (string[] Out, string[] Named, string[] Tools, string[] Labels) RunDoc(string[] inputs, out string notCollectedLine)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-plain-text-harness.mjs"));
@@ -39,7 +42,7 @@ public sealed class WebPlainTextTests
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             notCollectedLine = "";
-            return [];
+            return ([], [], [], []);
         }
 
         using (proc)
@@ -55,7 +58,8 @@ public sealed class WebPlainTextTests
             Assert.True(proc.ExitCode == 0, "the plain text harness failed: " + error.Result);
             using var doc = JsonDocument.Parse(output.Split('\n').First(l => l.StartsWith('{')));
             notCollectedLine = doc.RootElement.GetProperty("line").GetString()!;
-            return doc.RootElement.GetProperty("out").EnumerateArray().Select(e => e.GetString()!).ToArray();
+            string[] Strs(string name) => doc.RootElement.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
+            return (Strs("out"), Strs("named"), Strs("tools"), Strs("labels"));
         }
     }
 
@@ -91,6 +95,103 @@ public sealed class WebPlainTextTests
     {
         var o = Run(["latest run: shred_gated=1 events_read=0 report_xml_empty=0"], out _);
         Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
+    }
+
+    [Fact]
+    public void UserDataAndRealErrors_ReachThePageAsWritten()
+    {
+        /* Round-1 M4: only known internal tokens are rewritten. */
+        string[] same =
+        [
+            "Could not find stored procedure 'dbo.get_orders'",
+            "Server 'get_prod' not found",
+            "timeout=30",
+            "A driver said: timeout=30 while connecting",
+            "sales_2024",
+            "pg_stat_statements_1 was reset",
+            "Could not find get_orders_by_day",
+        ];
+        var o = Run(same, out _);
+        Assert.Equal(same, o);
+    }
+
+    [Fact]
+    public void TheClickThroughCases_StillReadInWords()
+    {
+        var o = Run(
+        [
+            "use get_collection_health to find where it stopped",
+            "latest run: shred_gated=1 events_read=0 report_xml_empty=0",
+            "latest run: events_read=4",
+            "latest noted run: shred_gated_1 events_read_0 (3 of 5 runs)",
+        ], out _);
+        Assert.Equal("use Collection Health to find where it stopped", o[0]);
+        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[1]);
+        Assert.Equal("latest run: events read: 4", o[2]);
+        Assert.Equal("latest noted run: shred gated: 1, events read: 0 (3 of 5 runs)", o[3]);
+    }
+
+    [Fact]
+    public void TheNamedRules_TouchOnlyTheNamedTokens()
+    {
+        string[] inputs =
+        [
+            "Could not find 'dbo.get_orders' (timeout=30); widen hours_back or use get_collection_health",
+            "latest run: events_read=4 shred_gated=1 and last_error shows it",
+        ];
+        var (_, named, _, _) = RunDoc(inputs, out _);
+        Assert.Equal("Could not find 'dbo.get_orders' (timeout=30); widen the time range or use get_collection_health", named[0]);
+        Assert.Equal("latest run: events_read=4 shred_gated=1 and Last Error shows it", named[1]);
+    }
+
+    [Fact]
+    public void TheToolNameList_IsExactlyTheRegisteredGetTools()
+    {
+        /* The get_ rule rewrites only these names, so the list must be the MCP tool registry's get_ tools, both ways. */
+        var (_, _, tools, _) = RunDoc([], out _);
+        if (tools.Length == 0)
+        {
+            return;
+        }
+
+        var registry = typeof(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpAlertTools).Assembly.GetTypes()
+            .Where(t => t.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolTypeAttribute>() is not null)
+            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
+            .Select(m => m.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolAttribute>()?.Name)
+            .Where(n => n is not null && n.StartsWith("get_", StringComparison.Ordinal))
+            .Select(n => n!)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.True(registry.Count > 100, $"the registry walk found only {registry.Count} get_ tools");
+        Assert.Empty(registry.Except(tools).OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Empty(tools.Except(registry).OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Equal(tools.Length, tools.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public void TheMeasurementLabelList_CoversEveryLabelTheCollectorsWrite()
+    {
+        var (_, _, tools, labels) = RunDoc([], out _);
+        if (tools.Length == 0)
+        {
+            return;
+        }
+
+        var found = new System.Collections.Generic.SortedSet<string>(StringComparer.Ordinal);
+        var dir = PathTo("PerformanceMonitor.Collectors");
+        foreach (var file in System.IO.Directory.EnumerateFiles(dir, "*.cs", System.IO.SearchOption.TopDirectoryOnly))
+        {
+            var text = System.IO.File.ReadAllText(file);
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+                         text, "const string \\w*Measurement\\w*\\s*=\\s*\"([a-z0-9_]+)\"|\\.Measure\\(\"([a-z0-9_]+)\""))
+            {
+                found.Add(m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value);
+            }
+        }
+
+        Assert.True(found.Count > 20, $"the label scan found only {found.Count} labels");
+        Assert.Empty(found.Except(labels).ToList());
+        Assert.Empty(labels.Except(found).ToList());
     }
 
     [Fact]
