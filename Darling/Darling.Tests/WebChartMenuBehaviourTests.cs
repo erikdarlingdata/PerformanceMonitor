@@ -110,6 +110,17 @@ public sealed class WebChartMenuBehaviourTests
         Assert.Equal("220px", style.GetProperty("top").GetString());
     }
 
+    /// <summary>A chart drawn at a measured width (1,600 px, off the 1,000 px default, #5586) keeps a right-click menu
+    /// inside its wider box: the menu is 176 px wide, so a click at x 1,590 puts it at 1,424.</summary>
+    [Fact]
+    public void ARightClickMenu_OnAChartDrawnAtAMeasuredWidth_StaysInsideTheWiderBox()
+    {
+        var style = Run().GetProperty("measuredMenuStyle");
+        Assert.Equal(1600, style.GetProperty("svgWidth").GetDouble());
+        Assert.Equal("1424px", style.GetProperty("left").GetString());
+        Assert.Equal("100px", style.GetProperty("top").GetString());
+    }
+
     [Fact]
     public void ExportDataToCsv_OnAZoomedChart_WritesEveryLoadedPoint()
     {
