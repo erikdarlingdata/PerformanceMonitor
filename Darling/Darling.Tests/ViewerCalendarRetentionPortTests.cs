@@ -316,7 +316,8 @@ public sealed class ViewerCalendarRetentionLivePostgresTests
 
             var purgedDay = viewerHorizon.AddDays(-10);
             var pastHorizonDay = viewerHorizon.AddDays(-5);
-            var collectedDay = DateTime.UtcNow.Date.AddDays(-2);
+            var today = DateTime.UtcNow.Date; // #5496: one reading, so the collected day and the absent day below cannot land on the same date
+            var collectedDay = today.AddDays(-2);
 
             /* The purged shape: a run record and nothing else. The past-horizon shape: a run record plus one
                surviving signal (a deadlock). The collected shape: a run record inside retention. */
@@ -359,7 +360,7 @@ public sealed class ViewerCalendarRetentionLivePostgresTests
             var absentBefore = await viewer.GetDailySummaryAsync(ServerId, viewerHorizon.AddDays(-15), ct);
             Assert.Equal(DailySummaryDataState.Purged, absentBefore!.DataState);
             Assert.False(absentBefore.HasData);
-            var absentInside = await viewer.GetDailySummaryAsync(ServerId, DateTime.UtcNow.Date.AddDays(-3), ct);
+            var absentInside = await viewer.GetDailySummaryAsync(ServerId, today.AddDays(-3), ct);
             Assert.Equal(DailySummaryDataState.NoRunRecord, absentInside!.DataState);
 
             bodySucceeded = true;

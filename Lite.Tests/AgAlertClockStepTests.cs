@@ -26,6 +26,7 @@ namespace Lite.Tests;
 public sealed class AgAlertClockStepTests
 {
     private const int ServerId = 4242;
+    /* #5493: also the refire interval the sync-behind sweeps below pass (the shape of "Server Unreachable"). */
     private static readonly TimeSpan Cooldown = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan Refire = TimeSpan.FromMinutes(10);
     private static readonly DateTime Start = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
@@ -118,7 +119,7 @@ public sealed class AgAlertClockStepTests
     }
 
     [Fact]
-    public void ASyncBehindRepeat_AfterA10MinuteStepBack_IsHeldOneCooldownFromTheFirstSweepThatSeesTheStep()
+    public void ASyncBehindRepeat_AfterA10MinuteStepBack_IsHeldOneRefireIntervalFromTheFirstSweepThatSeesTheStep()
     {
         var e = Evaluator();
         Assert.Single(Behind(e));
@@ -134,7 +135,7 @@ public sealed class AgAlertClockStepTests
     }
 
     [Fact]
-    public void ASyncBehindRepeat_OnAForwardClock_IsDueExactlyOneCooldownAfterTheSend()
+    public void ASyncBehindRepeat_OnAForwardClock_IsDueExactlyOneRefireIntervalAfterTheSend()
     {
         var e = Evaluator();
         Assert.Single(Behind(e));

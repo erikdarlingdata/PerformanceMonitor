@@ -475,7 +475,8 @@ public partial class MainWindow : Window
                     databases,
                     App.AgLagAlertSeconds,
                     App.AgRedoQueueAlertKb,
-                    TimeSpan.FromMinutes(App.AlertCooldownMinutes),
+                    /* #5493: a state alert, repeated only per connection_refire_minutes (0 = off), as "Server Unreachable". */
+                    TimeSpan.FromMinutes(App.ConnectionRefireMinutes),
                     sweepGeneration: generation));
             }
 

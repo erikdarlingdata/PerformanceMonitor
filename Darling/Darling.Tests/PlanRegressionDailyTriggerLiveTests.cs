@@ -301,7 +301,10 @@ SET search_path = decoy, pg_catalog;", ct);
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
-        var now = DateTime.UtcNow;
+        /* The trigger's WHEN clause windows on the database's now(), so the edges below must come from the database's clock,
+           and the whole body must run on one side of its UTC midnight. If the database clock is within the margin of the next
+           midnight, wait for it to pass first, then read the clock (#5496). */
+        var now = await SettledDatabaseUtcNowAsync(() => ReadDatabaseUtcNowAsync(connection, ct), d => Task.Delay(d, ct), MidnightMargin);
         var today = now.Date;
 
         /* The clamp is a whole-day edge: the start of the day 17 days back, one day wider than the cleanup's 16, so every day
@@ -572,6 +575,80 @@ WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time,
         await body();
         var after = await ReadAsync();
         return (after.Item1 - before.Item1, after.Item2 - before.Item2);
+    }
+
+    /// <summary>
+    /// How close to the next UTC midnight the database clock may be when a test that windows on it starts. The body that
+    /// follows the clock reading is a handful of single-row statements on a local store (tens of milliseconds); 10 seconds
+    /// covers a slow runner many times over, and the wait it costs happens only in the last 10 seconds of a UTC day.
+    /// </summary>
+    internal static readonly TimeSpan MidnightMargin = TimeSpan.FromSeconds(10);
+
+    /// <summary>The database's <c>now()</c> as UTC, the clock the trigger's <c>WHEN</c> clause uses.</summary>
+    private static async Task<DateTime> ReadDatabaseUtcNowAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT now() AT TIME ZONE 'UTC'", connection);
+        var value = (DateTime)(await command.ExecuteScalarAsync(ct))!;
+        return DateTime.SpecifyKind(value, DateTimeKind.Utc);
+    }
+
+    /// <summary>
+    /// How long to wait before a reading of <paramref name="clockUtc"/> has the rest of its UTC day ahead of it: zero when the
+    /// next midnight is at least <paramref name="margin"/> off, otherwise the time to just past that midnight.
+    /// </summary>
+    internal static TimeSpan WaitPastMidnight(DateTime clockUtc, TimeSpan margin)
+    {
+        var untilMidnight = clockUtc.Date.AddDays(1) - clockUtc;
+        return untilMidnight >= margin ? TimeSpan.Zero : untilMidnight + TimeSpan.FromMilliseconds(250);
+    }
+
+    /// <summary>
+    /// Reads the clock; if it is within <paramref name="margin"/> of the next UTC midnight, waits that midnight out and
+    /// reads again, so the caller has a "now" with the rest of the day ahead of it. Both the clock and the delay are
+    /// injected so the wait path is testable without waiting.
+    /// </summary>
+    internal static async Task<DateTime> SettledDatabaseUtcNowAsync(Func<Task<DateTime>> readClock, Func<TimeSpan, Task> delay, TimeSpan margin)
+    {
+        var now = await readClock();
+        var wait = WaitPastMidnight(now, margin);
+        if (wait > TimeSpan.Zero)
+        {
+            await delay(wait);
+            now = await readClock();
+        }
+
+        return now;
+    }
+
+    [Fact]
+    public async Task TheMidnightGuard_WaitsOnlyInsideTheMarginOfMidnight_AndRereadsTheClockAfterWaiting()
+    {
+        var reads = 0;
+        var delays = new List<TimeSpan>();
+        var clock = new Queue<DateTime>(new[]
+        {
+            new DateTime(2026, 3, 1, 23, 59, 58, DateTimeKind.Utc),
+            new DateTime(2026, 3, 2, 0, 0, 0, 300, DateTimeKind.Utc),
+        });
+
+        var settled = await SettledDatabaseUtcNowAsync(() => { reads++; return Task.FromResult(clock.Dequeue()); }, d => { delays.Add(d); return Task.CompletedTask; }, MidnightMargin);
+
+        Assert.Equal(2, reads);
+        Assert.Equal(new[] { TimeSpan.FromMilliseconds(2250) }, delays);
+        Assert.Equal(new DateTime(2026, 3, 2, 0, 0, 0, 300, DateTimeKind.Utc), settled);
+
+        reads = 0;
+        delays.Clear();
+        var noon = new DateTime(2026, 3, 1, 12, 0, 0, DateTimeKind.Utc);
+        var kept = await SettledDatabaseUtcNowAsync(() => { reads++; return Task.FromResult(noon); }, d => { delays.Add(d); return Task.CompletedTask; }, MidnightMargin);
+
+        Assert.Equal(1, reads);
+        Assert.Empty(delays);
+        Assert.Equal(noon, kept);
+
+        /* The margin's own edge: exactly 10 seconds out needs no wait, one tick inside it does. */
+        Assert.Equal(TimeSpan.Zero, WaitPastMidnight(new DateTime(2026, 3, 1, 23, 59, 50, DateTimeKind.Utc), MidnightMargin));
+        Assert.True(WaitPastMidnight(new DateTime(2026, 3, 1, 23, 59, 50, DateTimeKind.Utc).AddTicks(1), MidnightMargin) > TimeSpan.Zero);
     }
 
     private static async Task<NpgsqlConnection> OpenMigratedAsync(ScratchPostgres scratch, CancellationToken ct)
