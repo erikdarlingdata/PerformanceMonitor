@@ -81,10 +81,22 @@ public sealed class ComposeQueryStoreStampExactnessLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct, build: false);
         var bodySucceeded = false;
         try
         {
+            /* Rows whose weighted products need 63 bits and are odd: a double (53 bits) cannot hold them, nor their sums. The seed's own
+               products are all exactly representable, so without these a weighted sum built as double precision would pass. */
+            await ComposeStampLiveSupport.ExecAsync(connection, $@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
+SELECT TIMESTAMP '{ComposeStampLiveSupport.At(hourNow)}' - interval '12 hours' + g * interval '7 minutes', s, 'db1', 700 + g, 700 + g, 'Regular',
+       TIMESTAMP '{ComposeStampLiveSupport.At(hourNow)}' - interval '13 hours', TIMESTAMP '{ComposeStampLiveSupport.At(hourNow)}' - interval '12 hours',
+       'modP', 'hashP', 2000001 + g * 2, 3000000000001 + g * 2, 3000000000003 + g * 2, 5000 + g, 6000 + g, 7000000 + g * 10 + s
+FROM generate_series(1, 6) AS g CROSS JOIN generate_series(1, 2) AS s", ct);
+            Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(source, ct));
+
             /* Window A: starts at hourNow - 28 h + 17 min (mid-hour, inside the built run), ends at hourNow - 40 min. The built hours stop at
                hourNow - 3 h, so the rollup answers up to hourNow - 2 h and the rest is the wide-table tail. */
             var startA = hourNow.AddHours(-28).AddMinutes(17);
