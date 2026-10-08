@@ -545,9 +545,9 @@ public sealed class DarlingWebFailureHandlingTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingWebHostService.cs"));
 
-        var handler = code.IndexOf("DarlingWebFailureLog.Report(_logger", StringComparison.Ordinal);
+        var handler = code.IndexOf("app.UseMiddleware<DarlingWebFailureObserver>(", StringComparison.Ordinal);
         Assert.True(handler >= 0,
-            "ConfigurePipeline no longer calls DarlingWebFailureLog.Report; this pin is reading nothing.");
+            "ConfigurePipeline no longer registers DarlingWebFailureObserver; this pin is reading nothing.");
 
         var mapAll = code.IndexOf("DarlingWebEndpoints.MapAll(app", StringComparison.Ordinal);
         Assert.True(mapAll >= 0,
@@ -558,5 +558,93 @@ public sealed class DarlingWebFailureHandlingTests
             "The #4276 exception backstop must be registered (app.Use) AHEAD of DarlingWebEndpoints.MapAll, so "
           + "it wraps every /api/* route MapAll adds. It is currently registered AFTER, which leaves those "
           + "routes reaching ASP.NET Core's own error handling again — the empty, untraced 500 #4276 reports.");
+    }
+
+    /// <summary>W12: the observer is the FIRST middleware, ahead of response compression and every gate, so a throw there is logged.
+    /// It is registered as a class, so the Host guard stays the first <c>app.Use</c> lambda (HostHeaderGuardTests).</summary>
+    [Fact]
+    public void TheFailureObserver_IsRegisteredBeforeCompressionAndEveryGate()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingWebHostService.cs"));
+        var observer = code.IndexOf("app.UseMiddleware<DarlingWebFailureObserver>(", StringComparison.Ordinal);
+        var compression = code.IndexOf("app.UseResponseCompression()", StringComparison.Ordinal);
+        var firstUse = code.IndexOf("app.Use(", StringComparison.Ordinal);
+        Assert.True(observer >= 0 && compression > observer && firstUse > observer,
+            "the failure observer must be registered ahead of response compression and of every app.Use gate");
+    }
+
+    /// <summary>W12: a throw in a middleware registered AFTER the observer and BEFORE where the old backstop sat (a gate) writes
+    /// exactly one line and answers 500. The old backstop never saw it.</summary>
+    [Fact]
+    public async Task AThrowFromAGateBehindTheObserver_WritesOneErrorLine_AndAnswers500()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        var capturing = new CapturingLogger<DarlingWebHostService>();
+        app.UseMiddleware<DarlingWebFailureObserver>(capturing);
+        app.Use((HttpContext _, RequestDelegate _) => throw new InvalidOperationException("gate fault"));
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        var ctx = await Send(server, "/api/anything?server=example-sql-01");
+        await WaitForLinesAsync(capturing.Inner, 1);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
+        Assert.Equal(1, capturing.Inner.CountAtLevel(LogLevel.Error));
+        Assert.Single(capturing.Inner.Lines);
+        Assert.Contains("/api/anything", capturing.Inner.Joined, StringComparison.Ordinal);
+    }
+
+    /// <summary>S5: the line names the server as the registry does when the read resolved one, and otherwise passes the request
+    /// text through the bundle aliaser (an address in the text does not survive).</summary>
+    [Fact]
+    public async Task TheRouteNamesTheServerAsTheRegistryDoes_AndAliasesTheRequestTextOtherwise()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        var capturing = new CapturingLogger<DarlingWebHostService>();
+        app.UseMiddleware<DarlingWebFailureObserver>(capturing);
+        app.MapGet("/api/__test/resolved", () =>
+        {
+            DarlingWebFailureLog.NoteResolvedServer("example-sql-01");
+            return Results.Json(new { error = "x" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+        });
+        app.MapGet("/api/__test/unresolved", () => Results.Json(new { error = "x" }, statusCode: StatusCodes.Status503ServiceUnavailable));
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        await Send(server, "/api/__test/resolved?server=exam");
+        await WaitForLinesAsync(capturing.Inner, 1);
+        var resolvedLine = string.Join("\n", capturing.Inner.Lines);
+        Assert.Contains("(server example-sql-01)", resolvedLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("exam)", resolvedLine, StringComparison.Ordinal);
+
+        await Send(server, "/api/__test/unresolved?server=203.0.113.77");
+        await WaitForLinesAsync(capturing.Inner, 2);
+        var all = string.Join("\n", capturing.Inner.Lines);
+        Assert.DoesNotContain("203.0.113.77", all, StringComparison.Ordinal);
+        Assert.Contains("(server ip-1)", all, StringComparison.Ordinal);
+    }
+
+    /// <summary>The observer writes its line just after the response is handed back, so a test waits for it.</summary>
+    private static async Task WaitForLinesAsync(CapturingTestLogger logger, int count)
+    {
+        for (var wait = 0; wait < 100 && logger.Lines.Count < count; wait++)
+        {
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+    }
+
+    /// <summary>S5: Unicode format characters (the bidi controls included) are stripped from a logged route like control characters.</summary>
+    [Fact]
+    public void Sanitize_StripsUnicodeFormatCharacters()
+    {
+        var cleaned = DarlingHttpRefusalLog.Sanitize("/api/x (server a\u202Eb\u200Bc\u2066d)", 256);
+        Assert.Equal("/api/x (server a.b.c.d)", cleaned);
     }
 }

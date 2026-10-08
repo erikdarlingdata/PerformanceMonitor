@@ -2413,9 +2413,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal const int ComposeClientDeadlineHeadroomSeconds = 5;
 
     /// <summary>W13: the plain message for a composed run whose scope names only unregistered servers and whose rows hold no value,
-    /// else null. <paramref name="unregistered"/> is <see cref="ComposeServerScope.FindUnregisteredAsync"/>'s answer.</summary>
-    internal static string? UnknownServerMessage(IReadOnlyList<string>? scope, IReadOnlyList<string>? unregistered, JsonNode? rows)
+    /// else null. <paramref name="unregistered"/> is <see cref="ComposeServerScope.FindUnregisteredAsync"/>'s answer. When the registry
+    /// lookup itself failed (<paramref name="lookupFailed"/>) that answer is every name, a fallback and not a finding, so the message
+    /// is null and the run keeps the old empty answer. The check covers only the run's window, and the text says so.</summary>
+    internal static string? UnknownServerMessage(IReadOnlyList<string>? scope, IReadOnlyList<string>? unregistered, JsonNode? rows, bool lookupFailed = false)
     {
+        if (lookupFailed) return null;
         if (scope is null || scope.Count == 0 || unregistered is null) return null;
         if (!scope.All(name => unregistered.Contains(name, StringComparer.Ordinal))) return null;
         var hasValue = rows is JsonArray array
@@ -2423,8 +2426,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         if (hasValue) return null;
         var names = string.Join(", ", scope.Select(n => "'" + DarlingHttpRefusalLog.Sanitize(n, 128) + "'"));
         return scope.Count == 1
-            ? $"No server named {names} is registered, and nothing is stored under that name."
-            : $"No server named {names} is registered, and nothing is stored under those names.";
+            ? $"No server named {names} is registered, and nothing is stored under that name in this time range."
+            : $"No server named {names} is registered, and nothing is stored under those names in this time range.";
     }
 
     /// <summary>The client <c>CommandTimeout</c> for a composed query whose server-side statement_timeout is
@@ -2865,7 +2868,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            row's stored server_name, so a scope over a name that was never registered keeps matching what it matched before (a scoped name
            that IS registered means the server the registry holds under it now: see ComposeCompiler.ServerScope). Resolved here, before the hourly-edges snapshot below
            takes its connection, so this lookup never asks the pool for a second one while the snapshot holds the first. */
-        var unregisteredServers = await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken, logger);
+        var registryLookupFailed = false;
+        var unregisteredServers = await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken, logger, () => registryLookupFailed = true);
 
         /* #4605: only a panel the hourly-plus-raw-edges route could serve pays for the count guard. It runs on one
            connection, in a REPEATABLE READ READ ONLY transaction the panel statement shares, so a collector batch that
@@ -2931,7 +2935,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* W13: a scope naming only servers the registry does not know, over rows that hold nothing, is a server that does not exist, and
                a null aggregate row was being returned as if it were an answer. Names that ARE stored (a removed server's history, #5525)
                keep returning their rows, so this fires only when the run found nothing for them. */
-            if (UnknownServerMessage(serverScope, unregisteredServers, rows) is { } unknownServer)
+            if (UnknownServerMessage(serverScope, unregisteredServers, rows, registryLookupFailed) is { } unknownServer)
             {
                 return ComposeRunOutcome.NotFound(unknownServer);
             }

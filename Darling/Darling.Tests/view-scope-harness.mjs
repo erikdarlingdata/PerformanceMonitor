@@ -49,7 +49,21 @@ console.log(JSON.stringify({
   underAll: under(wholeView[0], "All").filters.length,
   underReadPanel: under({ read: "get_x" }, "All"),
   noteOnServer: context.panelServerNote({ server: ["sql2025"] }, viewServer),
-  noteOnOther: context.panelServerNote({ server: "All" }, viewServer),
+  noteOnOther: context.panelServerNote({ server: "All", picked: true }, viewServer),
+  noteOnOtherNotPicked: context.panelServerNote({ server: ["sql2022"], picked: false }, viewServer),
+  panelSeedVariableAll: seed("p4", sv("All"), viewServer),
+  panelSeedVariableReference: seed("p5", sv("$other"), viewServer),
+  panelSeedVariableUnknown: seed("p6", sv("nope"), viewServer),
+  panelSeedOtherDimensionVariable: seed("p7", [{ name: "db", dimension: "database", default: "x" }], viewServer),
+  pickedFlags: (() => {
+    const fresh = context.seedState("m0", 24, [], fleet, viewServer).picked;
+    const variable = context.seedState("m0b", 24, sv("sql2022"), fleet, viewServer).picked;
+    vm.runInContext('viewScopeMemory.set("m1", { server: "All", hours: 24, values: {}, picked: true }); viewScopeMemory.set("m2", { server: "All", hours: 12, values: {}, picked: false });', context);
+    return { fresh, variable, remembered: context.seedState("m1", 24, [], fleet, viewServer).picked, rememberedHoursOnly: context.seedState("m2", 24, [], fleet, viewServer).picked };
+  })(),
+  panelServerEqPlusIn: panelsServer([composed(eq("SQL2025"), { dimension: "server", op: "in", value: "SQL2022" })]),
+  panelServerEqPlusNeq: panelsServer([composed(eq("SQL2025"), { dimension: "server", op: "neq", value: "SQL2022" })]),
+  panelServerEqPlusOtherDimension: panelsServer([composed(eq("SQL2025"), { dimension: "database", op: "in", value: "d" })]),
   none: seed("a", []),
   byName: seed("b", sv("sql2025")),
   byDisplayName: seed("c", sv("SQL2022")),

@@ -318,8 +318,12 @@ internal sealed class DarlingHttpRefusalLog
                grep do not, so a forged entry could hide from ReadLine-based tooling while a splitlines()-based
                one saw it as real. All are sanitized the same as CR/LF so a reader can never disagree with
                another about where one log entry ends. */
-            if (char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029)
+            if (char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029
+                || System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format)
             {
+                /* Unicode format characters (category Cf: zero-width marks, the bidi controls U+202A-U+202E and
+                   U+2066-U+2069) change how a line DISPLAYS, so a request text could make a log line read
+                   reordered; they become '.' the same way. */
                 builder.Append('.');
             }
             else if (char.IsHighSurrogate(c) && i + 1 < take && char.IsLowSurrogate(value[i + 1]))

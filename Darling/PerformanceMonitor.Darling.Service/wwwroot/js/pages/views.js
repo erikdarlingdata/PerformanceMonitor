@@ -464,7 +464,12 @@ function savedServerScope(variables, fleet) {
    filters with the scope, so such a view already read only that server while the picker said "All servers (fleet)", and
    picking another server meant every panel filtered to the first one and drew nothing. A view counts only when EVERY composed
    panel has exactly one server "eq" filter, all naming the same server (case ignored) and that server is in the fleet; a
-   mixed view, a panel with an "in" filter, or a name the fleet does not list keeps the old behaviour. */
+   mixed view, a panel with any server filter other than that one "eq" (an "in", a "neq", a second "eq"), or a name the fleet
+   does not list keeps the old behaviour. */
+function serverFilters(p) {
+  return (Array.isArray(p.filters) ? p.filters : []).filter((f) => f && f.dimension === "server");
+}
+
 function serverEqFilters(p) {
   return (Array.isArray(p.filters) ? p.filters : []).filter(
     (f) => f && f.dimension === "server" && f.op === "eq" && typeof f.value === "string" && f.value.trim()
@@ -477,7 +482,9 @@ function panelFilterServer(panels, fleet) {
   let name = null;
   for (const p of composed) {
     const eq = serverEqFilters(p);
-    if (eq.length !== 1) return null;
+    /* The one "eq" must be the panel's ONLY server filter: panelUnderScope drops just the eq, so a leftover "in" or "neq" would
+       still be ANDed with the picked server into an empty panel. */
+    if (eq.length !== 1 || serverFilters(p).length !== 1) return null;
     const v = eq[0].value.trim().toLowerCase();
     if (name !== null && name !== v) return null;
     name = v;
@@ -500,20 +507,28 @@ function panelUnderScope(p, state, panelServer) {
   return { ...p, filters: kept };
 }
 
+/* "Your pick" is said only when the reader picked the server: state.picked is set by the server picker and remembered with the
+   scope. A scope the view's own server variable chose is the view's setting, and the note says so. */
 function panelServerNote(state, panelServer) {
   if (!panelServer) return "";
-  return onPanelServer(state, panelServer)
-    ? "This view sets its server: every panel is set to " + panelServer.label + ". Pick another server, or All servers, to replace that for every panel."
-    : "Showing your pick instead of " + panelServer.label + ", the server this view's panels are set to.";
+  if (onPanelServer(state, panelServer)) {
+    return "This view sets its server: every panel is set to " + panelServer.label + ". Pick another server, or All servers, to replace that for every panel.";
+  }
+  return state.picked
+    ? "Showing your pick instead of " + panelServer.label + ", the server this view's panels are set to."
+    : "Showing the server this view's own setting names instead of " + panelServer.label + ", the server this view's panels are set to.";
 }
 
 function seedState(id, defaultHours, variables, fleet, panelServer) {
   const cached = viewScopeMemory.get(String(id));
   if (cached) {
-    return { server: cached.server, hours: cached.hours, values: { ...cached.values } };
+    return { server: cached.server, hours: cached.hours, values: { ...cached.values }, picked: cached.picked === true };
   }
-  const state = { server: savedServerScope(variables, fleet), hours: defaultHours, values: {} };
-  if (state.server === "All" && panelServer) state.server = [panelServer.value];
+  const state = { server: savedServerScope(variables, fleet), hours: defaultHours, values: {}, picked: false };
+  /* An explicit server variable decides first, "All" included: the panels' server seeds the scope only when the view has no
+     server variable at all. */
+  const hasServerVariable = (variables || []).some((v) => v && v.dimension === "server");
+  if (state.server === "All" && panelServer && !hasServerVariable) state.server = [panelServer.value];
   for (const v of variables) {
     if (v.dimension !== "server" && v.default) state.values[v.name] = v.default;
   }
@@ -521,7 +536,7 @@ function seedState(id, defaultHours, variables, fleet, panelServer) {
 }
 
 function rememberScope(id, state) {
-  viewScopeMemory.set(String(id), { server: state.server, hours: state.hours, values: { ...state.values } });
+  viewScopeMemory.set(String(id), { server: state.server, hours: state.hours, values: { ...state.values }, picked: !!state.picked });
 }
 
 export async function renderView(main, id) {
@@ -1104,6 +1119,7 @@ function buildServerScopePicker(fleet, state, onChange) {
     const rows = [
       checkRow("All servers (fleet)", isAll(), () => {
         state.server = "All";
+        state.picked = true;
         redraw();
         onChange();
       }),
@@ -1113,6 +1129,7 @@ function buildServerScopePicker(fleet, state, onChange) {
       rows.push(
         checkRow(o.label, on, () => {
           toggle(o.value, !on);
+          state.picked = true;
           redraw();
           onChange();
         })

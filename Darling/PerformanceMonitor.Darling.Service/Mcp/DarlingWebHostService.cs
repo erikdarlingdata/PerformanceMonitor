@@ -1008,6 +1008,12 @@ public sealed class DarlingWebHostService : BackgroundService
            -> UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
            UseEndpoints at the tail, so the static-file middleware sits behind these gates and serves the SPA
            for non-API paths. */
+        /* W12: the failure observer is the outermost middleware. It decides nothing before next() runs (see
+           DarlingWebFailureObserver), so it adds no surface ahead of the Host guard; it is a class, not an app.Use lambda, and the
+           Host guard stays the first app.Use (HostHeaderGuardTests). It is the #4276 backstop folded in: route exceptions are caught
+           and answered here as before, and a 5xx nothing reported leaves its one line here. */
+        app.UseMiddleware<DarlingWebFailureObserver>(_logger);
+
         app.UseResponseCompression();
 
         /* #5288, #4220: HttpRequest.Host hands the guard below the DECODED form of a Host header
@@ -1233,81 +1239,8 @@ public sealed class DarlingWebHostService : BackgroundService
             });
         }
 
-        /* #4276: one backstop exception handler, ahead of every route below (DarlingWebEndpoints.MapAll has no
-           Map* of its own outside that one call, so this covers all of them — see
-           DarlingWebFailureHandlingTests' source pin), so a route with no try/catch of its own (the issue's
-           own examples, /api/ag and /api/fleet, plus any future one) cannot reach ASP.NET Core's own error
-           handling — which writes into the providers ClearProviders silenced above, so the browser got an
-           empty 500 with no trace anywhere. AFTER the Host-allowlist guard and the auth gate on purpose (see
-           the pipeline-order comment above app.UseResponseCompression) — but that means it covers the ROUTES
-           ONLY: it is registered after both gates, so a gate throw never enters this try, and is not logged
-           here (#4281 review, finding 4). A client that closed the page is not a failure — DarlingWebFailureLog
-           never sees it, and nothing is written to a caller who is gone. */
-        app.Use(async (context, next) =>
-        {
-            var route = DarlingWebFailureLog.RouteOf(context.Request);
-            var stopwatch = Stopwatch.StartNew();
-            var reported = DarlingWebFailureLog.BeginRequestTracking();
-            try
-            {
-                await next(context);
-            }
-            catch (Exception ex) when ((ex is OperationCanceledException or IOException)
-                && context.RequestAborted.IsCancellationRequested)
-            {
-                /* #4286 review, Low 2: a client that resets an upload or an HTTP/2 stream during a body read
-                   does not always surface as OperationCanceledException -- Kestrel can report it as an
-                   IOException (a TCP reset, or "The client reset the request stream." on HTTP/2), which used
-                   to fall to the generic arm below and write an unthrottled Error line for a caller who is
-                   already gone. Same filter ASP.NET Core's own exception handler middleware uses to classify a
-                   client abort. */
-            }
-            catch (BadHttpRequestException bad)
-            {
-                /* #4281 review, finding 3: Kestrel throws this for a malformed or oversized request body (a
-                   413/400/408 a client can trigger on purpose at no cost) — it is not a service failure, so it
-                   must not cost the generic 500 or an Error line the way a real failure does. Debug only: the
-                   default LoggerFilterOptions.MinLevel (Information) keeps it out of the file in production,
-                   same as every other Debug call site, while still letting an operator opt in. No body beyond
-                   what Kestrel itself would have written before this backstop existed. #4286 review, Low 5:
-                   {Message} dropped -- a template argument becomes part of the FORMATTED message, which used
-                   to bypass DarlingFileLoggerProvider's sanitize entirely (it only cleaned the exception
-                   OBJECT's own Message). The exception object passed as the first argument still carries
-                   bad.Message to any provider that wants it, and the file sink now cleans the whole assembled
-                   line regardless (#4286 review, Low 5) -- but dropping the template argument is still the
-                   right fix, matching the ruled Debug line the review gives verbatim. */
-                _logger.LogDebug(bad, "Web dashboard request rejected ({StatusCode})", bad.StatusCode);
-
-                if (!context.Response.HasStarted)
-                {
-                    context.Response.StatusCode = bad.StatusCode;
-                }
-            }
-            catch (Exception ex)
-            {
-                DarlingWebFailureLog.Report(_logger, route, stopwatch.ElapsedMilliseconds, ex);
-
-                /* Only log, per the ruling, once the response has already started — there is no header or
-                   body left to change at that point. */
-                if (!context.Response.HasStarted)
-                {
-                    context.Response.StatusCode = DarlingWebFailureLog.StatusCode(ex);
-                    context.Response.ContentType = "application/json; charset=utf-8";
-                    await context.Response.WriteAsync(DarlingWebFailureLog.Body(ex).ToJsonString());
-                }
-            }
-
-            /* W12: a read that answered 5xx (a 503 above all) with no failure report of its own still leaves one line, naming
-               the endpoint and the server, so the page's red strip always has a service-log line behind it. /api/ping answers
-               503 on purpose for a stopped collector and has its own contract. */
-            if (!reported.Value
-                && context.Response.StatusCode >= StatusCodes.Status500InternalServerError
-                && context.Request.Path.StartsWithSegments("/api")
-                && !context.Request.Path.StartsWithSegments("/api/ping"))
-            {
-                DarlingWebFailureLog.ReportUnlogged(_logger, route, context.Response.StatusCode, stopwatch.ElapsedMilliseconds);
-            }
-        });
+        /* #4276, W12: the failure backstop is no longer here. It is DarlingWebFailureObserver, registered FIRST (before response
+           compression), so a throw from the Host guard, the auth gate or compression is logged too, and still once per request. */
 
         /* API responses never cache (#4188): the store mutates continuously, so a stale GET is a stale
            dashboard. no-store rather than no-cache/must-revalidate — these bodies carry no ETag, so "cache but

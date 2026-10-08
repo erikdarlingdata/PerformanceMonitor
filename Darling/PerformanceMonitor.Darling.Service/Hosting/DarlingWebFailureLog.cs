@@ -104,14 +104,25 @@ internal static class DarlingWebFailureLog
         return SqlState(exception) == "57014" ? "statement_timeout" : "client_timeout_or_pool_wait";
     }
 
-    private static readonly System.Threading.AsyncLocal<StrongBox<bool>?> s_requestReported = new();
-
-    /// <summary>W12: starts tracking whether the current request's failure got a log line. The backstop calls it
-    /// before the route runs; <see cref="Report(ILogger,string,long,Exception)"/> and its sentence twin tick the
-    /// box, so a 5xx the route answered WITHOUT reporting is the one the backstop reports (<see cref="ReportUnlogged"/>).</summary>
-    internal static StrongBox<bool> BeginRequestTracking()
+    /// <summary>What one request's failure reporting tracks: whether a failure line was written, and the server name the
+    /// registry gave the read (<see cref="NoteResolvedServer"/>).</summary>
+    internal sealed class RequestTracking
     {
-        var box = new StrongBox<bool>(false);
+        /// <summary>True once <see cref="Report(ILogger,string,long,Exception)"/> or its sentence twin wrote the request's line.</summary>
+        public bool Reported { get; set; }
+
+        /// <summary>The name the registry resolved the read's server to, or null when the read resolved none.</summary>
+        public string? ServerName { get; set; }
+    }
+
+    private static readonly System.Threading.AsyncLocal<RequestTracking?> s_requestReported = new();
+
+    /// <summary>W12: starts tracking whether the current request's failure got a log line. The outermost observer calls it
+    /// before anything else runs; <see cref="Report(ILogger,string,long,Exception)"/> and its sentence twin tick the
+    /// box, so a 5xx answered WITHOUT a report is the one the observer reports (<see cref="ReportUnlogged"/>).</summary>
+    internal static RequestTracking BeginRequestTracking()
+    {
+        var box = new RequestTracking();
         s_requestReported.Value = box;
         return box;
     }
@@ -119,7 +130,15 @@ internal static class DarlingWebFailureLog
     private static void MarkReported()
     {
         var box = s_requestReported.Value;
-        if (box is not null) box.Value = true;
+        if (box is not null) box.Reported = true;
+    }
+
+    /// <summary>S5: the server resolver notes the registry's own name for the server a read resolved, so a failure line names the
+    /// server as the registry does (a name the diagnostics bundle's aliaser knows whole) and not as the request spelled it.
+    /// Ignored outside a tracked request.</summary>
+    internal static void NoteResolvedServer(string? serverName)
+    {
+        if (s_requestReported.Value is { } box && !string.IsNullOrEmpty(serverName)) box.ServerName ??= serverName;
     }
 
     /// <summary>
@@ -144,14 +163,28 @@ internal static class DarlingWebFailureLog
     }
 
     /// <summary>W12: the request's path, plus the server the read named (<c>server</c> or <c>server_name</c>) so a
-    /// failed read's line says WHICH server it was for. The value is request text and is sanitized with the route.</summary>
+    /// failed read's line says WHICH server it was for. S5: the server is written as the registry names it when the read
+    /// resolved one (<see cref="NoteResolvedServer"/>); otherwise it is the request's own text passed through the diagnostics
+    /// bundle's aliaser (<see cref="BundleAliaser"/>), which rewrites what it can recognise without a name list (IP addresses,
+    /// secrets), because a bundle can only replace the names it knows and a partial or unregistered spelling is not one.
+    /// The whole route is sanitized by the caller.</summary>
     internal static string RouteOf(HttpRequest request)
     {
         var path = request.Path.Value ?? "/";
-        var server = request.Query.TryGetValue("server", out var a) && a.Count > 0 && !string.IsNullOrEmpty(a[0]) ? a[0]
-            : request.Query.TryGetValue("server_name", out var b) && b.Count > 0 && !string.IsNullOrEmpty(b[0]) ? b[0]
-            : null;
+        var server = s_requestReported.Value?.ServerName
+            ?? (request.Query.TryGetValue("server", out var a) && a.Count > 0 && !string.IsNullOrEmpty(a[0]) ? AliasRequestText(a[0])
+            : request.Query.TryGetValue("server_name", out var b) && b.Count > 0 && !string.IsNullOrEmpty(b[0]) ? AliasRequestText(b[0])
+            : null);
         return server is null ? path : path + " (server " + server + ")";
+    }
+
+    /// <summary>The request text through a bundle aliaser that knows no names: its secret guard and address rewrite still apply.
+    /// Capped first, so a long value is not scanned in full.</summary>
+    private static string? AliasRequestText(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+        var capped = text.Length > 256 ? text[..256] : text;
+        return new BundleAliaser().Alias(capped);
     }
 
     /// <summary>

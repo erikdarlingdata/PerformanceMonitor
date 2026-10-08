@@ -594,6 +594,58 @@ GROUP BY server_id";
     }
 
     /// <summary>
+    /// Release walk W1b (review round): the older-collection read for a dark server (1) runs on a connection the first read has
+    /// already released - a store whose pool holds ONE connection still answers it, where holding the first reader open while the
+    /// second command took its connection waited for the pool and gave up - and (2) is cached per server for
+    /// <see cref="DarlingFleetReader.OlderCollectionCacheMinutes"/>: a second poll inside the window reuses the answer (proved by
+    /// deleting the rows it came from), and one past it reads again.
+    /// </summary>
+    [Fact]
+    public async Task TheOlderCollectionRead_NeedsOnlyOneConnectionAtATime_AndIsCachedPerServer_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live older-collection test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await PrepareHypertablesAsync(connectionString!, connection, ct);
+
+        var onePooled = new NpgsqlConnectionStringBuilder(connectionString) { MaxPoolSize = 1, Timeout = 3, Pooling = true }.ConnectionString;
+        await using var postgres = NpgsqlDataSource.Create(onePooled);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelRowsAsync(connection, ct);
+            var now = Micro(DateTime.UtcNow);
+            await SeedAsync(connection, now, ct);
+
+            var first = await DarlingFleetReader.ReadLastCollectionAsync(postgres, now, null, ct);
+            Assert.NotNull(first[DarkFiveDays].OlderCollection);
+
+            await using (var delete = new NpgsqlCommand("DELETE FROM collection_log WHERE server_id = $1", connection) { Parameters = { new() { Value = DarkFiveDays } } })
+            {
+                await delete.ExecuteNonQueryAsync(ct);
+            }
+
+            var cached = await DarlingFleetReader.ReadLastCollectionAsync(postgres, now.AddMinutes(1), null, ct);
+            Assert.Equal(first[DarkFiveDays].OlderCollection, cached[DarkFiveDays].OlderCollection);
+
+            var expired = await DarlingFleetReader.ReadLastCollectionAsync(
+                postgres, now.AddMinutes(DarlingFleetReader.OlderCollectionCacheMinutes + 1), null, ct);
+            Assert.Null(expired[DarkFiveDays].OlderCollection);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelRowsAsync);
+        }
+    }
+
+    /// <summary>
     /// The plan, where TimescaleDB is present (the only place chunks exist to exclude). Over the seeded week of
     /// daily chunks: the newest-row probes read a handful of rows rather than every retained one and never sort
     /// the relation, and the floored incident count plans only the window's chunks where the event-bounded
