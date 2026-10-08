@@ -68,17 +68,19 @@ public sealed class StaThreadCensusTests
                 continue;
             }
 
-            if (text.Contains(s_sta, StringComparison.Ordinal))
+            /* Code only: a comment or a string that names the old helper, the dispatcher or the apartment state is not a use of it. */
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+            if (code.Contains(s_sta, StringComparison.Ordinal))
             {
                 violations.Add(rel + ": starts its own STA thread; run the body in StaTestThread.Run(...) instead");
             }
 
-            if (s_helperDefinition.IsMatch(StripComments(text)))
+            if (s_helperDefinition.IsMatch(code))
             {
                 violations.Add(rel + ": defines its own OnStaThread-style helper; call StaTestThread.Run(...) directly");
             }
 
-            if (text.Contains(s_run, StringComparison.Ordinal))
+            if (code.Contains(s_run, StringComparison.Ordinal))
             {
                 violations.Add(rel + ": runs its own dispatcher; use the async overload StaTestThread.Run(async () => ...)");
             }
@@ -132,10 +134,6 @@ public sealed class StaThreadCensusTests
             yield return (rel, File.ReadAllText(file));
         }
     }
-
-    /// <summary>Drops // and /// comment lines, so a comment that names the old helper is not a definition.</summary>
-    private static string StripComments(string text) =>
-        string.Join('\n', text.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
 
     private static string ProjectDir([CallerFilePath] string thisFile = "") => Path.GetDirectoryName(thisFile)!;
 }
