@@ -24,7 +24,7 @@
  */
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
+         ALERT_STATE_LABELS, alertDeliveryState, parseUtc } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -440,11 +440,13 @@ function readRequest() {
 }
 
 /* Keeps the alerts at or after the range start. The newest-first reply and the row cap mean the cut cannot hide an in-range row (the
- * rows it drops are the oldest), the same argument job-history.js makes for its runs. An unreadable time is kept. */
+ * rows it drops are the oldest), the same argument job-history.js makes for its runs. An unreadable time is kept.
+ * alert_time is the store's naive UTC with no zone suffix, and Date.parse would read that as the browser's LOCAL time, shifting every
+ * alert by the browser's offset, so parseUtc (util.js) reads it as UTC (#5570 review round 2, H1). */
 export function trimAlertsToStart(alerts, startMs) {
   return alerts.filter((a) => {
-    const t = Date.parse(a && a.alert_time);
-    return Number.isNaN(t) || t >= startMs;
+    const d = parseUtc(a && a.alert_time);
+    return d === null || d.getTime() >= startMs;
   });
 }
 

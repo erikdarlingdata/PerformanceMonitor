@@ -1123,6 +1123,18 @@
    "error": "bad_range"
   },
   {
+   "name": "a fixed range that starts in the future is refused (review r2 M1)",
+   "input": "Dec 25 2030 - Dec 26 2030",
+   "now": "2026-10-08T11:01:00Z",
+   "zone": "America/New_York",
+   "start": null,
+   "end": null,
+   "live": null,
+   "echo": null,
+   "error": "range_not_started",
+   "errorMessage": "That range has not started yet."
+  },
+  {
    "name": "too far back",
    "input": "99999999 days",
    "now": "2026-10-08T11:01:00Z",

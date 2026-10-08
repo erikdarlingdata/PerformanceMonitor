@@ -85,7 +85,7 @@ public sealed class FinOpsStorageGrowthWindowBehaviourTests
         var objects = run.GetProperty("objects");
         Assert.Equal(new[] { "720" }, Hours(objects));
         // #5562 R5: the Compact rolling-only picker, whole days, reach 2160 hours for this view (not the catalog entry's 168).
-        Assert.Equal("Past week,Past 30 days", string.Join(",", objects.GetProperty("options").EnumerateArray().Select(e => e.GetString())));
+        Assert.Equal("Past week,Past 30 days,Past 90 days", string.Join(",", objects.GetProperty("options").EnumerateArray().Select(e => e.GetString())));
         var refused = objects.GetProperty("refused");
         Assert.Equal("This page reads whole days back from now, such as 7d or 30d.", refused.GetProperty("hours").GetString());
         Assert.Equal("This page reads a length back from now, so pick a rolling length such as 24h or 7d.", refused.GetProperty("calendar").GetString());

@@ -195,6 +195,8 @@ export const tab = {
       return finopsWindowControl({
         hours: state.days * 24,
         view: "storage_growth",
+        /* The page always offered 7 / 30 / 90 days as one click each; the view's reach is the 90 (#5562 review r2 L3). */
+        offerReach: true,
         /* The server reads hours_back = 24 as its 30-day default and refuses 2 to 6 days (DarlingMcpFinOpsTools.StorageGrowthWindowDaysFor), so the
            shortest length the picker offers is a week (#5562 review r1 H1). */
         minSpanMs: 7 * DAY_MS,

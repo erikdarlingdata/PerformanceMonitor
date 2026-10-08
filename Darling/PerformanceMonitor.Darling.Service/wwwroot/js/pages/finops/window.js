@@ -26,6 +26,8 @@ const HOUR_MS = 3600000;
  * @param {number} [opts.minSpanMs] a floor above one hour (a daily read)
  * @param {number} [opts.stepMs] the unit a length must be a whole number of (default one hour)
  * @param {string} [opts.label] the control's label (default "Window")
+ * @param {boolean} [opts.offerReach] add the view's reach as the longest quick choice when it is longer than the shared 30 days
+ *   (Storage Growth's 90, which the page always offered as one click, #5562 review r2 L3)
  * @returns {{ node: HTMLElement, picker: object, hours: () => number }}
  */
 export function finopsWindowControl(opts) {
@@ -35,6 +37,7 @@ export function finopsWindowControl(opts) {
     spec: relativeSpec(opts.hours * HOUR_MS),
     label,
     compact: true,
+    offerReach: opts.offerReach,
     rollingOnly: true,
     minSpanMs: opts.minSpanMs || ROLLING_ONLY_MIN_SPAN_MS,
     stepMs: opts.stepMs,

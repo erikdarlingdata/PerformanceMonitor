@@ -67,7 +67,7 @@ public static class TimeRangePresets
         return range.IsLive ? TimeRangeSpec.SinceInstant(range.StartUtc) : TimeRangeSpec.FixedRange(range.StartUtc, range.EndUtc);
     }
 
-    /// <summary>The length of a calendar period at <paramref name="nowUtc"/> in <paramref name="zone"/> ("3d", "7h 1m"), or <c>null</c> when the period is shorter than the minimum right now (Today just after midnight).</summary>
+    /// <summary>The length of a calendar period at <paramref name="nowUtc"/> in <paramref name="zone"/> ("3d", "7h 1m"), or <c>null</c> when the period cannot be used right now: only at zero length (exactly midnight for Today), because a calendar period is exempt from the 5-minute floor (#5562).</summary>
     public static string? CurrentLength(TimeRangeSpec spec, DateTime nowUtc, TimeZoneInfo zone)
         => spec.TryResolve(nowUtc, zone, out var range, out _) ? range!.Length : null;
 

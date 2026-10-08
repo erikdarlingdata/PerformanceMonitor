@@ -308,6 +308,36 @@ public sealed class WebServerPageRangeTests
         Assert.Empty(Strings(r, "errors"));
     }
 
+    /// <summary>Review r2 M1: the server page's hold refuses a fixed range that starts in the future, in the picker's words, and the range
+    /// it had is still the range it reads (before this, the past hour was read under the future range's label).</summary>
+    [Fact]
+    public void AFixedRangeThatStartsInTheFuture_IsRefusedByTheHold_AndTheHeldRangeStays()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("tabReachHoldFutureStart", out var r, CatalogJson())) return;
+
+        var found = r.GetProperty("found");
+        Assert.Equal("That range has not started yet.", found.GetProperty("refused").GetString());
+        Assert.Equal(found.GetProperty("beforeHours").GetInt32(), found.GetProperty("afterHours").GetInt32());
+        Assert.False(found.GetProperty("custom").GetBoolean());
+    }
+
+    /// <summary>Review r2 L2: while the catalog is pending, a second render of the same server (a range change or the 60 second refresh
+    /// both redraw the panels) adds no second wait. Two waits ran two redraws when the catalog arrived, so every panel read was sent twice.</summary>
+    [Fact]
+    public void ARedrawDuringTheCatalogWait_ReadsEachPanelOnce()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("tabReachWaitsRedrawn", out var r, CatalogJson())) return;
+
+        var found = r.GetProperty("found");
+        Assert.Equal(0, found.GetProperty("readsBeforeRelease").GetInt32());
+        // One batch of panel builds when the catalog arrives, not one per redraw that hit the wait.
+        Assert.Equal(1, found.GetProperty("builds").GetInt32());
+        var reads = Strings(found, "reads");
+        Assert.NotEmpty(reads);
+        Assert.Equal(reads.Length, found.GetProperty("distinct").GetInt32());
+        Assert.Empty(Strings(r, "errors"));
+    }
+
     /// <summary>A custom start and end maps to the reads' window: <c>as_of</c> is the end and <c>hours</c> is the span rounded
     /// UP to whole hours, so the fetch starts at or before the picked start. A span under an hour, a reversed pair, a future
     /// end and a span wider than the widest preset are refused; an end at "now" is live and names no <c>as_of</c>.</summary>

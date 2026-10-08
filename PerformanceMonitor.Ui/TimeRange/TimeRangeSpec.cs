@@ -199,6 +199,14 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
             return false;
         }
 
+        /* A fixed range that starts in the future is refused (#5562 review r2 M1), in the same words as the web module: nothing has been
+           collected for a window that has not begun, and a host that read it would show an empty chart under a future label. */
+        if (Kind == TimeRangeKind.Fixed && start > now)
+        {
+            error = new TimeRangeError("range_not_started", "That range has not started yet.");
+            return false;
+        }
+
         /* A calendar period is exempt from the floor (#5562, seat ruling): "Today" at 00:02 reads 00:00 to now and the "collected
            every N min" note explains a sparse chart; no other range is ever substituted. The floor applies to typed spans and
            custom start/end only. A period that has not started (zero length) is still refused. */

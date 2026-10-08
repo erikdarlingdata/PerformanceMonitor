@@ -38,7 +38,7 @@ public sealed class TimeRangeParseResult
     /// <summary>The plain reason the text was refused, or <c>null</c>.</summary>
     public string? Error { get; }
 
-    /// <summary>A stable code for the refusal: empty, unrecognized, bad_date, bad_time, bad_range, needs_end, too_short, end_before_start, start_in_future, too_far_back. <c>null</c> on success.</summary>
+    /// <summary>A stable code for the refusal: empty, unrecognized, bad_date, bad_time, bad_range, needs_end, too_short, end_before_start, start_in_future, range_not_started, too_far_back. <c>null</c> on success.</summary>
     public string? ErrorCode { get; }
 
     /// <summary>The named range, or <c>null</c> on an error.</summary>

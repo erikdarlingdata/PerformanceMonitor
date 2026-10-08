@@ -228,6 +228,12 @@ public sealed class WebTimeRangeTests
         Assert.Equal(3, futureEnd.GetProperty("future").GetProperty("hours").GetInt32());
         Assert.False(futureEnd.GetProperty("past").GetProperty("live").GetBoolean());
         Assert.NotEqual(JsonValueKind.Null, futureEnd.GetProperty("past").GetProperty("asOf").ValueKind);
+
+        // Review r2 M1: a fixed range that starts in the future is refused with its reason, Apply stays off and nothing is held.
+        var futureStart = r.GetProperty("futureStart");
+        Assert.Equal("That range has not started yet.", futureStart.GetProperty("preview").GetString());
+        Assert.True(futureStart.GetProperty("applyDisabled").GetBoolean());
+        Assert.Equal(0, futureStart.GetProperty("changes").GetInt32());
     }
 
     /// <summary>Compact moves the detail into the tooltip; the sample-interval note shows when the span holds fewer than three samples;

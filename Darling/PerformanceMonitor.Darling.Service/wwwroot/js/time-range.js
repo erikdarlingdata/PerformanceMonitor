@@ -436,6 +436,10 @@ export function resolveSpec(spec, nowMs, zone) {
       ? fail("start_in_future", "That start has not happened yet.")
       : fail("end_before_start", "The end is before the start.");
   }
+  /* A fixed range that starts in the future (typed with a year ahead, or picked in the date boxes) is refused (#5562 review r2 M1): a
+     read cannot answer a window that has not begun, and the page would otherwise read the past hour under the future range's label.
+     Here, in the one resolver, so the picker's preview and Apply, the server page's hold and the shared fixture all see the same refusal. */
+  if (spec.kind === "fixed" && start > nowMs) return fail("range_not_started", "That range has not started yet.");
   /* A calendar period is exempt from the 5-minute floor (#5562): "Today" at 00:02 reads 00:00 to now and the "collected every N min" note
      explains a sparse chart; no other range is ever substituted. Typed spans, "since" and custom start/end keep the floor. A period that
      has not started (zero length, exactly midnight) is still refused. */
@@ -780,7 +784,7 @@ function parseSpec(text, nowMs, zone) {
 /**
  * Reads a line of text as a range at `nowMs` in `zone`. Returns `{ ok, range, spec, echo, error, errorCode }`: `echo` is the
  * range's one-line label (empty on an error), `error` the plain reason and `errorCode` the stable code (empty, unrecognized,
- * bad_date, bad_time, bad_range, needs_end, too_short, end_before_start, start_in_future, too_far_back).
+ * bad_date, bad_time, bad_range, needs_end, too_short, end_before_start, start_in_future, range_not_started, too_far_back).
  */
 export function parseRange(text, nowMs, zone) {
   const refused = (code, message) => ({ ok: false, range: null, spec: null, echo: "", error: message, errorCode: code });

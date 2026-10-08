@@ -278,4 +278,12 @@ const found = {};
   found.futureEnd = { future: p.window(), past: past.p.window() };
 }
 
+/* 14. Review r2 M1: a fixed range that starts in the future is refused with its reason, and Apply stays off; nothing is held or sent. */
+{
+  const { root, button, changes } = make();
+  fire(button, "click");
+  const typed = typeInto(root, "Dec 25 2030 - Dec 26 2030");
+  found.futureStart = { ...typed, changes: changes.length };
+}
+
 console.log(JSON.stringify(found));

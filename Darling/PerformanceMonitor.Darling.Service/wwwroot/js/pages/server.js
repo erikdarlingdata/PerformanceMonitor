@@ -80,6 +80,9 @@ function rangeOption(hours) {
 const catalogsRead = new Map();
 /* Servers whose catalog could not be read when a wide range waited for it: they read at the common reach, and do not wait again. */
 const catalogGaveUp = new Set();
+/* The servers whose catalog is being read for the panels' wait below: one wait and one redraw per server, whatever redraws meanwhile
+   (#5562 review r2 L2). */
+const catalogWaits = new Set();
 
 /** How far back a tab's reads all reach, in hours (the smallest catalog `max_hours` among its `reachReads`). */
 function tabReach(tab = current.tab, server = current.server) {
@@ -195,11 +198,11 @@ export function rangeContext(nowMs = Date.now()) {
          The range stays held (the next tab may take all of it), and reachNoteText says what happened (#5562 review r1 M4). */
       const cut = tabReachRefusal(resolved.range.spanMs, reach) != null;
       const range = cut ? { ...resolved.range, startMs: resolved.range.endMs - reach * HOUR_MS, spanMs: reach * HOUR_MS } : resolved.range;
-      const w = readWindow(range);
+      const w = readWindow(range, nowMs);
       setActiveRange({ server: current.server, hours: w.hours, startMs: range.startMs, endMs: range.endMs, asOf: w.asOf });
       /* Totals and rankings are read over whole hours back from the end, so they can begin earlier than the picked start:
          when the span is not a whole number of hours the label says where they begin. */
-      const aggregateFrom = range.endMs - w.hours * HOUR_MS;
+      const aggregateFrom = w.endMs - w.hours * HOUR_MS;
       const rounded = aggregateFrom < range.startMs ? "; totals and rankings aggregate from " + localTime(new Date(aggregateFrom).toISOString()) : "";
       const times = localTime(new Date(range.startMs).toISOString()) + " to " + (range.live ? "now" : localTime(new Date(range.endMs).toISOString()));
       const picked = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom";
@@ -383,13 +386,18 @@ function redrawPanels() {
      last 7 days of it), so the panels wait for the catalog rather than read twice. A held range within the common reach reads now. */
   if (!catalogsRead.has(current.server) && !catalogGaveUp.has(current.server) && heldSpanMs() > DEFAULT_REACH_HOURS * HOUR_MS) {
     const server = current.server;
-    const tab = current.tab;
     if (panelAbort) panelAbort.abort();
     mount(gridNode, [loadingStrip()]);
+    /* A range change or the 60 second refresh during the wait lands here again: it keeps the loading strip and adds no second wait, or
+       two redraws would run when the catalog arrives and send the panels' reads twice (#5562 review r2 L2). The one redraw reads the
+       tab and range held at that moment, so a change made during the wait is read once. */
+    if (catalogWaits.has(server)) return;
+    catalogWaits.add(server);
     serverCatalog(server).catch(() => null).then((catalog) => {
+      catalogWaits.delete(server);
       if (catalog) catalogsRead.set(server, catalog);
       else catalogGaveUp.add(server);
-      if (server === current.server && tab === current.tab) redrawPanels();
+      if (server === current.server) redrawPanels();
     });
     return;
   }

@@ -1,7 +1,7 @@
 /* Runs the shipped Alert History page (wwwroot/js/pages/alerts.js) with the real shared renderer (panels.js, util.js,
    mute-context.js) on a small fake DOM and a recording fetch, and prints as one line of JSON what the page asked for
    and drew. AlertHistoryRangeBehaviourTests starts it as
-       node alert-history-range-harness.mjs <path to wwwroot/js> <scenario>
+       node alert-history-range-harness.mjs <path to wwwroot/js> <scenario> [IANA time zone]
    Only the DOM, fetch and charts.js are stand-ins. */
 import fs from "node:fs";
 import os from "node:os";
@@ -44,6 +44,9 @@ globalThis.location = { hash: "#/alerts" };
 
 const jsDir = process.argv[2];
 const scenario = process.argv[3];
+// Node on Windows ignores a TZ variable set before it starts, but honours one set on process.env from inside, so the zone is an argument
+// (#5570 r2 H1): the page's time parsing must give the same answer in every browser zone, and a harness stuck in UTC cannot show that.
+if (process.argv[4]) process.env.TZ = process.argv[4];
 
 const urls = [];
 let alertsReply = { alerts: [], truncated: false };
@@ -62,7 +65,9 @@ const readsOf = () => urls.filter((u) => u.includes("/get_alert_history")).map((
 
 const T0 = Date.now();
 const row = (i, over = {}) => ({
-  alert_time: new Date(T0 - 60000 - i * 60000).toISOString(),
+  // The server's shape: alert_time is r.AlertTime.ToString("o") of a naive-UTC timestamp, so seven fraction digits and NO zone suffix
+  // (#5570 r2 H1). toISOString() would add a Z, which hides a reader that parses the text as local time.
+  alert_time: new Date(T0 - 60000 - i * 60000).toISOString().replace("Z", "0000"),
   server_id: 1, server_name: "srv-a", stored_server_name: "srv-a", metric_name: "High CPU " + i,
   current_value: 90, threshold_value: 80, severity: "warning", severity_source: "fired", dismissed: false, ...over,
 });
@@ -192,6 +197,7 @@ try {
       pickRange(main, "Time range", "5m"); await settle(); out.fiveMinutes = metrics(main);
       pickRange(main, "Time range", "30m"); await settle(); out.thirtyMinutes = metrics(main);
       pickRange(main, "Time range", "4h"); await settle(); out.fourHours = metrics(main);
+      out.tzOffsetMinutes = new Date().getTimezoneOffset();
     },
     async mute() {
       alertsReply = { alerts: [row(1)], truncated: false };

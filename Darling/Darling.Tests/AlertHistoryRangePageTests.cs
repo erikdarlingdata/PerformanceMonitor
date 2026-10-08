@@ -73,12 +73,17 @@ public sealed class AlertHistoryRangePageTests
         Assert.DoesNotContain("/api/alerts/dismiss", page);
     }
 
-    private static JsonElement Run(string scenario)
+    private static JsonElement Run(string scenario, string? timeZone = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "alert-history-range-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
         psi.ArgumentList.Add(scenario);
+        if (timeZone is not null)
+        {
+            psi.ArgumentList.Add(timeZone);
+        }
+
         Process proc;
         try
         {
@@ -219,10 +224,18 @@ public sealed class AlertHistoryRangePageTests
         Assert.Equal("High CPU 3", string.Join(",", r.GetProperty("shrunk").EnumerateArray().Select(e => e.GetString())));
     }
 
-    [Fact]
-    public void ARangeShorterThanTheWholeHoursItFetches_ListsOnlyTheAlertsInsideIt()
+    // Review r2 H1: alert_time is naive UTC with no zone suffix, which the browser reads as LOCAL time unless the page parses it as UTC. The
+    // harness rows carry the server's real shape, and the same scenario runs in zones that are not UTC (and in UTC) because a UTC-only run
+    // passes the old Date.parse code. The offset check proves Node honoured the zone, so the test cannot pass by running in UTC every time.
+    [Theory]
+    [InlineData("UTC", 0)]
+    [InlineData("Europe/Berlin", -1)]
+    [InlineData("America/New_York", 1)]
+    [InlineData("Asia/Tokyo", -1)]
+    public void ARangeShorterThanTheWholeHoursItFetches_ListsOnlyTheAlertsInsideIt(string zone, int offsetSign)
     {
-        var r = Run("trim");
+        var r = Run("trim", zone);
+        Assert.Equal(offsetSign, Math.Sign(r.GetProperty("tzOffsetMinutes").GetInt32()));
         string[] Names(string key) => r.GetProperty(key).EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Equal(new[] { "High CPU 0", "High CPU 19", "High CPU 89" }, Names("day"));
         Assert.Equal(new[] { "High CPU 0" }, Names("fiveMinutes"));

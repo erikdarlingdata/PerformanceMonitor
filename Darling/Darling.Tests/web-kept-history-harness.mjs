@@ -688,6 +688,47 @@ Object.assign(scenarios, {
     found = { fetches: after, firstRead: after.findIndex((f) => f.startsWith("/api/read/")), catalog: after.findIndex((f) => f.startsWith("/api/catalog")) };
     return [holder];
   },
+  // Review r2 M1: a fixed range that starts in the future is refused by the server page's hold, and the range it had stays.
+  tabReachHoldFutureStart: async () => {
+    tabReachAnswers();
+    const holder = await tabPage("SRV1", "io");
+    const before = modules.server.rangeContext(NOW);
+    const refused = modules.server.holdSpec("SRV1", modules.timeRange.fixedSpec(NOW + HOURS, NOW + 3 * HOURS), NOW);
+    const after = modules.server.rangeContext(NOW);
+    found = { refused, beforeHours: before.hours, afterHours: after.hours, custom: after.custom === true };
+    return [holder];
+  },
+  // Review r2 L2: while the catalog is pending, another redraw of the same server (a range change or the 60 second refresh both call
+  // redrawPanels) must not add a second wait, or two redraws run when the catalog arrives and the panels' reads go out twice. The catalog
+  // answer is held back until the second render has happened. The batches are counted at the tab's build(): the page joins identical reads
+  // that are in flight together, so two batches can still show as one set of URLs, but each batch is a full rebuild of the panels.
+  tabReachWaitsRedrawn: async () => {
+    tabReachAnswers();
+    await tabPage("SRV1", "io");
+    modules.server.holdSpec("SRV1", modules.timeRange.relativeSpec(720 * HOURS), NOW);
+    const ioTab = modules.tabs.SERVER_TABS.find((t) => t.id === "io");
+    const realBuild = ioTab.build;
+    let builds = 0;
+    ioTab.build = (...args) => { builds++; return realBuild.apply(ioTab, args); };
+    const realFetch = globalThis.fetch;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    globalThis.fetch = async (url, init) => {
+      if (String(url).startsWith("/api/catalog")) await gate;
+      return realFetch(url, init);
+    };
+    const before = fetches.length;
+    const holder = await tabPage("SRV2", "io");
+    const again = await tabPage("SRV2", "io");
+    const readsBeforeRelease = fetches.slice(before).filter((f) => f.startsWith("/api/read/")).length;
+    release();
+    await settleFast();
+    globalThis.fetch = realFetch;
+    ioTab.build = realBuild;
+    const reads = fetches.slice(before).filter((f) => f.startsWith("/api/read/"));
+    found = { readsBeforeRelease, builds, reads, distinct: new Set(reads).size };
+    return [holder, again];
+  },
 });
 
 const chosen = scenarios[scenario];
