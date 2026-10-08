@@ -16,7 +16,8 @@
 
 import { renderPanel, VIZ } from "../../panels.js";
 import { READ_FIELDS } from "../../read-fields.js";
-import { el, mount, loadingStrip, emptyStrip, readErrorStrip, errorStrip, readTool, fmtInt } from "../../util.js";
+import { el, mount, loadingStrip, readErrorStrip, errorStrip, readTool, fmtInt } from "../../util.js";
+import { gatedEmptyStrip, PG_NOT_COLLECTED } from "./gate.js";
 const CPU_HOURS = 24;
 const TOP_HOURS = 24;
 const TOP_LIMIT = 5;
@@ -121,7 +122,7 @@ function loadUtilization(body, server, ctx) {
       const res = await readTool("get_finops", { server, view: "utilization" }, ctx && ctx.signal);
       if (res.kind === "aborted" || res.kind === "auth") return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+      if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
       const data = res.data || {};
       const hasCost = data.monthly_cost_usd != null;
       const view = {
@@ -165,7 +166,7 @@ function loadTopDatabases(body, server, ctx) {
       const res = await readTool("get_finops", { server, view: "database_resources", hours: TOP_HOURS, limit: TOP_LIMIT }, ctx && ctx.signal);
       if (res.kind === "aborted" || res.kind === "auth") return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+      if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
       const data = res.data || {};
       mount(body, [
         el("h3", { text: "Top Databases by Total CPU" }),
@@ -199,6 +200,7 @@ export const tab = {
           title: "CPU Utilization",
           subtitle: "last " + CPU_HOURS + " hours",
           read: "get_cpu_utilization",
+          notCollectedLine: ctx && ctx.postgres ? PG_NOT_COLLECTED : null,
           params: { server, hours: CPU_HOURS },
           viz: "line",
           rowsKey: "samples",
@@ -215,6 +217,7 @@ export const tab = {
           title: "Memory",
           subtitle: "latest snapshot",
           read: "get_memory_stats",
+          notCollectedLine: ctx && ctx.postgres ? PG_NOT_COLLECTED : null,
           params: { server },
           viz: "stat",
           stats: MEMORY_STATS,
@@ -227,6 +230,7 @@ export const tab = {
           title: "Database Sizes",
           subtitle: "latest snapshot",
           read: "get_database_sizes",
+          notCollectedLine: ctx && ctx.postgres ? PG_NOT_COLLECTED : null,
           params: { server },
           viz: "table",
           rowsKey: "databases",

@@ -23,6 +23,7 @@
 
 import { el, mount, readTool, fmtInt, makeActivatable } from "../../util.js";
 import { renderPanel } from "../../panels.js";
+import { PG_NOT_COLLECTED } from "./gate.js";
 import { databaseBox, newBoxChoice } from "./database-box.js";
 
 /* #5311: the four wait columns are shaded the desktop's way. The service bands each column over the rows it returns and
@@ -177,6 +178,7 @@ export const tab = {
           subtitle: choice.db ? "daily collection, database " + choice.db : "daily collection",
           read: "get_object_locking",
           params,
+          notCollectedLine: ctx && ctx.postgres ? PG_NOT_COLLECTED : null,
           viz: "table",
           rowsKey: "objects",
           columns: LOCKING_COLUMNS,

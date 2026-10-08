@@ -241,6 +241,82 @@ const scenarios = {
     await settle();
     return { sent, maxInFlight, stillInFlight, aborted, chart: chartInfo() };
   },
+  /* Clicks that change WHICH series are read (a different path each), so the superseded reads are aborted rather than
+     shared: "Default counters" sends the top series, "Clear All" supersedes every one of them (each is the only caller on its read, so
+     the fetch itself is cancelled), and two single checks send two reads of their own. */
+  changedParameter: async () => {
+    const root = await build("SRV1");
+    await click(button(root, "Clear All"));
+    let release;
+    hold = new Promise((r) => (release = r));
+    fetches.length = 0;
+    maxInFlight = 0;
+    aborted = 0;
+    for (const name of ["Default counters", "Clear All"]) {
+      button(root, name).listeners.click.forEach((l) => l({}));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const abortedByClear = aborted;
+    const readsByClear = trendReads().length;
+    await toggle(boxes(root).find((b) => b.attrs["aria-label"] === "C13"), true);
+    await toggle(boxes(root).find((b) => b.attrs["aria-label"] === "C14"), true);
+    const stillInFlight = inFlight;
+    const sent = trendReads().length;
+    const total = aborted;
+    release();
+    await settle();
+    return { readsByClear, abortedByClear, sent, aborted: total, stillInFlight, maxInFlight, chart: chartInfo() };
+  },
+  /* One series checked, then unchecked: its read has no other caller, so the fetch itself is cancelled. */
+  soleWaiterUnchecks: async () => {
+    const root = await build("SRV1");
+    await click(button(root, "Clear All"));
+    let release;
+    hold = new Promise((r) => (release = r));
+    fetches.length = 0;
+    aborted = 0;
+    const box = () => boxes(root).find((b) => b.attrs["aria-label"] === "C13");
+    await toggle(box(), true);
+    const sentAfterCheck = trendReads().length;
+    const inFlightAfterCheck = inFlight;
+    await toggle(box(), false);
+    const out = { sentAfterCheck, inFlightAfterCheck, aborted, inFlightAfterUncheck: inFlight, sent: trendReads().length };
+    release();
+    await settle();
+    return out;
+  },
+  /* apiGetJoined itself: two callers share one fetch; the first to abort leaves it running, the sole caller left cancels
+     it, and a caller after that sends a fresh request. */
+  joinedAbort: async () => {
+    const path = "/api/read/get_perfmon_trend?server=SRV1&counter_name=C13";
+    let release;
+    hold = new Promise((r) => (release = r));
+    fetches.length = 0;
+    aborted = 0;
+    const a = new AbortController();
+    const b = new AbortController();
+    const first = modules.util.apiGetJoined(path, a.signal);
+    const second = modules.util.apiGetJoined(path, b.signal);
+    await settle();
+    const sentForTwo = fetches.length;
+    const inFlightForTwo = inFlight;
+    a.abort();
+    const firstResult = await first;
+    await settle();
+    const abortedAfterFirst = aborted;
+    const inFlightAfterFirst = inFlight;
+    b.abort();
+    const secondResult = await second;
+    await settle();
+    const abortedAfterSole = aborted;
+    const inFlightAfterSole = inFlight;
+    const later = modules.util.apiGetJoined(path);
+    await settle();
+    const sentAfterLater = fetches.length;
+    release();
+    const laterResult = await later;
+    return { sentForTwo, inFlightForTwo, firstKind: firstResult.kind, abortedAfterFirst, inFlightAfterFirst, secondKind: secondResult.kind, abortedAfterSole, inFlightAfterSole, sentAfterLater, laterKind: laterResult.kind };
+  },
   focusKept: async () => {
     const first = await build("SRV1");
     const search = all(first, (n) => n.tag === "input" && n.attrs.type === "search")[0];

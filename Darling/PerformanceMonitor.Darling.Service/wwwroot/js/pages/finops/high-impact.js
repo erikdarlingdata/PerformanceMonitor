@@ -12,7 +12,8 @@
 
 import { VIZ } from "../../panels.js";
 import { planColumn } from "../plan-viewer.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { gatedEmptyStrip } from "./gate.js";
 
 // The default window.
 const HOURS = 24;
@@ -85,7 +86,7 @@ export const tab = {
         if (mine !== seq) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         mount(body, [
           noticeStrip(noticeText(data)),

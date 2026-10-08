@@ -208,7 +208,13 @@ public sealed class UtilizationEfficiencyRow
     // Health score
     public decimal FreeSpacePct { get; set; }
     public int HealthScore { get; set; }
-    public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+
+    /// <summary>The badge color: the score's own, or gray when the window held no CPU sample and there is no score to color.</summary>
+    public string HealthScoreColor => HasCpuSample ? FinOpsHealthCalculator.ScoreColor(HealthScore) : FinOpsHealthCalculator.NoScoreColor;
+
+    /// <summary>The badge text: "Health: 87", or "Health: -" when the window held no CPU sample. Memory and storage alone can read a
+    /// perfect 100 beside a "No Data" card, so with no CPU sample there is no score, not a partial one.</summary>
+    public string HealthScoreText => HasCpuSample ? $"Health: {HealthScore}" : "Health: -";
 
     /// <summary>The read-result form of these figures.</summary>
     public UtilizationEfficiencyDto ToDto() => new(
@@ -596,8 +602,13 @@ public sealed class ServerPropertyRow
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
     public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
-    public int HealthScore { get; set; }
-    public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
+    /// not a score built from the memory and storage defaults (<see cref="FinOpsInventoryFigures.HealthScoreOrNull"/>).</summary>
+    public int? HealthScore { get; set; }
+    public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
+
+    /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
+    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoScoreNote;
 }
 
 /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid).</summary>
@@ -612,6 +623,12 @@ public sealed class StorageGrowthRow
     public decimal? Growth30dMb { get; set; }
     public decimal? DailyGrowthRateMb { get; set; }
     public decimal? GrowthPct30d { get; set; }
+
+    /// <summary>The tooltip on a blank 7-day baseline cell (shown as n/a): no sample within a day of 7 days ago. Null when there is one.</summary>
+    public string? Size7dAgoNote => DarlingFinOpsStorageGrowthReader.NoBaselineNote(7, Size7dAgoMb);
+
+    /// <summary>The tooltip on a blank 30-day baseline cell (shown as n/a): no sample within a day of 30 days ago. Null when there is one.</summary>
+    public string? Size30dAgoNote => DarlingFinOpsStorageGrowthReader.NoBaselineNote(30, Size30dAgoMb);
 
     /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
     /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>

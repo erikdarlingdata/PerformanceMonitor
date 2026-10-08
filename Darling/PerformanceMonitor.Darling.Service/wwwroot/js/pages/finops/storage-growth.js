@@ -14,6 +14,7 @@
 
 import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat, relTime, localTime } from "../../util.js";
+import { gatedEmptyStrip, gatedSections } from "./gate.js";
 
 const HOURS = 24;
 const OBJECT_LIMIT = 20;
@@ -53,8 +54,8 @@ function accessText(v) {
 const DATABASE_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "current_size_mb", label: "Current (MB)", format: "num2" },
-  { key: "size_7d_ago_mb", label: "7 days ago (MB)", format: "num2" },
-  { key: "size_30d_ago_mb", label: "30 days ago (MB)", format: "num2" },
+  { key: "size_7d_ago_mb", label: "7 days ago (MB)", format: "num2", nullKey: "size_7d_ago_note" },
+  { key: "size_30d_ago_mb", label: "30 days ago (MB)", format: "num2", nullKey: "size_30d_ago_note" },
   { key: "growth_7d_mb", label: "Growth 7 days (MB)", format: "num2" },
   { key: "growth_30d_mb", label: "Growth 30 days (MB)", format: "num2" },
   { key: "daily_growth_rate_mb", label: "Daily rate (MB)", format: "num2" },
@@ -245,8 +246,8 @@ export const tab = {
           return load();
         }
         if (res.kind === "error") return chrome([readErrorStrip(res.message)]);
-        if (res.kind === "empty") return chrome([emptyStrip(res.message)]);
-        const data = res.data || {};
+        if (res.kind === "empty") return chrome([gatedEmptyStrip(res, ctx)]);
+        const data = gatedSections(res.data || {}, ctx);
         if (state.level === "databases") {
           chrome([el("h3", { text: "Database Size and Growth" }), ...sectionContent(data.databases, DATABASE_COLUMNS, "No storage growth data available yet", databaseNotice, drillColumn("Show objects", openObjects))]);
         } else if (state.level === "objects") {

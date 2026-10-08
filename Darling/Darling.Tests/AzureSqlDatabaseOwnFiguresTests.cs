@@ -489,11 +489,11 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         Assert.DoesNotContain("$\"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}\"", tab, StringComparison.Ordinal);
 
         Assert.Contains(
-            "FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;",
+            "FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;",
             tab, StringComparison.Ordinal);
 
         // The CPU term's rule moved to Storage with the inventory figures (#4843).
-        Assert.Contains("item.HealthScore = FinOpsInventoryFigures.HealthScore(item.AvgCpuPct);", tab, StringComparison.Ordinal);
+        Assert.Contains("item.HealthScore = FinOpsInventoryFigures.HealthScoreOrNull(item.AvgCpuPct);", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("item.AvgCpuPct ?? 0m", tab, StringComparison.Ordinal);
 
         var figures = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsInventoryFigures.cs");

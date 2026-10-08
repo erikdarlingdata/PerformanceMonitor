@@ -60,6 +60,9 @@ public partial class FinOpsTab : UserControl
         /* Register the FinOps grids' column-filter managers into _filterManagers (defined below), after
            InitializeComponent so the named grids exist. Body lives in FinOpsTab.Loaders.cs. */
         InitializeFinOpsTab();
+
+        /* Headers show in full with their unit: each column is at least as wide as its own header (the fixed widths cut "Current Size M"). */
+        Loaded += (_, _) => DataGridHeaderFit.Apply(this);
     }
 
     /// <summary>The selector's currently-selected server. Entry points guard on a valid selection before any loader runs, so the loaders read this non-null.</summary>
@@ -94,7 +97,7 @@ public partial class FinOpsTab : UserControl
     /// selector). Suppresses SelectionChanged during population. With <paramref name="keepSelection"/>, the
     /// selector keeps its server while that server is in the list; otherwise, or once it is gone, it takes
     /// <paramref name="sidebarServerId"/>, the shell's sidebar server, as the initial load does
-    /// (<see cref="ViewerServerSetSync.PickerSelectionAfterReload"/>). The shell drives the first load once the
+    /// (<see cref="FinOpsServerChoice.Selection"/>: the same keep-or-sidebar rule as the other pickers, but it never falls to a PostgreSQL target while a SQL Server target is listed). The shell drives the first load once the
     /// tab becomes visible.
     /// </summary>
     public void SetServers(IReadOnlyList<DarlingServer> servers, int? sidebarServerId, bool keepSelection = true)
@@ -103,9 +106,10 @@ public partial class FinOpsTab : UserControl
 
         _populatingServers = true;
         ServerSelector.ItemsSource = servers;
-        ServerSelector.SelectedItem = ViewerServerSetSync.PickerSelectionAfterReload(
+        ServerSelector.SelectedItem = FinOpsServerChoice.Selection(
             servers, keepSelection ? previousId : null, sidebarServerId);
         _populatingServers = false;
+        ApplyServerGate();
 
         /* The selection changed with SelectionChanged suppressed: the previously selected server is gone
            (removed elsewhere), or a load that does not keep the selection moved it. Reset the drills and column
@@ -145,6 +149,28 @@ public partial class FinOpsTab : UserControl
         _populatingServers = true;
         ServerSelector.SelectedItem = match;
         _populatingServers = false;
+        ApplyServerGate();
+    }
+
+    /// <summary>
+    /// A PostgreSQL target answers none of the single-server FinOps panels (they read SQL Server data), so its sub-tabs
+    /// collapse and the tab says <see cref="FinOpsServerChoice.PostgresNotCollected"/> once, where the grids would have sat
+    /// empty or still holding the previous server's rows. Server Inventory lists the whole fleet and stays. Called wherever
+    /// the selected server or the active sub-tab changes; the loaders ask the same helper before they read.
+    /// </summary>
+    private void ApplyServerGate()
+    {
+        var line = FinOpsServerChoice.NotCollectedLine(ServerSelector.SelectedItem as DarlingServer, crossServer: false);
+        for (var i = 0; i < FinOpsSubTabControl.Items.Count; i++)
+        {
+            if (i != FinOpsServerInventorySubTabIndex && FinOpsSubTabControl.Items[i] is TabItem { Content: UIElement content })
+            {
+                content.Visibility = line is null ? Visibility.Visible : Visibility.Collapsed;
+            }
+        }
+
+        FinOpsNotCollectedText.Text = line ?? "";
+        FinOpsNotCollectedText.Visibility = line is not null && !SelectedSubTabIsCrossServer ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>The tab's own server selector drives it; single-clicking a sidebar server syncs it here (and
@@ -156,6 +182,8 @@ public partial class FinOpsTab : UserControl
         {
             return;
         }
+
+        ApplyServerGate();
 
         /* A new server invalidates any open Storage Growth / Locking drill (their breadcrumbs + detail views
            belong to the previous server), so reset both to their parent view before reloading. */

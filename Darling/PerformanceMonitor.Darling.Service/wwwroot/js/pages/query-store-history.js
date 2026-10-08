@@ -20,6 +20,7 @@
 import { el, readTool, fmtMs, localTime, windowFromHours, activeRangeStamp, windowNoteText } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { planSourceCell } from "./plan-viewer.js";
+import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 
 /* key -> { phase: "loading" | "done", stamp, window, result: { kind: "data" | "none" | "error", ... } }. `window` is the chart's
    axis ({ windowStart, windowEnd } or null), taken when the read was made so a redraw later keeps the axis the data was read for. */
@@ -232,7 +233,8 @@ export function queryStoreHistoryColumn(server, hours) {
         });
         button.addEventListener("click", () => toggle(server, row, hours));
         host.appendChild(button);
-        if (isOpen) host.appendChild(panelFor(key, server, hours));
+        if (isOpen) dockPanelUnderRow(host, panelFor(key, server, hours));
+        else undockPanel(host);
       };
       draw.host = host;
       draw.generation = generation;

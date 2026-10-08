@@ -335,6 +335,157 @@ GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type
     }
 
     [Fact]
+    public async Task Gc_RemovesADisabledServersDaysFromBothTables()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (1, 'srv1', TRUE), (9, 'srv9', FALSE)", ct);
+            foreach (var (server, day) in new[] { (1, 19), (9, 19), (9, 18) })
+            {
+                await InsertSummaryAndBuiltAsync(connection, server, day, ct);
+            }
+
+            var removed = await QueryStoreTopDaily.GcAsync(connection, new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Unspecified), RetentionDays, ct);
+
+            Assert.Equal(2L, removed);
+            Assert.Equal("1|2026-01-19", await ScalarAsync(connection, "SELECT string_agg(server_id || '|' || day, ';' ORDER BY server_id, day) FROM collect.query_store_top_daily", ct));
+            Assert.Equal("1|2026-01-19", await ScalarAsync(connection, "SELECT string_agg(server_id || '|' || day, ';' ORDER BY server_id, day) FROM collect.query_store_top_daily_built", ct));
+        });
+    }
+
+    /* #5507. The cleanup is one transaction: if the summary step fails, the built rows it already deleted come back, so
+       the two tables never disagree about which days exist. A trigger that refuses the summary delete forces the failure. */
+    [Fact]
+    public async Task Gc_RollsTheBuiltRowsBack_WhenTheSummaryStepFails()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (1, 'srv1', TRUE), (9, 'srv9', FALSE)", ct);
+            foreach (var (server, day) in new[] { (1, 19), (9, 19) })
+            {
+                await InsertSummaryAndBuiltAsync(connection, server, day, ct);
+            }
+
+            await ExecAsync(connection, @"
+CREATE FUNCTION collect.refuse_summary_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'summary delete refused'; END $$;
+CREATE TRIGGER refuse_summary_delete BEFORE DELETE ON collect.query_store_top_daily FOR EACH ROW EXECUTE FUNCTION collect.refuse_summary_delete();", ct);
+
+            var failure = await Assert.ThrowsAsync<PostgresException>(() =>
+                QueryStoreTopDaily.GcAsync(connection, new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Unspecified), RetentionDays, ct));
+            Assert.Contains("summary delete refused", failure.MessageText, StringComparison.Ordinal);
+
+            Assert.Equal("1|2026-01-19;9|2026-01-19", await ScalarAsync(connection, "SELECT string_agg(server_id || '|' || day, ';' ORDER BY server_id, day) FROM collect.query_store_top_daily_built", ct));
+            Assert.Equal("1|2026-01-19;9|2026-01-19", await ScalarAsync(connection, "SELECT string_agg(server_id || '|' || day, ';' ORDER BY server_id, day) FROM collect.query_store_top_daily", ct));
+        });
+    }
+
+    private static async Task InsertSummaryAndBuiltAsync(NpgsqlConnection connection, int serverId, int day, CancellationToken ct)
+    {
+        await ExecAsync(connection,
+            $"INSERT INTO collect.query_store_top_daily (server_id, day, query_id, interval_rows, avg_duration_us_n, avg_cpu_time_us_n, avg_logical_io_reads_n, avg_logical_io_writes_n, avg_physical_io_reads_n, avg_rowcount_n) VALUES ({serverId}, DATE '2026-01-{day:00}', 1, 1, 0, 0, 0, 0, 0, 0)", ct);
+        await ExecAsync(connection,
+            $"INSERT INTO collect.query_store_top_daily_built (server_id, day, pass, built_at, source_rows) VALUES ({serverId}, DATE '2026-01-{day:00}', 2, TIMESTAMP '2026-01-15 00:00:00', 1)", ct);
+    }
+
+    /* #5507. The pin that fails on the old single statement: a one-statement cleanup with its own predicate on the summary
+       reads all of it every tick. Here a disabled server's one day is due among 90,000 live summary rows. Two halves:
+       the EXPLAIN pins the shape of the statement GcAsync runs per due key (an index probe on both leading columns), and
+       the table's access counters around two GcAsync calls pin what GcAsync does (no sequential scan of the summary on
+       either call, at most the ten due rows fetched on the first, and no touch of the summary at all when nothing is due). */
+    [Fact]
+    public async Task TheGc_ProbesTheSummaryByIndex_NeverScansIt_AndRunsNoSummaryDeleteWhenNothingIsDue()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (1, 'srv1', TRUE), (9, 'srv9', FALSE)", ct);
+            await ExecAsync(connection, @"
+INSERT INTO collect.query_store_top_daily_built (server_id, day, pass, built_at, source_rows)
+SELECT 1, d::date, 2, TIMESTAMP '2026-01-15 00:00:00', 1 FROM generate_series(DATE '2026-01-16', DATE '2026-01-18', interval '1 day') AS d;
+INSERT INTO collect.query_store_top_daily (server_id, day, query_id, interval_rows, avg_duration_us_n, avg_cpu_time_us_n, avg_logical_io_reads_n, avg_logical_io_writes_n, avg_physical_io_reads_n, avg_rowcount_n)
+SELECT 1, d::date, q, 1, 0, 0, 0, 0, 0, 0 FROM generate_series(DATE '2026-01-16', DATE '2026-01-18', interval '1 day') AS d, generate_series(1, 30000) AS q;
+INSERT INTO collect.query_store_top_daily_built (server_id, day, pass, built_at, source_rows) VALUES (9, DATE '2026-01-16', 2, TIMESTAMP '2026-01-15 00:00:00', 1);
+INSERT INTO collect.query_store_top_daily (server_id, day, query_id, interval_rows, avg_duration_us_n, avg_cpu_time_us_n, avg_logical_io_reads_n, avg_logical_io_writes_n, avg_physical_io_reads_n, avg_rowcount_n)
+SELECT 9, DATE '2026-01-16', q, 1, 0, 0, 0, 0, 0, 0 FROM generate_series(1, 10) AS q;
+ANALYZE collect.query_store_top_daily;
+ANALYZE collect.query_store_top_daily_built;", ct);
+
+            /* The statement that removes one due key, run under EXPLAIN ANALYZE in a transaction that is rolled back. */
+            await using (var transaction = await connection.BeginTransactionAsync(ct))
+            {
+                string json;
+                await using (var command = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + QueryStoreTopDaily.GcSummarySql, connection, transaction))
+                {
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 9 });
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = new DateOnly(2026, 1, 16) });
+                    json = (string)(await command.ExecuteScalarAsync(ct))!;
+                }
+
+                await transaction.RollbackAsync(ct);
+
+                var scans = new System.Collections.Generic.List<(string Node, string? Index, string? Cond, double Rows)>();
+                void Walk(System.Text.Json.JsonElement node)
+                {
+                    if (node.TryGetProperty("Relation Name", out var relation) && relation.GetString() == "query_store_top_daily"
+                        && node.GetProperty("Node Type").GetString()!.Contains("Scan", StringComparison.Ordinal))
+                    {
+                        scans.Add((node.GetProperty("Node Type").GetString()!,
+                            node.TryGetProperty("Index Name", out var index) ? index.GetString() : null,
+                            node.TryGetProperty("Index Cond", out var cond) ? cond.GetString() : null,
+                            node.GetProperty("Actual Rows").GetDouble() * node.GetProperty("Actual Loops").GetDouble()));
+                    }
+
+                    if (node.TryGetProperty("Plans", out var plans))
+                    {
+                        foreach (var child in plans.EnumerateArray()) Walk(child);
+                    }
+
+                    if (node.TryGetProperty("Plan", out var plan)) Walk(plan);
+                }
+
+                using var document = System.Text.Json.JsonDocument.Parse(json);
+                Walk(document.RootElement[0]);
+
+                Assert.NotEmpty(scans);
+                Assert.All(scans, scan => Assert.True(scan.Index == "ux_query_store_top_daily", $"{scan.Node} on {scan.Index ?? "no index"}"));
+                Assert.All(scans, scan => Assert.True(scan.Cond is not null && scan.Cond.Contains("server_id", StringComparison.Ordinal)
+                    && scan.Cond.Contains("day", StringComparison.Ordinal), $"index condition: {scan.Cond ?? "none"}"));
+                Assert.True(scans.Sum(scan => scan.Rows) <= 10, $"the cleanup read {scans.Sum(scan => scan.Rows)} summary rows for ten due ones");
+            }
+
+            /* GcAsync ITSELF, observed through the table's own access counters: the EXPLAIN above runs the constant by name,
+               so on its own it would pass if GcAsync went back to one statement. pg_stat_force_next_flush() makes this
+               session's pending counts visible at the next statement. */
+            async Task<(long SeqScan, long IdxScan, long IdxTupFetch)> CountersAsync()
+            {
+                await ExecAsync(connection, "SELECT pg_stat_force_next_flush()", ct);
+                await using var read = new NpgsqlCommand(
+                    "SELECT seq_scan, COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0) FROM pg_stat_user_tables WHERE schemaname = 'collect' AND relname = 'query_store_top_daily'", connection);
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
+            }
+
+            var now = new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Unspecified);
+            var before = await CountersAsync();
+            Assert.Equal(1L, await QueryStoreTopDaily.GcAsync(connection, now, RetentionDays, ct));
+            var afterDue = await CountersAsync();
+            Assert.Equal(before.SeqScan, afterDue.SeqScan);
+            Assert.True(afterDue.IdxScan > before.IdxScan, "the due day's summary rows are removed through an index");
+            Assert.True(afterDue.IdxTupFetch - before.IdxTupFetch <= 10, $"GcAsync fetched {afterDue.IdxTupFetch - before.IdxTupFetch} summary rows for ten due ones");
+            Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily", ct));
+
+            /* The count above is a sequential scan of its own; measure the next pass from a fresh baseline. */
+            var beforeIdle = await CountersAsync();
+            Assert.Equal(0L, await QueryStoreTopDaily.GcAsync(connection, now, RetentionDays, ct));
+            var afterIdle = await CountersAsync();
+            Assert.Equal(beforeIdle.SeqScan, afterIdle.SeqScan);
+            Assert.Equal(beforeIdle.IdxScan, afterIdle.IdxScan);
+            Assert.Equal(beforeIdle.IdxTupFetch, afterIdle.IdxTupFetch);
+            Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily", ct));
+        });
+    }
+
+    [Fact]
     public async Task ABacklogLargerThanTheCap_BuildsTheOldestDaysFirst_AndExactlyTheCap()
     {
         await RunLiveAsync(async (scratch, connection, ct) =>

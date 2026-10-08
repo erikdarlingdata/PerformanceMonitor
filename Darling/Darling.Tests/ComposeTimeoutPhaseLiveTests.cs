@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// exhausts a one-connection pool so the open itself times out; the statement phase blocks the panel's table
 /// behind an ACCESS EXCLUSIVE lock so the client deadline fires inside the statement.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class ComposeTimeoutPhaseLiveTests
 {
     private const string PanelJson = "{\"panel\":{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"day\",\"viz\":\"line\"}}";

@@ -24,6 +24,7 @@ namespace Lite.Tests;
 /// the table must give the same answer on a store that has the idle rows and one that does not. Each test seeds two
 /// servers with the same work: <see cref="OldServer"/> keeps the idle rows, <see cref="NewServer"/> leaves them out.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class ProcedureStatsIdleRowsReaderTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int OldServer = -5449;

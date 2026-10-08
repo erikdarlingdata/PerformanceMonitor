@@ -1122,6 +1122,10 @@ public sealed class DarlingWorker : BackgroundService
 
     /* The collector runner, kept for the reconcile, which clears a changed server's RDS endpoint verdicts on it. */
     private DarlingCollectorRunner? _runner;
+
+    /* #5518: the Query Store backfill, held so a removed server's cached database list can be dropped with it. */
+    private QueryStoreBackfill? _queryStoreBackfill;
+
     /* Concrete rather than IAlertDeliverer: there is exactly one implementation here and it is constructed
        a few lines from where this is assigned, so the interface bought an indirection per delivered alert
        and no seam (CA1859). */
@@ -2668,8 +2672,9 @@ LIMIT 1";
            its own connection, its own catch, drained with the other background startup work below. */
         var planForceDetailScrub = RunPlanForceActionDetailScrubAsync(postgres, stoppingToken);
 
-        /* #4605, #4952: the Query Store read indexes - the BRIN on collect.query_store_interval_wide (collection_time)
-           and the btree on its (server_id, first_execution_time) - built in the background
+        /* #4605, #4952, #5507: the Query Store read indexes - the BRIN on collect.query_store_interval_wide
+           (collection_time) and the btrees on (server_id, first_execution_time) of collect.query_store_interval_wide
+           and collect.query_store_interval_latest - built in the background
            QueryStoreBackgroundIndexes.StartDelay after start so their heap reads stay off the post-restart IO burst,
            one after another, each failure-isolated. Launched after migrations confirm the tables exist, never awaited
            on the startup path, one attempt per start, and RunDelayedAsync never throws. Drained with the other
@@ -3321,7 +3326,11 @@ LIMIT 1";
             () => _timescaleAvailable,
             /* #5483: the server's effective database_states cadence, resolved live like the alert adapter's, so the
                gone-database check knows how old a snapshot may be. */
-            serverId => StoreConfigProvider.ResolveSchedule("database_states", serverId, _scheduleOverrides).FrequencyMinutes);
+            serverId => StoreConfigProvider.ResolveSchedule("database_states", serverId, _scheduleOverrides).FrequencyMinutes,
+            /* #5518: the same fence the runner's Query Store writes go through, so the candidate list is read from the
+               store only when a write named a database it does not hold, the cut chunk moved or it aged out. */
+            _queryStoreWriteFence);
+        _queryStoreBackfill = queryStoreBackfill;
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* #5450 proposal 2: the outbound heartbeat, on its own task and connection so a slow or dead URL never touches
@@ -4160,7 +4169,7 @@ LIMIT 1";
             /* Expected on shutdown. */
         }
 
-        /* And the Query Store read index ensures (#4605, #4952), which absorb their own failures. */
+        /* And the Query Store read index ensures (#4605, #4952, #5507), which absorb their own failures. */
         await queryStoreIndexes;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
@@ -6313,6 +6322,8 @@ LIMIT 1";
                 _deltas?.ClearServer(id);
                 /* The RDS endpoint verdict and fresh login held for this id go with the server: a re-add checks again. */
                 _runner?.ForgetRdsVerdicts(id);
+                /* #5518: and the backfill's cached database list and the fence's database names for it. */
+                _queryStoreBackfill?.ForgetServer(id);
                 /* #4999: and its single-flight slots. The id is the registration's, so a re-add carries the same one, and a
                    run of this removed state that is still going, or still queued for a permit (hours, behind other daily
                    runs), would hold the slot the re-added server's first daily run needs. That run would skip, and a

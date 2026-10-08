@@ -80,10 +80,64 @@ export const ROUTE_COLUMNS = [
   { key: "modified_at_utc", label: "Modified", format: "time" },
 ];
 
+/* The Setting column shows a readable label; the key stays as the cell's tooltip (and the row's `setting`), so a person
+   matching a setting to the MCP tool or the config still finds it (click-through 4d). */
 export const SETTING_COLUMNS = [
-  { key: "setting", label: "Setting" },
+  { key: "setting", label: "Setting", render: (row) => el("span", { title: row.setting, text: row.label || row.setting }) },
   { key: "value", label: "Value", wrap: true },
 ];
+
+const GROUP_LABELS = {
+  cpu: "CPU",
+  blocking: "Blocking",
+  deadlocks: "Deadlocks",
+  poison_wait: "Poison wait",
+  long_running_query: "Long-running query",
+  tempdb_space: "TempDB space",
+  low_disk: "Low disk",
+  self_alerts: "Monitor self-alerts",
+  pvs: "Version store (PVS)",
+  file_growth: "File growth",
+  long_running_job: "Long-running job",
+  failed_job: "Failed job",
+  database_state: "Database state",
+  ag: "Availability Groups",
+  delivery: "Delivery",
+  health_bands: "Health bands",
+  analysis: "Automated analysis",
+  fleet_sweep: "Fleet sweep reports",
+};
+
+/* A unit at the end of a key reads as a bracketed unit: wait_threshold_seconds -> "wait threshold (seconds)". */
+const KEY_UNITS = [
+  ["_seconds", "seconds"],
+  ["_minutes", "minutes"],
+  ["_percent", "%"],
+  ["_ms", "ms"],
+  ["_gb", "GB"],
+  ["_mb", "MB"],
+  ["_kb", "KB"],
+  ["_per_hour", "per hour"],
+];
+
+/** The readable label of one setting: "cpu.threshold_percent" -> "CPU: threshold (%)"; "connection_refire_minutes" ->
+    "Connection refire (minutes)". A key it has no rule for is its words with the underscores spaced out. */
+export function settingLabel(prefix, key) {
+  let words = String(key);
+  let unit = "";
+  for (const [suffix, text] of KEY_UNITS) {
+    if (words.endsWith(suffix) && words.length > suffix.length) {
+      words = words.slice(0, -suffix.length);
+      unit = " (" + text + ")";
+      break;
+    }
+  }
+  words = words.replace(/_/g, " ").replace(/\bpg\b/g, "PostgreSQL");
+  words = words.charAt(0).toUpperCase() + words.slice(1);
+  if (!prefix) return words + unit;
+  const group = GROUP_LABELS[prefix] || prefix.replace(/_/g, " ");
+  return group + ": " + (/^[A-Z][A-Z]/.test(words) || words.startsWith("PostgreSQL") ? words : words.charAt(0).toLowerCase() + words.slice(1)) + unit;
+}
 
 /* The groups, in the Settings window's order. A key listed here is read from the payload's top level or from the
    named group; a group the read does not carry is left out rather than shown empty. */
@@ -157,7 +211,7 @@ export function groupRows(prefix, group, fields) {
   const allowed = fields || GROUP_FIELDS[prefix] || [];
   return allowed
     .filter((k) => k in group && !isSecretKey(k))
-    .map((k) => ({ setting: prefix + "." + k, value: valueText(group[k]) }));
+    .map((k) => ({ setting: prefix + "." + k, label: settingLabel(prefix, k), value: valueText(group[k]) }));
 }
 
 /** The sections of the settings payload as [{ title, rows }]; a section with no rows is dropped. */
@@ -165,7 +219,7 @@ export function settingSections(data) {
   const d = data && typeof data === "object" ? data : {};
   return SETTING_SECTIONS.map((s) => {
     const rows = [];
-    for (const k of s.top) if (k in d && !isSecretKey(k)) rows.push({ setting: k, value: valueText(d[k]) });
+    for (const k of s.top) if (k in d && !isSecretKey(k)) rows.push({ setting: k, label: settingLabel("", k), value: valueText(d[k]) });
     for (const g of s.groups) rows.push(...groupRows(g, d[g], s.groupFields && s.groupFields[g]));
     return { title: s.title, rows };
   }).filter((s) => s.rows.length);

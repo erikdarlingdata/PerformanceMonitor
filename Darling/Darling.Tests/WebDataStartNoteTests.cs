@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// shipped <c>util.js</c>, <c>panels.js</c> and <c>pages/server-tabs.js</c>), and pins on the wiring. The store's
 /// side, rows that start inside the range and a quiet start, is <see cref="WebDataStartNoteLiveTests"/>.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class WebDataStartNoteTests
 {
     private const string Rows = "{\"server\":\"sql01\",\"hours_back\":168,\"waiting_tasks\":[{\"wait_type\":\"LCK_M_X\"}]}";

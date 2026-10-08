@@ -46,6 +46,7 @@ import {
   sourceStrip,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
+import { plainText, plainTextNamed } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 
 /* The AbortSignal for the render currently building panels (#4191). A page sets it (setPanelSignal)
@@ -123,6 +124,18 @@ async function loadPanelBody(desc, body, signal) {
     return;
   }
   const kept = keptWindowStrip(res);
+  /* A panel that does not apply to this kind of server and says `hideWhenNotCollected` is not drawn at all (the Instance CPU
+     panel on a PostgreSQL server that is not Aurora): one panel that can never fill is clutter, not information. */
+  if (res.kind === "empty" && res.status === "not_collected" && desc.hideWhenNotCollected && body.parentNode) {
+    if (body.parentNode.style) body.parentNode.style.display = "none";
+    body.parentNode.hidden = true;
+    return;
+  }
+  /* A panel on a PostgreSQL FinOps target that does not apply says one short line (`notCollectedLine`) instead of the server's gate paragraph. */
+  if (res.kind === "empty" && res.status === "not_collected" && desc.notCollectedLine) {
+    mount(body, emptyStrip(desc.notCollectedLine));
+    return;
+  }
   if (res.kind === "empty") {
     /* #4966: a grid that looked and found nothing still says where its table's data starts when that is after the
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
@@ -208,7 +221,10 @@ const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-dete
 function vizTable(data, desc) {
   if (!(Array.isArray(desc.columns) && desc.columns.length)) return emptyStrip(NO_FIELDS_MSG);
   /* rowsKey "." is a read whose payload is one object, drawn as one row. */
-  const rows = desc.rowsKey === "." ? (data ? [data] : []) : getPath(data, desc.rowsKey) || [];
+  const read = desc.rowsKey === "." ? (data ? [data] : []) : getPath(data, desc.rowsKey) || [];
+  /* A grid whose natural order is not the one to open on (a calendar oldest first, collectors A to Z) names `orderRows`,
+     a function from the rows to the rows in the order to show. A header click still sorts from there. */
+  const rows = typeof desc.orderRows === "function" && Array.isArray(read) ? desc.orderRows(read) : read;
   /* #5244: a filtered read that has a snapshot but no row for the chosen databases must not say there is no snapshot. */
   return gridTable(rows, rows.length ? desc : { ...desc, emptyText: dbFilteredEmptyText(desc.read, desc.emptyText, desc.dbScope) });
 }
@@ -926,7 +942,11 @@ function cell(row, c) {
         ? applyFormat(c.format, raw)
         : raw == null || raw === ""
           ? "—"
-          : String(raw);
+          : c.plain === "named"
+            ? plainTextNamed(String(raw))
+            : c.plain
+              ? plainText(String(raw))
+              : String(raw);
   return el("td", { class: cls.join(" ") || null, text });
 }
 
@@ -960,10 +980,13 @@ function vizStat(data, desc) {
      key with a value still renders the tiles, and a descriptor with no emptyText (every stored view, and
      every SQL Server tile on the server page) falls through unchanged. */
   if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
+  /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
+     of fifteen tiles, half of them dashes, said less than the seven that had a value. */
+  const shown = stats.filter((s) => !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
   return el(
     "div",
     { class: "stats" },
-    stats.map((s) => {
+    shown.map((s) => {
       const sev = s.sev || s.severity;
       const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
       const raw = getPath(data, s.key);
@@ -1057,6 +1080,33 @@ function vizBandlist(data, desc) {
 /** Set the hash route to a server's detail page. */
 export function navigateServer(serverName) {
   location.hash = "#/server/" + encodeURIComponent(serverName);
+}
+
+/** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in
+    name order: the order a person reading the grid wants, instead of A to Z. A new array; the rows are not changed. */
+export function worstFirst(rows) {
+  const rank = (row) => {
+    if (String(row && row.status).toLowerCase() === "not_collected") return 4;
+    switch (statusToSev(row && row.status)) {
+      case "Critical": return 0;
+      case "Warning": return 1;
+      case "Unknown": return 2;
+      default: return 3;
+    }
+  };
+  return rows
+    .map((row, i) => ({ row, i }))
+    .sort((a, b) => rank(a.row) - rank(b.row) || String(a.row && a.row.collector).localeCompare(String(b.row && b.row.collector)) || a.i - b.i)
+    .map((x) => x.row);
+}
+
+/** Rows newest first by a text date key (an ISO day sorts as text): `newestFirst("summary_date")`. */
+export function newestFirst(key) {
+  return (rows) =>
+    rows
+      .map((row, i) => ({ row, i }))
+      .sort((a, b) => String(b.row && b.row[key]).localeCompare(String(a.row && a.row[key])) || a.i - b.i)
+      .map((x) => x.row);
 }
 
 /**
