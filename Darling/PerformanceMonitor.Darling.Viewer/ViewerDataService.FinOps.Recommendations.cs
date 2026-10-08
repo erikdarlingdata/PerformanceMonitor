@@ -68,7 +68,7 @@ public sealed partial class ViewerDataService
     /// <summary>Per-database aggregate read/write I/O + stall over the window (storage-tier optimization). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string RecommendationsStorageTierSql = DarlingFinOpsRecommendationsReader.StorageTierSql;
 
-    /// <summary>Distinct UTC days with a query-stats sample since the coverage start (idle-database advice needs each of the last 7). $1 server_id, $2 the coverage start.</summary>
+    /// <summary>The oldest query-stats sample, and how many complete UTC days in [$2, $3) hold one (idle-database advice needs each of the last 7). $1 server_id, $2 the coverage start (D-7 00:00), $3 the coverage end (today 00:00, exclusive).</summary>
     public const string RecommendationsIdleCoverageSql = DarlingFinOpsOptimizationReader.IdleCoverageSql;
 
     /// <summary>CPU utilization mean + standard deviation + sample count (reserved-capacity stability). $1 server_id, $2 cutoff (naive UTC).</summary>

@@ -136,4 +136,71 @@ public sealed class FinOpsIdleCoverageLiveTests
            it, so coverage ends there rather than lasting forever. */
         Assert.False(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, id, Day.AddDays(1).AddMinutes(5), TimeoutSeconds, ct));
     }
+
+    /// <summary>The 7-day raw count the rule used before the per-day probes (#5492): the distinct UTC dates in [$2, $3) holding a sample.</summary>
+    private const string OldDistinctDayCountSql = @"
+SELECT COUNT(DISTINCT CAST(collection_time AS DATE))
+FROM v_query_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <  $3";
+
+    private static async Task<(long Old, long Probed)> CountDaysBothWaysAsync(NpgsqlDataSource dataSource, int id, DateTime now, CancellationToken ct)
+    {
+        var start = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now), DateTimeKind.Unspecified);
+        var end = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now), DateTimeKind.Unspecified);
+
+        static async Task<long> RunAsync(NpgsqlDataSource ds, string sql, int serverId, DateTime from, DateTime to, int column, CancellationToken token)
+        {
+            await using var command = ds.CreateCommand(sql);
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = from });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = to });
+            await using var reader = await command.ExecuteReaderAsync(token);
+            Assert.True(await reader.ReadAsync(token));
+            return Convert.ToInt64(reader.GetValue(column), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return (await RunAsync(dataSource, OldDistinctDayCountSql, id, start, end, 0, ct),
+                await RunAsync(dataSource, DarlingFinOpsOptimizationReader.IdleCoverageSql, id, start, end, 1, ct));
+    }
+
+    [Fact]
+    public async Task PerDayProbes_CountTheSameDaysAsTheOldDistinctCount_InTheThreeScenarios()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live idle-coverage test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Cs!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        foreach (var hour in HoursOfDay)
+        {
+            var now = Day.AddHours(hour);
+
+            /* Six and a half days of history: D-6 .. D-1 hold samples, and D-7 does only at the hours when 6.5 days back still reaches it. */
+            var (shortId, shortName) = await RegisterAsync(c, $"darling-idle-cnt-short-{hour}", ct);
+            await SeedHalfDaysAsync(c, shortId, shortName, now, 6.5, _ => false, ct);
+            var (oldShort, probedShort) = await CountDaysBothWaysAsync(dataSource, shortId, now, ct);
+            Assert.Equal(oldShort, probedShort);
+            Assert.InRange(probedShort, 6L, 7L);
+
+            /* Seven and a half days with D-3 missing: six of the seven days, the gap not counted. */
+            var dMinus3 = now.Date.AddDays(-3);
+            var (gapId, gapName) = await RegisterAsync(c, $"darling-idle-cnt-gap-{hour}", ct);
+            await SeedHalfDaysAsync(c, gapId, gapName, now, 7.5, at => at.Date == dMinus3, ct);
+            var (oldGap, probedGap) = await CountDaysBothWaysAsync(dataSource, gapId, now, ct);
+            Assert.Equal(oldGap, probedGap);
+            Assert.Equal(6L, probedGap);
+
+            /* Seven and a half days, no gap: all seven complete days, and today (which holds samples at some hours) is not one of them. */
+            var (fullId, fullName) = await RegisterAsync(c, $"darling-idle-cnt-full-{hour}", ct);
+            await SeedHalfDaysAsync(c, fullId, fullName, now, 7.5, _ => false, ct);
+            var (oldFull, probedFull) = await CountDaysBothWaysAsync(dataSource, fullId, now, ct);
+            Assert.Equal(oldFull, probedFull);
+            Assert.Equal(7L, probedFull);
+        }
+    }
 }

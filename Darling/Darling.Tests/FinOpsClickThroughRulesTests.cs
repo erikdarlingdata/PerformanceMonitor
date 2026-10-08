@@ -73,8 +73,15 @@ public class FinOpsClickThroughRulesTests
         Assert.Equal(new DateTime(2026, 9, 30), DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now));
         Assert.Equal(new DateTime(2026, 10, 7), DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now));
         Assert.Equal(7, DarlingFinOpsOptimizationReader.IdleCoverageDays);
-        Assert.Contains("COUNT(DISTINCT CAST(collection_time AS DATE))", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
-        Assert.Contains("MIN(collection_time)", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
+        // One EXISTS probe per complete day (an index range seek each), not a COUNT(DISTINCT) over 7 days of raw rows (#5492).
+        Assert.Contains("FROM generate_series(CAST($2 AS timestamp), CAST($3 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day')", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
+        // The probe sits in the select list: a WHERE EXISTS is flattened to a semi join that read every chunk of the server on a hypertable.
+        Assert.Contains("SELECT EXISTS (SELECT 1", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE EXISTS", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COUNT(DISTINCT", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
+        // The oldest sample is an ordered index scan that stops at its first row; MIN through the view read the server's whole history.
+        Assert.Contains("SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY collection_time LIMIT 1", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(collection_time)", DarlingFinOpsOptimizationReader.IdleCoverageSql, StringComparison.Ordinal);
 
         var covered = now.AddDays(-7).AddMinutes(-1);
         Assert.True(DarlingFinOpsOptimizationReader.IdleCoverageHolds(covered, 7, now));
@@ -110,9 +117,12 @@ public class FinOpsClickThroughRulesTests
     {
         // The raw statement joins idle_dbs to idle_coverage (an inner join), so an uncovered server has no idle_dbs row and its count is NULL.
         Assert.Contains("JOIN idle_coverage ic ON ic.server_id = s.server_id", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
-        Assert.Contains("HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
-        // The complete days only (before $5, today at 00:00), and the oldest sample at or before the 7-day cutoff ($2).
-        Assert.Contains("collection_time <  $5", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
+        // One EXISTS probe per complete day and server (#5492), at least $4 of them, not a COUNT(DISTINCT) over every raw row of 7 days.
+        Assert.Contains("WHERE has_sample) >= $4", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
+        Assert.Contains("SELECT EXISTS (SELECT 1", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COUNT(DISTINCT CAST(collection_time AS DATE))", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
+        // The complete days only (the day starts stop at $5 - 1 day, today at 00:00 exclusive), and the oldest sample at or before the 7-day cutoff ($2).
+        Assert.Contains("CAST($5 AS timestamp) - INTERVAL '1 day'", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
         Assert.Contains("o.collection_time <= $2", DarlingFinOpsInventoryReader.ServerMetricsSql, StringComparison.Ordinal);
     }
 
