@@ -59,6 +59,9 @@ public sealed class DarlingModuleMapTests
         Assert.Contains("FROM collect.procedure_stats", sql, StringComparison.Ordinal);
         /* the latest row per (server, handle) */
         Assert.Contains("DISTINCT ON (server_name, sql_handle)", sql, StringComparison.Ordinal);
+        /* #5583: src is grouped BEFORE the DISTINCT ON, so the sort sees one row per handle and name set, not the raw read */
+        Assert.Contains("max(collection_time) AS collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_name, sql_handle, database_name, schema_name, object_name", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY server_name, sql_handle, collection_time DESC", sql, StringComparison.Ordinal);
         /* bounded read, comfortably inside procedure_stats' 4-day raw retention */
         Assert.Contains("collection_time >= now() - interval '2 days'", sql, StringComparison.Ordinal);
@@ -93,6 +96,8 @@ public sealed class DarlingModuleMapTests
         Assert.DoesNotContain("now() -", sql, StringComparison.Ordinal);
         Assert.Contains("sql_handle IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("DISTINCT ON (server_name, sql_handle)", sql, StringComparison.Ordinal);
+        Assert.Contains("max(collection_time) AS collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_name, sql_handle, database_name, schema_name, object_name", sql, StringComparison.Ordinal);
         /* the #1801 lock-order ORDER BY survives */
         Assert.Contains("ORDER BY server_name, sql_handle, collection_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE module_map.last_seen IS NULL OR EXCLUDED.last_seen >= module_map.last_seen", sql, StringComparison.Ordinal);
