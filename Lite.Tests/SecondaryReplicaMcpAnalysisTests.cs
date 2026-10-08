@@ -140,6 +140,44 @@ VALUES ($1, $2, $3, 'TestServer', 'AN5558_LITE_WAIT', 5000, $4, 0, 5000, $4, 0)"
         Assert.Null(service.LastSecondaryReplicaNote);
     }
 
+    /// <summary>
+    /// #5558 round 2: <c>get_analysis_facts</c> returns facts the secondary filter already trimmed, so it carries the same
+    /// field, always present and null when nothing was left to the primary, in every envelope it can answer with (no facts,
+    /// facts without an observed window, the facts payload).
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFacts_CarriesTheNote_OnlyWhenThisNodeHoldsASecondaryCopy()
+    {
+        var service = CreateService();
+
+        /* Nothing collected, no AG rows: an unavailable answer, the field there and null. */
+        Assert.Null(NoteOf(await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, null, 4)));
+
+        /* A secondary copy, still nothing collected: the sentence is in the field and in the prose. */
+        await SeedAgAsync(DateTime.UtcNow.AddMinutes(-1), "SECONDARY");
+        var bare = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, null, 4);
+        Assert.Equal(AgReplicaScope.SkippedNote(1), NoteOf(bare));
+        using (var bareDoc = JsonDocument.Parse(bare))
+            Assert.Contains(AgReplicaScope.SkippedNote(1)!, bareDoc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        /* Facts in the window: the facts payload carries it at the root. */
+        for (var m = 5; m <= 55; m += 10) await PlantWaitAsync(DateTime.UtcNow.AddMinutes(-m), 150_000L);
+        var withFacts = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, null, 4);
+        using (var factsDoc = JsonDocument.Parse(withFacts))
+        {
+            Assert.True(factsDoc.RootElement.TryGetProperty("facts", out _), "expected the facts payload, got: " + withFacts[..Math.Min(withFacts.Length, 200)]);
+            Assert.Equal(AgReplicaScope.SkippedNote(1), factsDoc.RootElement.GetProperty("secondary_replica_note").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task GetAnalysisFacts_OnAPrimary_CarriesANullNote()
+    {
+        await SeedAgAsync(DateTime.UtcNow.AddMinutes(-1), "PRIMARY");
+        for (var m = 5; m <= 55; m += 10) await PlantWaitAsync(DateTime.UtcNow.AddMinutes(-m), 150_000L);
+        Assert.Null(NoteOf(await McpAnalysisTools.GetAnalysisFacts(CreateService(), _serverManager, null, 4)));
+    }
+
     [Fact]
     public async Task CompareAnalysis_CarriesOneNotePerWindow_EachFromItsOwnRole()
     {

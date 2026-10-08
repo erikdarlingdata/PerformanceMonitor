@@ -432,6 +432,50 @@ VALUES ($1, $2, $3, $4, 'AN5558_WAIT', 50, $5)", CollectionIdGenerator.Next(), D
         });
     }
 
+    /// <summary>
+    /// Round 2: get_analysis_facts returns facts the secondary filter already trimmed, so it carries the same note, in
+    /// every envelope it can answer with, always present and null when nothing is skipped. Lite's twin is in
+    /// <c>SecondaryReplicaMcpAnalysisTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFacts_CarriesTheNote_OnlyWhenThisNodeHoldsASecondaryCopy()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 };
+
+            /* Nothing collected, no AG rows: an unavailable answer, the field there and null. */
+            Assert.Null(NoteOf(await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 4, cancellationToken: ct)));
+
+            /* A secondary copy, still nothing collected: the sentence is in the field and in the prose. */
+            await SeedAgAsync(c, ct, Now().AddMinutes(-1));
+            var bare = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 4, cancellationToken: ct);
+            Assert.Equal(AgReplicaScope.SkippedNote(1), NoteOf(bare));
+            using (var bareDoc = JsonDocument.Parse(bare))
+                Assert.Contains(AgReplicaScope.SkippedNote(1)!, bareDoc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+            /* Facts in the window: the facts payload carries it at the root. */
+            for (var m = 5; m <= 55; m += 10) await PlantWaitAsync(c, ct, Now().AddMinutes(-m), 150_000L);
+            var withFacts = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, 4, cancellationToken: ct);
+            using var factsDoc = JsonDocument.Parse(withFacts);
+            Assert.True(factsDoc.RootElement.TryGetProperty("facts", out _), "expected the facts payload, got: " + withFacts[..Math.Min(withFacts.Length, 200)]);
+            Assert.Equal(AgReplicaScope.SkippedNote(1), factsDoc.RootElement.GetProperty("secondary_replica_note").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task GetAnalysisFacts_OnAPrimary_CarriesANullNote()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedAgAsync(c, ct, Now().AddMinutes(-1), localRole: "PRIMARY");
+            for (var m = 5; m <= 55; m += 10) await PlantWaitAsync(c, ct, Now().AddMinutes(-m), 150_000L);
+            var answer = await DarlingMcpTools.GetAnalysisFacts(
+                new DarlingAnalysisService(postgres) { MinimumDataHours = 0 }, postgres, ServerName, 4, cancellationToken: ct);
+            Assert.Null(NoteOf(answer));
+        });
+    }
+
     /// <summary>M4 (round 1): compare_analysis carries one note per window, each from the role at that window's own end.</summary>
     [Fact]
     public async Task CompareAnalysis_CarriesOneNotePerWindow_EachFromItsOwnRole()

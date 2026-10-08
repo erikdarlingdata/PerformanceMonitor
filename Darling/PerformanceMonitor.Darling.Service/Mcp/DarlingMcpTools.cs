@@ -340,6 +340,12 @@ public sealed class DarlingMcpTools
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken: cancellationToken);
 
+            /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
+               availability group, as of the window end; the facts below were trimmed of them. Read like
+               compare_analysis and get_analysis_findings read it, not through the service's last-pass state, so two
+               concurrent reads cannot swap notes. Null when none, and then the field is simply null. */
+            var secondaryReplicaNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, anchor);
+
             /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
@@ -351,12 +357,11 @@ public sealed class DarlingMcpTools
                    #3691: a pass in which every family FAILED lands here too, and used to be told apart from
                    "no data" only by the service log; the caveat now says which families were not read. */
                 const string noFacts = "No facts collected. The collector may not have run yet, or no data exists in the requested time range.";
-                return collectionCaveat is null
-                    ? McpHelpers.Status("unavailable", noFacts)
-                    : McpHelpers.Status(
-                        "unavailable",
-                        $"{noFacts} COLLECTION CAVEAT: {collectionCaveat}",
-                        collection.Attach(new { coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                var noFactsMessage = secondaryReplicaNote is null ? noFacts : $"{noFacts} {secondaryReplicaNote}";
+                return McpHelpers.Status(
+                    "unavailable",
+                    collectionCaveat is null ? noFactsMessage : $"{noFactsMessage} COLLECTION CAVEAT: {collectionCaveat}",
+                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -373,7 +378,7 @@ public sealed class DarlingMcpTools
                     $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
                     "Check get_collection_health to see when collectors last succeeded and why they stopped." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
-                    collection.Attach(new { coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
 
             var filtered = facts.AsEnumerable();
@@ -425,6 +430,7 @@ public sealed class DarlingMcpTools
                 total_facts = facts.Count,
                 shown = result.Count,
                 filters = new { source, min_severity },
+                secondary_replica_note = secondaryReplicaNote, /* #5558: null when nothing was left to the primary */
                 /* #3538 A2: null at full coverage; below the partial bar it says what share of the window
                    the fractions and rates were divided over, because a 25%-of-observed-time wait on a
                    quarter-collected window is a different claim from 25% of four hours. #3691: the
@@ -1147,7 +1153,7 @@ public sealed class DarlingMcpTools
 
             /* #5558: databases skipped because this node holds only a secondary copy of them in an availability group
                (their per-database findings are the primary's). Null when none; the same sentence on every surface. */
-            var secondaryReplicaNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, logger, cancellationToken, anchor);
+            var secondaryReplicaNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, anchor);
 
             if (findings.Count == 0)
             {
