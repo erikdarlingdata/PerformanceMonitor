@@ -380,7 +380,7 @@ public sealed class QueryStatsHourLedgerTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        var viewerStatements = ViewerGrantReplay.StatementsFor(roleName);
+        var viewerStatements = ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName);
         Assert.Contains(viewerStatements, x => x.Contains("SELECT ON ALL TABLES IN SCHEMA collect", StringComparison.Ordinal));
 
         var bodySucceeded = false;

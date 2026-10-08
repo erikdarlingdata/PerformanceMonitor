@@ -110,7 +110,7 @@ public static class DarlingServerConnector
        Comments inside these probe strings stay to one short line each: the text is sent to the monitored
        server on every connect, so the reasoning belongs here rather than on the wire. */
     public const string DetectionQueryText = @"
-SELECT
+SELECT /* PerformanceMonitorLite */
     @@VERSION AS sql_version,
     CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
     DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,

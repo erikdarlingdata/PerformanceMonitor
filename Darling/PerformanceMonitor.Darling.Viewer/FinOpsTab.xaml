@@ -1157,6 +1157,7 @@
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
 
@@ -1167,7 +1168,9 @@
                             <TextBlock Text="Analyzed from collected data (no live target)." Margin="16,0,0,0" VerticalAlignment="Center" FontStyle="Italic" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
 
-                        <Grid Grid.Row="1" Margin="10,0,10,10">
+                        <TextBlock x:Name="FinOpsRecommendationsSecondaryNote" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,0,10,6" FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+
+                        <Grid Grid.Row="2" Margin="10,0,10,10">
                             <DataGrid x:Name="FinOpsRecommendationsDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto" AutoGenerateColumns="False" IsReadOnly="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding Category}" Width="120"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Category" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Category" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -1191,10 +1194,20 @@
                                     </DataGridTextColumn>
                                     <!-- Detail wraps instead of running off the column edge, with the full text in a tooltip. -->
                                     <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="560">
+                                        <DataGridTextColumn.HeaderStyle>
+                                            <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                                                <Setter Property="ToolTip" Value="The full finding text: what was found and why it matters. Hover a row to read it in full."/>
+                                            </Style>
+                                        </DataGridTextColumn.HeaderStyle>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="ToolTip" Value="{Binding Detail}"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
                                     <!-- No savings estimate (no monthly cost set for the server) reads as a dash with a tooltip naming the setting. -->
                                     <DataGridTextColumn Header="Est. Savings ($/mo)" Binding="{Binding EstMonthlySavings, StringFormat='${0:N0}', TargetNullValue='-'}" Width="130" SortMemberPath="EstMonthlySavings">
+                                        <DataGridTextColumn.HeaderStyle>
+                                            <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                                                <Setter Property="ToolTip" Value="Estimated monthly savings in dollars if the finding is acted on, from this server's Monthly Cost. A dash means no estimate: no monthly cost is set."/>
+                                            </Style>
+                                        </DataGridTextColumn.HeaderStyle>
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock" BasedOn="{StaticResource NumericCell}">
                                                 <Style.Triggers>

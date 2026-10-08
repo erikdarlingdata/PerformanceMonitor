@@ -141,6 +141,17 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
+    public void TheSecondaryReplicaNote_ShowsWithFindingsAndWithNone_AndIsAbsentWhenTheReadCarriesNone()
+    {
+        var r = Run("replicaNote");
+        Assert.Contains("REPLICA-NOTE", r.GetProperty("withFindings").GetString(), StringComparison.Ordinal);
+        Assert.Contains("REPLICA-NOTE", r.GetProperty("noFindings").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("REPLICA-NOTE", r.GetProperty("without").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("REPLICA-NOTE", r.GetProperty("nullNote").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("null", r.GetProperty("nullNote").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheTabsAbortSignal_ReachesTheRead()
     {
         Assert.True(Run("signal").GetProperty("passed").GetBoolean());

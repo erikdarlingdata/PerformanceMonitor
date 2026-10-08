@@ -105,6 +105,24 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal(new int?[] { 168 }, ChartHours(r));
     }
 
+    /// <summary>The footer's "Updated" time stamps only while the page's read-error count holds still, and that count is the red
+    /// strips drawn. A read narrowed to the widest window it takes and then answered draws data and a notice, so it must not move
+    /// the count; a failure that draws a red strip must.</summary>
+    [Fact]
+    public void ANarrowedReadThatIsThenAnswered_DrawsNoRedStrip_AndLeavesTheReadErrorCountAlone()
+    {
+        if (!TryRun("loaderRefused", out var narrowed)) return;
+        Assert.Equal(0, narrowed.GetProperty("readErrors").GetInt32());
+
+        if (!TryRun("loaderOtherError", out var failed)) return;
+        Assert.Single(Strings(failed, "errors"));
+        Assert.Equal(1, failed.GetProperty("readErrors").GetInt32());
+
+        if (!TryRun("loaderRefusedTwice", out var refusedTwice)) return;
+        Assert.Empty(Strings(refusedTwice, "errors"));
+        Assert.Equal(0, refusedTwice.GetProperty("readErrors").GetInt32());
+    }
+
     [Fact]
     public void ARefusedWindowWhoseRetryIsEmpty_ShowsTheNoticeBesideTheEmptyAnswer()
     {

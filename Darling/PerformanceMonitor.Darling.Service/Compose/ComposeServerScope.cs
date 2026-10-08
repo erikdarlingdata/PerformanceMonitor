@@ -40,12 +40,15 @@ internal static class ComposeServerScope
     /// stored <c>server_name</c> as well as by id still returns everything the old scope returned, so a store that cannot answer the
     /// lookup costs the old read's price, never a missing server; the fault is logged as a warning. A cancelled run is not a fault and
     /// propagates.
+    /// <para><paramref name="onLookupFailed"/> is called when the lookup faulted, so a caller that must tell "every name is unregistered" from
+    /// "the registry could not be read" (the web panel run's unknown-server answer, W13) can; the returned names are the same either way.</para>
     /// <para>The lookup runs outside the read's own transaction (and outside the hourly-edges snapshot). If a re-connect renames a
     /// registry row between the lookup and the read, that one run can miss the rows stored under the old name, because the lookup saw
     /// the name as registered and the read no longer resolves it to an id. The next run is right.</para>
     /// </summary>
     public static async Task<IReadOnlyList<string>?> FindUnregisteredAsync(
-        NpgsqlDataSource postgres, IReadOnlyList<string>? servers, CancellationToken cancellationToken, ILogger? logger = null)
+        NpgsqlDataSource postgres, IReadOnlyList<string>? servers, CancellationToken cancellationToken, ILogger? logger = null,
+        Action? onLookupFailed = null)
     {
         if (servers is not { Count: > 0 })
         {
@@ -76,6 +79,7 @@ internal static class ComposeServerScope
             logger?.LogWarning(
                 "Compose server-scope lookup failed ({Message}); the read matches the scoped names on the stored server name as well as by id",
                 ex.Message);
+            onLookupFailed?.Invoke();
             return names;
         }
     }

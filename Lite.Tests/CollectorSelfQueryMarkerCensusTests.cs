@@ -44,8 +44,10 @@ public class CollectorSelfQueryMarkerCensusTests
         new() { SqlMajorVersion = 15, IsAwsRds = true },
     };
 
-    private static CollectorContext Context(CollectorTargetInfo target, bool collectedBefore) => new()
+    private static CollectorContext Context(CollectorTargetInfo target, bool collectedBefore, bool planAndTextBySeparateFetch = false) => new()
     {
+        CapturePlanXml = planAndTextBySeparateFetch,
+        FetchQueryTextSeparately = planAndTextBySeparateFetch,
         ServerId = 42,
         ServerName = "test-server",
         CollectionTime = DateTime.UtcNow,
@@ -209,6 +211,113 @@ SET @w = N'EXECUTE ' + QUOTENAME(@d) + N'.sys.sp_executesql N''SELECT 3 FROM u;'
         Assert.DoesNotContain(batches, b => b.Contains("not a batch", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The Query Store database probe builds its per-database statement into <c>@sql</c> and runs it through <c>EXECUTE @exec_sp @sql</c>.
+    /// That inner batch is what the monitored server caches and Query Store records, one row per database, so the marker has to sit in it
+    /// (V8 of the release walk: it topped Top Queries by Duration and Query Store by Duration without it).
+    /// </summary>
+    [Fact]
+    public void TheQueryStoreProbeInnerBatchCarriesTheSelfQueryMarker()
+    {
+        var probe = QueryStoreCollector.Instance.BuildEnumerationQuery(Context(new CollectorTargetInfo { SqlMajorVersion = 17 }, collectedBefore: true))!;
+        var batches = InnerBatches(probe.Text).ToList();
+
+        Assert.Contains(batches, b => b.Contains("database_query_store_options", StringComparison.Ordinal));
+        Assert.All(batches, b => Assert.Contains(QueryStoreCollector.SelfQueryMarker, b, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Query Store records and ranks each statement of a batch on its own, so every top-level statement of every Query Store
+    /// query needs the marker, not only the batch's first one. The plan and text fetch by id, the backfill and the probe's result
+    /// reads were the unmarked ones (V8): their <c>SELECT ... INTO #plan_fetch</c> and the ranked <c>SELECT</c> after it ranked first
+    /// by duration on a quiet server.
+    /// </summary>
+    [Fact]
+    public void EveryTopLevelSelectOfEveryQueryStoreQueryCarriesTheSelfQueryMarker()
+    {
+        var collector = QueryStoreCollector.Instance;
+        var targets = new[]
+        {
+            new CollectorTargetInfo { SqlMajorVersion = 13 },
+            new CollectorTargetInfo { SqlMajorVersion = 17 },
+            new CollectorTargetInfo { SqlMajorVersion = 16, IsAzureSqlDb = true },
+        };
+        var queries = new List<(string Name, string Text)>();
+
+        /* Darling's shape (plan XML and query text fetched by id) and Lite's, each over the targets that change the SQL. */
+        foreach (var (target, separateFetch) in targets.SelectMany(t => new[] { (t, false), (t, true) }))
+        {
+            var context = Context(target, collectedBefore: true, planAndTextBySeparateFetch: separateFetch);
+            var floor = DateTime.UtcNow.AddDays(-2);
+            var ceiling = DateTime.UtcNow.AddDays(-1);
+
+            /* The single-statement payload is the Azure SQL DB shape; every other target enumerates databases and nests it per item. */
+            if (target.IsAzureSqlDb)
+            {
+                queries.Add(("BuildQuery", collector.BuildQuery(context).Text));
+                queries.Add(("BuildBackfillQuery", collector.BuildBackfillQuery(context, floor, ceiling).Text));
+            }
+
+            var enumeration = collector.BuildEnumerationQuery(context);
+
+            if (enumeration is not null)
+            {
+                queries.Add(("BuildEnumerationQuery", enumeration.Text));
+            }
+
+            queries.Add(("BuildPerItemQuery", collector.BuildPerItemQuery("SomeDatabase", context).Text));
+            queries.Add(("BuildBackfillPerItemQuery", collector.BuildBackfillPerItemQuery("SomeDatabase", context, floor, ceiling).Text));
+
+            if (separateFetch)
+            {
+                queries.Add(("BuildPlanFetchByIdsQuery", collector.BuildPlanFetchByIdsQuery("SomeDatabase", context, new long[] { 1, 2, 3 }, 1024 * 1024).Text));
+                queries.Add(("BuildTextFetchByIdsQuery", collector.BuildTextFetchByIdsQuery("SomeDatabase", context, new long[] { 1, 2, 3 }, 1024 * 1024).Text));
+            }
+        }
+
+        var missing = new SortedSet<string>(StringComparer.Ordinal);
+        var checkedSelects = 0;
+
+        foreach (var (name, text) in queries)
+        {
+            /* A top-level statement starts in column 0; the sub-selects and CTE bodies are indented. */
+            foreach (Match select in Regex.Matches(text, @"(?m)^SELECT\b(?<rest>[^\r\n]*)"))
+            {
+                checkedSelects++;
+
+                if (!select.Groups["rest"].Value.Contains(QueryStoreCollector.SelfQueryMarker, StringComparison.Ordinal))
+                {
+                    missing.Add(name + ": " + text.Substring(select.Index, Math.Min(60, text.Length - select.Index)).Replace("\r", "", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal));
+                }
+            }
+        }
+
+        Assert.True(checkedSelects > 20, $"only {checkedSelects} top-level SELECT statements were found; the scan is not reaching them");
+        Assert.True(missing.Count == 0, "top-level Query Store statements without the " + QueryStoreCollector.SelfQueryMarker + " marker:\n" + string.Join("\n", missing));
+    }
+
+    /// <summary>
+    /// The statements that are not collectors but still run against the monitored server on a schedule or per alert: the connect-time
+    /// detection probe and start-time read, the failed-jobs read and the job-step lookup (shared with Darling through
+    /// <c>PerformanceMonitor.Alerting</c>). Each is a single statement, so the marker sits in its own text.
+    /// </summary>
+    [Fact]
+    public void TheConnectProbesAndTheAlertJobReadsCarryTheSelfQueryMarker()
+    {
+        var statements = new Dictionary<string, string>
+        {
+            ["ServerManager.DetectionQueryText"] = PerformanceMonitorLite.Services.ServerManager.DetectionQueryText,
+            ["ServerManager.ServerStartTimeQueryText"] = PerformanceMonitorLite.Services.ServerManager.ServerStartTimeQueryText,
+            ["FailedJobsQuery.Sql"] = PerformanceMonitor.Alerting.FailedJobsQuery.Sql,
+            ["AgentJobStepQuery.BuildSql"] = PerformanceMonitor.Alerting.AgentJobStepQuery.BuildSql(2),
+        };
+
+        foreach (var (name, text) in statements)
+        {
+            Assert.True(text.Contains(QueryStoreCollector.SelfQueryMarker, StringComparison.Ordinal), name + " has no " + QueryStoreCollector.SelfQueryMarker + " marker");
+        }
+    }
+
     private sealed record SqlLiteral(int Start, int End, string Content);
 
     /// <summary>The string literals of a T-SQL text, un-doubled, with comments skipped (an apostrophe in a comment is not a literal).</summary>
@@ -293,7 +402,7 @@ SET @w = N'EXECUTE ' + QUOTENAME(@d) + N'.sys.sp_executesql N''SELECT 3 FROM u;'
             }
         }
 
-        foreach (Match call in Regex.Matches(sql, @"sp_executesql\s+(@\w+)", RegexOptions.IgnoreCase))
+        foreach (Match call in Regex.Matches(sql, @"(?:sp_executesql|EXECUTE\s+@\w+)\s+(@\w+)", RegexOptions.IgnoreCase))
         {
             var variable = Regex.Escape(call.Groups[1].Value);
             var start = -1;

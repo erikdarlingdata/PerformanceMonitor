@@ -158,7 +158,7 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
         });
     }
 
-    /// <summary>A wall-clock-relative second-precision instant, for the start-up and daily refreshes: their
+    /// <summary>A wall-clock-relative second-precision instant, for the daily refresh: its
     /// full-read fallback is <see cref="DarlingModuleMap.RefreshSql"/>, whose window is <c>now() - 2 days</c>.</summary>
     private static DateTime Ago(TimeSpan span)
     {
@@ -170,12 +170,12 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
         await ObjectNameForAsync(c, sqlHandle, ct) is not null;
 
     [Fact]
-    public async Task TheStartUpRefresh_WithAWatermark_ReadsTheRepairSlackBehindIt_NotTwoDays()
+    public async Task TheDailyRefresh_WithAWatermark_ReadsTheRepairSlackBehindIt_NotTwoDays()
     {
         await RunLiveAsync(async (connection, ct) =>
         {
             /* #5519: the map holds one handle and a watermark three hours back. A second handle was stamped an hour
-               before that watermark: the hourly read (watermark less ten minutes) never covers it, and the start-up
+               before that watermark: the hourly read (watermark less ten minutes) never covers it, and the daily
                read must (it repairs what the old two-day read repaired). A third is newer than the watermark, and a
                fourth sits 35 hours behind it, past the repair slack, where the two-day read no longer goes. */
             var watermark = Ago(TimeSpan.FromHours(3));
@@ -188,7 +188,7 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             await InsertProcAsync(connection, watermark.AddMinutes(30), "0xSTART_NEW", "new", ct);
 
             /* The seed row at the watermark is re-read too: the slack reaches back past it. */
-            Assert.Equal(3, await DarlingModuleMap.RefreshAtStartAsync(connection, null, ct));
+            Assert.Equal(3, await DarlingModuleMap.RefreshAsync(connection, null, ct));
             Assert.True(await InMapAsync(connection, "0xSTART_NEW", ct));
             Assert.True(await InMapAsync(connection, "0xSTART_BEHIND", ct));
             Assert.False(await InMapAsync(connection, "0xSTART_FAR", ct));
@@ -197,14 +197,14 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
     }
 
     [Fact]
-    public async Task ALateCommittedRow_StampedADayBeforeTheDaily_IsRepairedByTheDailyAndTheStartUpRefresh()
+    public async Task ALateCommittedRow_StampedADayBeforeTheDaily_IsRepairedByTheDailyRefresh()
     {
         await RunLiveAsync(async (connection, ct) =>
         {
             /* #5519 review: the hourly refresh keeps the watermark near now, so a daily that fires every 24 hours
                has to reach back a day plus the lateness, not a few hours. Another server's rows (stamped 20 minutes
                ago) have moved the shared watermark; server A's row, stamped 20 hours ago, commits only now, behind
-               it. The hourly read (watermark less ten minutes) cannot see it, and a daily or start-up read that only
+               it. The hourly read (watermark less ten minutes) cannot see it, and a daily read that only
                reached six hours behind the watermark never repaired it either, so its handle read "(ad hoc)" once raw
                procedure_stats aged out. */
             var watermark = Ago(TimeSpan.FromMinutes(20));
@@ -220,21 +220,15 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             Assert.False(await InMapAsync(connection, "0xLATE_DAILY", ct));
             Assert.False(await InMapAsync(connection, "0xLATE_START", ct));
 
-            /* The daily repairs both (a row stamped 26 hours before it is inside the 30-hour span), and the start-up
-               read covers the same span. */
+            /* The daily repairs both (a row stamped 26 hours before it is inside the 30-hour span). */
             Assert.Equal(3, await DarlingModuleMap.RefreshAsync(connection, null, ct));
-            Assert.True(await InMapAsync(connection, "0xLATE_DAILY", ct));
-            Assert.True(await InMapAsync(connection, "0xLATE_START", ct));
-
-            await ExecAsync(connection, "DELETE FROM collect.module_map WHERE sql_handle IN ('0xLATE_DAILY','0xLATE_START')", ct);
-            Assert.Equal(3, await DarlingModuleMap.RefreshAtStartAsync(connection, null, ct));
             Assert.True(await InMapAsync(connection, "0xLATE_DAILY", ct));
             Assert.True(await InMapAsync(connection, "0xLATE_START", ct));
         });
     }
 
     [Fact]
-    public async Task TheStartUpRefresh_WithNoWatermark_ReadsTheFullTwoDays()
+    public async Task TheDailyRefresh_WithNoWatermark_ReadsTheFullTwoDays()
     {
         await RunLiveAsync(async (connection, ct) =>
         {
@@ -242,14 +236,14 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             await InsertProcAsync(connection, Ago(TimeSpan.FromHours(2)), "0xSTART_RECENT", "recent", ct);
             Assert.Null(await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
 
-            Assert.Equal(2, await DarlingModuleMap.RefreshAtStartAsync(connection, null, ct));
+            Assert.Equal(2, await DarlingModuleMap.RefreshAsync(connection, null, ct));
             Assert.True(await InMapAsync(connection, "0xSTART_OLD", ct));
             Assert.True(await InMapAsync(connection, "0xSTART_RECENT", ct));
         });
     }
 
     [Fact]
-    public async Task TheStartUpRefresh_WithAWatermarkButAnEmptyMap_ReadsTheFullTwoDays()
+    public async Task TheDailyRefresh_WithAWatermarkButAnEmptyMap_ReadsTheFullTwoDays()
     {
         await RunLiveAsync(async (connection, ct) =>
         {
@@ -262,7 +256,7 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
             await ExecAsync(connection, "DELETE FROM collect.module_map", ct);
             Assert.NotNull(await DarlingModuleMap.ReadWatermarkAsync(connection, ct));
 
-            Assert.Equal(2, await DarlingModuleMap.RefreshAtStartAsync(connection, null, ct));
+            Assert.Equal(2, await DarlingModuleMap.RefreshAsync(connection, null, ct));
             Assert.True(await InMapAsync(connection, "0xSTART_E1", ct));
             Assert.True(await InMapAsync(connection, "0xSTART_E2", ct));
         });
@@ -307,13 +301,52 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
     }
 
     [Fact]
-    public void TheWorker_RunsTheStartUpRefreshOnTheWatermark_AndKeepsTheDailyRefreshOnItsRepairRead()
+    public void TheWorkerStartPath_RunsNoModuleMapRefresh_AndBothRefreshHomesLaunchAfterTheCollectorsStart()
     {
+        /* #5578: the start path used to await the module map refresh (55.6 s on a large store, a flat two days with no
+           watermark) before the collectors started, so every restart delayed collection by that much. The table ensure
+           stays on the start path (cheap DDL); every refresh runs from the sweep loop, whose first pass launches the
+           collectors, the daily purge and the hourly store-maintenance tick, the last two fire-and-track. The marker is
+           the publish that is the last statement before the sweep loop's first iteration. A rename or a move of any of
+           these names fails this test (each is asserted present) rather than passing vacuously. */
         var worker = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
-        Assert.Equal(1, worker.Split("DarlingModuleMap.RefreshAtStartAsync(").Length - 1);
-        Assert.Equal(1, worker.Split("DarlingModuleMap.RefreshAsync(").Length - 1);
-        Assert.Contains("DarlingModuleMap.RefreshAtStartAsync(tuningConnection", worker, StringComparison.Ordinal);
+
+        var collectorsStart = worker.IndexOf("_collectorState.PublishCollecting()", StringComparison.Ordinal);
+        Assert.True(collectorsStart > 0, "the collection-start marker (_collectorState.PublishCollecting()) was renamed or removed");
+        Assert.Equal(1, worker.Split("_collectorState.PublishCollecting()").Length - 1);
+
+        var ensure = worker.IndexOf("DarlingModuleMap.EnsureTableAsync(", StringComparison.Ordinal);
+        Assert.True(ensure > 0 && ensure < collectorsStart, "the table ensure must stay on the start path, before the collectors start");
+
+        /* Exactly two refresh call sites: the daily purge's full-or-repair read and the hourly tick's watermarked one.
+           The removed start-up refresh must not come back under either name. */
+        Assert.DoesNotContain("RefreshAtStartAsync", worker, StringComparison.Ordinal);
+        var refreshCalls = new System.Collections.Generic.List<int>();
+        for (var at = worker.IndexOf("DarlingModuleMap.Refresh", StringComparison.Ordinal); at >= 0;
+             at = worker.IndexOf("DarlingModuleMap.Refresh", at + 1, StringComparison.Ordinal))
+        {
+            refreshCalls.Add(at);
+        }
+
+        Assert.Equal(2, refreshCalls.Count);
         Assert.Contains("DarlingModuleMap.RefreshAsync(moduleMapConnection", worker, StringComparison.Ordinal);
+        Assert.Contains("DarlingModuleMap.RefreshRecentAsync(connection", worker, StringComparison.Ordinal);
+        Assert.Contains("await RefreshModuleMapRecentAsync(stoppingToken);", worker, StringComparison.Ordinal);
+
+        /* The refresh bodies sit in methods below the start path; what matters is where those methods are launched. */
+        var purgeLaunch = worker.IndexOf("TryStartScheduledPurge(", StringComparison.Ordinal);
+        var tickLaunch = worker.IndexOf("TryStartStoreMaintenanceTick(token =>", StringComparison.Ordinal);
+        Assert.True(purgeLaunch > collectorsStart, "the daily purge must launch from the sweep loop, after the collectors start");
+        Assert.True(tickLaunch > collectorsStart, "the hourly store-maintenance tick must launch from the sweep loop, after the collectors start");
+        Assert.DoesNotContain("await TryStartScheduledPurge(", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("await TryStartStoreMaintenanceTick(", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("RunStoreMaintenanceTickAsync(stoppingToken)", worker, StringComparison.Ordinal);
+
+        /* Nothing before the collectors start may call either refresh wrapper or the purge body. */
+        var beforeCollectors = worker[..collectorsStart];
+        Assert.DoesNotContain("DarlingModuleMap.Refresh", beforeCollectors, StringComparison.Ordinal);
+        Assert.DoesNotContain("RefreshModuleMapRecentAsync(", beforeCollectors, StringComparison.Ordinal);
+        Assert.DoesNotContain("RunScheduledPurgeAsync(", beforeCollectors, StringComparison.Ordinal);
     }
 
     [Fact]

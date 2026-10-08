@@ -193,9 +193,9 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     {
         var tab = ViewerFile("ViewerServerTab.Queries.cs");
 
-        Assert.Equal(1, Matches(tab, $@"var floorTask = _dataService\.{probe}\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(tab, $@"var floorTask = Timed\(timer, ""data start"", _dataService\.{probe}\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(tab,
-            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc\);\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc\);"));
+            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc,\s*slicerTask\);\s*\}}\s*catch\s*\{{[^}}]*\}}\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc,\s*timer\);"));
     }
 
     [Theory]
@@ -332,6 +332,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     private static void OnStaThread(Action body)
     {
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try { body(); }

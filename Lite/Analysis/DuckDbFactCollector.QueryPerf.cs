@@ -349,6 +349,7 @@ WITH deduped AS
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
     AND   last_execution_time >= $2
+    /*SEC*/
 ),
 plan_agg AS
 (
@@ -470,6 +471,9 @@ LIMIT 20";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
+            /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
+               primary stay in the window, so the read skips those databases. */
+            cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 3);
 
             var offenderCount = 0;
             var worstFactor = 0.0;

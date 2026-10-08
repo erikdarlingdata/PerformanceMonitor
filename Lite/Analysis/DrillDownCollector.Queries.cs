@@ -632,6 +632,7 @@ deduped AS
     -- subset.
     AND   ($5::VARCHAR[] IS NULL
            OR (list_contains($5::VARCHAR[], database_name) AND list_contains($6::BIGINT[], query_id)))
+    /*SEC*/
 ),
 plan_agg AS
 (
@@ -784,6 +785,9 @@ LIMIT 5";
         /* $7 (#4821): the psp_signature filter's first-pass bound, opened by an hour. The exact
            compiled-before-the-window test for the co-fired flag is made below, per row. */
         cmd.Parameters.Add(new DuckDBParameter { Value = PlanCreationClock.RoughBound(context.TimeRangeStart) });
+        /* $8 and up (#5558): the same databases the PLAN_REGRESSION fact skipped, for the pass where the fact did not
+           run and the offender list above is NULL. */
+        cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 8);
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

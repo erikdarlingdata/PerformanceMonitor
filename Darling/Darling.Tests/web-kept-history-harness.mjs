@@ -731,6 +731,8 @@ console.log(JSON.stringify({
   fetches,
   notices: strips("notice"),
   errors: strips("error"),
+  /* The page's read-error count (the footer's Updated time stamps only while it holds still): a red strip counts, a notice does not. */
+  readErrors: modules.util.readErrorCount(),
   empties: strips("empty"),
   loading: strips("loading").length,
   chartHours: modules.charts.chartCalls.map((c) => (c.windowStart == null ? null : Math.round((c.windowEnd - c.windowStart) / 3600000))),

@@ -171,7 +171,7 @@ public sealed class StatementScrubLivePlanDisplayTests
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex Wrapped = new(
-        @"LivePlanDisplay\s*\.\s*Filter\s*\(\s*await\s*$",
+        @"await\s+LivePlanDisplay\s*\.\s*FilterAsync\s*\(\s*await\s*$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -203,7 +203,7 @@ public sealed class StatementScrubLivePlanDisplayTests
             {
                 sites++;
                 files.Add(relative);
-                /* The call is `LivePlanDisplay.Filter(await LocalDataService.Fetch...(`, so what precedes `LocalDataService`
+                /* The call is `await LivePlanDisplay.FilterAsync(await LocalDataService.Fetch...(`, so what precedes `LocalDataService`
                    must end in the wrapper and the `await`. */
                 var awaitIndex = code.LastIndexOf("await", match.Index, StringComparison.Ordinal);
                 var before = awaitIndex < 0 ? string.Empty : code[..(awaitIndex + "await".Length)];
@@ -211,7 +211,7 @@ public sealed class StatementScrubLivePlanDisplayTests
                 if (awaitIndex < 0 || between.Trim().Length != 0 || !Wrapped.IsMatch(before))
                 {
                     var line = code[..match.Index].Count(c => c == '\n') + 1;
-                    problems.Add(relative + ":" + line + " calls " + match.Value.TrimEnd('(') + " without LivePlanDisplay.Filter(await ...)");
+                    problems.Add(relative + ":" + line + " calls " + match.Value.TrimEnd('(') + " without await LivePlanDisplay.FilterAsync(await ...)");
                 }
             }
         }
@@ -265,6 +265,7 @@ public sealed class StatementScrubLivePlanDisplayTests
     private static void OnStaThread(Action body)
     {
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try { body(); }

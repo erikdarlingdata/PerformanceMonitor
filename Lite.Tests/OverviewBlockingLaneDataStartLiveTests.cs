@@ -355,6 +355,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)";
     {
         T result = default!;
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try { result = body(); }

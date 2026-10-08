@@ -77,6 +77,7 @@ WHERE rn = 1
 AND   is_percent_growth = true
 AND   total_size_mb >= 10240
 AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
+/*SEC*/
 ORDER BY total_size_mb DESC
 LIMIT 50";
 
@@ -99,6 +100,8 @@ LIMIT 50";
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name)));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        /* #5558: the same databases the fact skipped. */
+        PgSecondaryReplicaScope.Apply(cmd, context, "FILE_AUTOGROWTH_PERCENT", "database_name");
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

@@ -208,9 +208,10 @@ public partial class FinOpsTab : UserControl
                 : null;
             await Windows.PlanViewerWindow.ShowPlanAsync(owner, xml, label, qt, metadata);
         },
-        (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+        /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
             GetSelectedConnectionString() ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
-            productName: "SQL Server Performance Monitor Lite"),
+            productName: "SQL Server Performance Monitor Lite")),
         "the monitored server");
 
     private string? GetSelectedConnectionString()
@@ -232,7 +233,7 @@ public partial class FinOpsTab : UserControl
         {
             var connStr = GetSelectedConnectionString();
             if (!string.IsNullOrEmpty(connStr))
-                plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash));
+                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash));
         }
         return plan;
     }
@@ -330,9 +331,12 @@ public partial class FinOpsTab : UserControl
             var gen = _loads.Claim(nameof(LoadRecommendationsAsync));
 
             var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
-            var data = await Task.Run(() => _dataService.GetRecommendationsAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
+            var (data, skippedNote) = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
             if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
             RecommendationsDataGrid.ItemsSource = data;
+            /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
+            RecommendationsSecondaryNoteText.Text = skippedNote ?? "";
+            RecommendationsSecondaryNoteText.Visibility = skippedNote is null ? Visibility.Collapsed : Visibility.Visible;
             RecommendationsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             RecommendationsCountIndicator.Text = data.Count > 0 ? $"{data.Count} recommendation(s)" : "";
         }

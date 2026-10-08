@@ -1842,13 +1842,16 @@ public partial class MainWindow : Window
             await _dataService.GetServerClocksAsync(server.ServerId, System.Threading.CancellationToken.None),
             server.ServerId, TimeZoneInfo.Local, DateTime.UtcNow);
 
+        /* #5558: the shared note when this server's node holds a secondary availability group copy of any database. */
+        var replicaNote = await _dataService.GetSecondaryReplicaNoteAsync(server.ServerId);
+
         ApplyRecommendationsViewModel(
             RecommendationsViewModel.FromFindings(
                 rows, server.DisplayName, serverClock,
                 insufficientData: analysisState?.InsufficientData == true,
                 insufficientDataMessage: analysisState?.Message,
                 windowEmpty: analysisState?.WindowEmpty == true,
-                windowEmptyMessage: analysisState?.Message));
+                windowEmptyMessage: analysisState?.Message).WithReplicaNote(replicaNote));
 
         /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
            the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display
@@ -1864,6 +1867,11 @@ public partial class MainWindow : Window
     /// <summary>Swaps the visible content region to match the view-model's state (mirrors Lite's ApplyViewModel).</summary>
     private void ApplyRecommendationsViewModel(RecommendationsViewModel vm)
     {
+        /* #5558: the availability group note rides with the list or the all-clear, never with a state that replaces them. */
+        var replicaNote = vm.State is RecommendationsState.Loaded or RecommendationsState.Empty ? vm.ReplicaNote : null;
+        RecommendationsReplicaNoteText.Text = replicaNote ?? string.Empty;
+        RecommendationsReplicaNoteText.Visibility = replicaNote is null ? Visibility.Collapsed : Visibility.Visible;
+
         switch (vm.State)
         {
             case RecommendationsState.Loading:

@@ -47,7 +47,7 @@
 
 import { el, mount, apiGetFleet, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
-import { databaseFilterControl, databaseFilterUnavailable } from "./database-filter.js";
+import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
@@ -249,6 +249,8 @@ let gridKey = "";
  */
 export function renderServer(main, server, tabId, opts) {
   const isPoll = !!(opts && opts.poll === true);
+  /* A tab click, another server or a deep link closes the Databases popover (W9); only the poll's rebuild keeps it open. */
+  if (!isPoll) closeDatabaseFilter();
   const generation = ++renderGeneration;
   const custom = customRanges.get(server);
   /* A fixed custom range cannot change under the poll, so the poll keeps the panels it already drew (same server, same

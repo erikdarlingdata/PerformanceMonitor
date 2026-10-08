@@ -182,6 +182,12 @@ function panelMemoryKey(read, params, spec) {
 }
 function hidesPanel(spec, res, shell, key) {
   if (!spec.hideWhenNoRows) return false;
+  /* A failed read is not "no rows": hiding the card would leave a problem list that could not load looking like a clean server.
+     The card stays (or comes back) and shows the read's error (release walk, W12). */
+  if (res.kind === "error") {
+    shell.panel.style.display = "";
+    return false;
+  }
   const hasRows = res.kind === "data" && (getPath(res.data, spec.rowsKey) || []).length > 0;
   panelHadRows.set(key, hasRows);
   if (hasRows) {
@@ -992,9 +998,9 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope };
+  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   return renderPanel(desc);
@@ -2686,7 +2692,14 @@ export const POSTGRES_TABS = [
         "queries",
         PG_KERNEL_COLUMNS,
         ctx.label + ", CPU measured by the operating system; device bytes are not logical I/O",
-        "No per-query OS resource usage in this window."
+        "No per-query OS resource usage in this window.",
+        2,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "pg_stat_kcache is not installed on this server, so per-query OS CPU is not collected. Install the extension (it needs shared_preload_libraries and a restart) to fill this panel."
       ),
       /* #2663 the first PostgreSQL time series. The single-window panels above rank what this server waits
          on; this follows ONE of them over time, which is the question they cannot answer. Parameterised by
@@ -4609,8 +4622,14 @@ const JOB_HISTORY_COLUMNS = [
   { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
   { key: "retries", label: "Retries", format: "int" },
   { key: "last_success", label: "Last Success", format: "time" },
-  { key: "message", label: "Message", wrap: true },
+  { key: "message", label: "Message", wrap: true, render: jobMessageCell },
 ];
+
+/* The same squeeze as the Job History page's Message column (W2): a readable width, the first 3 lines, and the whole text on hover. */
+function jobMessageCell(r) {
+  const text = r && r.message != null ? String(r.message) : "";
+  return el("div", { class: "jh-message", title: text || null, text });
+}
 
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },

@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Controls;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Mcp;
@@ -1161,11 +1162,36 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var runningJobsTask = Task.Run(() => SafeQueryAsync(() => _dataService.GetRunningJobsAsync(_serverId)));
-            await runningJobsTask;
-            _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
+            /* Not through SafeQueryAsync: that turns a failed read into an empty list, and an empty grid then says "No SQL Agent jobs are
+               running." about a read that never answered. A failed read shows its own error below instead. */
+            LocalDataService.RunningJobsRead read;
+            try
+            {
+                read = await Task.Run(() => _dataService.ReadRunningJobsAsync(_serverId));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Running jobs read failed: {ex.Message}");
+                _runningJobsFilterMgr!.UpdateData(new List<RunningJobRow>());
+                RunningJobsNoDataMessage.Tag ??= RunningJobsNoDataMessage.Text; /* the words kept for when the read works again */
+                RunningJobsNoDataMessage.Text = RunningJobsReadFailedText(ex);
+                RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
+                return;
+            }
+
+            _runningJobsFilterMgr!.UpdateData(read.Jobs);
             await RefreshRunningJobsSkippedNoteAsync();
-            ShowEngineGap(RunningJobsNoDataMessage, "running_jobs", runningJobsTask.Result.Count);
+            var bannerShows = RunningJobsMsdbWarning.Visibility == System.Windows.Visibility.Visible;
+            /* D20: an empty grid says no job is running, unless the login cannot read msdb (then the warning above the grid says
+               why the grid is empty, and "no jobs running" would be a claim nobody checked) or the not-collected note applies. */
+            ShowEngineGap(RunningJobsNoDataMessage, "running_jobs", read.Jobs.Count, keepsOwnEmptyText: !bannerShows);
+            /* An empty grid whose collector has not collected within the freshness bound says that instead (no gap note or banner wins). */
+            if (read.Jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
+                && RunningJobsNoDataMessage.Tag is string ownText && RunningJobsNoDataMessage.Text == ownText)
+            {
+                RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGood);
+                RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
+            }
         }
         catch (Exception ex)
         {
@@ -1194,7 +1220,7 @@ public partial class ServerTab : UserControl
             _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
             _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);
-            ShowEngineGap(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count);
+            ShowEngineGap(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count, keepsOwnEmptyText: true);
         }
         catch (Exception ex)
         {

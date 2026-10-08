@@ -57,7 +57,7 @@ public sealed class ServerEditLiveTests : IDisposable
         }
     }
 
-    private static List<string> McpStatements(string roleName)
+    private static List<string> McpStatements(string roleName, string database)
     {
         var provisioning = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
@@ -84,7 +84,7 @@ public sealed class ServerEditLiveTests : IDisposable
                 continue;
             }
 
-            statements.Add(statement[..at] + marker + roleName);
+            statements.Add(ViewerGrantReplay.OnDatabase(statement[..at], database) + marker + roleName);
         }
 
         return statements;
@@ -107,7 +107,7 @@ public sealed class ServerEditLiveTests : IDisposable
         var owner = NpgsqlDataSource.Create(ownerString);
         var role = "srv_edit_" + Guid.NewGuid().ToString("N")[..8];
         await ExecAsync(owner, $"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-        foreach (var statement in McpStatements(role))
+        foreach (var statement in McpStatements(role, scratch.DatabaseName))
         {
             await ExecAsync(owner, statement, ct);
         }

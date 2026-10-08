@@ -195,6 +195,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         try
         {
             _crosshairManager?.PrepareForRefresh();
+            ComparisonEmptyBanner.Visibility = Visibility.Collapsed;
 
             /* #4966: the UTC window the blocking and deadlock reads below take (their own GetTimeRange call), for the data-start note. */
             var (windowStartUtc, windowEndUtc) = LocalDataService.GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
@@ -276,7 +277,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var ioGrouped = fileIoTask.Result
                     .GroupBy(d => d.CollectionTime)
                     .OrderBy(g => g.Key)
-                    .Select(g => (g.Key.ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                    .Select(g => (g.Key.ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))))
                     .ToList();
                 UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
             }
@@ -336,9 +337,21 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     var refIo = refIoTask.Result
                         .GroupBy(d => d.CollectionTime)
                         .OrderBy(g => g.Key)
-                        .Select(g => (TimeWindows.GhostX(g.Key, days, zone).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                        .Select(g => (TimeWindows.GhostX(g.Key, days, zone).ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))))
                         .ToList();
                     AddGhostLine(FileIoChart, refIo, "#81C784");
+                }
+
+                /* Release walk V12d: a comparison window the store holds nothing for (a store newer than the offset) drew no
+                   line and said nothing. When every read came back, and every one was empty, the chart says so. A read that
+                   failed is logged above and is not "no data". */
+                if (refCpuTask.IsCompletedSuccessfully && refWaitTask.IsCompletedSuccessfully && refBlockingTask.IsCompletedSuccessfully
+                    && refMemoryTask.IsCompletedSuccessfully && refIoTask.IsCompletedSuccessfully
+                    && ComparisonHasNoData(refCpuTask.Result?.Count ?? 0, refWaitTask.Result?.Count ?? 0, refBlockingTask.Result?.Count ?? 0,
+                        refMemoryTask.Result?.Count ?? 0, refIoTask.Result?.Count ?? 0))
+                {
+                    ComparisonEmptyBanner.Text = ComparisonEmptyText(days);
+                    ComparisonEmptyBanner.Visibility = Visibility.Visible;
                 }
 
                 // Register reference data with crosshair manager for tooltip
@@ -727,6 +740,14 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         chart.Refresh();
     }
+
+    /// <summary>True when none of the comparison window's reads returned a row, so no ghost line can be drawn on any lane.</summary>
+    internal static bool ComparisonHasNoData(int cpuRows, int waitRows, int blockingRows, int memoryRows, int ioRows)
+        => cpuRows == 0 && waitRows == 0 && blockingRows == 0 && memoryRows == 0 && ioRows == 0;
+
+    /// <summary>What the chart says when the comparison window holds no data, in the same words as <see cref="ComparisonLabel"/>.</summary>
+    internal static string ComparisonEmptyText(int days)
+        => $"No comparison line: no data was collected for the same hours {(days == 1 ? "yesterday" : days == 7 ? "last week" : $"{days:N0} days earlier")}";
 
     /// <summary>The words the crosshair tooltip puts beside a ghost line: how many whole days it is moved by.</summary>
     internal static string ComparisonLabel(int days)

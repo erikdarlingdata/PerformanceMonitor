@@ -398,6 +398,14 @@ public sealed class DarkPastRetentionReadsOfflineLivePostgresTests
                 Assert.Equal(dot.Word(), fleet[id].Status);
             }
 
+            /* Release walk W1b: a server dark past the fleet read's 48 hours shows its REAL last collection (five days
+               ago here), read for it alone from before the window; a server with no row anywhere shows none, and the
+               server that is collecting keeps the windowed read's answer. */
+            Assert.Equal(now.AddDays(-5), fleet[DarkInsideRetention].LastCollectionTime);
+            Assert.Null(fleet[AgedOut].LastCollectionTime);
+            Assert.Null(fleet[JustRegistered].LastCollectionTime);
+            Assert.Equal(now.AddMinutes(-1), fleet[Collecting].LastCollectionTime);
+
             bodySucceeded = true;
         }
         finally

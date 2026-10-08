@@ -56,6 +56,10 @@ public sealed class McpAnalysisTools
                 }, McpHelpers.JsonOptions);
             }
 
+            /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
+               availability group; the set THIS pass used. Null when none, and then the field is simply null. */
+            var secondaryReplicaNote = analysisService.LastSecondaryReplicaNote;
+
             /* #2506: whether this run's findings reached the store, and why not when they did not.
                Reported rather than left to the documentation because the caller cannot otherwise tell:
                an anchored run returns a complete, correct set of findings that simply does not exist in
@@ -90,7 +94,8 @@ public sealed class McpAnalysisTools
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
-                        persistence_note = persistenceNote
+                        persistence_note = persistenceNote,
+                        secondary_replica_note = secondaryReplicaNote
                     }, McpHelpers.JsonOptions));
             }
 
@@ -132,12 +137,14 @@ public sealed class McpAnalysisTools
                     : $"No significant findings in the {coverage!.Fraction:P0} of this window the collector observed — a PARTIAL reading, not a full all-clear. {coverage.Describe()}. The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.";
                 return McpHelpers.Status(
                     "empty",
-                    collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}",
+                    (collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}")
+                        + (secondaryReplicaNote is null ? string.Empty : " " + secondaryReplicaNote),
                     collection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
                         persistence_note = persistenceNote,
+                        secondary_replica_note = secondaryReplicaNote,
                         coverage = coverage?.ToPayload(),
                         fact_count = analysisService.LastFactCount,
                         facts_scored = analysisService.LastFactsScored
@@ -172,6 +179,7 @@ public sealed class McpAnalysisTools
                 /* Null at full coverage (#3538 A2) — same rule; the collection caveat (#3691) joins it
                    only when a family failed, so a clean full-coverage pass keeps its null. */
                 caveat = CollectionCaveats.Compose(coverageCaveat, collectionCaveat),
+                secondary_replica_note = secondaryReplicaNote,
                 coverage = coverage?.ToPayload(),
                 time_range = new
                 {
@@ -298,6 +306,12 @@ public sealed class McpAnalysisTools
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken);
 
+            /* #5558: databases left to the primary because this node holds only a secondary copy of them in an
+               availability group, as of the window end; the facts below were trimmed of them. Built from the set the
+               read's own context filtered with (carried on the returned collection state), not from a second read, so
+               the note cannot disagree with what was skipped. Null when none, and then the field is simply null. */
+            var secondaryReplicaNote = AgReplicaScope.SkippedNote(collection.SecondaryReplicaDatabases);
+
             /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
@@ -309,12 +323,11 @@ public sealed class McpAnalysisTools
                    #3691: a pass in which every family FAILED lands here too, and used to be told apart from
                    "no data" only by the service log; the caveat now says which families were not read. */
                 const string noFacts = "No facts collected. The collector may not have run yet, or no data exists in the requested time range.";
-                return collectionCaveat is null
-                    ? McpHelpers.Status("unavailable", noFacts)
-                    : McpHelpers.Status(
-                        "unavailable",
-                        $"{noFacts} COLLECTION CAVEAT: {collectionCaveat}",
-                        collection.Attach(new { coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                var noFactsMessage = secondaryReplicaNote is null ? noFacts : $"{noFacts} {secondaryReplicaNote}";
+                return McpHelpers.Status(
+                    "unavailable",
+                    collectionCaveat is null ? noFactsMessage : $"{noFactsMessage} COLLECTION CAVEAT: {collectionCaveat}",
+                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -331,7 +344,7 @@ public sealed class McpAnalysisTools
                     $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
                     "Check get_collection_health to see when collectors last succeeded and why they stopped." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
-                    collection.Attach(new { coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
 
             var filtered = facts.AsEnumerable();
@@ -383,6 +396,7 @@ public sealed class McpAnalysisTools
                 total_facts = facts.Count,
                 shown = result.Count,
                 filters = new { source, min_severity },
+                secondary_replica_note = secondaryReplicaNote, /* #5558: null when nothing was left to the primary */
                 /* #3538 A2: null at full coverage; below the partial bar it says what share of the window
                    the fractions and rates were divided over, because a 25%-of-observed-time wait on a
                    quarter-collected window is a different claim from 25% of four hours. #3691: the
@@ -433,11 +447,17 @@ public sealed class McpAnalysisTools
             var baselineEnd = windowEnd.AddHours(-baseline_hours_back + hours_back);
             var baselineStart = windowEnd.AddHours(-baseline_hours_back);
 
-            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion) = await analysisService.ComparePeriodsAsync(
+            var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion, baselineSecondaries, comparisonSecondaries) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
                 comparisonStart, comparisonEnd,
                 cancellationToken);
+
+            /* #5558: per window, because each window uses the role at its own end and the two can straddle a
+               failover. Built from the sets the windows' contexts filtered with (returned beside the coverages), not
+               from a second read, so the note names exactly what the comparison skipped. */
+            var baselineSecondaryNote = AgReplicaScope.SkippedNote(baselineSecondaries);
+            var comparisonSecondaryNote = AgReplicaScope.SkippedNote(comparisonSecondaries);
 
             /* The COLLECTION_GAP context fact (#3538 A2) is an observation of the COLLECTOR, not of the
                server, and it is reported through the coverage blocks and caveat below. Left in the
@@ -489,7 +509,9 @@ public sealed class McpAnalysisTools
                            it observed and found idle — is the difference between "check collection" and
                            "the server was quiet", and only the coverage can tell them apart. */
                         baseline_coverage = baselineCoverage?.ToPayload(),
-                        comparison_coverage = comparisonCoverage?.ToPayload()
+                        comparison_coverage = comparisonCoverage?.ToPayload(),
+                        baseline_secondary_replica_note = baselineSecondaryNote,
+                        comparison_secondary_replica_note = comparisonSecondaryNote
                     });
             }
 
@@ -546,14 +568,16 @@ public sealed class McpAnalysisTools
                     start = baselineStart.ToString("o"),
                     end = baselineEnd.ToString("o"),
                     fact_count = baselineServerFacts.Count,
-                    coverage = baselineCoverage?.ToPayload()
+                    coverage = baselineCoverage?.ToPayload(),
+                    secondary_replica_note = baselineSecondaryNote
                 },
                 comparison = new
                 {
                     start = comparisonStart.ToString("o"),
                     end = comparisonEnd.ToString("o"),
                     fact_count = comparisonServerFacts.Count,
-                    coverage = comparisonCoverage?.ToPayload()
+                    coverage = comparisonCoverage?.ToPayload(),
+                    secondary_replica_note = comparisonSecondaryNote
                 },
                 summary = comparison.SummaryPayload(),
                 families = comparison.Families.Select(f => f.ToPayload()).ToList(),
@@ -842,11 +866,16 @@ public sealed class McpAnalysisTools
                 resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit + 1, asOfUtc: anchor);
             var (findings, truncated) = McpHelpers.BoundPage(fetched, FindingOccurrences.WindowCoveringLimit);
 
+            /* #5558: databases skipped because this node holds only a secondary copy of them in an availability group
+               (their per-database findings are the primary's). Null when none; the same sentence on every surface. */
+            var secondaryReplicaNote = await analysisService.GetSecondaryReplicaNoteAsync(resolved.ServerId, anchor);
+
             if (findings.Count == 0)
             {
                 return McpHelpers.Status(
                     "empty",
-                    "No findings in the requested time range. Run analyze_server to generate new findings.");
+                    "No findings in the requested time range. Run analyze_server to generate new findings."
+                    + (secondaryReplicaNote is null ? "" : " " + secondaryReplicaNote));
             }
 
             /* #2000: collapse to one entry per (story_path_hash, incident_id). Measured 27.9x
@@ -888,6 +917,7 @@ public sealed class McpAnalysisTools
                 finding_count = groups.Count,
                 total_finding_count = totalFindingCount,
                 total_occurrences = findings.Count,
+                secondary_replica_note = secondaryReplicaNote,
                 // No silent caps: a read the window-covering limit CUT has had its OLDEST rows dropped by
                 // the store's newest-first LIMIT, so occurrence stats may under-report — say so instead of
                 // letting first_seen quietly lie. truncated is the #3594 flag (observed above); the note

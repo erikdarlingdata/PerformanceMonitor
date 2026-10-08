@@ -64,9 +64,10 @@ public partial class ProcedureHistoryWindow : Window
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
                 this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
-            (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+            /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
-                productName: "SQL Server Performance Monitor Lite"),
+                productName: "SQL Server Performance Monitor Lite")),
             "the monitored server");
 
         _filterManager = new DataGridFilterManager<ProcedureStatsHistoryRow>(HistoryDataGrid);
@@ -247,7 +248,7 @@ public partial class ProcedureHistoryWindow : Window
         btn.Content = "...";
         try
         {
-            var plan = LivePlanDisplay.Filter(await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName));
+            var plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName));
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show("No plan found in the plan cache for this procedure. The plan may have been evicted.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -288,7 +289,7 @@ public partial class ProcedureHistoryWindow : Window
     private async System.Threading.Tasks.Task<string?> FetchPlanAsync()
     {
         if (string.IsNullOrEmpty(_connectionString) || string.IsNullOrEmpty(_objectName)) return null;
-        return LivePlanDisplay.Filter(await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName));
+        return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName));
     }
 
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)

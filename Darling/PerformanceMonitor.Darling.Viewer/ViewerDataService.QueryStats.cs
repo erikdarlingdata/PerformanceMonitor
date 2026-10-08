@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -467,23 +468,15 @@ public sealed partial class ViewerDataService
                 }
             }
 
+            /* Walk finding D15: ONE statement for every ranked row's text. This was one v_query_stats statement per row
+               (50 sequential round trips per load, each planned on its own), which on a 7 day window over a network was
+               most of the load. */
+            var texts = await ReadHourlyQueryTextsAsync(serverId, ranked.Select(r => r.Database).ToArray(), ranked.Select(r => r.QueryHash).ToArray(), cancellationToken);
             rows = new List<ViewerQueryStatsRow>(ranked.Count);
-            foreach (var r in ranked)
+            for (var i = 0; i < ranked.Count; i++)
             {
-                var queryText = "";
-                await using (var textCommand = _dataSource.CreateCommand(
-                    "SELECT query_text FROM v_query_stats WHERE server_id = $1 AND database_name = $2 AND query_hash = $3 AND query_text IS NOT NULL ORDER BY collection_time DESC LIMIT 1"))
-                {
-                    textCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                    textCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                    textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.Database });
-                    textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.QueryHash });
-                    var textResult = await textCommand.ExecuteScalarAsync(cancellationToken);
-                    if (textResult is string text)
-                    {
-                        queryText = text;
-                    }
-                }
+                var r = ranked[i];
+                var queryText = texts[i];
 
                 rows.Add(new ViewerQueryStatsRow
                 {
@@ -512,6 +505,53 @@ public sealed partial class ViewerDataService
 
         var firstBucket = await firstBucketTask;
         return new ViewerRoutedRead<ViewerQueryStatsRow>(rows, "hourly", HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling), useIo, firstBucket);
+    }
+
+    /// <summary>The hourly arm's text lookup for every ranked row in one statement (walk finding D15; it was one statement per row).
+    /// Each (database, query hash) key takes the text of its newest row that has one, from <c>v_query_stats</c> (the view resolves
+    /// the #1767 dimension), exactly as the per-row lookup it replaces did; a key with no text is simply absent from the answer.
+    /// $1 server_id, $2 database names, $3 query hashes (parallel arrays), answered as (ordinal, query_text).</summary>
+    internal const string HourlyTextBatchSql = """
+        SELECT k.ord, t.query_text
+        FROM unnest($2::text[], $3::text[]) WITH ORDINALITY AS k(database_name, query_hash, ord)
+        CROSS JOIN LATERAL
+        (
+            SELECT v.query_text
+            FROM v_query_stats AS v
+            WHERE v.server_id = $1
+            AND   v.database_name = k.database_name
+            AND   v.query_hash = k.query_hash
+            AND   v.query_text IS NOT NULL
+            ORDER BY v.collection_time DESC
+            LIMIT 1
+        ) AS t
+        """;
+
+    /// <summary>One <see cref="HourlyTextBatchSql"/> round trip: the text per ranked row, in the same order, "" where none.</summary>
+    internal async Task<string[]> ReadHourlyQueryTextsAsync(int serverId, string[] databases, string[] hashes, CancellationToken cancellationToken)
+    {
+        var texts = new string[databases.Length];
+        Array.Fill(texts, "");
+        if (databases.Length == 0)
+        {
+            return texts;
+        }
+
+        await using var command = _dataSource.CreateCommand(HourlyTextBatchSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = databases });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = hashes });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(1))
+            {
+                texts[(int)reader.GetInt64(0) - 1] = reader.GetString(1);
+            }
+        }
+
+        return texts;
     }
 
     /// <summary>#5329: the three columns the io hourly rollups add, appended to the hourly arm's select list

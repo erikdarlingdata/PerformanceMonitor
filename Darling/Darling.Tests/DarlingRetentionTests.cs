@@ -358,6 +358,7 @@ public sealed class DarlingRetentionTests
             },
             cap: 25_000,
             floorCap: 1_000,
+            tableName: "query_plan_dim",
             CancellationToken.None);
 
         Assert.Equal(new[] { 25_000, 12_500 }, attemptCaps);
@@ -387,6 +388,7 @@ public sealed class DarlingRetentionTests
             },
             cap: 1_000,
             floorCap: 100,
+            tableName: "query_plan_dim",
             CancellationToken.None);
 
         Assert.Equal(2, attempts);
@@ -413,6 +415,7 @@ public sealed class DarlingRetentionTests
             },
             cap: 1_000,
             floorCap: 1_000,
+            tableName: "query_plan_dim",
             CancellationToken.None));
 
         Assert.Equal(1, attempts);
@@ -440,6 +443,7 @@ public sealed class DarlingRetentionTests
             },
             cap: 25_000,
             floorCap: 1_000,
+            tableName: "query_plan_dim",
             shutdown.Token));
 
         Assert.Equal(1, attempts);
@@ -1228,9 +1232,11 @@ WHERE hypertable_name = 'wait_stats'
     }
 
     /// <summary>
-    /// Only the plan dimension is capped. <c>query_text_dim</c> is ~40 MB in total and drains in a single
-    /// slice, and the fact tables need the compressed-chunk-safe shape that the <c>ctid</c> idiom cannot
-    /// provide (#1564) — so the row cap is scoped to the one table whose rows are large enough to matter.
+    /// Among the payload DIMENSION tables only the plan dimension is capped. <c>query_text_dim</c> is ~40 MB in
+    /// total and drains in a single slice, so the row cap is scoped to the one dimension whose rows are large
+    /// enough to matter. (The two Query Store interval fact tables are row-capped too since #5569, because they
+    /// are plain heaps where the <c>ctid</c> idiom is safe; <c>QueryStoreIntervalPurgeRowCappedTests</c> pins
+    /// that. The fact tables that stay time-sliced need the compressed-chunk-safe shape, #1564.)
     /// </summary>
     [Fact]
     public void OnlyThePlanDim_TakesTheRowCap()

@@ -244,6 +244,7 @@ public sealed class ViewerCollectionLogDataStartLiveTests : IClassFixture<Collec
         var viewer = _store.Viewer!;
         DrillAnswer? answer = null;
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             var dispatcher = Dispatcher.CurrentDispatcher;

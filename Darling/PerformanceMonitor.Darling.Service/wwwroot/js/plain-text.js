@@ -168,6 +168,17 @@ export function plainText(text) {
      pg_stat_statements_1 is left alone, so a real object name followed by a number is not rewritten. */
   t = t.replace(/(?<![\w.])[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+(?: [a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+)+(?![\w])/g, underscoreCountsToText);
 
+  /* The index-bloat "answered only" read says it in the read's own parameter name. The page shows the sentence under the
+     answered-ranking panel, so it says why that ranking is empty, in words, and points at the table above that lists each
+     index with its reason (release walk, PG18 Storage). */
+  t = t.replace(/answered_only excluded every row: /g, "Nothing to rank: ");
+  t = t.replace(
+    /the suppression breakdown below says why each index has no answer and which reasons are remediable\. Re-run without answered_only to see the rows and their reasons\./g,
+    "the Index Bloat table above says why each index has no answer."
+  );
+  t = t.replace(/\banswered_only: true\b/g, "the answered-only ranking");
+  t = t.replace(/\banswered_only\b/g, "the answered-only ranking");
+
   /* A tool name: use get_collection_health -> use Collection Health. Only a real tool name; any other get_ word is the
      reader's own text (an object, a server) and stays as written. */
   t = t.replace(/(?<![\w.])get_([a-z0-9]+(?:_[a-z0-9]+)*)(?![\w])/g, (m, rest) => (TOOL_NAME_SET.has(m) ? toolWords(rest) : m));
@@ -180,5 +191,8 @@ export function plainText(text) {
 export const NOT_COLLECTED_LINE = "This server does not collect this data (it does not apply to this kind of server).";
 
 /** The words every engine-gate sentence ends on (CollectorEngineCapability's permanent-gap epilogue). A "not collected"
-    answer that is something else, such as a plan that was never stored, does not carry them and keeps its own sentence. */
-const ENGINE_GATE_MARK = "permanent engine capability gap";
+    answer that is something else, such as a plan that was never stored, does not carry them and keeps its own sentence.
+    The mark opens with "This is a" because a runtime-precondition sentence (an extension that is not installed, a skipped
+    source) says "not a permanent engine capability gap": matching the bare phrase turned that fixable state into "does not
+    apply to this kind of server" (release walk, PG18 OS CPU by Query). */
+const ENGINE_GATE_MARK = "This is a permanent engine capability gap";
