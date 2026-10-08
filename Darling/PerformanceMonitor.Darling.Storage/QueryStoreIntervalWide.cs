@@ -444,8 +444,8 @@ LEFT JOIN collect.query_store_interval_wide_coverage AS c
     /// Raw's floor, from TimescaleDB's catalog (metadata, never a scan), exactly as
     /// <see cref="QueryStoreIntervalLatest.RawChunkFloorSql"/>: raw's oldest chunk (NULL when raw is not a
     /// hypertable). This table's floor is never read from the catalog (#5541): the table is engine-plain, per its
-    /// migration's own comment, and retention purges it with a sliced DELETE that leaves emptied chunks listed, so a
-    /// catalog floor would sit far below the real one and move the rule toward the table.
+    /// migration's own comment, and retention purges it with a row-capped DELETE (#5569) that leaves emptied chunks
+    /// listed, so a catalog floor would sit far below the real one and move the rule toward the table.
     /// </summary>
     public const string RawChunkFloorSql = @"
 SELECT
