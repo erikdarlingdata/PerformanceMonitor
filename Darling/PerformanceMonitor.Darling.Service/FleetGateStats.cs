@@ -86,8 +86,11 @@ internal sealed class FleetGateStats
     /// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/>. Decided when the slot is recorded, so a wall-clock step
     /// afterwards cannot bring a start-up count into the judged window, or take a judged one out of it.
     /// </summary>
-    private bool IsJudgedNow() =>
-        _uptime?.Invoke() is { } uptime && uptime >= TimeSpan.FromMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes);
+    private bool IsJudgedNow()
+    {
+        var uptime = _uptime?.Invoke();
+        return uptime is not null && uptime.Value >= TimeSpan.FromMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes);
+    }
 
     /// <summary>
     /// Records one collector slot that ran (#4732), and how many slots it stepped over on the way. Called where a
