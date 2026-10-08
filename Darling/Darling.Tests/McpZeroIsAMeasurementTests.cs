@@ -54,6 +54,7 @@ namespace Darling.Tests;
 /// SQL consts are pinned for the new columns, and the pure derivations (growth, PVS reasons) are executed.
 /// <see cref="McpZeroIsAMeasurementLivePostgresTests"/> runs the tools against live Postgres.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpZeroIsAMeasurementTests
 {
     private const string DarlingMcp = "Darling/PerformanceMonitor.Darling.Service/Mcp";
@@ -572,6 +573,7 @@ public sealed class McpZeroIsAMeasurementTests
 /// 0 MB beside one not measured at all, and the growth read over three days of history.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class McpZeroIsAMeasurementLivePostgresTests
 {
     private const string ServerName = "zero-is-a-measurement-e2e";

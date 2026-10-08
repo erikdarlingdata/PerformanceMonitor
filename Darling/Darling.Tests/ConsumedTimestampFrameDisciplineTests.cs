@@ -58,6 +58,7 @@ namespace Darling.Tests;
 /// declaration carrying the C#-side evidence, pinned at set equality against the classifier's own
 /// unreadable set and counted, so the hole cannot quietly grow.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ConsumedTimestampFrameDisciplineTests
 {
     /// <summary>Which clock a stored value is in. Naive UTC is the store's default and the frame every

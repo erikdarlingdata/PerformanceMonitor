@@ -44,6 +44,7 @@ namespace Darling.Tests;
 /// finding no work to do — the precise failure mode of the text pins it replaces.</para>
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class DarlingPgReadSqlParsesLiveTests
 {
     /// <summary>

@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// through the one shared describer both SKUs use. Lite's half — including that its stored values are
 /// UNCHANGED — is <c>Lite.Tests.AlertDeliveryChannelTests</c>.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AlertDeliveryChannelTests
 {
     /* ─────────────── the resolution record: a stated channel, not a claimed delivery ─────────────── */
