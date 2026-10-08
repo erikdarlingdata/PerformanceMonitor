@@ -427,7 +427,7 @@ public class ServerPropertyRow
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
     /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
-    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoScoreNote;
+    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
 }
 
 public class StorageGrowthRow
@@ -511,6 +511,10 @@ public static class FinOpsHealthCalculator
 
     /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
     public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
+    /// <summary>The tooltip on the dash shown in place of a health score on the Server Inventory. That score is null for two reasons: the last 24 hours hold no
+    /// CPU sample, or no memory sample has been collected (memory_stats off in the schedule, or not yet run on a new server). The row does not say which,
+    /// so the note names both. The Utilization view keeps <see cref="NoScoreNote"/>: it has no row at all without a memory sample.</summary>
+    public const string NoInventoryScoreNote = "No health score: the last 24 hours hold no CPU sample, or no memory sample has been collected.";
 
     public static int CpuScore(decimal p95Pct)
     {

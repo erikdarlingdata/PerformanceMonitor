@@ -50,6 +50,16 @@ public sealed class FinOpsInventoryViewerFiguresTests
         Assert.Equal(expected, FinOpsInventoryFigures.LicenseWarning(edition, 2, cpus, memoryMb));
     }
 
+    /// <summary>L5 (#5542): the inventory score is a dash both with no CPU sample and with no memory sample, so the dash's note names both reasons.</summary>
+    [Fact]
+    public void NoScoreNote_NamesTheMissingMemorySampleAsWellAsTheCpuSample()
+    {
+        var row = new ServerPropertyRow { HealthScore = null };
+        Assert.Equal(FinOpsHealthCalculator.NoInventoryScoreNote, row.HealthScoreNote);
+        Assert.Contains("CPU sample", row.HealthScoreNote, System.StringComparison.Ordinal);
+        Assert.Contains("memory sample", row.HealthScoreNote, System.StringComparison.Ordinal);
+    }
+
     [Fact]
     public void LicenseWarning_NeverWarnsOnAzureSqlDatabaseHostMemory()
     {

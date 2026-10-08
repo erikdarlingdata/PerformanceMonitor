@@ -37,7 +37,6 @@ public sealed class ServerScheduleSummaryTests : IDisposable
         Assert.Equal(ScheduleManager.StatusUsesDefault, summary.Status);
         Assert.Equal("Uses default", summary.Status);
         Assert.Contains("matches the Balanced preset", summary.PresetDetail);
-        Assert.Equal(summary.Preset, manager.GetActivePresetForServer(ServerKey));
         Assert.Equal(summary.Preset, manager.GetActivePreset());
     }
 
@@ -71,7 +70,7 @@ public sealed class ServerScheduleSummaryTests : IDisposable
 
         Assert.Equal("Low-Impact", summary.Preset);
         Assert.Equal("Own schedule", summary.Status);
-        Assert.Equal(summary.Preset, manager.GetActivePresetForServer(ServerKey));
+        Assert.Equal(summary.Preset, ScheduleManager.DetectPreset(own));
         Assert.Equal("Balanced", manager.GetActivePreset());
     }
 

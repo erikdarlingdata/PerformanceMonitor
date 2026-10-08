@@ -171,7 +171,9 @@ public sealed class FinOpsInventoryHealthScoreTests
 
         Assert.Null(row.HealthScore);
         Assert.Equal(FinOpsHealthCalculator.NoScoreColor, row.HealthScoreColor);
-        Assert.Equal(FinOpsHealthCalculator.NoScoreNote, row.HealthScoreNote);
+        Assert.Equal(FinOpsHealthCalculator.NoInventoryScoreNote, row.HealthScoreNote);
+        // L5: the dash also shows for a server with no memory sample, so the note must not blame the CPU alone.
+        Assert.Contains("memory sample", row.HealthScoreNote, StringComparison.Ordinal);
     }
 
     [Fact]

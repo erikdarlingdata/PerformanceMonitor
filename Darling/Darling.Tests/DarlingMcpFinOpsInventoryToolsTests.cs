@@ -104,7 +104,8 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
             // The wire writes no null fields, so a missing key and a null are the same dash.
             Assert.False(row.TryGetProperty("health_score", out var scoreField) && scoreField.ValueKind != System.Text.Json.JsonValueKind.Null);
             Assert.False(row.TryGetProperty("health_band", out var bandField) && bandField.ValueKind != System.Text.Json.JsonValueKind.Null);
-            Assert.Equal(FinOpsHealthCalculator.NoScoreNote, row.GetProperty("health_score_note").GetString());
+            Assert.Equal(FinOpsHealthCalculator.NoInventoryScoreNote, row.GetProperty("health_score_note").GetString());
+            Assert.Contains("memory sample", row.GetProperty("health_score_note").GetString()!, StringComparison.Ordinal);
             return;
         }
 

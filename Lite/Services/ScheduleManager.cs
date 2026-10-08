@@ -771,21 +771,6 @@ public class ScheduleManager
         }
     }
 
-    /// <summary>
-    /// Detects which preset matches a server's active schedule.
-    /// </summary>
-    public string GetActivePresetForServer(string serverId)
-    {
-        lock (_lock)
-        {
-            var schedules = _serverOverrides.TryGetValue(serverId, out var over)
-                ? over.Collectors
-                : _defaultSchedule;
-
-            return DetectPreset(schedules);
-        }
-    }
-
     /// <summary>One Settings > Collector Schedules row: what the server's schedule matches, whose schedule it is, and
     /// why the match is "Custom" when it is.</summary>
     internal sealed record ServerScheduleSummary(string Preset, string Status, string PresetDetail);

@@ -88,6 +88,24 @@ public partial class AlertsHistoryTab : UserControl
         await LoadAlertsAsync();
     }
 
+    /// <summary>Puts one read's rows on the grid and writes the empty message, the clock header and the count text. Returns how many
+    /// rows the grid shows. Split out of the load so a test can drive it with rows (#5542 L6).</summary>
+    internal int ShowAlerts(List<AlertHistoryRow> alerts)
+    {
+        if (_filterManager != null)
+            _filterManager.UpdateData(alerts);
+        else
+            AlertsDataGrid.ItemsSource = alerts;
+
+        var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
+        NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+        /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
+        _lastReadRowCount = alerts.Count;
+        AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
+        return displayCount;
+    }
+
     private async System.Threading.Tasks.Task LoadAlertsAsync()
     {
         if (_dataService == null) return;
@@ -115,17 +133,7 @@ public partial class AlertsHistoryTab : UserControl
             /* Back on the UI thread, where the open tabs can be asked for their clocks. */
             StampClocks(alerts, collectedClocks, _openTabClock);
 
-            if (_filterManager != null)
-                _filterManager.UpdateData(alerts);
-            else
-                AlertsDataGrid.ItemsSource = alerts;
-
-            var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
-            NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
-            /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
-            _lastReadRowCount = alerts.Count;
-            AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
+            var displayCount = ShowAlerts(alerts);
             AppLogger.Debug("AlertsHistory", $"Loaded {displayCount} alert(s) (query returned {alerts.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
@@ -296,7 +304,15 @@ public partial class AlertsHistoryTab : UserControl
         if (_filterPopup != null)
             _filterPopup.IsOpen = false;
 
-        _filterManager?.SetFilter(e.FilterState);
+        ApplyColumnFilter(e.FilterState);
+    }
+
+    /// <summary>Applies a column filter, then rebuilds the count text from what the grid now shows and the last read's size (the
+    /// Viewer's tab does the same). The popup's Clear button raises FilterApplied with an empty filter, so clearing comes through here too (#5542 L6).</summary>
+    internal void ApplyColumnFilter(ColumnFilterState filterState)
+    {
+        _filterManager?.SetFilter(filterState);
+        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert(s)");
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)

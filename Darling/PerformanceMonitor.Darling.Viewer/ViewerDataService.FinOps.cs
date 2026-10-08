@@ -622,7 +622,7 @@ public sealed class ServerPropertyRow
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
     /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
-    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoScoreNote;
+    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
 }
 
 /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid).</summary>
