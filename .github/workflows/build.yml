@@ -693,6 +693,8 @@ jobs:
               - 'Lite/**/*.csproj'
               # #4966: Darling.Tests' CommentFilterAdoptionTests reads this Lite.Tests file, so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/DataStartBannerQueriesTabTests.cs'
+              # #5596: Darling.Tests' WpfExitSwitchPinTests reads this project file for the WPF exit switch, so an edit to it has to reach the Darling suite.
+              - 'Lite.Tests/Lite.Tests.csproj'
             # #5459 cut 3a: the part of `darling` that is NOT a Lite file. A diff that reaches `darling` through
             # these (or core, root, a release) runs the whole Darling suite; a diff that reaches it only through the
             # Lite entries above runs the Stage=Guard classes and the classes tagged Reads=Lite, which are the ones
@@ -2611,6 +2613,7 @@ jobs:
               - 'Darling/Darling.Tests/StatementScrubCanary.cs'
               - 'Darling/Darling.Tests/GuardStageScanner.cs'
               - 'Darling/Darling.Tests/WpfStaGate.cs'
+              - 'Darling/Darling.Tests/WpfExitSwitchTests.cs'
       # How much of the Lite suite THIS leg runs, decided from the filter answers alone (no build needed):
       #   full  - a Lite, Lite.Tests, core or root path changed, or a Darling.Tests file that Lite.Tests
       #           compiles into itself, or the event is not a pull request (a push

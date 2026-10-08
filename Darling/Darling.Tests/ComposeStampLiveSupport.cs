@@ -24,6 +24,9 @@ namespace Darling.Tests;
 /// durations and counts, Aborted and Exception rows, and products that pass a bigint. The builder then runs hour by hour, so the
 /// store has 28 built hours: hourNow - 30 h up to hourNow - 3 h.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. This class reaches DARLING_TEST_PG only to CREATE and DROP each
+   test's own database through ScratchPostgres and works entirely inside it, so it never touches the shared database and cannot race the
+   live collection. */
 internal static class ComposeStampLiveSupport
 {
     internal const int RetentionDays = 9;
