@@ -501,7 +501,9 @@ table.data tbody tr.band-Offline { background: rgba(168, 174, 186, 0.16); }
 .plan-cell { min-width: 8rem; }
 .plan-panel { margin-top: 6px; max-width: 70vw; }
 /* An open panel is drawn full width under its row, not in the last column (js/plan-row.js): the row is the containing
-   block, the panel sits at its bottom, and the spacer in the cell makes the row tall enough to hold it. */
+   block, the panel sits at its bottom, and the spacer in the cell makes the row tall enough to hold it. left:0/right:0 is
+   the fallback (a cell outside a scrolling grid); plan-row.js overrides left and width inline so the panel covers the
+   grid's visible area when the grid is scrolled sideways. */
 table.data tbody tr:has(> td > .plan-cell.plan-open) { position: relative; }
 table.data tbody tr:has(> td > .plan-cell.plan-open) > td { vertical-align: top; }
 .plan-cell.plan-open > .plan-panel { position: absolute; left: 0; right: 0; bottom: 0; max-width: none; margin-top: 0; padding: 6px 8px; box-sizing: border-box; background: var(--bg); border-top: 1px solid var(--border); white-space: normal; z-index: 1; }

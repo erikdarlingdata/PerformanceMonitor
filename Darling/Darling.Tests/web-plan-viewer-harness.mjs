@@ -44,6 +44,11 @@ globalThis.fetch = async (url) => {
 const planReply = (xml, truncated = false) => { reply = { status: 200, body: JSON.stringify({ query_hash: "H1", database_name: null, plan_xml: xml, truncated }) }; };
 const noPlanReply = () => { reply = { status: 200, body: JSON.stringify({ status: "unavailable", message: "No stored plan found for query_hash 'H1'." }) }; };
 
+/* ResizeObserver stand-in that counts the observers still connected (plan-row.js: a closed panel must leave none). */
+const observers = [];
+globalThis.ResizeObserver = class { constructor() { this.live = true; observers.push(this); } observe() {} disconnect() { this.live = false; } };
+const liveObservers = () => observers.filter((o) => o.live).length;
+
 const root = process.argv[2];
 const viewer = await import(pathToFileURL(root + "/pages/plan-viewer.js").href);
 const flush = () => new Promise((r) => setTimeout(r, 5));
@@ -80,7 +85,9 @@ const scenarios = {
     out.noHashCell = viewer.storedPlanCell("srv-a", { query_hash: null }).textContent;
     out.openClass = cell.className;
     out.hasSpacer = cell.all((n) => n.className === "plan-spacer").length === 1;
+    out.observersOpen = liveObservers();
     cell.byText("Hide plan").click();
+    out.observersClosed = liveObservers();
     out.closed = pre(cell) === null;
     out.closedClass = cell.className;
   },

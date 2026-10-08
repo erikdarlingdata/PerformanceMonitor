@@ -32,6 +32,11 @@ globalThis.location = { hash: "#/server/a/queries" };
 const fetches = [];
 globalThis.fetch = async (url) => { fetches.push(String(url)); throw new Error("no fetch expected"); };
 
+/* ResizeObserver stand-in that counts the observers still connected (plan-row.js: a closed panel must leave none). */
+const observers = [];
+globalThis.ResizeObserver = class { constructor() { this.live = true; observers.push(this); } observe() {} disconnect() { this.live = false; } };
+const liveObservers = () => observers.filter((o) => o.live).length;
+
 const root = process.argv[2];
 const viewer = await import(pathToFileURL(root + "/pages/pg-plan-viewer.js").href);
 const flush = () => new Promise((r) => setTimeout(r, 5));
@@ -57,7 +62,9 @@ const scenarios = {
     out.fetches = fetches.length;
     out.openClass = cell.className;
     out.hasSpacer = cell.all((n) => n.className === "plan-spacer").length === 1;
+    out.observersOpen = liveObservers();
     cell.byText("Hide plan").click();
+    out.observersClosed = liveObservers();
     out.preAfterHide = pre(cell) !== null;
     out.closedClass = cell.className;
   },
