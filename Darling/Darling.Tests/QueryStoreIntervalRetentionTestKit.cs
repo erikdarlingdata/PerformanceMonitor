@@ -25,6 +25,8 @@ namespace Darling.Tests;
 /// a migrated scratch store, a promoted table, one-row inserts, and a logger that records what it was told. The test
 /// classes using it each own their scratch database, so none of them can race another's DDL.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. This class only reads DARLING_TEST_PG for the
+   test classes that CREATE and DROP their own database through ScratchPostgres; it touches no shared database. */
 internal static class QueryStoreIntervalRetentionTestKit
 {
     internal static readonly QueryStoreIntervalPartitions.IntervalTable Wide = QueryStoreIntervalPartitions.Wide;

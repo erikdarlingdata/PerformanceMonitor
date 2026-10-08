@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// DEFAULT partition. The live check that proves the behavior is in <see cref="QueryStoreIntervalRetentionLiveTests"/>;
 /// these catch the rewrite before it reaches a database.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreIntervalRetentionPinTests
 {
     private const string PurgeStart = "internal static async Task<IntervalPartitionPurge> PurgeIntervalTableAsync(";
