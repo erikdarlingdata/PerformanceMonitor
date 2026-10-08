@@ -542,6 +542,64 @@ public sealed class ViewerPerfmonRunningJobsLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// The review round's M1, in the Viewer and the MCP tool (one statement text): a run that stored rows, then nothing but failed
+    /// runs for hours. The job is not listed as running (its duration was frozen at the last good run), and the read carries the
+    /// time of the last good collection so the tab and the tool can say collection is not current. A server whose collector keeps
+    /// logging SUCCESS with no rows is current and gets no such time.
+    /// </summary>
+    [Fact]
+    public async Task RunningJobs_RowsThenOnlyFailedRunsForHours_AreNotListed_AndCarryTheLastGoodTime_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live running-jobs freshness test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteJobRowsAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteJobLogRowsAsync(connection, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+        await using var dataSource = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = TruncateToSeconds(DateTime.UtcNow);
+            var lastGood = now.AddHours(-3);
+            await InsertJobRowAsync(connection, lastGood, "FrozenJob", currentDuration: 111780, isRunningLong: true, percentOfAverage: 400m);
+            await InsertCollectionLogAsync(connection, 1, "running_jobs", lastGood, "SUCCESS", rowsCollected: 1);
+            await InsertCollectionLogAsync(connection, 2, "running_jobs", now.AddHours(-2), "ERROR", rowsCollected: 0);
+            await InsertCollectionLogAsync(connection, 3, "running_jobs", now.AddMinutes(-5), "ERROR", rowsCollected: 0);
+
+            var viewerRead = await viewer.ReadRunningJobsAsync(JobsServerId);
+            Assert.Empty(viewerRead.Jobs);
+            Assert.True(viewerRead.LastGoodCollection is DateTime vg && Math.Abs((vg - lastGood).TotalSeconds) < 1);
+            Assert.Empty(await viewer.GetRunningJobsAsync(JobsServerId));
+
+            var mcpRead = await PerformanceMonitor.Darling.Service.Mcp.DarlingJobReader.ReadRunningJobsAsync(dataSource, JobsServerId);
+            Assert.Empty(mcpRead.Jobs);
+            Assert.True(mcpRead.LastGoodCollection is DateTime mg && Math.Abs((mg - lastGood).TotalSeconds) < 1);
+
+            /* A collector that keeps finding nothing is current: no time is carried, so nothing claims collection is stale. */
+            await InsertCollectionLogAsync(connection, 4, "running_jobs", now.AddMinutes(-2), "SUCCESS", rowsCollected: 0);
+            Assert.Null((await viewer.ReadRunningJobsAsync(JobsServerId)).LastGoodCollection);
+            Assert.Null((await PerformanceMonitor.Darling.Service.Mcp.DarlingJobReader.ReadRunningJobsAsync(dataSource, JobsServerId)).LastGoodCollection);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteJobRowsAsync(cleanup, cleanupCt);
+                await DeleteJobLogRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     [Fact]
     public async Task RunningJobs_SnapshotNewerThanTheLastLogRow_AndAServerWithNoLogRow_StillReadTheirJobs_AgainstDevPostgres()
     {

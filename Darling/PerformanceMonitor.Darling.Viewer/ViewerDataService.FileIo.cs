@@ -83,8 +83,8 @@ public sealed partial class ViewerDataService
             SELECT
                 database_name,
                 file_name,
-                SUM(delta_reads) AS total_reads,
-                SUM(delta_writes) AS total_writes
+                COALESCE(SUM(delta_reads), 0) AS total_reads,
+                COALESCE(SUM(delta_writes), 0) AS total_writes
             FROM v_file_io_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -105,8 +105,8 @@ public sealed partial class ViewerDataService
                 file_name,
                 total_reads,
                 total_writes,
-                ROW_NUMBER() OVER (ORDER BY total_reads DESC, total_writes DESC, database_name, file_name) AS read_rank,
-                ROW_NUMBER() OVER (ORDER BY total_writes DESC, total_reads DESC, database_name, file_name) AS write_rank
+                ROW_NUMBER() OVER (ORDER BY total_reads DESC NULLS LAST, total_writes DESC NULLS LAST, database_name COLLATE "C" NULLS LAST, file_name COLLATE "C" NULLS LAST) AS read_rank,
+                ROW_NUMBER() OVER (ORDER BY total_writes DESC NULLS LAST, total_reads DESC NULLS LAST, database_name COLLATE "C" NULLS LAST, file_name COLLATE "C" NULLS LAST) AS write_rank
             FROM file_totals
         ),
         top_files AS (
@@ -190,7 +190,7 @@ public sealed partial class ViewerDataService
             AND   (delta_read_bytes > 0 OR delta_write_bytes > 0)
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, file_name
-            ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC
+            ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC NULLS LAST, database_name COLLATE "C" NULLS LAST, file_name COLLATE "C" NULLS LAST
             LIMIT 10
         ),
         with_interval AS (
