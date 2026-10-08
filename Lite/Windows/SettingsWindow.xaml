@@ -199,8 +199,8 @@
                           Foreground="{DynamicResource ForegroundBrush}"
                           ToolTip="Off = the classic behavior: the first sighting of a server is a silent baseline, even when it is down."/>
                 <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
-                            ToolTip="0 = off (one alert per outage). Re-alerts use the same 'Server Unreachable' metric name, so webhook automation keyed on it re-triggers.">
-                    <TextBlock Text="Re-alert while still down every" VerticalAlignment="Center"
+                            ToolTip="0 = off (one alert per occurrence). Covers a server that is unreachable, AG Sync Fell Behind, and the other alerts for a lasting problem. Each repeat uses that alert's own metric name, so webhook automation keyed on it re-triggers.">
+                    <TextBlock Text="Re-alert while a problem lasts every" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="ConnectionRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"

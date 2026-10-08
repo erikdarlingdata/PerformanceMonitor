@@ -267,7 +267,8 @@ public sealed class AgAlertEvaluator
 
     /// <summary>
     /// The database-grain conditions for one server: "AG Database Suspended" (a pure <c>is_suspended</c>
-    /// false→true edge) and "AG Sync Fell Behind" (a standing condition with a cooldown re-fire).
+    /// false→true edge) and "AG Sync Fell Behind" (a state alert, #5493: one alert on entry, a repeat only per the
+    /// refire interval).
     ///
     /// <para>Recovery is driven off the databases this sweep MEASURED as caught up, never off "everything
     /// tracked that did not breach" — a lagging database that becomes SUSPENDED, or whose columns go NULL
@@ -275,8 +276,10 @@ public sealed class AgAlertEvaluator
     /// caught up in the same sweep that reports it suspended. Resolutions are returned as
     /// <see cref="AgAlert.IsResolution"/> notices so the caller can record them without paging.</para>
     /// </summary>
-    /// <param name="cooldown">How long a standing sync-behind alert waits before re-firing. Lite passes the
-    /// user's configured alert cooldown, matching what its other standing alerts use.</param>
+    /// <param name="refireInterval">#5493: how long a standing sync-behind alert waits before it is announced again.
+    /// Lite passes <c>connection_refire_minutes</c>, as "Server Unreachable" does; zero or less is off, and a
+    /// standing condition is then announced once. An alert no channel delivered is sent again after the
+    /// failed-send delay whatever this says (#4795).</param>
     /// <param name="sweepGeneration">#4795: as on <see cref="EvaluateReplicas"/>: given and out of date, this returns
     /// nothing and records nothing.</param>
     public List<AgAlert> EvaluateDatabases(
@@ -284,7 +287,7 @@ public sealed class AgAlertEvaluator
         IReadOnlyList<AgDatabaseReading> databases,
         int lagThresholdSeconds,
         long redoThresholdKb,
-        TimeSpan cooldown,
+        TimeSpan refireInterval,
         int? sweepGeneration = null)
     {
         var alerts = new List<AgAlert>();
@@ -378,31 +381,36 @@ public sealed class AgAlertEvaluator
             {
                 _activeSyncBehind.Add(key);
                 var syncRetryKey = RetryKeyFor(key, AgAlertPolicy.SyncFellBehindMetric);
-                /* #4732: a stamp ahead of the clock (it stepped back) is replaced by this sweep's reading and counted from there. */
+                /* #5493: the shape "Server Unreachable" has (ConnectionAlertPolicy). A database with no stamp is the
+                   entry: one alert. While it stays behind it repeats only when the refire interval is on and has
+                   passed, or to send again an alert no channel delivered (#4795, the due time below). A stamp ahead
+                   of the clock (it stepped back) is replaced by this sweep's reading and counted from there (#4732). */
                 var hadStamp = LastFiredStamp.TryGet(_lastSyncBehindAlert, key, now, out var last);
-                if (!_retries.RetryPending(syncRetryKey, now) && (!hadStamp || now - last >= cooldown))
+                var decision = ConnectionAlertPolicy.Decide(
+                    previousOnline: !hadStamp,
+                    online: false,
+                    alertWhenAlreadyDownAtFirstSight: false,
+                    refireInterval: refireInterval > TimeSpan.Zero ? refireInterval : null,
+                    lastDownAlertUtc: hadStamp ? last : null,
+                    nowUtc: now,
+                    retryDueUtc: _retries.DueUtc(syncRetryKey, now));
+                if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastSyncBehindAlert[key] = now;
 
-                    /* #4795: the cooldown stamp is taken at the decision. A send that reaches no channel puts
-                       it back (the prior stamp, or none), so the retry after the failed-send delay is not made
-                       to wait out the whole cooldown. */
-                    _putBack[syncRetryKey] = () =>
-                    {
-                        if (hadStamp)
-                        {
-                            _lastSyncBehindAlert[key] = last;
-                        }
-                        else
-                        {
-                            _lastSyncBehindAlert.Remove(key);
-                        }
-                    };
+                    /* The stamp stays at this send even when no channel took it: the retry is brought back by its due
+                       time, not by a stamp that looks old. */
+                    var repeatNote = decision == ConnectionAlertDecision.Lost
+                        ? string.Empty
+                        : refireInterval > TimeSpan.Zero
+                            ? "Still behind (re-alerting every " +
+                              ((int)refireInterval.TotalMinutes).ToString(CultureInfo.InvariantCulture) + " min). "
+                            : "Still behind (the previous alert reached no channel, so it is sent again). ";
                     alerts.Add(new AgAlert(
                         AgAlertPolicy.SyncFellBehindMetric,
                         behindReason,
                         "caught up",
-                        behindReason + " A secondary that trails the primary is a data-loss window: an automatic " +
+                        repeatNote + behindReason + " A secondary that trails the primary is a data-loss window: an automatic " +
                         "failover cannot complete until it catches up, and a forced failover throws away everything " +
                         "still queued. Look at the network throughput between the replicas, the secondary's redo " +
                         "thread, and whether something on the primary — an index rebuild, a bulk load, a long " +
