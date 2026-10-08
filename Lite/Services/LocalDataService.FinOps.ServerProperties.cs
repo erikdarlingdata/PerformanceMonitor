@@ -304,14 +304,26 @@ active_dbs AS (
     WHERE collection_time >= $2
     AND   delta_execution_count > 0
 ),
-idle_dbs AS (
-    SELECT server_id, COUNT(*) AS idle_db_count
-    FROM (
-        SELECT server_id, database_name FROM latest_dbs
-        EXCEPT
-        SELECT server_id, database_name FROM active_dbs
-    ) AS idle
+/* The recommendation row's coverage rule (HasQueryStatsCoverageAsync, IdleCoverageDays): a database is called idle for 7 days only when
+   query stats hold a sample on each of the last 7 UTC days. A server without that coverage has no idle_dbs row, so its count is NULL
+   (a dash), never a count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
+idle_coverage AS (
+    SELECT server_id
+    FROM v_query_stats
+    WHERE collection_time >= $3
     GROUP BY server_id
+    HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
+),
+idle_dbs AS (
+    SELECT
+        ld.server_id,
+        COUNT(*) FILTER (WHERE ad.database_name IS NULL) AS idle_db_count
+    FROM latest_dbs ld
+    JOIN idle_coverage ic ON ic.server_id = ld.server_id
+    LEFT JOIN active_dbs ad
+      ON ad.server_id = ld.server_id
+     AND ad.database_name = ld.database_name
+    GROUP BY ld.server_id
 )
 SELECT
     s.server_id,
@@ -344,6 +356,8 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
 
         command.Parameters.Add(new DuckDBParameter { Value = cpuCutoff });
         command.Parameters.Add(new DuckDBParameter { Value = idleCutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = IdleCoverageStartUtc() });
+        command.Parameters.Add(new DuckDBParameter { Value = (long)IdleCoverageDays });
 
         var results = new Dictionary<int, ServerMetricsRow>();
         using var reader = await command.ExecuteReaderAsync();

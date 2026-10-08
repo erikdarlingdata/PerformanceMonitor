@@ -3131,7 +3131,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IdleDbCount}" Width="105">
+                            <DataGridTextColumn Binding="{Binding IdleDbCount, TargetNullValue='-'}" Width="105">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IdleDbCount" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -3170,9 +3170,10 @@
                             <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat='{}{0:N0}'}" Width="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Health" Binding="{Binding HealthScore}" Width="75">
+                            <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='-'}" Width="75">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
+                                        <Setter Property="ToolTip" Value="{Binding HealthScoreNote}"/>
                                         <Setter Property="HorizontalAlignment" Value="Center"/>
                                         <Setter Property="FontWeight" Value="Bold"/>
                                         <Style.Triggers>

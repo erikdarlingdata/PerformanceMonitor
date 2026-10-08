@@ -948,6 +948,16 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
     /// <summary>The number of UTC days, counting today, that must each hold a query-stats sample before a database is called idle for 7 days.</summary>
     internal const int IdleCoverageDays = 7;
 
+    /// <summary>The first UTC day of the idle-coverage window: today and the six days before it. The per-server check and the fleet read share it.</summary>
+    internal static DateTime IdleCoverageStartUtc() => DateTime.UtcNow.Date.AddDays(-(IdleCoverageDays - 1));
+
+    /// <summary>What the Optimization tab's Idle Databases grid says when it is empty: that no database is idle, or (when the query
+    /// stats do not cover the last 7 UTC days) that idle cannot be judged yet. An empty grid after a collection gap must not read as
+    /// a clean bill.</summary>
+    internal static string IdleDatabasesEmptyText(bool hasCoverage) => hasCoverage
+        ? "No idle databases detected"
+        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
+
     /// <summary>
     /// True once the server's query stats hold a sample on each of the last 7 UTC days (today and the six before it). The advice
     /// text claims "no query activity in 7 days", so all 7 days must have been watched. The oldest sample being 7 days old is not
@@ -955,7 +965,7 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
     /// sample, and every database reads as idle because nothing was watching, not because nothing ran. Without the coverage there is
     /// no idle row at all.
     /// </summary>
-    private async Task<bool> HasQueryStatsCoverageAsync(int serverId)
+    internal async Task<bool> HasQueryStatsCoverageAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -965,7 +975,7 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.Date.AddDays(-(IdleCoverageDays - 1)) });
+        command.Parameters.Add(new DuckDBParameter { Value = IdleCoverageStartUtc() });
         var days = await command.ExecuteScalarAsync();
         return days != null && days != DBNull.Value && Convert.ToInt64(days) >= IdleCoverageDays;
     }
