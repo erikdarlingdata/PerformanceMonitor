@@ -123,7 +123,7 @@ public partial class ServerTab : UserControl
         RunRefreshPassAsync,
         ex =>
         {
-            ConnectionStatusText.Text = $"Error: {ex.Message}";
+            ConnectionStatusText.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] refresh failed: {ex}");
         });
 
@@ -228,7 +228,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            ConnectionStatusText.Text = $"Error: {ex.Message}";
+            ConnectionStatusText.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshAllDataAsync failed: {ex}");
         }
         finally

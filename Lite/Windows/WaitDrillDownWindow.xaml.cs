@@ -66,7 +66,7 @@ public partial class WaitDrillDownWindow : Window
         _planActions = new PlanNavigationController(
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
-                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
+                this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
             (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite"),
@@ -110,14 +110,16 @@ public partial class WaitDrillDownWindow : Window
         }
         catch (Exception ex)
         {
-            SummaryText.Text = $"Error: {ex.Message}";
+            SummaryText.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
     }
 
+    /* #5457: the three loads below read on the pool, not the dispatcher: each read takes the store read lock, which an archive or
+       compaction pass can hold, and the window would stop pumping input for as long. */
     private async System.Threading.Tasks.Task LoadDirectDataAsync(WaitClassification classification)
     {
-        var data = await _dataService.GetQuerySnapshotsByWaitTypeAsync(
-            _serverId, _waitType, _hoursBack, _fromDate, _toDate);
+        var data = await System.Threading.Tasks.Task.Run(() => _dataService.GetQuerySnapshotsByWaitTypeAsync(
+            _serverId, _waitType, _hoursBack, _fromDate, _toDate));
 
         if (data.Count == 0)
         {
@@ -141,8 +143,8 @@ public partial class WaitDrillDownWindow : Window
     private async System.Threading.Tasks.Task LoadCorrelatedDataAsync(WaitClassification classification)
     {
         // Fetch ALL queries in the time range (no wait type filter)
-        var data = await _dataService.GetAllQuerySnapshotsInRangeAsync(
-            _serverId, _hoursBack, _fromDate, _toDate);
+        var data = await System.Threading.Tasks.Task.Run(() => _dataService.GetAllQuerySnapshotsInRangeAsync(
+            _serverId, _hoursBack, _fromDate, _toDate));
 
         if (data.Count == 0)
         {
@@ -163,8 +165,8 @@ public partial class WaitDrillDownWindow : Window
     private async System.Threading.Tasks.Task LoadChainDataAsync(WaitClassification classification)
     {
         // Get waiters with the target wait type
-        var waiters = await _dataService.GetQuerySnapshotsByWaitTypeAsync(
-            _serverId, _waitType, _hoursBack, _fromDate, _toDate);
+        var waiters = await System.Threading.Tasks.Task.Run(() => _dataService.GetQuerySnapshotsByWaitTypeAsync(
+            _serverId, _waitType, _hoursBack, _fromDate, _toDate));
 
         if (waiters.Count == 0)
         {
@@ -173,8 +175,8 @@ public partial class WaitDrillDownWindow : Window
         }
 
         // Get all snapshots in range for chain walking
-        var allSnapshots = await _dataService.GetAllQuerySnapshotsInRangeAsync(
-            _serverId, _hoursBack, _fromDate, _toDate);
+        var allSnapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetAllQuerySnapshotsInRangeAsync(
+            _serverId, _hoursBack, _fromDate, _toDate));
 
         // Map to SnapshotInfo for the chain walker
         var waiterInfos = waiters.Select(ToSnapshotInfo).ToList();

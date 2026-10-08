@@ -94,7 +94,8 @@ public partial class DatabaseStateOverridesWindow : Window
     {
         try
         {
-            return await _dataService.GetCollectorRunHistoryAsync(serverId);
+            /* #5457: off the UI thread, where the read waits on the store lock. */
+            return await System.Threading.Tasks.Task.Run(() => _dataService.GetCollectorRunHistoryAsync(serverId));
         }
         catch (Exception)
         {
@@ -139,11 +140,13 @@ public partial class DatabaseStateOverridesWindow : Window
 
         try
         {
-            var rows = await _dataService.GetDatabaseStateExpectationsAsync(serverId);
+            /* #5457: the reads run on the pool, not the dispatcher: each takes the store read lock, which an archive or compaction
+               pass can hold. The same lock-and-query-on-one-thread rule as Lite/Controls (TabLoadsOffUiThreadTests). */
+            var rows = await System.Threading.Tasks.Task.Run(() => _dataService.GetDatabaseStateExpectationsAsync(serverId));
 
             /* Read with the rows, ahead of the two checks below, so those checks still guard every paint. An unknown
                edition (no stored row, or a failed read) makes no claim. */
-            var engineEdition = await McpEngineCapability.EngineEditionAsync(_dataService, serverId);
+            var engineEdition = await System.Threading.Tasks.Task.Run(() => McpEngineCapability.EngineEditionAsync(_dataService, serverId));
             var runs = await ReadCollectorRunsAsync(serverId);
 
             /* A newer load for this grid has started, so this answer is not the one the operator is
@@ -225,7 +228,8 @@ public partial class DatabaseStateOverridesWindow : Window
 
         try
         {
-            await _dataService.ResetDatabaseStateExpectedToCurrentAsync(serverId, row.DatabaseName);
+            var databaseName = row.DatabaseName;
+            await System.Threading.Tasks.Task.Run(() => _dataService.ResetDatabaseStateExpectedToCurrentAsync(serverId, databaseName));
             await LoadAsync();
         }
         catch (Exception ex)
@@ -250,7 +254,9 @@ public partial class DatabaseStateOverridesWindow : Window
             var changed = _rows.Where(r => !string.Equals(r.ExpectedState, r.OriginalExpected, StringComparison.Ordinal)).ToList();
             foreach (var row in changed)
             {
-                await _dataService.SetDatabaseStateExpectedAsync(serverId, row.DatabaseName, row.ExpectedState);
+                var databaseName = row.DatabaseName;
+                var expectedState = row.ExpectedState;
+                await System.Threading.Tasks.Task.Run(() => _dataService.SetDatabaseStateExpectedAsync(serverId, databaseName, expectedState));
             }
 
             DialogResult = true;

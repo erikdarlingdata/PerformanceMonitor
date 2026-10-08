@@ -521,6 +521,7 @@ public partial class App : Application
 
         // Load settings. The log level goes first so it governs every line the loaders below buffer.
         LoadLogMinimumLevel();
+        LoadDuckDbMemoryLimit();
         LoadDefaultTimeRange();
         LoadAlertSettings();
 
@@ -1115,6 +1116,20 @@ public partial class App : Application
                 $"settings.json key 'log_minimum_level' could not be read ({ex.Message}); " +
                 $"{AppLogger.DefaultMinimumLevel} is in use.");
         }
+    }
+
+    /// <summary>
+    /// #5457: installs the user's DuckDB memory limit from settings.json before the first DuckDB connection is
+    /// created (<c>memory_limit</c> is per DuckDB instance, so it is read once at startup and a changed value
+    /// takes effect at the next start). A missing, unparsable or out-of-range value is the 2 GB default and
+    /// logs one line saying so. An unreadable settings.json is reported by LoadDefaultTimeRange, so this only
+    /// takes the default and logs the same line.
+    /// </summary>
+    private static void LoadDuckDbMemoryLimit()
+    {
+        var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
+        Services.DuckDbMemoryLimitSetting.LoadAtStartup(
+            settings.State == SettingsFileState.Unreadable ? null : settings.Text);
     }
 
     public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, SaveWebhookUrl);

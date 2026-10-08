@@ -130,6 +130,14 @@
                                VerticalAlignment="Center" Margin="6,0,0,0"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="DuckDB memory limit:" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
+                    <TextBox x:Name="DuckDbMemoryLimitBox" Width="50" Text="2" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="DuckDbMemoryLimitHint" Text="GB (default 2). Raise it if a tab reports DuckDB out of memory. Takes effect after Lite restarts."
+                               FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                     <TextBlock Text="CSV separator:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
                     <ComboBox x:Name="CsvSeparatorCombo" Width="140" VerticalAlignment="Center">

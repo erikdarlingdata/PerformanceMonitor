@@ -61,7 +61,7 @@ public partial class QueryStatsHistoryWindow : Window
         _planActions = new PlanNavigationController(
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
-                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
+                this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
             (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite"),
@@ -81,7 +81,8 @@ public partial class QueryStatsHistoryWindow : Window
     {
         try
         {
-            _historyData = await _dataService.GetQueryStatsHistoryAsync(_serverId, _databaseName, _queryHash, _hoursBack);
+            /* #5457: off the UI thread: the read takes the store read lock, which an archive or compaction pass can hold. */
+            _historyData = await System.Threading.Tasks.Task.Run(() => _dataService.GetQueryStatsHistoryAsync(_serverId, _databaseName, _queryHash, _hoursBack));
             /* #4766: the grid words each row's times in this window's own zone, as the chart and the summary below do,
                not in whichever server's tab is selected when the row is drawn (this window stays open after another
                tab is selected). The columns that hold the server's own wall clock are converted on the opening tab's
@@ -113,7 +114,7 @@ public partial class QueryStatsHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            SummaryText.Text = $"Error loading history: {ex.Message}";
+            SummaryText.Text = $"Error loading history: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
     }
 
@@ -185,7 +186,7 @@ public partial class QueryStatsHistoryWindow : Window
             // Try DuckDB first — plan may already be cached from collection
             try
             {
-                plan = await _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash);
+                plan = await System.Threading.Tasks.Task.Run(() => _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash));
             }
             catch
             {
@@ -222,7 +223,7 @@ public partial class QueryStatsHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -301,7 +302,7 @@ public partial class QueryStatsHistoryWindow : Window
     {
         if (string.IsNullOrEmpty(_queryHash)) return null;
         string? plan = null;
-        try { plan = await _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash); }
+        try { plan = await System.Threading.Tasks.Task.Run(() => _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash)); }
         catch { /* DuckDB lookup failed — fall through to the live server */ }
         if (string.IsNullOrEmpty(plan) && !string.IsNullOrEmpty(_connectionString))
             plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
