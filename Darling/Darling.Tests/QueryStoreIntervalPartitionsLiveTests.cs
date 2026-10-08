@@ -73,7 +73,6 @@ public sealed class QueryStoreIntervalPartitionsLiveTests
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        await TempRungScaffold.ApplyAsync(connection, ct); // TEMP until lane A1's V171/V172 land
         return connection;
     }
 
