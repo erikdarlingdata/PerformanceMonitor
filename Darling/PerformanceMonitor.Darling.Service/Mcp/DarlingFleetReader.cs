@@ -439,34 +439,54 @@ GROUP BY server_id";
     /// <c>(server_id, collection_time)</c> index — the same order as <see cref="FleetBlockingSql"/>'s
     /// two scans.</para>
     ///
-    /// <para><b>One server at a time (#5526).</b> The read used to be one <c>LAG</c> window,
-    /// <c>PARTITION BY server_id, database_name</c>, over every server's rows at once, which meant one sort
-    /// and one window pass over the whole fleet's window: 26.9 s for 30 days on a 50-server store (17.1 M
-    /// rows, 29 of 31 chunks decompressed), most of it the sort and the window rather than I/O. Now
-    /// <c>window_servers</c> lists the servers that have a row in the window (TimescaleDB can answer that with
-    /// a skip scan over the <c>(server_id, collection_time)</c> index or the segmentby column of a compressed
-    /// chunk; on plain PostgreSQL it is an index range read of the window), and the
-    /// <c>LATERAL</c> differences, clamps and counts ONE server's series at a time, so no sort or window
-    /// ever covers more than a server's rows. The arithmetic is the old one unchanged: the same
-    /// <c>LAG</c> per database series (a server's rows are one partition's worth of series, so
-    /// <c>PARTITION BY database_name</c> inside a <c>server_id = s.server_id</c> filter is the old
-    /// <c>PARTITION BY server_id, database_name</c>), the same first-row-of-the-window NULL difference, the
-    /// same clamp, the same <c>intervals</c>. A server whose only row in the window is one sample still gets
-    /// its row, <c>cnt</c> 0 and <c>intervals</c> 0, exactly as the grouped read gave it.</para></summary>
+    /// <para><b>Only the pairs that moved are ordered (#5526).</b> The read used to be one <c>LAG</c> window,
+    /// <c>PARTITION BY server_id, database_name</c>, over every server's rows, so one sort and one window pass
+    /// covered the whole fleet's window: 26.9 s for 30 days on a 50-server store (17.1 M rows, 29 of 31 chunks
+    /// decompressed), most of it the sort and the window rather than I/O. Almost every
+    /// <c>(server_id, database_name)</c> pair never changes its counter inside a window, and for those the
+    /// ordering buys nothing: with every sample equal, every difference is 0. So <c>pairs</c> first takes ONE
+    /// unordered aggregate over the window (rows, rows with a counter, min, max) and marks a pair <c>flat</c>
+    /// when it has a counter in every row (<c>count(deadlocks) = count(*)</c>) and the counter never moves
+    /// (<c>min = max</c>). A flat pair of <c>n</c> samples has <c>n - 1</c> differences, all 0, so it adds 0 to
+    /// <c>cnt</c>, nothing to <c>last_seen</c> and <c>n - 1</c> to <c>intervals</c>, exactly what the ordered
+    /// form gave it; that is arithmetic, not an estimate. Every other pair (any change, any NULL counter, a
+    /// column that is NULL throughout, a reset) goes through the old ordered <c>LAG</c> unchanged. The
+    /// <c>LATERAL</c> reads one server at a time (<c>server_id = s.server_id</c>, the hypertable's segmentby, so a
+    /// compressed chunk is read through its segment index and no sort or window covers more than one server's
+    /// rows) and keeps only that server's ordered pairs by name, the NULL-named shared-relation series by
+    /// <c>IS NULL</c> because <c>= ANY</c> never matches NULL. A server with no ordered pair skips the read
+    /// (the pair test is a one-time filter on the lateral), and still gets its row: <c>cnt</c> 0,
+    /// <c>last_seen</c> NULL, <c>intervals</c> the flat pairs' sum. A server whose only row in the window is
+    /// one sample still gets its row with <c>intervals</c> 0, and a server with no row in the window still does
+    /// not appear. <c>FleetTotalsSql</c> in the viewer is the same shape, keeping only the total.</para></summary>
     public const string FleetPgDeadlockSql = @"
-WITH window_servers AS
+WITH pairs AS
 (
-    SELECT DISTINCT
-        server_id
+    SELECT
+        server_id,
+        database_name,
+        count(*) AS n,
+        (count(deadlocks) = count(*) AND min(deadlocks) = max(deadlocks)) AS flat
     FROM pg_database_stats
     WHERE collection_time >= $1
     AND   collection_time <= $2
+    GROUP BY server_id, database_name
+),
+window_servers AS
+(
+    SELECT
+        server_id,
+        CAST(coalesce(SUM(n - 1) FILTER (WHERE flat), 0) AS bigint) AS flat_intervals,
+        array_agg(database_name) FILTER (WHERE NOT flat AND database_name IS NOT NULL) AS ordered_names,
+        coalesce(bool_or(database_name IS NULL) FILTER (WHERE NOT flat), false) AS ordered_null_name
+    FROM pairs
+    GROUP BY server_id
 )
 SELECT
     s.server_id,
     d.cnt,
     d.last_seen,
-    d.intervals
+    s.flat_intervals + d.intervals AS intervals
 FROM window_servers AS s
 CROSS JOIN LATERAL
 (
@@ -480,9 +500,11 @@ CROSS JOIN LATERAL
             collection_time,
             deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time) AS raw_delta
         FROM pg_database_stats
-        WHERE server_id = s.server_id
+        WHERE (cardinality(s.ordered_names) > 0 OR s.ordered_null_name)
+        AND   server_id = s.server_id
         AND   collection_time >= $1
         AND   collection_time <= $2
+        AND   (database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL))
     ) AS sampled
 ) AS d";
 

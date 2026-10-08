@@ -67,11 +67,17 @@ public sealed partial class ViewerDataService
     /// <c>SUM(deadlocks)</c>: the column is a lifetime counter repeated in every sample. $1 window start,
     /// $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all naive UTC).
     ///
-    /// <para>The PostgreSQL arm differences ONE server at a time (#5526): the service's
+    /// <para>The PostgreSQL arm orders only the pairs that moved (#5526): the service's
     /// <c>DarlingFleetReader.FleetPgDeadlockSql</c> carries the reasoning and the measurement, and this is the
-    /// same <c>LATERAL</c> without the per-server columns. One <c>LAG</c> window over every server's rows was
-    /// 26.9 s for 30 days on a 50-server store, most of it the sort and the window; per server, no sort
-    /// or window covers more than one server's rows. The totals are unchanged: the same <c>LAG</c> per
+    /// same shape keeping only the total. One <c>LAG</c> window over every server's rows was 26.9 s for 30 days
+    /// on a 50-server store, most of it the sort and the window. A <c>(server_id, database_name)</c> pair whose
+    /// counter never takes two different values inside the window adds nothing to the sum of positive
+    /// differences: every difference between two present samples is 0, and one touching a NULL is NULL. So one
+    /// unordered aggregate keeps only the pairs with <c>min(deadlocks) &lt;&gt; max(deadlocks)</c> (a NULL
+    /// counter does not change that: <c>min</c> and <c>max</c> skip NULLs, and a column that is NULL throughout
+    /// has neither) and the ordered <c>LAG</c> runs one server at a time over those pairs only. Unlike the
+    /// service's read, this one needs no "a counter in every row" half of the rule, because it returns only
+    /// the total, not the number of differences taken. The totals are unchanged: the same <c>LAG</c> per
     /// database series, the same first-row NULL, the same clamp at zero.</para>
     ///
     /// <para>$3 bounds the three event-table scans on the partition column (#3895), the bound the service's
@@ -121,11 +127,22 @@ SELECT
         SELECT COALESCE(SUM(per_server.cnt), 0)
         FROM
         (
-            SELECT DISTINCT
-                server_id
-            FROM pg_database_stats
-            WHERE collection_time >= $1
-            AND   collection_time <= $2
+            SELECT
+                server_id,
+                array_agg(database_name) FILTER (WHERE database_name IS NOT NULL) AS ordered_names,
+                coalesce(bool_or(database_name IS NULL), false) AS ordered_null_name
+            FROM
+            (
+                SELECT
+                    server_id,
+                    database_name
+                FROM pg_database_stats
+                WHERE collection_time >= $1
+                AND   collection_time <= $2
+                GROUP BY server_id, database_name
+                HAVING min(deadlocks) <> max(deadlocks)
+            ) AS moved
+            GROUP BY server_id
         ) AS s
         CROSS JOIN LATERAL
         (
@@ -137,6 +154,7 @@ SELECT
                 WHERE server_id = s.server_id
                 AND   collection_time >= $1
                 AND   collection_time <= $2
+                AND   (database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL))
             ) AS sampled
         ) AS per_server
     ) AS total_deadlocks";

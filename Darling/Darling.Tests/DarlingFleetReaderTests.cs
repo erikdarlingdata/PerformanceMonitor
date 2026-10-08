@@ -634,20 +634,32 @@ public sealed class DarlingFleetDeadlockCoverageTests
         var sql = DarlingFleetReader.FleetPgDeadlockSql;
 
         Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
-        /* One server at a time (#5526): the LAG partitions by database inside a server_id = s.server_id
-           filter, which is the old (server_id, database_name) series; the previous single window over the
-           whole fleet's rows (27 s for 30 days on a 50-server store) must not come back. */
+        /* Only the pairs that moved are ordered (#5526): the LAG partitions by database inside a
+           server_id = s.server_id filter, which is the old (server_id, database_name) series, and the previous
+           single window over the whole fleet's rows (27 s for 30 days on a 50-server store) must not come back. */
         Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("PARTITION BY server_id", sql, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(sql, "OVER ("));
+        /* The unordered aggregate that decides which pairs need the ordered pass, and the exact flat rule: a
+           counter in EVERY row (so a NULL sends the pair to the ordered pass) that never moves (min = max). */
+        Assert.Contains("WITH pairs AS", sql, StringComparison.Ordinal);
+        Assert.Contains("(count(deadlocks) = count(*) AND min(deadlocks) = max(deadlocks)) AS flat", sql, StringComparison.Ordinal);
+        /* A flat pair of n samples has n - 1 differences, all zero: n - 1 intervals, nothing else. */
+        Assert.Contains("SUM(n - 1) FILTER (WHERE flat)", sql, StringComparison.Ordinal);
+        Assert.Contains("s.flat_intervals + d.intervals AS intervals", sql, StringComparison.Ordinal);
+        /* The ordered read keeps only the pairs that are not flat: by name, and the NULL-named shared-relation
+           series by IS NULL because = ANY never matches NULL. */
+        Assert.Contains("FILTER (WHERE NOT flat AND database_name IS NOT NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL)", sql, StringComparison.Ordinal);
         /* The server list is not named for the registry table it must not be mistaken for. */
-        Assert.Contains("WITH window_servers AS", sql, StringComparison.Ordinal);
+        Assert.Contains("window_servers AS", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("WITH servers AS", sql, StringComparison.Ordinal);
         Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   server_id = s.server_id", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(sampled.collection_time) FILTER (WHERE sampled.raw_delta > 0)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
-        /* Windowed on the partitioning column, both bounds, like the SQL Server twin - in the server list AND
+        /* Windowed on the partitioning column, both bounds, like the SQL Server twin - in the pair aggregate AND
            in the per-server read, so each opens only the window's chunks. */
         Assert.Equal(2, CountOf(sql, "collection_time >= $1"));
         Assert.Equal(2, CountOf(sql, "collection_time <= $2"));
