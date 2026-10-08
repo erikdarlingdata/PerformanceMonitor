@@ -1,0 +1,131 @@
+{
+  "issue": 5565,
+  "about": "Shared cases for the value-list column filter. The desktop tests (Darling.Tests) and the web page tests drive these steps through their own code and must see the same list, state and shown rows after each step.",
+  "format": {
+    "rows": "A column of text cells, in grid order. A JSON null is a null cell. Instead of an array, {\"generate\": {\"prefix\": \"x\", \"count\": 1500}} means the values prefix0 .. prefix(count-1).",
+    "steps": "Run in order against one open filter on that column; state, rows and the search box carry from step to step. A step's expect keys are all optional; check only the ones present.",
+    "actions": {
+      "open": "No change. Only the expectations are checked.",
+      "search": "{\"text\"}: the search box now holds text (contains, ignore case; empty means no search). Not part of the stored state.",
+      "untick": "{\"values\": [...], \"blank\": bool}: untick these list values, and the (Blanks) entry when blank is true, then apply. Values are matched ignore case.",
+      "tick": "{\"values\": [...], \"blank\": bool}: tick them, then apply.",
+      "tickOnly": "{\"values\": [...], \"blank\": bool}: untick everything, tick these (and the (Blanks) entry when blank is true), then apply.",
+      "selectAll": "{\"ticked\": bool}: Select All ticks (true) or unticks (false) every real value the current search shows, then applies. The (Blanks) entry is only listed while the search box is empty, and then Select All covers it too.",
+      "refresh": "{\"addRows\": [...]} appends rows, or {\"rows\": [...]} replaces all rows; the stored filter stays and is re-applied.",
+      "textMatch": "{\"operator\": \"Contains\", \"text\": \"...\"}: sets the text match beside the list, then apply."
+    },
+    "expect": {
+      "listBlank": "true when the list opens with the (Blanks) entry (the rows have a blank cell and the search box is empty).",
+      "listValues": "The real values listed, in listed order (ordinal ignore case), after the cap. The (Blanks) entry is not in this array.",
+      "listCount": "Number of entries listed, (Blanks) included.",
+      "note": "The note under the list: the cap note, the no-ticks note, or null for none.",
+      "state": "{mode: None | ShowOnly | Hide, values: [...] compared as a set ignoring case and order, blank: bool}. In Hide, blank true hides the blank cells; in ShowOnly, blank true shows them.",
+      "shown": "The rows the grid shows after the filter, in grid order (null for a null cell).",
+      "shownCount": "The number of rows shown, for the large case."
+    },
+    "rules": {
+      "listCap": 1000,
+      "capNote": "Showing 1,000 of {N} values. Search to find the rest.  N is the count of distinct real values (the Blanks entry is not counted) and uses a comma thousands separator. The note shows when the entries the search shows are cut off by the cap.",
+      "noTicksNote": "No values are ticked, so no rows show.",
+      "modeChoice": "All entries ticked: None. Otherwise fewer unticked than ticked: Hide the unticked. Otherwise ShowOnly the ticked. Counts take every distinct value of the rows (and the blank entry when the rows have a blank cell), not just the entries the search shows."
+    }
+  },
+  "cases": [
+    {
+      "id": 1,
+      "name": "The list is the distinct values, ignore case, sorted, Blanks first",
+      "rows": ["sa", "app", "APP", "job_svc", "", null],
+      "steps": [
+        { "action": "open", "expect": { "listBlank": true, "listValues": ["app", "job_svc", "sa"], "listCount": 4, "note": null, "state": { "mode": "None", "values": [], "blank": false }, "shown": ["sa", "app", "APP", "job_svc", "", null] } }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Unticking a value hides it, and a value that first shows up after a refresh still shows",
+      "rows": ["sa", "app", "APP", "job_svc", "", null],
+      "steps": [
+        { "action": "untick", "values": ["job_svc"], "blank": false, "expect": { "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa", "app", "APP", "", null] } },
+        { "action": "refresh", "addRows": ["newuser"], "expect": { "listValues": ["app", "job_svc", "newuser", "sa"], "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa", "app", "APP", "", null, "newuser"] } }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Ticking only one value shows only it, and a new value after a refresh does not show",
+      "rows": ["sa", "app", "APP", "job_svc", "", null],
+      "steps": [
+        { "action": "tickOnly", "values": ["sa"], "blank": false, "expect": { "state": { "mode": "ShowOnly", "values": ["sa"], "blank": false }, "shown": ["sa"] } },
+        { "action": "refresh", "addRows": ["newuser"], "expect": { "state": { "mode": "ShowOnly", "values": ["sa"], "blank": false }, "shown": ["sa"] } }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Unticking only (Blanks) hides the empty and null cells",
+      "rows": ["sa", "app", "APP", "job_svc", "", null],
+      "steps": [
+        { "action": "untick", "values": [], "blank": true, "expect": { "state": { "mode": "Hide", "values": [], "blank": true }, "shown": ["sa", "app", "APP", "job_svc"] } }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "The value part and the text match both have to pass",
+      "rows": ["sa", "app", "APP", "job_svc", "", null],
+      "steps": [
+        { "action": "tickOnly", "values": ["app"], "blank": false, "expect": { "state": { "mode": "ShowOnly", "values": ["app"], "blank": false }, "shown": ["app", "APP"] } },
+        { "action": "textMatch", "operator": "Contains", "text": "AP", "expect": { "shown": ["app", "APP"] } },
+        { "action": "textMatch", "operator": "Contains", "text": "zzz", "expect": { "shown": [] } }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "A text match narrows a ticked list",
+      "rows": ["sa", "app", "APP", "job_svc", "", null],
+      "steps": [
+        { "action": "tickOnly", "values": ["app", "sa"], "blank": false, "expect": { "state": { "mode": "ShowOnly", "values": ["app", "sa"], "blank": false }, "shown": ["sa", "app", "APP"] } },
+        { "action": "textMatch", "operator": "Contains", "text": "AP", "expect": { "shown": ["app", "APP"] } }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "A real value spelled (Blanks) is a normal value, apart from the Blanks entry",
+      "rows": ["(Blanks)", "x", "", null],
+      "steps": [
+        { "action": "open", "expect": { "listBlank": true, "listValues": ["(Blanks)", "x"], "listCount": 3, "state": { "mode": "None", "values": [], "blank": false }, "shown": ["(Blanks)", "x", "", null] } },
+        { "action": "untick", "values": ["(Blanks)"], "blank": false, "expect": { "state": { "mode": "Hide", "values": ["(Blanks)"], "blank": false }, "shown": ["x", "", null] } },
+        { "action": "tick", "values": ["(Blanks)"], "blank": false },
+        { "action": "untick", "values": [], "blank": true, "expect": { "state": { "mode": "Hide", "values": [], "blank": true }, "shown": ["(Blanks)", "x"] } }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "1,500 distinct values: 1,000 listed with a note, and the search finds the rest",
+      "rows": { "generate": { "prefix": "x", "count": 1500 } },
+      "steps": [
+        { "action": "open", "expect": { "listBlank": false, "listCount": 1000, "note": "Showing 1,000 of 1,500 values. Search to find the rest.", "state": { "mode": "None", "values": [], "blank": false }, "shownCount": 1500 } },
+        { "action": "search", "text": "x99", "expect": { "listBlank": false, "listValues": ["x99", "x990", "x991", "x992", "x993", "x994", "x995", "x996", "x997", "x998", "x999"], "listCount": 11, "note": null } },
+        { "action": "selectAll", "ticked": false, "expect": { "state": { "mode": "Hide", "values": ["x99", "x990", "x991", "x992", "x993", "x994", "x995", "x996", "x997", "x998", "x999"], "blank": false }, "shownCount": 1489 } },
+        { "action": "search", "text": "", "expect": { "listCount": 1000, "note": "Showing 1,000 of 1,500 values. Search to find the rest." } },
+        { "action": "search", "text": "x99", "expect": { "listCount": 11 } },
+        { "action": "selectAll", "ticked": true, "expect": { "state": { "mode": "None", "values": [], "blank": false }, "shownCount": 1500 } }
+      ]
+    },
+    {
+      "id": 9,
+      "name": "Select All unticked with no search shows no rows and says so",
+      "rows": ["sa", "app", ""],
+      "steps": [
+        { "action": "selectAll", "ticked": false, "expect": { "note": "No values are ticked, so no rows show.", "state": { "mode": "ShowOnly", "values": [], "blank": false }, "shown": [] } },
+        { "action": "selectAll", "ticked": true, "expect": { "note": null, "state": { "mode": "None", "values": [], "blank": false }, "shown": ["sa", "app", ""] } }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "A value hidden by the filter but gone from the rows is kept in the state, not listed",
+      "rows": ["sa", "app", "job_svc"],
+      "steps": [
+        { "action": "untick", "values": ["job_svc"], "blank": false, "expect": { "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa", "app"] } },
+        { "action": "refresh", "rows": ["sa", "app"], "expect": { "listValues": ["app", "sa"], "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa", "app"] } },
+        { "action": "refresh", "rows": ["sa", "job_svc"], "expect": { "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa"] } }
+      ]
+    }
+  ]
+}
