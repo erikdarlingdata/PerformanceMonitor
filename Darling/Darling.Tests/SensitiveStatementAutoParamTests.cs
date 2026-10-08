@@ -539,16 +539,39 @@ public class SensitiveStatementAutoParamTests
         return (sw.ElapsedMilliseconds, bytes, result);
     }
 
+    /// <summary>
+    /// The fastest of <paramref name="runs"/> runs of <see cref="Measure"/> on the same document (#5561). A busy machine only
+    /// ever adds time, so the minimum is the run it touched least: one stalled run (8 s on a shared runner for a walk that
+    /// takes 0.6 s) no longer fails a pin whose purpose is the walk's cost, while a walk that is really slow is slow in every
+    /// run and still fails. The bytes are the smallest too, and the result is the last run's.
+    /// </summary>
+    private (long Ms, long Bytes, string? Result) FastestOf(int runs, string label, string xml, int max)
+    {
+        long bestMs = long.MaxValue;
+        long bestBytes = long.MaxValue;
+        string? result = null;
+        for (int run = 0; run < runs; run++)
+        {
+            var m = Measure(label, xml, max);
+            bestMs = Math.Min(bestMs, m.Ms);
+            bestBytes = Math.Min(bestBytes, m.Bytes);
+            result = m.Result;
+        }
+
+        return (bestMs, bestBytes, result);
+    }
+
     [Fact]
     public void Measure_PassOne_27MbPlan_NoHit_AndWithAThousandAutoParameterizedStatements()
     {
         string plain = BigPlan(27_000_000, "SELECT [c] FROM [dbo].[t] WHERE [name] = 1", null, tokensInRest: false);
-        var noToken = Measure("27 MB no hit, no token", plain, int.MaxValue);
+        // fastest of three (#5561): the ceiling below is the walk's cost, not the worst stall a shared runner dealt it
+        var noToken = FastestOf(3, "27 MB no hit, no token", plain, int.MaxValue);
         Assert.Same(plain, noToken.Result);
 
         // the same shape with a token and a ParameterList in every statement
         string tokens = BigPlan(27_000_000, "(@1 nvarchar(50))SELECT [c] FROM [dbo].[t] WHERE [name]=@1", "N'plain-value'", tokensInRest: true);
-        var withTokens = Measure("27 MB no hit, token in every statement", tokens, int.MaxValue);
+        var withTokens = FastestOf(3, "27 MB no hit, token in every statement", tokens, int.MaxValue);
         Assert.Same(tokens, withTokens.Result);
 
         // probe cost per 1,000 statements: a plan of just 1,000 statements, with and without the tokens
@@ -574,15 +597,11 @@ public class SensitiveStatementAutoParamTests
 
         foreach (var (label, xml) in new[] { ("20 MB hit in the first statement", hitFirst), ("20 MB no hit", noHit), ("20 MB probe hit in the first statement", probeFirst) })
         {
-            for (int pass = 0; pass < 2; pass++)
-            {
-                var m = Measure(label, xml, Max);
-                if (pass == 1)
-                {
-                    Assert.True(m.Ms < 500, $"{label}: {m.Ms} ms");
-                    Assert.True(m.Bytes < 32L * 1024 * 1024, $"{label}: {m.Bytes} bytes");
-                }
-            }
+            Measure(label, xml, Max); // the warm-up pass
+            // fastest of three warm passes (#5561): the same 500 ms, judged on the pass a busy machine touched least
+            var m = FastestOf(3, label, xml, Max);
+            Assert.True(m.Ms < 500, $"{label}: {m.Ms} ms");
+            Assert.True(m.Bytes < 32L * 1024 * 1024, $"{label}: {m.Bytes} bytes");
         }
         Assert.Contains(PText, Measure("check", probeFirst, Max).Result);
     }
