@@ -86,7 +86,10 @@ public sealed class WebReadReachTests
         {
             if (reach.MaxHours > McpHelpers.MaxHoursBack)
             {
-                Assert.True(reach.Shape == ReadShape.BucketedTrend, $"{read} reaches {reach.MaxHours} h but is a {reach.Shape}; lists and rankings stay at {McpHelpers.MaxHoursBack}.");
+                /* Alert History is the one list that reaches past a week (ruling R8): its reach is the alert table's retention, capped by its row limit. */
+                Assert.True(
+                    reach.Shape == ReadShape.BucketedTrend || read == "get_alert_history",
+                    $"{read} reaches {reach.MaxHours} h but is a {reach.Shape}; lists and rankings stay at {McpHelpers.MaxHoursBack}.");
                 Assert.True(reach.MaxHours <= WebReadReach.RollupTrendHours, $"{read} reaches past the hourly rollup's 90 days.");
             }
             else
@@ -96,9 +99,40 @@ public sealed class WebReadReachTests
         }
 
         Assert.Equal(
-            new[] { "get_procedure_duration_trend", "get_query_duration_trend", "get_query_store_duration_trend" },
+            new[]
+            {
+                "get_alert_history", "get_blocking_stats", "get_blocking_trend", "get_cpu_utilization", "get_deadlock_trend", "get_file_io_trend",
+                "get_lock_wait_trend", "get_memory_trend", "get_perfmon_trend", "get_pg_cpu_utilization", "get_pg_database_trend", "get_pg_io_trend",
+                "get_procedure_duration_trend", "get_query_duration_trend", "get_query_heatmap", "get_query_store_duration_trend", "get_tempdb_trend",
+                "get_wait_trend",
+            },
             WebReadReach.All.Where(kv => kv.Value.MaxHours > McpHelpers.MaxHoursBack).Select(kv => kv.Key).OrderBy(n => n, StringComparer.Ordinal).ToArray());
         Assert.Equal(2160, WebReadReach.RollupTrendHours);
+        Assert.Equal(720, WebReadReach.RawTrendHours);
+        Assert.Equal(2160, WebReadReach.AlertHistoryHours);
+    }
+
+    /// <summary>
+    /// #5562 L4b, rule 4: a raw-table read never reaches past its table's retention. A read over a table that keeps
+    /// less than 30 days (<c>waiting_tasks</c>, 7) stays at 168; the rollup-routed duration trends are the only reads whose
+    /// reach is the rollup's, not the raw table's, so they are skipped here.
+    /// </summary>
+    [Fact]
+    public void NoRawTableRead_ReachesPastItsCollectorsDefaultRetention()
+    {
+        foreach (var (read, reach) in WebReadReach.All)
+        {
+            if (reach.Collector is null || reach.MaxHours > WebReadReach.RawTrendHours)
+            {
+                continue;
+            }
+
+            Assert.True(
+                CollectorScheduleDefaults.All[reach.Collector].RetentionDays * 24 >= reach.MaxHours,
+                $"{read} reaches {reach.MaxHours} h but its collector {reach.Collector} keeps {CollectorScheduleDefaults.All[reach.Collector].RetentionDays} days.");
+        }
+
+        Assert.Equal(168, WebReadReach.MaxHoursFor("get_current_waits_trend"));
     }
 
     /// <summary>
@@ -125,6 +159,17 @@ public sealed class WebReadReachTests
                 var read = m.Groups["read"].Value;
                 optedIn[read] = optedIn.GetValueOrDefault(read) + 1;
             }
+        }
+
+        /* A read the MCP deliberately never capped (ValidateUncappedWindow) keeps its validator: the table row only tells the page how far to offer. */
+        var uncapped = new[] { "get_blocking_stats" };
+        var dataTools = System.IO.File.ReadAllText(System.IO.Path.Combine(serviceDir, "Mcp", "DarlingMcpDataTools.cs"));
+        foreach (var read in uncapped)
+        {
+            Assert.True(WebReadReach.All[read].MaxHours > McpHelpers.MaxHoursBack);
+            Assert.DoesNotContain($"MaxHoursFor(\"{read}\")", dataTools);
+            Assert.Matches($@"Name = ""{read}""[\s\S]*?ValidateUncappedWindow", dataTools);
+            optedIn[read] = 1;
         }
 
         foreach (var read in optedIn.Keys)
@@ -164,7 +209,9 @@ public sealed class WebReadReachTests
         }
 
         Assert.Equal(2160, HoursParam(catalog, "get_query_store_duration_trend")["max_hours"]!.GetValue<int>());
-        Assert.Equal(168, HoursParam(catalog, "get_wait_trend")["max_hours"]!.GetValue<int>());
+        Assert.Equal(720, HoursParam(catalog, "get_wait_trend")["max_hours"]!.GetValue<int>());
+        Assert.Equal(168, HoursParam(catalog, "get_server_trend")["max_hours"]!.GetValue<int>());
+        Assert.Equal(2160, HoursParam(catalog, "get_alert_history")["max_hours"]!.GetValue<int>());
         Assert.Equal("bucketed_trend", HoursParam(catalog, "get_wait_trend")["shape"]!.GetValue<string>());
         Assert.Equal("latest_snapshot", HoursParam(catalog, "get_active_queries")["shape"]!.GetValue<string>());
     }

@@ -49,12 +49,12 @@ public sealed class AlertHistoryRangePageTests
     {
         var page = Page();
         // #5562 R8: no hand-listed windows and no "All". The picker takes its reach from the catalog's max_hours for the read, which is
-        // the 168 hours the read's validator accepts, so a longer range is greyed out with the reason and never clamped. The alert table
-        // keeps 90 days (AlertHistoryRetentionDays, DarlingRetention.cs), but the web read stops at the common reach (R2).
+        // the 2160 hours (90 days) the read's validator accepts, so a longer range is greyed out with the reason and never clamped. That
+        // is the alert table's retention (AlertHistoryRetentionDays, DarlingRetention.cs), the longest choice the Viewer offers (R8, L4b).
         Assert.DoesNotContain("WINDOW_CHOICES", page);
         Assert.Contains("read: \"get_alert_history\"", page);
         Assert.Contains("pageRangePicker({", page);
-        Assert.Equal(PerformanceMonitor.Common.McpHelpers.MaxHoursBack, PerformanceMonitor.Darling.Service.WebReadReach.All["get_alert_history"].MaxHours);
+        Assert.Equal(24 * PerformanceMonitor.Darling.Storage.DarlingRetentionHorizons.AlertHistoryRetentionDays, PerformanceMonitor.Darling.Service.WebReadReach.All["get_alert_history"].MaxHours);
         Assert.Equal(90, PerformanceMonitor.Darling.Storage.DarlingRetentionHorizons.AlertHistoryRetentionDays);
 
         var limits = System.Text.RegularExpressions.Regex.Match(page, "const LIMIT_CHOICES = \\[([0-9, ]+)\\]").Groups[1].Value
@@ -126,12 +126,12 @@ public sealed class AlertHistoryRangePageTests
         Assert.Equal("1000", Get(dismissed, "limit"));
         Assert.Equal("srv-b", Get(dismissed, "server_name"));
 
-        // The popup offers the short presets and the calendar periods within 7 days; the longer ones are greyed out, never clamped.
-        Assert.Equal("Past 5 minutes,Past 15 minutes,Past 30 minutes,Past hour,Past 4 hours,Past day,Past 2 days,Past week,Today,Yesterday,Week to Date,Previous Week",
+        // The popup offers every preset and calendar period within the catalog's 90 days; the longer ones are greyed out, never clamped.
+        Assert.Equal("Past 5 minutes,Past 15 minutes,Past 30 minutes,Past hour,Past 4 hours,Past day,Past 2 days,Past week,Past 30 days,Today,Yesterday,Week to Date,Previous Week,Month to Date,Previous Month",
             string.Join(",", r.GetProperty("windowOptions").EnumerateArray().Select(e => e.GetString())));
-        Assert.Equal("Past 30 days,Month to Date,Previous Month,Year to Date,Previous Year",
+        Assert.Equal("Year to Date,Previous Year",
             string.Join(",", r.GetProperty("windowGreyed").EnumerateArray().Select(e => e.GetString())));
-        Assert.Equal("This page's reads reach at most 7 days back.", r.GetProperty("refused").GetString());
+        Assert.Equal("This page's reads reach at most 90 days back.", r.GetProperty("refused").GetString());
         // A finished range sends its end as as_of; a shorter-than-an-hour range reads the whole hour.
         Assert.EndsWith("Z", Get(r.GetProperty("finished"), "as_of"));
         Assert.Equal("1", Get(r.GetProperty("thirtyMinutes"), "hours_back"));
@@ -198,12 +198,13 @@ public sealed class AlertHistoryRangePageTests
     }
 
     [Fact]
-    public void TheRangePickerSaysTheWebReadsAtMostSevenDays()
+    public void TheRangePickerTakesItsReachFromTheCatalog_NinetyDays()
     {
         // #5562: the picker greys out what the read cannot reach and says why (the catalog's max_hours), so the page needs no hand-written
-        // "at most 7 days" tooltip; the reach is the read's own 168 hours.
+        // tooltip; the reach is the read's own 2160 hours, the alert table's retention (L4b).
         Assert.DoesNotContain("The web reads at most 7 days of alert history, so there is no All choice.", Page());
-        Assert.Contains("the web read stops at the common 7 day reach", Page());
+        Assert.DoesNotContain("the web read stops at the common 7 day reach", Page());
+        Assert.Contains("get_alert_history reaches 2160 hours, 90 days", Page());
     }
 
     [Fact]

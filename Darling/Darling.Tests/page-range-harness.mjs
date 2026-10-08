@@ -26,7 +26,7 @@ try {
     reads: [
       { name: "get_wait_trend", params: [{ name: "hours", collector: "wait_stats", collector_interval_minutes: interval, max_hours: 168 }] },
       { name: "get_cpu_utilization", params: [{ name: "hours", collector: "cpu_utilization", collector_interval_minutes: 1, max_hours: 168 }] },
-      { name: "get_alert_history", params: [{ name: "hours", collector: null, collector_interval_minutes: null, max_hours: 168 }] },
+      { name: "get_alert_history", params: [{ name: "hours", collector: null, collector_interval_minutes: null, max_hours: 2160 }] },
     ],
   });
   const out = {};

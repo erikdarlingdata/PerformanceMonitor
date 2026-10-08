@@ -412,10 +412,9 @@ function reconcileRows(tbody, rows, rowMap) {
 
 /* The four read choices, kept at module scope so the 60 s poll (which calls renderAlerts again) and a visit to
  * another page and back keep them. The range is the shared time range picker's spec (#5562), read as of each read so a
- * rolling range slides. The picker takes the reach from the catalog (get_alert_history reaches 168 hours), so a longer
- * range is greyed out with the reason, never clamped, and there is no All. The alert table itself keeps 90 days
- * (DarlingRetention.AlertHistoryRetentionDays, R8), but the web read stops at the common 7 day reach (R2). The row limits
- * stop at the dispatch layer's 1000-row ceiling. The server is the registry's server_name ("" = the whole fleet). */
+ * rolling range slides. The picker takes the reach from the catalog (get_alert_history reaches 2160 hours, 90 days: the
+ * alert table's retention, DarlingRetention.AlertHistoryRetentionDays, ruling R8, #5562 L4b), so a longer range is greyed
+ * out with the reason, never clamped, and there is no All. The row limits stop at the dispatch layer's 1000-row ceiling. The server is the registry's server_name ("" = the whole fleet). */
 const DEFAULT_HOURS = 24;
 const LIMIT_CHOICES = [200, 500, 1000];
 const choices = { spec: relativeSpec(DEFAULT_HOURS * 3600000), limit: 200, server: "", dismissed: false };

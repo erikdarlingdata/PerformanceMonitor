@@ -62,9 +62,14 @@ globalThis.document = withDocumentListeners({
 
 const fetches = [];
 let body = "{}";
+/* The catalog the picker reads its reach from (#5562 L4b): get_finops says 168 for its other views and serves the Storage Growth view's own
+   reach as view_max_hours, the number the server validates. The page takes it from here, not from a constant of its own. */
+const catalogBody = JSON.stringify({
+  reads: [{ name: "get_finops", params: [{ name: "hours", max_hours: 168, view_max_hours: { storage_growth: 2160 } }] }],
+});
 globalThis.fetch = async (url) => {
   fetches.push(String(url));
-  return { status: 200, ok: true, text: async () => body };
+  return { status: 200, ok: true, text: async () => (String(url).includes("/api/catalog") ? catalogBody : body) };
 };
 
 const find = (node, tag) => (node.tag === tag ? node : node.children.map((c) => find(c, tag)).find(Boolean) || null);

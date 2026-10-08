@@ -804,7 +804,7 @@ public sealed class DarlingMcpBlockingTools
     public static Task<string> GetBlockingTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
@@ -823,7 +823,8 @@ public sealed class DarlingMcpBlockingTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: reaches the raw table's 30-day retention (720 h); 33.6 ms at 30 days on a large store. The ceiling is the WebReadReach row. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_blocking_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -878,14 +879,15 @@ public sealed class DarlingMcpBlockingTools
     public static async Task<string> GetDeadlockTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: reaches the raw table's 30-day retention (720 h); 13.8 ms at 30 days on a large store. The ceiling is the WebReadReach row. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_deadlock_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -931,7 +933,7 @@ public sealed class DarlingMcpBlockingTools
     public static Task<string> GetLockWaitTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default) =>
@@ -949,7 +951,8 @@ public sealed class DarlingMcpBlockingTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: reaches the raw table's 30-day retention (720 h); 5.3 s at 30 days on a large store. The ceiling is the WebReadReach row. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_lock_wait_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);

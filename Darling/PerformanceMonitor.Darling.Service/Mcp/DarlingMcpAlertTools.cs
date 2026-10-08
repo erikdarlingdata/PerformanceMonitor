@@ -80,7 +80,7 @@ public sealed class DarlingMcpAlertTools
     public static async Task<string> GetAlertHistory(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
-        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24; up to 2160 (90 days, the alert table's retention).")] int hours_back = 24,
         [Description("Maximum rows to return, newest first. Default 50. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         /* Appended after as_of for the reason get_collection_log's filters are: MCP invokes by name, the
@@ -89,7 +89,8 @@ public sealed class DarlingMcpAlertTools
         [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read.")] bool include_dismissed = false,
         CancellationToken cancellationToken = default)
     {
-        var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562 ruling R8: the alert table keeps 90 days and the read is capped by its row limit (DarlingAlertReader LIMIT), so it reaches the retention. */
+        var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_alert_history"), out var windowEnd);
         if (hoursError != null) return hoursError;
         var limitError = McpHelpers.ValidateTop(limit);
         if (limitError != null) return limitError;

@@ -48,7 +48,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
     public static Task<string> GetPgCpuUtilization(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 4.")] int hours_back = 4,
+        [Description("Hours of history. Default 4; up to 720 (30 days).")] int hours_back = 4,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         ILogger? logger = null,
@@ -66,7 +66,8 @@ public sealed class DarlingMcpPgCpuUtilizationTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: reaches the raw table's 30-day retention (720 h); 65 ms at 30 days on a large store. The ceiling is the WebReadReach row. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_pg_cpu_utilization"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);

@@ -4736,6 +4736,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         };
         var collector = reach?.Collector;
         param["max_hours"] = reach?.MaxHours ?? WebReadReach.DefaultHours;
+        if (WebReadReach.ViewMaxHours.TryGetValue(read, out var views))
+        {
+            var viewReach = new JsonObject();
+            foreach (var (view, hours) in views)
+            {
+                viewReach[view] = hours;
+            }
+
+            param["view_max_hours"] = viewReach;
+        }
+
         param["shape"] = shape;
         param["collector"] = collector;
         param["collector_interval_minutes"] = WebReadReach.CollectorIntervalMinutes(collector, serverId, schedules);

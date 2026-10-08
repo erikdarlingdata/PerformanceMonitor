@@ -21,7 +21,8 @@ const HOUR_MS = 3600000;
  * @param {object} opts
  * @param {number} opts.hours the window to start on, in whole hours
  * @param {(hours: number) => void} opts.onChange raised with the whole hours the reader picked
- * @param {number} [opts.reachHours] the view's own reach, when it is longer than the read's catalog reach
+ * @param {number} [opts.reachHours] a fixed reach for the view; prefer `opts.view`
+ * @param {string} [opts.view] the get_finops view whose own reach (catalog `view_max_hours`) is longer than the read's `max_hours`
  * @param {number} [opts.minSpanMs] a floor above one hour (a daily read)
  * @param {number} [opts.stepMs] the unit a length must be a whole number of (default one hour)
  * @param {string} [opts.label] the control's label (default "Window")
@@ -38,6 +39,7 @@ export function finopsWindowControl(opts) {
     minSpanMs: opts.minSpanMs || ROLLING_ONLY_MIN_SPAN_MS,
     stepMs: opts.stepMs,
     reachHours: opts.reachHours,
+    view: opts.view,
     /* No collector feeds the FinOps views as one read, so there is no "collected every N minutes" note here. */
     useCatalogInterval: false,
     onChange: () => opts.onChange(currentHours()),

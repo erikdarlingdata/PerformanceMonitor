@@ -131,11 +131,19 @@ public sealed class WebReadReachLiveTests
             Assert.Contains("exceeds maximum of 2160 hours (90 days)",
                 McpHelpers.ErrorMessageOf(await WebReadAsync(postgres, "get_query_store_duration_trend", WebReadReach.RollupTrendHours + 1)));
 
-            /* A read that did not opt in keeps 168: a ranking that routes through the same rollup, and a raw-table trend. */
-            foreach (var read in new[] { "get_top_queries_by_cpu", "get_tempdb_trend", "get_query_heatmap", "get_cpu_utilization" })
+            /* A read that did not opt in keeps 168: a ranking that routes through the same rollup. */
+            foreach (var read in new[] { "get_top_queries_by_cpu" })
             {
                 var refused = McpHelpers.ErrorMessageOf(await WebReadAsync(postgres, read, McpHelpers.MaxHoursBack + 1));
                 Assert.Contains("exceeds maximum of 168 hours (7 days)", refused);
+            }
+
+            /* The raw-table trends reach their table's 30 days (#5562 L4b): 720 is answered, 721 is refused, never clamped. */
+            foreach (var read in new[] { "get_tempdb_trend", "get_query_heatmap", "get_cpu_utilization" })
+            {
+                Assert.DoesNotContain("exceeds maximum", await WebReadAsync(postgres, read, WebReadReach.RawTrendHours));
+                var refused = McpHelpers.ErrorMessageOf(await WebReadAsync(postgres, read, WebReadReach.RawTrendHours + 1));
+                Assert.Contains("exceeds maximum of 720 hours (30 days)", refused);
             }
 
             bodySucceeded = true;

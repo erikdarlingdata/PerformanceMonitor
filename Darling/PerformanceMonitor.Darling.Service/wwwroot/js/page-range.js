@@ -72,7 +72,9 @@ export function collectorIntervalFromCatalog(catalog, collector) {
  *
  * @param {object} opts
  * @param {string} opts.read the catalog read the page calls (its `hours` param carries the reach and the collector's interval)
- * @param {number} [opts.reachHours] a reach the page knows better than the read-level catalog (a view of get_finops that reaches further)
+ * @param {number} [opts.reachHours] a reach the page knows better than the catalog; prefer `opts.view`, which reads it from the catalog
+ * @param {string} [opts.view] a view of the read that reaches further than the read does (get_finops storage_growth): its reach is the
+ *   catalog's `view_max_hours[view]`, the number the server validates
  * @param {string} [opts.server] ask the catalog for this server's own collector interval
  * @param {boolean} [opts.useCatalogInterval] default true; false for a read that no collector feeds
  */
@@ -81,7 +83,8 @@ export function pageRangePicker(opts) {
   const ready = (async () => {
     try {
       const entry = await catalogEntryFor(opts.read);
-      picker.setReach(opts.reachHours > 0 ? opts.reachHours : reachHours(entry));
+      const viewMax = opts.view && entry && entry.params ? Number((hoursParam(entry).view_max_hours || {})[opts.view]) : NaN;
+      picker.setReach(viewMax > 0 ? viewMax : opts.reachHours > 0 ? opts.reachHours : reachHours(entry));
       if (opts.useCatalogInterval === false) return;
       if (opts.server) {
         const interval = collectorIntervalFromCatalog(await serverCatalog(opts.server), entry && entry.params ? hoursParam(entry).collector : null);

@@ -53,6 +53,7 @@ globalThis.fetch = async (url) => {
   urls.push(u);
   let body = {};
   if (u.startsWith("/api/session")) body = { can_edit: true };
+  else if (u.includes("/api/catalog")) body = { reads: [{ name: "get_alert_history", params: [{ name: "hours", collector: null, collector_interval_minutes: null, max_hours: 2160 }] }] };
   else if (u.includes("/list_servers")) body = servers;
   else if (u.includes("/get_alert_history")) body = typeof alertsReply === "function" ? alertsReply(u) : alertsReply;
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
@@ -102,7 +103,7 @@ try {
       out.windowOptions = pickerItems(main, "Time range").filter((i) => !i.disabled).map((i) => i.name);
       out.windowGreyed = pickerItems(main, "Time range").filter((i) => i.disabled).map((i) => i.name);
       out.windowShape = popupShape(main, "Time range");
-      out.refused = pickRange(main, "Time range", "30d");
+      out.refused = pickRange(main, "Time range", "120d");
       urls.length = 0; pickRange(main, "Time range", "yesterday"); await settle(); out.finished = readsOf().pop();
       urls.length = 0; pickRange(main, "Time range", "30m"); await settle(); out.thirtyMinutes = readsOf().pop();
       out.limitOptions = byLabel(main, "Row limit").children.map((o) => o.attrs.value);

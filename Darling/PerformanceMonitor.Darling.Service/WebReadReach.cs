@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -55,9 +56,11 @@ internal sealed record ReadReach(ReadShape Shape, int MaxHours, string? Collecto
 /// <see cref="McpHelpers.MaxHoursBack"/> even where they route through a rollup (a top-N over 90 days is a different
 /// payload, and the MCP ceiling rises for bucketed trends only); query text and plans are kept for a few days only
 /// (<c>RetentionTierRouter.ClampToTextHorizon</c>), and none of the three opted-in reads carries either.
-/// The raw-table bucketed trends (waits, CPU, memory, file I/O, tempdb, perfmon, blocking) stay at 168 hours in code
-/// until a timing run on a large store says a month is affordable; raising one is a one-line change to its row here,
-/// plus its validator call, and nothing else.</para>
+/// The raw-table bucketed trends reach <see cref="RawTrendHours"/> (30 days, the raw tables' default retention) once a
+/// timing run on a large store measured a month under 10 seconds (#5562 L4b); a trend not yet timed, or over a table
+/// that keeps less than 30 days, stays at 168 hours. Raising one is a one-line change to its row here, plus its
+/// validator call, and nothing else. Alert History is the one list that reaches past a week (ruling R8): its reach is
+/// the alert table's retention, <see cref="AlertHistoryHours"/>, and the read is capped by its row limit.</para>
 /// </summary>
 internal static class WebReadReach
 {
@@ -68,8 +71,32 @@ internal static class WebReadReach
     /// <c>ComposeLimits.MaxWindowHours</c>).</summary>
     public const int RollupTrendHours = 24 * 90;
 
+    /// <summary>The raw-table trends' reach: 30 days (#5562 L4b), what every raw collector table keeps by default.
+    /// A read over a table with a shorter retention (<c>waiting_tasks</c> keeps 7 days) stays at
+    /// <see cref="DefaultHours"/>, and a read that spans tables takes the shortest.</summary>
+    public const int RawTrendHours = 24 * DarlingRetentionHorizons.DataRetentionBaseDays;
+
+    /// <summary>Alert History's reach: the alert table's retention, 90 days (#5562 ruling R8), the longest choice the
+    /// Viewer already offers (<see cref="DarlingRetentionHorizons.AlertHistoryRetentionDays"/>).</summary>
+    public const int AlertHistoryHours = 24 * DarlingRetentionHorizons.AlertHistoryRetentionDays;
+
+    /// <summary>
+    /// A view of one read that reaches further than the read's own row (#5562 L4b): <c>get_finops</c> serves its other views
+    /// at <see cref="DefaultHours"/>, but its Storage Growth view takes up to 90 days of whole days, validated by
+    /// <see cref="Mcp.DarlingMcpFinOpsTools.MaxStorageGrowthHoursBack"/>. The catalog serves this as <c>view_max_hours</c> on the
+    /// read's <c>hours</c> param, and the page reads it from there, so the page, the catalog and the server share one number.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, int>> ViewMaxHours =
+        new Dictionary<string, IReadOnlyDictionary<string, int>>(StringComparer.Ordinal)
+        {
+            ["get_finops"] = new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                ["storage_growth"] = Mcp.DarlingMcpFinOpsTools.MaxStorageGrowthHoursBack,
+            },
+        };
+
     private static ReadReach Trend(string? collector, int maxHours = DefaultHours) => new(ReadShape.BucketedTrend, maxHours, collector);
-    private static ReadReach List(string? collector) => new(ReadShape.List, DefaultHours, collector);
+    private static ReadReach List(string? collector, int maxHours = DefaultHours) => new(ReadShape.List, maxHours, collector);
     private static ReadReach Snapshot(string? collector) => new(ReadShape.LatestSnapshot, DefaultHours, collector);
 
     /// <summary>Every windowed read (one with an <c>hours</c> parameter in the web catalog), by read name.</summary>
@@ -80,25 +107,28 @@ internal static class WebReadReach
         ["get_procedure_duration_trend"] = Trend("procedure_stats", RollupTrendHours),
         ["get_query_store_duration_trend"] = Trend("query_store", RollupTrendHours),
 
-        /* Raw-table bucketed trends: 168 hours until the large-store timing run (item 4 of #5562's L4 lane). */
-        ["get_blocking_trend"] = Trend("blocked_process_report"),
-        ["get_deadlock_trend"] = Trend("deadlocks"),
-        ["get_lock_wait_trend"] = Trend("wait_stats"),
+        /* Raw-table bucketed trends: 720 hours where the large-store timing run measured a month under 10 s (#5562 L4b;
+           each validator names its time). Left at 168: get_current_waits_trend (its waiting_tasks table keeps 7 days),
+           get_server_trend (6 of its 11 metrics were never timed), get_pg_wait_trend (its timing table was empty) and
+           get_pg_query_duration_trend (not timed). get_blocking_stats is uncapped on the MCP side (ValidateUncappedWindow). */
+        ["get_blocking_trend"] = Trend("blocked_process_report", RawTrendHours),
+        ["get_deadlock_trend"] = Trend("deadlocks", RawTrendHours),
+        ["get_lock_wait_trend"] = Trend("wait_stats", RawTrendHours),
         ["get_current_waits_trend"] = Trend("waiting_tasks"),
-        ["get_blocking_stats"] = Trend("dmv_blocking_snapshot"),
-        ["get_cpu_utilization"] = Trend("cpu_utilization"),
-        ["get_query_heatmap"] = Trend("query_stats"),
-        ["get_tempdb_trend"] = Trend("tempdb_stats"),
-        ["get_wait_trend"] = Trend("wait_stats"),
-        ["get_file_io_trend"] = Trend("file_io_stats"),
-        ["get_memory_trend"] = Trend("memory_stats"),
+        ["get_blocking_stats"] = Trend("dmv_blocking_snapshot", RawTrendHours),
+        ["get_cpu_utilization"] = Trend("cpu_utilization", RawTrendHours),
+        ["get_query_heatmap"] = Trend("query_stats", RawTrendHours),
+        ["get_tempdb_trend"] = Trend("tempdb_stats", RawTrendHours),
+        ["get_wait_trend"] = Trend("wait_stats", RawTrendHours),
+        ["get_file_io_trend"] = Trend("file_io_stats", RawTrendHours),
+        ["get_memory_trend"] = Trend("memory_stats", RawTrendHours),
         ["get_server_trend"] = Trend(null),
-        ["get_perfmon_trend"] = Trend("perfmon_stats"),
-        ["get_pg_cpu_utilization"] = Trend("pg_cpu_utilization"),
+        ["get_perfmon_trend"] = Trend("perfmon_stats", RawTrendHours),
+        ["get_pg_cpu_utilization"] = Trend("pg_cpu_utilization", RawTrendHours),
         ["get_pg_wait_trend"] = Trend("pg_wait_sampling"),
         ["get_pg_query_duration_trend"] = Trend("pg_statement_stats"),
-        ["get_pg_io_trend"] = Trend("pg_io_stats"),
-        ["get_pg_database_trend"] = Trend("pg_database_stats"),
+        ["get_pg_io_trend"] = Trend("pg_io_stats", RawTrendHours),
+        ["get_pg_database_trend"] = Trend("pg_database_stats", RawTrendHours),
 
         /* Lists, rankings and unbucketed series. */
         ["get_top_queries_by_cpu"] = List("query_stats"),
@@ -174,7 +204,7 @@ internal static class WebReadReach
         ["compare_analysis"] = List(null),
         ["get_analysis_facts"] = List(null),
         ["get_analysis_findings"] = List(null),
-        ["get_alert_history"] = List(null),
+        ["get_alert_history"] = List(null, AlertHistoryHours),
         ["get_fleet_overview"] = List(null),
         ["get_sweep_reports"] = List(null),
         ["get_store_log"] = List(null),

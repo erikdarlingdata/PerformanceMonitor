@@ -84,8 +84,10 @@ public sealed class WebPageRangeTests
     public void TheStorageGrowthPickerTakesTheViewsOwnReachAndWholeDays()
     {
         var src = Js("pages", "finops", "storage-growth.js");
-        Assert.Contains("const STORAGE_GROWTH_REACH_HOURS = 2160;", src);
-        Assert.Contains("reachHours: STORAGE_GROWTH_REACH_HOURS,", src);
+        // #5562 L4b: no reach constant of its own; the picker reads the catalog's view_max_hours for this view.
+        Assert.DoesNotContain("STORAGE_GROWTH_REACH_HOURS", src);
+        Assert.Contains("view: \"storage_growth\",", src);
+        Assert.Contains("view_max_hours", Js("page-range.js"));
         Assert.Contains("minSpanMs: DAY_MS,", src);
         Assert.Contains("stepMs: DAY_MS,", src);
 

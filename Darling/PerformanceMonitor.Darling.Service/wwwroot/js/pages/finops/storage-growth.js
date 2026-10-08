@@ -24,10 +24,10 @@ const OBJECT_LIMIT = 20;
 const DATABASE_LIMIT = 500;
 
 // The objects window, in whole days (the heatmap has one column per day). The service reads it as hours_back (days * 24) and takes up to
-// 2160 hours for this view (DarlingMcpFinOpsTools.cs: "storage_growth: max 2160"), though the get_finops catalog entry says 168 for its
-// other views, so the picker is given this view's own reach. 30 days is the default.
+// 2160 hours for this view (DarlingMcpFinOpsTools.MaxStorageGrowthHoursBack), though the get_finops catalog entry says 168 for its
+// other views. The catalog serves this view's own reach as `view_max_hours.storage_growth` (WebReadReach.ViewMaxHours, #5562 L4b), the
+// number the server validates, and the picker reads it from there. 30 days is the default.
 const DAY_MS = 86400000;
-const STORAGE_GROWTH_REACH_HOURS = 2160;
 const DEFAULT_DAYS = 30;
 
 // The drill per server: { level, database, object, days }. It lives at module scope because the page's 60 s poll calls build()
@@ -194,7 +194,7 @@ export const tab = {
     function windowPicker() {
       return finopsWindowControl({
         hours: state.days * 24,
-        reachHours: STORAGE_GROWTH_REACH_HOURS,
+        view: "storage_growth",
         minSpanMs: DAY_MS,
         stepMs: DAY_MS,
         onChange: (hours) => {
