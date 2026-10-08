@@ -83,7 +83,7 @@ public sealed class QueryStoreIntervalMaintenancePassLiveTests
     }
 
     [Fact]
-    public async Task ATableThatIsNotPromotedYet_IsLeftAloneAndIsNotAFailure()
+    public async Task ATableThatIsNotPromotedYet_IsArmedButNotPartitionedAndIsNotAFailure()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
@@ -101,6 +101,10 @@ public sealed class QueryStoreIntervalMaintenancePassLiveTests
         Assert.Equal(0, pass.Failed);
         Assert.True(pass.Changed > 0);
         Assert.Equal(latestBefore, (await PartitionNamesAsync(connection, Latest, ct)).OrderBy(n => n, StringComparer.Ordinal).ToList());
+        /* #5571 review H1: the hourly pass arms the legacy CHECK of a table that is not promoted (it does no VALIDATE). */
+        var latestState = await QueryStoreIntervalPartitions.ReadStateAsync(connection, Latest, ct);
+        Assert.True(latestState.CheckPresent);
+        Assert.False(latestState.CheckValid);
         Assert.False(logger.HasAtLeast(LogLevel.Warning), logger.Dump());
     }
 
