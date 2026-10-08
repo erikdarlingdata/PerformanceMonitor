@@ -51,10 +51,10 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// <c>QueryStoreTopSuffix</c> was divided into its ranked head and its tail, and re-taken once for #5313, which
     /// deliberately changed both statements: the over-fetch <c>LIMIT $4 + 5</c> became the round's candidate limit and
     /// the tail gained the page / count-row wrapper, and re-taken again for #5420, which deliberately bounded the tail's
-    /// inline-text fallback to the read's window (<c>collection_time &gt;= $2</c> and <c>&lt;= $3</c>). The split pin is the
+    /// inline-text fallback to the read's window (<c>collection_time &gt;= $2</c> and <c>&lt;= $3</c>), and re-taken for #5523, which deliberately added the table read's upper <c>first_execution_time</c> bound (<c>&lt;= $3 + </c>the slack). The split pin is the
     /// tail-sharing assert below.</summary>
     private const string RawSqlHash = "836D1C99489C7EC952E327EE1CE1C40D7B94DE3270EC67D9249D32D05634CC33";
-    private const string TableSqlHash = "00902FACCF96EB93F4AFC6817B221C70B7D6BB19674FF2AAD8FAA0506E97E425";
+    private const string TableSqlHash = "49EFA1A7F025A60B4E36AE0E395901F3E508FFFA2D9FC6D29103F7A25FF6CBA4";
 
     private static string Hash(string sql) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));

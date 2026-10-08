@@ -196,6 +196,11 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
     /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
+    /// <para><b>The upper bound (#5523).</b> A window with an end ($3 not NULL) also carries
+    /// <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>, so the
+    /// <c>(server_id, first_execution_time)</c> btree scans a range finite at both ends instead of everything newer than
+    /// the window start. An open end (NULL) reads to now, as before. It drops a row only for a monitored-server clock more
+    /// than the slack ahead of the service's (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary).</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (
@@ -207,6 +212,7 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   ($3::timestamp IS NULL OR collection_time <= $3)
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
 

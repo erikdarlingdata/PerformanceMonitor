@@ -2582,6 +2582,12 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
     /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
+    /// <para><b>The upper bound (#5523).</b> <c>first_execution_time &lt;= $3 + </c>
+    /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> closes the range that
+    /// <c>ix_query_store_interval_wide_server_first_exec</c> scans. The floor alone ran from the window start to now, so
+    /// a window that ended days ago walked every newer row of the server (109,362 blocks a call on a 43-server
+    /// store). It drops a row only when the monitored server's clock runs more than the slack ahead of the service's
+    /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary).</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (
@@ -2593,6 +2599,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
@@ -2738,8 +2745,10 @@ internal static class DarlingDataReader
     /// <c>ReadStart</c>, $3 the window end (inclusive, as in the table read), $4 top, $5 database, $6 execution
     /// outcome, $7 module, $8 <c>S</c> and $9 <c>E</c> (dates): the days <c>[S, E)</c> come from the summary, and the
     /// edges <c>[$2, S)</c> and <c>[E, $3]</c> from the wide table with exactly the table read's predicates (the
-    /// inclusive $3, the <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, no upper
-    /// bound), so a partial first or last day, and any day without a built row, is exact.
+    /// inclusive $3, the <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, and its
+    /// upper bound too (#5523): each edge range ends at its own window end plus
+    /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>, so an edge reads about a day of the server's rows, not
+    /// every row newer than it), so a partial first or last day, and any day without a built row, is exact.
     /// <para><b>Every arm is projected as recombinable parts</b>: the execution count, and for each averaged column its
     /// value as <c>numeric</c> and a 0/1 for "not NULL" (the summary stores the same two things as
     /// <c>&lt;col&gt;_sum</c> and <c>&lt;col&gt;_n</c>). <c>ranked</c> then groups the unioned rows by the table read's own
@@ -2773,6 +2782,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time < $8::date
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time < $8::date + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text IS NULL OR execution_type_desc = $6)
             UNION ALL
@@ -2791,6 +2801,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $9::date
             AND   collection_time <= $3
             AND   first_execution_time >= $9::date - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text IS NULL OR execution_type_desc = $6)
             UNION ALL
