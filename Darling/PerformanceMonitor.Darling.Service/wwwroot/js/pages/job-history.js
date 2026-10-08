@@ -132,11 +132,15 @@ export function trimRunsToStart(data, w) {
   };
 }
 
+/** The window the held range reads as of now, or the default one when it cannot resolve. */
+function currentWindow() {
+  return windowOfSpec(state.spec) || windowOfSpec(relativeSpec(DEFAULT_HOURS * 3600000));
+}
+
 /** The read's parameters for the current filters; an empty filter is left off so the read applies none. */
-export function readParams() {
+export function readParams(w = currentWindow()) {
   /* A finished range sends its end as `as_of` (#5562 R6). The reader bounds the runs by that end in SQL, before the row limit
      (JobHistoryFilter.UntilUtc, DarlingJobHistoryReader.cs), so the newest runs the limit keeps are the range's own. */
-  const w = windowOfSpec(state.spec) || windowOfSpec(relativeSpec(DEFAULT_HOURS * 3600000));
   const p = { hours: w.hours, limit: state.limit };
   if (w.asOf) p.as_of = w.asOf;
   if (state.server) p.server = state.server;
@@ -298,14 +302,17 @@ export function renderJobHistory(main) {
     const signal = (loadAbort = new AbortController()).signal;
     mount(body, loadingStrip("Loading job history…"));
     try {
-      const res = await readToolWithinKeptHistory("get_job_history", readParams(), signal);
+      /* One window for the request and the trim: a live range's start moves with the clock, so a window recomputed after the reply would cut
+         later than the read began (#5562 review r1 L7). */
+      const w = currentWindow();
+      const res = await readToolWithinKeptHistory("get_job_history", readParams(w), signal);
       if (ticket !== loadSeq) return;
       if (res.kind === "aborted" || res.kind === "auth") return;
       if (res.kind === "error") {
         showAgent(null);
         return mount(body, readErrorStrip(res.message));
       }
-      const data = trimRunsToStart(res.data || {}, windowOfSpec(state.spec));
+      const data = trimRunsToStart(res.data || {}, w);
       const kept = keptWindowStrip(res);
       showAgent(res.kind === "empty" ? res.hints : data);
       if (res.kind === "empty") {

@@ -62,7 +62,7 @@ public sealed class DarlingMcpQueryHeatmapTools
     public static Task<string> GetQueryHeatmap(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("How far back to look, in hours. Default 24; up to 720 (30 days).")] int hours_back = 24,
+        [Description("How far back to look, in hours. Default 24.")] int hours_back = 24,
         [Description("Which per-execution metric to bucket by: duration, cpu, logical_reads, logical_writes or execution_count. Default duration.")] string? metric = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Width of each time bin, in minutes. Default 5 - the desktop viewer's own bin width, so the two surfaces agree. Raise it to cover a longer window in fewer cells.")] int bucket_minutes = DarlingQueryHeatmapReader.ViewerBucketMinutes,
@@ -98,8 +98,9 @@ public sealed class DarlingMcpQueryHeatmapTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        /* #5562: reaches the raw table's 30-day retention (720 h); 5.5 s at 30 days on a large store. The ceiling is the WebReadReach row. */
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_heatmap"), out var windowEnd)
+        /* #5562: stays at 168 h. This reads raw query_stats, which a TimescaleDB store drops at four days (TimescaleSupport.RawRetentionInterval), so a
+           longer reach would be a window the table cannot fill, so this keeps the 168-hour overload (its WebReadReach row says the same). */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
             ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 

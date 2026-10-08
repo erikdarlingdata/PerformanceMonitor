@@ -172,7 +172,7 @@ public sealed class DarlingMcpTrendTools
         NpgsqlDataSource postgres,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 24; up to 720 (30 days).")] int hours_back = 24,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default) =>
@@ -187,8 +187,9 @@ public sealed class DarlingMcpTrendTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        /* #5562: reaches the raw table's 30-day retention (720 h). The 12.5 s at 30 days came from the Wait Statistics arm's right(object_name, 16) filter, which
-           decompressed and dropped every row; DarlingTrendReader.PerfmonTrendSql now filters with LIKE, which the columnar scan vectorizes. */
+        /* #5562: stays at 168 h. The re-time on a large store read 11.2 s cold at 30 days even with the LIKE predicate (DarlingTrendReader.PerfmonTrendSql,
+           which saved 1.3 s cold): the compressed perfmon_stats data is grouped by server only, so the read decodes every counter's name no matter which
+           counter was asked for. A month is too slow to offer (#5574 tracks compressing the data by counter so it can reach 30 days); the ceiling is the WebReadReach row. */
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_perfmon_trend"), out var windowEnd);
         if (validation != null) return validation;
 

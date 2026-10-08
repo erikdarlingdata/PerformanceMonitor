@@ -27,7 +27,7 @@ import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emp
          ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
-import { pageRangePicker, windowOfSpec } from "../page-range.js";
+import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
 import { relativeSpec, specName } from "../time-range.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { orderServers } from "../server-order.js";
@@ -419,17 +419,33 @@ const DEFAULT_HOURS = 24;
 const LIMIT_CHOICES = [200, 500, 1000];
 const choices = { spec: relativeSpec(DEFAULT_HOURS * 3600000), limit: 200, server: "", dismissed: false };
 
-/* The get_alert_history parameters the current choices ask for. server_name and include_dismissed are left out
- * (buildQuery drops empty values) when they are at their defaults, and as_of when the range ends now. */
-function readParams() {
-  const w = windowOfSpec(choices.spec);
+/* The get_alert_history request the current choices ask for: `{ params, startMs }`, or `{ error }` when the range cannot be read right now
+ * (Today in its first five minutes) - the page shows that reason, never a different window (#5562 review r1 L3). server_name and
+ * include_dismissed are left out (buildQuery drops empty values) when they are at their defaults, and as_of when the range ends now.
+ * The read takes whole hours, so `startMs` is the range's exact start: the page trims the reply to it (review r1 H2). */
+function readRequest() {
+  const r = windowResultOfSpec(choices.spec);
+  if (r.error) return { error: r.error };
+  const w = r.window;
   return {
-    hours_back: w ? w.hours : DEFAULT_HOURS,
-    as_of: w ? w.asOf : null,
-    limit: choices.limit,
-    server_name: choices.server || null,
-    include_dismissed: choices.dismissed ? "true" : null,
+    startMs: w.startMs,
+    params: {
+      hours_back: w.hours,
+      as_of: w.asOf,
+      limit: choices.limit,
+      server_name: choices.server || null,
+      include_dismissed: choices.dismissed ? "true" : null,
+    },
   };
+}
+
+/* Keeps the alerts at or after the range start. The newest-first reply and the row cap mean the cut cannot hide an in-range row (the
+ * rows it drops are the oldest), the same argument job-history.js makes for its runs. An unreadable time is kept. */
+export function trimAlertsToStart(alerts, startMs) {
+  return alerts.filter((a) => {
+    const t = Date.parse(a && a.alert_time);
+    return Number.isNaN(t) || t >= startMs;
+  });
 }
 
 function windowLabel() {
@@ -595,6 +611,8 @@ export async function renderAlerts(main) {
     label: "Time range",
     /* No collector feeds the alert log, so there is no "collected every N minutes" note. */
     useCatalogInterval: false,
+    /* The longest choice is the alert table's retention (90 days, ruling R8), not only a typed "90d". */
+    offerReach: true,
     onChange: (spec) => { choices.spec = spec; changed(); },
   }).picker;
   const limitSel = picker("Row limit", LIMIT_CHOICES.map((n) => ({ value: n, label: n + " rows" })), choices.limit);
@@ -641,7 +659,8 @@ export async function renderAlerts(main) {
  * in order. A reply that arrives after a newer request was made is dropped. */
 async function refreshAlerts(state) {
   const seq = ++state.seq;
-  const res = await readTool("get_alert_history", readParams());
+  const req = readRequest();
+  const res = req.error ? { kind: "error", message: "This range cannot be read yet: " + req.error } : await readTool("get_alert_history", req.params);
   if (seq !== state.seq) return;
   state.meta.textContent = (choices.server ? choices.server : "fleet-wide") + " · " + windowLabel();
   mount(state.noticeBox, []);
@@ -655,7 +674,7 @@ async function refreshAlerts(state) {
     mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
     return;
   }
-  state.alerts = res.data.alerts || [];
+  state.alerts = trimAlertsToStart(res.data.alerts || [], req.startMs);
   state.truncated = res.data.truncated === true;
   /* A checked row that is no longer listed (dismissed elsewhere, aged out) is no longer selected. */
   const listed = new Set(state.alerts.filter(dismissable).map(alertKey));

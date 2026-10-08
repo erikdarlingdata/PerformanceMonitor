@@ -40,7 +40,6 @@ import {
   minSpanRefusal,
   reachText,
   sampleIntervalNote,
-  dataStartNote,
   wallText,
 } from "./time-range.js";
 
@@ -56,7 +55,7 @@ let pickerCount = 0;
  * @param {() => number} [opts.now] the clock, epoch ms (default Date.now); tests give their own
  * @param {number} [opts.reachHours] the longest range the page's reads take, in hours (default 168); longer ones are greyed out
  * @param {number|null} [opts.sampleIntervalMs] the main collector's interval; a span with fewer than 3 samples shows a note
- * @param {number|null} [opts.dataStartMs] where the data begins; a range starting well before it shows a note
+ * @param {object[]} [opts.extraPresets] quick choices added after the shared list (a read that reaches past 30 days offers its reach)
  * @param {boolean} [opts.compact] hide the detail beside the button (it moves into the tooltip)
  * @param {boolean} [opts.rollingOnly] offer only "this long back from now" (#5562 R5, the FinOps pages): no calendar periods, no
  *   custom end, whole hours, at least one hour. A range outside that is greyed out or refused with the reason, never clamped.
@@ -71,9 +70,11 @@ export function timeRangePicker(opts = {}) {
   const name = opts.label || "Time range";
   const previewId = "trp-preview-" + ++pickerCount;
   let spec = opts.spec || relativeSpec(DAY_MS);
+  /* Longer quick choices a page adds when its read reaches past the 30 days the shared list stops at (#5562 review r1 M5): the longest
+     choice a page offers is its reach. */
+  let extraPresets = Array.isArray(opts.extraPresets) ? opts.extraPresets : [];
   let reach = opts.reachHours > 0 ? opts.reachHours : DEFAULT_REACH_HOURS;
   let sampleIntervalMs = opts.sampleIntervalMs || null;
-  let dataStartMs = opts.dataStartMs ?? null;
   const onChange = opts.onChange || (() => {});
   let open = false;
   let popup = null;
@@ -83,6 +84,8 @@ export function timeRangePicker(opts = {}) {
   let pending = null;
   let fromBox = null;
   let toBox = null;
+  /* The end box's prefilled value while the held range is live; an end left at it still means "now" (#5562 review r1 M3). */
+  let prefilledLiveEnd = null;
   let removeDocumentListeners = null;
 
   const button = el("button", { type: "button", class: "trp-button", "aria-haspopup": "dialog", "aria-expanded": "false" });
@@ -113,7 +116,7 @@ export function timeRangePicker(opts = {}) {
     button.setAttribute("aria-label", name + ": " + text + ", " + where);
     detail.textContent = opts.compact ? "" : where;
     node.setAttribute("title", opts.compact ? text + ", " + where : "");
-    const notes = [sampleIntervalNote(range.spanMs, sampleIntervalMs), dataStartNote(range, dataStartMs)].filter(Boolean);
+    const notes = [sampleIntervalNote(range.spanMs, sampleIntervalMs)].filter(Boolean);
     note.textContent = notes.join(" ");
   }
 
@@ -184,7 +187,7 @@ export function timeRangePicker(opts = {}) {
       return;
     }
     pending = r;
-    const notes = [sampleIntervalNote(r.range.spanMs, sampleIntervalMs), dataStartNote(r.range, dataStartMs)].filter(Boolean);
+    const notes = [sampleIntervalNote(r.range.spanMs, sampleIntervalMs)].filter(Boolean);
     preview.textContent = [r.echo, ...notes].join(" ");
     preview.className = "trp-preview trp-ok";
     applyButton.disabled = false;
@@ -201,7 +204,10 @@ export function timeRangePicker(opts = {}) {
   /* The date and time boxes write the typed form (in the picker's zone), so one path parses, previews and applies. */
   function pickChanged() {
     if (!fromBox.value || !toBox.value) return;
-    textBox.value = fromBox.value.replace("T", " ") + " - " + toBox.value.replace("T", " ");
+    /* A live range stays live when only the start moves: the end box still holding the value the popup filled in is "now", not a typed end,
+       so the text reads "<start> - now" (a since-range, kept refreshing by the page's poll) instead of freezing at the popup-open minute. */
+    const endText = prefilledLiveEnd !== null && toBox.value === prefilledLiveEnd ? "now" : toBox.value.replace("T", " ");
+    textBox.value = fromBox.value.replace("T", " ") + " - " + endText;
     showPreview();
   }
 
@@ -216,6 +222,7 @@ export function timeRangePicker(opts = {}) {
     if (r.ok) {
       fromBox.value = wallText(r.range.startMs, zone).replace(" ", "T").slice(0, 16);
       toBox.value = wallText(r.range.endMs, zone).replace(" ", "T").slice(0, 16);
+      prefilledLiveEnd = r.range.live ? toBox.value : null;
     }
     textBox.addEventListener("input", showPreview);
     textBox.addEventListener("keydown", (e) => {
@@ -230,7 +237,7 @@ export function timeRangePicker(opts = {}) {
 
     const quick = el("div", { class: "trp-column" }, [
       el("div", { class: "trp-heading", text: "Quick ranges" }),
-      ...ROLLING_PRESETS.map((s) => item(s, nowMs)),
+      ...ROLLING_PRESETS.concat(extraPresets.filter((x) => !ROLLING_PRESETS.some((p) => specId(p) === specId(x)))).map((s) => item(s, nowMs)),
     ]);
     const periods = el("div", { class: "trp-column" }, [
       el("div", { class: "trp-heading", text: "Calendar periods" }),
@@ -304,7 +311,7 @@ export function timeRangePicker(opts = {}) {
     /** The window the reads take for the range now ({ hours, asOf, live, startMs, endMs }), or null. */
     window() {
       const r = current();
-      return r.ok ? readWindow(r.range) : null;
+      return r.ok ? readWindow(r.range, now()) : null;
     },
     spec() {
       return spec;
@@ -331,10 +338,16 @@ export function timeRangePicker(opts = {}) {
       sampleIntervalMs = ms || null;
       draw();
     },
-    setDataStart(ms) {
-      dataStartMs = ms ?? null;
-      draw();
+    /** Add quick choices longer than the shared list (the page's own reach); a popup that is open redraws. */
+    setExtraPresets(specs) {
+      extraPresets = Array.isArray(specs) ? specs : [];
+      if (open) {
+        close(false);
+        openPopup();
+      }
     },
+    /** The longest range the page takes, in hours. */
+    reachHours: () => reach,
     openPopup,
     close: () => close(true),
     isOpen: () => open,

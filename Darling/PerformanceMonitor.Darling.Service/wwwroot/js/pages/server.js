@@ -146,7 +146,7 @@ function holdSpec(server, spec, nowMs) {
     customRanges.delete(server);
     pageHours = hours;
   } else {
-    customRanges.set(server, { spec, live: resolved.range.live });
+    customRanges.set(server, { spec, live: resolved.range.live || resolved.range.endMs >= nowMs });
   }
   return null;
 }
@@ -182,10 +182,16 @@ export function rangeContext(nowMs = Date.now()) {
       const named = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom";
       return { hours: w.hours, label: named + ": " + times + rounded, custom: true };
     }
-    customRanges.delete(current.server);
+    if (resolved.ok) customRanges.delete(current.server);
   }
   setActiveRange(null);
   const opt = RANGE_OPTIONS.find((o) => o.hours === pageHours) || RANGE_OPTIONS.find((o) => o.hours === 24) || RANGE_OPTIONS[0];
+  /* A held range that cannot resolve right now (Today in its first five minutes) is kept, not dropped: the label says so and names the
+     window shown instead, and the range reads again once it can (#5562 review r1 L3). */
+  if (custom) {
+    const unresolved = resolveSpec(custom.spec, nowMs, browserZone());
+    if (!unresolved.ok) return { hours: opt.hours, label: specName(custom.spec).toLowerCase() + " cannot be read yet (" + unresolved.error.message + "); showing " + opt.label };
+  }
   return { hours: opt.hours, label: opt.label };
 }
 
@@ -397,6 +403,9 @@ function applySampleNote() {
   serverCatalog(server).then((catalog) => {
     if (picker !== rangePicker || tab !== current.tab || server !== current.server) return;
     picker.setSampleInterval(collectorIntervalFromCatalog(catalog, tab.collector));
+  }).catch(() => {
+    /* A catalog that cannot be read shows no note (#5562 review r1 L2); the next tab or range change asks again. */
+    if (picker === rangePicker) picker.setSampleInterval(null);
   });
 }
 

@@ -21,9 +21,12 @@
  */
 
 import { timeRangePicker } from "./time-range-picker.js";
-import { reachHours, collectorIntervalMs, resolveSpec, readWindow, browserZone, relativeSpec } from "./time-range.js";
+import { reachHours, collectorIntervalMs, resolveSpec, readWindow, browserZone, relativeSpec, ROLLING_PRESETS } from "./time-range.js";
 import { getCatalog } from "./views-api.js";
 import { apiGet } from "./util.js";
+
+const HOUR_MS = 3600000;
+const SERVER_CATALOG_TTL_MS = 5 * 60000;
 
 const serverCatalogs = new Map();
 
@@ -32,7 +35,14 @@ const serverCatalogs = new Map();
  *  it) calls this on every read, so a live range slides with the clock. */
 export function windowOfSpec(spec, nowMs = Date.now(), zone = browserZone()) {
   const r = resolveSpec(spec, nowMs, zone);
-  return r.ok ? readWindow(r.range) : null;
+  return r.ok ? readWindow(r.range, nowMs) : null;
+}
+
+/** Like windowOfSpec, but says why a spec cannot be read: `{ window }` or `{ error: message }`. A page shows the message (a Today range
+ *  in its first five minutes) instead of quietly reading a different window (#5562 review r1 L3). */
+export function windowResultOfSpec(spec, nowMs = Date.now(), zone = browserZone()) {
+  const r = resolveSpec(spec, nowMs, zone);
+  return r.ok ? { window: readWindow(r.range, nowMs) } : { error: r.error.message };
 }
 
 /** One catalog entry by read name from the fleet-wide catalog, or null. */
@@ -44,10 +54,14 @@ export async function catalogEntryFor(read) {
 /** The catalog with the SERVER's own collector intervals (a per-server schedule row wins), cached per server. Null when it cannot be read. */
 export function serverCatalog(server) {
   if (!serverCatalogs.has(server)) {
-    serverCatalogs.set(
-      server,
-      apiGet("/api/catalog?server=" + encodeURIComponent(server)).then((r) => (r.kind === "data" && r.data ? r.data : null))
-    );
+    /* Only a catalog that was read is kept (#5562 review r1 L2): a failed fetch is not cached as null for the page's life, and a
+       schedule edited in Settings is seen again after the entry expires. */
+    const fetched = apiGet("/api/catalog?server=" + encodeURIComponent(server)).then((r) => (r.kind === "data" && r.data ? r.data : null));
+    serverCatalogs.set(server, fetched);
+    fetched.then((catalog) => {
+      if (catalog === null) serverCatalogs.delete(server);
+      else setTimeout(() => serverCatalogs.delete(server), SERVER_CATALOG_TTL_MS);
+    }, () => serverCatalogs.delete(server));
   }
   return serverCatalogs.get(server);
 }
@@ -77,6 +91,7 @@ export function collectorIntervalFromCatalog(catalog, collector) {
  *   catalog's `view_max_hours[view]`, the number the server validates
  * @param {string} [opts.server] ask the catalog for this server's own collector interval
  * @param {boolean} [opts.useCatalogInterval] default true; false for a read that no collector feeds
+ * @param {boolean} [opts.offerReach] add the read's reach as the longest quick choice when it is longer than the shared 30 days (Alert History's 90)
  */
 export function pageRangePicker(opts) {
   const picker = timeRangePicker(opts);
@@ -85,6 +100,7 @@ export function pageRangePicker(opts) {
       const entry = await catalogEntryFor(opts.read);
       const viewMax = opts.view && entry && entry.params ? Number((hoursParam(entry).view_max_hours || {})[opts.view]) : NaN;
       picker.setReach(viewMax > 0 ? viewMax : opts.reachHours > 0 ? opts.reachHours : reachHours(entry));
+      if (opts.offerReach) offerReach(picker);
       if (opts.useCatalogInterval === false) return;
       if (opts.server) {
         const interval = collectorIntervalFromCatalog(await serverCatalog(opts.server), entry && entry.params ? hoursParam(entry).collector : null);
@@ -97,6 +113,12 @@ export function pageRangePicker(opts) {
     }
   })();
   return { picker, ready };
+}
+
+/** The reach as the longest quick choice, when it is longer than the shared list's 30 days (#5562 review r1 M5, ruling R8). */
+function offerReach(picker) {
+  const hours = picker.reachHours();
+  if (hours * HOUR_MS > ROLLING_PRESETS[ROLLING_PRESETS.length - 1].spanMs) picker.setExtraPresets([relativeSpec(hours * HOUR_MS)]);
 }
 
 function hoursParam(entry) {
@@ -126,5 +148,6 @@ export function rollingHoursPicker(opts) {
       if (w) opts.onChange(w.hours);
     },
   });
+  offerReach(picker);
   return picker;
 }

@@ -215,10 +215,23 @@ public sealed class WebTimeRangeTests
         var picked = r.GetProperty("picked");
         Assert.Equal("2026-10-01 13:00 - 2026-10-01 15:00", picked.GetProperty("text").GetString());
         Assert.Equal("2h  Oct 1, 1:00 pm - Oct 1, 3:00 pm (UTC-04:00)", picked.GetProperty("preview").GetString());
+
+        // Review r1 M3: moving only the start of a live range leaves the end as "now", so the range keeps refreshing; typing an end fixes it.
+        var liveEnd = r.GetProperty("liveEnd");
+        Assert.Equal("2026-10-08 05:00 - now", liveEnd.GetProperty("startOnly").GetString());
+        Assert.Equal("2026-10-08 05:00 - 2026-10-08 07:00", liveEnd.GetProperty("edited").GetString());
+
+        // Review r1 M2: an end at or after now is a live range ending now (no as_of); one in the past keeps its as_of.
+        var futureEnd = r.GetProperty("futureEnd");
+        Assert.True(futureEnd.GetProperty("future").GetProperty("live").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, futureEnd.GetProperty("future").GetProperty("asOf").ValueKind);
+        Assert.Equal(3, futureEnd.GetProperty("future").GetProperty("hours").GetInt32());
+        Assert.False(futureEnd.GetProperty("past").GetProperty("live").GetBoolean());
+        Assert.NotEqual(JsonValueKind.Null, futureEnd.GetProperty("past").GetProperty("asOf").ValueKind);
     }
 
-    /// <summary>Compact moves the detail into the tooltip; the sample-interval note shows when the span holds fewer than three samples
-    /// and the data-start note when the range starts well before the data; select() refuses a range the page cannot take; the catalog's
+    /// <summary>Compact moves the detail into the tooltip; the sample-interval note shows when the span holds fewer than three samples;
+    /// select() refuses a range the page cannot take; the catalog's
     /// max_hours is the reach; a live range slides on refresh.</summary>
     [Fact]
     public void TheNotesTheReachAndTheClock_FollowTheirInputs()
@@ -228,7 +241,6 @@ public sealed class WebTimeRangeTests
         Assert.Equal(string.Empty, r.GetProperty("compact").GetProperty("detail").GetString());
         Assert.Equal("Past day, Oct 7, 7:01 am - Oct 8, 7:01 am (UTC-04:00)", r.GetProperty("compact").GetProperty("title").GetString());
         Assert.Equal("Data here is collected every 5 minutes.", r.GetProperty("notes").GetProperty("short").GetString());
-        Assert.Equal("Data starts Oct 8, 5:01 am", r.GetProperty("notes").GetProperty("wide").GetString());
 
         var select = r.GetProperty("select");
         Assert.Contains("7 days", select.GetProperty("tooLong").GetString());

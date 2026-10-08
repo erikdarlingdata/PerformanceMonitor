@@ -88,7 +88,7 @@ public sealed class WebPageRangeTests
         Assert.DoesNotContain("STORAGE_GROWTH_REACH_HOURS", src);
         Assert.Contains("view: \"storage_growth\",", src);
         Assert.Contains("view_max_hours", Js("page-range.js"));
-        Assert.Contains("minSpanMs: DAY_MS,", src);
+        Assert.Contains("minSpanMs: 7 * DAY_MS,", src);
         Assert.Contains("stepMs: DAY_MS,", src);
 
         // The reach is the view's, as the tool's own description says; the get_finops catalog entry says 168 for its other views.
@@ -153,7 +153,9 @@ public sealed class WebPageRangeTests
         Assert.Contains("serverCatalog(server).then((catalog) => {", server);
         Assert.Contains("picker.setSampleInterval(collectorIntervalFromCatalog(catalog, tab.collector));", server);
         // The note is set before the keep-the-panels return, so a poll that keeps the grid still gets it.
-        Assert.True(server.IndexOf("  applySampleNote();", StringComparison.Ordinal) < server.IndexOf("if (keepGrid) {", StringComparison.Ordinal));
+        var noteCall = server.IndexOf("  applySampleNote();", StringComparison.Ordinal);
+        Assert.True(noteCall >= 0, "server.js no longer calls applySampleNote().");
+        Assert.True(noteCall < server.IndexOf("if (keepGrid) {", StringComparison.Ordinal));
         // The server's own schedule: the catalog is asked for this server.
         Assert.Contains("\"/api/catalog?server=\" + encodeURIComponent(server)", Js("page-range.js"));
     }

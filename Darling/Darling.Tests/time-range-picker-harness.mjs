@@ -230,8 +230,7 @@ const found = {};
   const detail = byClass(compact.p.node, "trp-detail")[0];
   found.compact = { detail: text(detail), title: compact.p.node.attrs.title };
   const shortOne = make({ spec: tr.relativeSpec(5 * 60000), sampleIntervalMs: 5 * 60000 });
-  const wide = make({ spec: tr.relativeSpec(4 * 3600000), sampleIntervalMs: 5 * 60000, dataStartMs: NOW - 2 * 3600000 });
-  found.notes = { short: text(byClass(shortOne.p.node, "trp-note")[0]), wide: text(byClass(wide.p.node, "trp-note")[0]) };
+  found.notes = { short: text(byClass(shortOne.p.node, "trp-note")[0]) };
   const m = make();
   found.select = { tooLong: m.p.select(tr.relativeSpec(30 * 86400000)), tooShort: m.p.select(tr.relativeSpec(60000)), ok: m.p.select(tr.relativeSpec(3600000)), changes: m.changes.map((c) => c.id) };
 }
@@ -256,6 +255,27 @@ const found = {};
   const second = text(byClass(p.node, "trp-detail")[0]);
   p.setSpec("previous-month");
   found.slides = { first, second, afterSetSpec: text(button), specId: tr.specId(p.spec()) };
+}
+
+/* 12. Review r1 M3: on a live range, editing only the start box keeps the end as "now"; typing an end makes it a fixed pair. */
+{
+  const { root, button, p } = make({ spec: tr.relativeSpec(4 * 3600000) });
+  fire(button, "click");
+  const [from, to] = byClass(root, "trp-pick");
+  const original = from.value;
+  from.value = "2026-10-08T05:00";
+  fire(from, "change");
+  const startOnly = byClass(root, "trp-text")[0].value;
+  to.value = "2026-10-08T07:00";
+  fire(to, "change");
+  found.liveEnd = { original, startOnly, edited: byClass(root, "trp-text")[0].value };
+}
+
+/* 13. Review r1 M2: a fixed range whose end is at or after now is a live range ending now (no as_of); one that has ended keeps its as_of. */
+{
+  const { p } = make({ spec: tr.fixedSpec(NOW - 3 * 3600000, NOW + 3600000) });
+  const past = make({ spec: tr.fixedSpec(NOW - 3 * 3600000, NOW - 3600000) });
+  found.futureEnd = { future: p.window(), past: past.p.window() };
 }
 
 console.log(JSON.stringify(found));

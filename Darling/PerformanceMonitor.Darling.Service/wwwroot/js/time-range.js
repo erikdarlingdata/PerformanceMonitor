@@ -896,12 +896,17 @@ export function minSpanRefusal(spanMs, minSpanMs) {
  * number of hours (at least 1), so the fetch starts at or before the range start and the page trims to the exact pair; `asOf` is
  * the end as ISO text, or null for a live range, whose reads are anchored at the server's own clock.
  */
-export function readWindow(range) {
+export function readWindow(range, nowMs = Date.now()) {
+  /* A fixed range whose end is at or after now is a live range ending now (#5562 review r1 M2): it is sent with no as_of, which a
+     read would refuse as "in the future", and it keeps refreshing until the clock passes the end. */
+  const endsNow = range.live || range.endMs >= nowMs;
+  const endMs = endsNow ? Math.max(range.startMs, Math.min(range.endMs, nowMs)) : range.endMs;
+  const spanMs = endsNow && !range.live ? Math.max(0, endMs - range.startMs) : range.spanMs;
   return {
-    hours: Math.max(1, Math.ceil(range.spanMs / HOUR_MS)),
-    asOf: range.live ? null : new Date(range.endMs).toISOString(),
-    live: range.live,
+    hours: Math.max(1, Math.ceil(spanMs / HOUR_MS)),
+    asOf: endsNow ? null : new Date(range.endMs).toISOString(),
+    live: endsNow,
     startMs: range.startMs,
-    endMs: range.endMs,
+    endMs: endsNow && !range.live ? endMs : range.endMs,
   };
 }

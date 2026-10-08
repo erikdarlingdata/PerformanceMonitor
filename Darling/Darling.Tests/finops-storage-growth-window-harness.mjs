@@ -118,7 +118,7 @@ try {
     options: pickerItems(root, "Window").filter((i) => !i.disabled).map((i) => i.name),
     disabled: pickerItems(root, "Window").filter((i) => i.disabled).map((i) => i.name + ": " + i.why),
     value: pickerText(root, "Window"),
-    refused: { hours: pickRange(root, "Window", "36h"), calendar: pickRange(root, "Window", "last month"), tooLong: pickRange(root, "Window", "120d") },
+    refused: { hours: pickRange(root, "Window", "200h"), calendar: pickRange(root, "Window", "last month"), tooLong: pickRange(root, "Window", "120d"), tooShort: pickRange(root, "Window", "3d"), oneDay: pickRange(root, "Window", "1d") },
   };
 
   // Pick 90 days, then 7 days: each re-reads with days * 24.

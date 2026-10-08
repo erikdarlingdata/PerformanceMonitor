@@ -195,7 +195,9 @@ export const tab = {
       return finopsWindowControl({
         hours: state.days * 24,
         view: "storage_growth",
-        minSpanMs: DAY_MS,
+        /* The server reads hours_back = 24 as its 30-day default and refuses 2 to 6 days (DarlingMcpFinOpsTools.StorageGrowthWindowDaysFor), so the
+           shortest length the picker offers is a week (#5562 review r1 H1). */
+        minSpanMs: 7 * DAY_MS,
         stepMs: DAY_MS,
         onChange: (hours) => {
           state.days = hours / 24;

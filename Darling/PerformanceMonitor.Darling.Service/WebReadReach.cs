@@ -58,7 +58,7 @@ internal sealed record ReadReach(ReadShape Shape, int MaxHours, string? Collecto
 /// (<c>RetentionTierRouter.ClampToTextHorizon</c>), and none of the three opted-in reads carries either.
 /// The raw-table bucketed trends reach <see cref="RawTrendHours"/> (30 days, the raw tables' default retention) once a
 /// timing run on a large store measured a month under 10 seconds (#5562 L4b); a trend not yet timed, or over a table
-/// that keeps less than 30 days, stays at 168 hours. Raising one is a one-line change to its row here, plus its
+/// that keeps less than 30 days on EITHER store type (plain PostgreSQL, or the raw tier a TimescaleDB store drops at four days), stays at 168 hours. Raising one is a one-line change to its row here, plus its
 /// validator call, and nothing else. Alert History is the one list that reaches past a week (ruling R8): its reach is
 /// the alert table's retention, <see cref="AlertHistoryHours"/>, and the read is capped by its row limit.</para>
 /// </summary>
@@ -109,21 +109,23 @@ internal static class WebReadReach
 
         /* Raw-table bucketed trends: 720 hours where the large-store timing run measured a month under 10 s (#5562 L4b;
            each validator names its time). Left at 168: get_current_waits_trend (its waiting_tasks table keeps 7 days),
-           get_server_trend (6 of its 11 metrics were never timed), get_pg_wait_trend (its timing table was empty) and
-           get_pg_query_duration_trend (not timed). get_blocking_stats is uncapped on the MCP side (ValidateUncappedWindow). */
+           get_server_trend (6 of its 11 metrics were never timed), get_pg_wait_trend (its timing table was empty),
+           get_pg_query_duration_trend (not timed), get_perfmon_trend (11.2 s cold at 30 days on a large store: the compressed data is
+           grouped by server only, so the read decodes every counter's name; #5574 tracks the fix) and get_query_heatmap (raw query_stats, which a TimescaleDB
+           store drops at four days, so a month is a window the table cannot fill). get_blocking_stats is uncapped on the MCP side (ValidateUncappedWindow). */
         ["get_blocking_trend"] = Trend("blocked_process_report", RawTrendHours),
         ["get_deadlock_trend"] = Trend("deadlocks", RawTrendHours),
         ["get_lock_wait_trend"] = Trend("wait_stats", RawTrendHours),
         ["get_current_waits_trend"] = Trend("waiting_tasks"),
         ["get_blocking_stats"] = Trend("dmv_blocking_snapshot", RawTrendHours),
         ["get_cpu_utilization"] = Trend("cpu_utilization", RawTrendHours),
-        ["get_query_heatmap"] = Trend("query_stats", RawTrendHours),
+        ["get_query_heatmap"] = Trend("query_stats"),
         ["get_tempdb_trend"] = Trend("tempdb_stats", RawTrendHours),
         ["get_wait_trend"] = Trend("wait_stats", RawTrendHours),
         ["get_file_io_trend"] = Trend("file_io_stats", RawTrendHours),
         ["get_memory_trend"] = Trend("memory_stats", RawTrendHours),
         ["get_server_trend"] = Trend(null),
-        ["get_perfmon_trend"] = Trend("perfmon_stats", RawTrendHours),
+        ["get_perfmon_trend"] = Trend("perfmon_stats"),
         ["get_pg_cpu_utilization"] = Trend("pg_cpu_utilization", RawTrendHours),
         ["get_pg_wait_trend"] = Trend("pg_wait_sampling"),
         ["get_pg_query_duration_trend"] = Trend("pg_statement_stats"),

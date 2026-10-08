@@ -139,11 +139,24 @@ public sealed class WebReadReachLiveTests
             }
 
             /* The raw-table trends reach their table's 30 days (#5562 L4b): 720 is answered, 721 is refused, never clamped. */
-            foreach (var read in new[] { "get_tempdb_trend", "get_query_heatmap", "get_cpu_utilization" })
+            foreach (var read in new[] { "get_tempdb_trend", "get_memory_trend", "get_cpu_utilization" })
             {
-                Assert.DoesNotContain("exceeds maximum", await WebReadAsync(postgres, read, WebReadReach.RawTrendHours));
+                /* No "error" key at all, not merely a message without the ceiling text: a read that failed for another reason must not pass (review L6). */
+                var answered = await WebReadAsync(postgres, read, WebReadReach.RawTrendHours);
+                using (var answeredDoc = JsonDocument.Parse(answered))
+                {
+                    Assert.False(answeredDoc.RootElement.TryGetProperty("error", out _), $"{read} refused its own declared reach: {answered}");
+                }
+
                 var refused = McpHelpers.ErrorMessageOf(await WebReadAsync(postgres, read, WebReadReach.RawTrendHours + 1));
                 Assert.Contains("exceeds maximum of 720 hours (30 days)", refused);
+            }
+
+            /* Raised-then-lowered (#5562 review r1): the perfmon trend (11.2 s cold at 30 days, #5574) and the heatmap (raw query_stats, four days on a TimescaleDB store) stay at 168. */
+            foreach (var read in new[] { "get_perfmon_trend", "get_query_heatmap" })
+            {
+                Assert.Contains("exceeds maximum of 168 hours (7 days)",
+                    McpHelpers.ErrorMessageOf(await WebReadAsync(postgres, read, McpHelpers.MaxHoursBack + 1)));
             }
 
             bodySucceeded = true;

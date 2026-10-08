@@ -60,8 +60,9 @@ globalThis.fetch = async (url) => {
 };
 const readsOf = () => urls.filter((u) => u.includes("/get_alert_history")).map((u) => Object.fromEntries(new URL(u, "http://x").searchParams));
 
+const T0 = Date.now();
 const row = (i, over = {}) => ({
-  alert_time: new Date(Date.UTC(2026, 0, 1, 12, 0, 0) - i * 60000).toISOString(),
+  alert_time: new Date(T0 - 60000 - i * 60000).toISOString(),
   server_id: 1, server_name: "srv-a", stored_server_name: "srv-a", metric_name: "High CPU " + i,
   current_value: 90, threshold_value: 80, severity: "warning", severity_source: "fired", dismissed: false, ...over,
 });
@@ -182,6 +183,15 @@ try {
       alertsReply = { alerts: [row(3)], truncated: false };
       pickRange(main, "Time range", "1h"); await settle();
       out.shrunk = metrics(main);
+    },
+    async trim() {
+      // Review r1 H2: the read takes whole hours, so a 5 or 30 minute range lists only the alerts inside it. Rows are 1, 20 and 90 minutes old.
+      alertsReply = { alerts: [row(0), row(19), row(89)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      out.day = metrics(main);
+      pickRange(main, "Time range", "5m"); await settle(); out.fiveMinutes = metrics(main);
+      pickRange(main, "Time range", "30m"); await settle(); out.thirtyMinutes = metrics(main);
+      pickRange(main, "Time range", "4h"); await settle(); out.fourHours = metrics(main);
     },
     async mute() {
       alertsReply = { alerts: [row(1)], truncated: false };

@@ -235,8 +235,8 @@ internal static class McpHelpers
 
     /// <summary>
     /// <see cref="ValidateWindow(int, string, out DateTime)"/> with the read's own ceiling (#5562): the opt-in a
-    /// bucketed trend read uses to accept a window past <see cref="MaxHoursBack"/>. Lists and rankings do not call
-    /// this; they stay on the 168-hour overload. Refuses, never clamps.
+    /// bucketed trend read uses to accept a window past <see cref="MaxHoursBack"/>. Lists and rankings stay on the
+    /// 168-hour overload, except <c>get_alert_history</c> (a list, ruling R8), which passes its retention. Refuses, never clamps.
     /// </summary>
     public static string? ValidateWindow(int hoursBack, string? asOf, int maxHours, out DateTime endUtc)
     {

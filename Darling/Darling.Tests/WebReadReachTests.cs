@@ -102,14 +102,93 @@ public sealed class WebReadReachTests
             new[]
             {
                 "get_alert_history", "get_blocking_stats", "get_blocking_trend", "get_cpu_utilization", "get_deadlock_trend", "get_file_io_trend",
-                "get_lock_wait_trend", "get_memory_trend", "get_perfmon_trend", "get_pg_cpu_utilization", "get_pg_database_trend", "get_pg_io_trend",
-                "get_procedure_duration_trend", "get_query_duration_trend", "get_query_heatmap", "get_query_store_duration_trend", "get_tempdb_trend",
+                "get_lock_wait_trend", "get_memory_trend", "get_pg_cpu_utilization", "get_pg_database_trend", "get_pg_io_trend",
+                "get_procedure_duration_trend", "get_query_duration_trend", "get_query_store_duration_trend", "get_tempdb_trend",
                 "get_wait_trend",
             },
             WebReadReach.All.Where(kv => kv.Value.MaxHours > McpHelpers.MaxHoursBack).Select(kv => kv.Key).OrderBy(n => n, StringComparer.Ordinal).ToArray());
         Assert.Equal(2160, WebReadReach.RollupTrendHours);
         Assert.Equal(720, WebReadReach.RawTrendHours);
         Assert.Equal(2160, WebReadReach.AlertHistoryHours);
+
+        /* Review r1: get_perfmon_trend (11.2 s cold at 30 days, #5574) and get_query_heatmap (raw query_stats, four days on a TimescaleDB store) stay at a week. */
+        Assert.Equal(McpHelpers.MaxHoursBack, WebReadReach.MaxHoursFor("get_perfmon_trend"));
+        Assert.Equal(McpHelpers.MaxHoursBack, WebReadReach.MaxHoursFor("get_query_heatmap"));
+    }
+
+    /// <summary>
+    /// Review r1 M1: a read's reach never exceeds its table's retention on EITHER store type. The test above checks the
+    /// collector's default retention (plain PostgreSQL); a TimescaleDB store drops the three raw tiers at four days. A read of
+    /// one of those raw tables (not a rollup-routed trend, whose reach is the rollup's) stays at <see cref="McpHelpers.MaxHoursBack"/>
+    /// or less, and the four days is named so a change to it surfaces here.
+    /// </summary>
+    [Fact]
+    public void NoRawTierTableRead_ReachesPastTheTimescaleRawRetention()
+    {
+        Assert.Equal("4 days", PerformanceMonitor.Darling.Storage.TimescaleSupport.RawRetentionInterval);
+        var rawTierTables = PerformanceMonitor.Darling.Storage.TimescaleSupport.RawRelations.ToHashSet(StringComparer.Ordinal);
+        foreach (var (read, reach) in WebReadReach.All)
+        {
+            if (reach.Collector is null || reach.MaxHours == WebReadReach.RollupTrendHours)
+            {
+                continue;
+            }
+
+            var table = CollectorCatalog.All.SingleOrDefault(c => c.Name == reach.Collector)?.TargetTable;
+            if (table is not null && rawTierTables.Contains(table))
+            {
+                Assert.True(
+                    reach.MaxHours <= McpHelpers.MaxHoursBack,
+                    $"{read} reads raw {table}, which a TimescaleDB store drops after four days, but reaches {reach.MaxHours} h.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Review r1 M6: the <c>hours_back</c> description of every MCP tool carries the number its <see cref="WebReadReach"/> row
+    /// holds, so raising or lowering a row cannot leave the description stating the old ceiling. A tool that never capped
+    /// (<c>ValidateUncappedWindow</c>) states no ceiling and is skipped; a tool whose row stays at the default states none either.
+    /// </summary>
+    [Fact]
+    public void EveryRaisedTool_HoursBackDescription_NamesItsRowsNumber_AndNoOtherToolClaimsAHigherOne()
+    {
+        var tools = typeof(WebReadReach).Assembly.GetTypes()
+            .SelectMany(t => t.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+            .Select(m => (Method: m, Attr: (ModelContextProtocol.Server.McpServerToolAttribute?)Attribute.GetCustomAttribute(m, typeof(ModelContextProtocol.Server.McpServerToolAttribute))))
+            .Where(x => x.Attr?.Name is not null)
+            .ToDictionary(x => x.Attr!.Name!, x => x.Method, StringComparer.Ordinal);
+        var uncapped = new[] { "get_blocking_stats" };
+        var raised = 0;
+        foreach (var (read, reach) in WebReadReach.All)
+        {
+            if (!tools.TryGetValue(read, out var method))
+            {
+                continue;
+            }
+
+            var hoursBack = method.GetParameters().SingleOrDefault(p => p.Name == "hours_back");
+            var description = hoursBack is null ? null
+                : ((System.ComponentModel.DescriptionAttribute?)Attribute.GetCustomAttribute(hoursBack, typeof(System.ComponentModel.DescriptionAttribute)))?.Description;
+            if (description is null || Array.IndexOf(uncapped, read) >= 0)
+            {
+                continue;
+            }
+
+            var claim = Regex.Match(description, @"up to (?<n>\d+)");
+            if (reach.MaxHours > McpHelpers.MaxHoursBack)
+            {
+                raised++;
+                Assert.True(claim.Success && claim.Groups["n"].Value == reach.MaxHours.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    $"{read}: hours_back says '{description}' but its WebReadReach row holds {reach.MaxHours}.");
+            }
+            else if (claim.Success)
+            {
+                Assert.True(int.Parse(claim.Groups["n"].Value, System.Globalization.CultureInfo.InvariantCulture) <= reach.MaxHours,
+                    $"{read}: hours_back says '{description}' but its WebReadReach row holds only {reach.MaxHours}.");
+            }
+        }
+
+        Assert.True(raised >= 14, $"Only {raised} raised tools had an hours_back description to check; the reflection missed them.");
     }
 
     /// <summary>

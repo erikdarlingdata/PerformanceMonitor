@@ -32,7 +32,7 @@ public sealed class AlertHistoryRangePageTests
         var page = Page();
         Assert.DoesNotContain("hours_back: 24", page);
         Assert.DoesNotContain("limit: 200 }", page);
-        Assert.Contains("readTool(\"get_alert_history\", readParams())", page);
+        Assert.Contains("readTool(\"get_alert_history\", req.params)", page);
         // #5562: the range is the shared picker's spec, read as of each read; a finished range also sends its end.
         Assert.Contains("const w = windowOfSpec(choices.spec);", page);
         Assert.Contains("hours_back: w ? w.hours : DEFAULT_HOURS", page);
@@ -127,7 +127,7 @@ public sealed class AlertHistoryRangePageTests
         Assert.Equal("srv-b", Get(dismissed, "server_name"));
 
         // The popup offers every preset and calendar period within the catalog's 90 days; the longer ones are greyed out, never clamped.
-        Assert.Equal("Past 5 minutes,Past 15 minutes,Past 30 minutes,Past hour,Past 4 hours,Past day,Past 2 days,Past week,Past 30 days,Today,Yesterday,Week to Date,Previous Week,Month to Date,Previous Month",
+        Assert.Equal("Past 5 minutes,Past 15 minutes,Past 30 minutes,Past hour,Past 4 hours,Past day,Past 2 days,Past week,Past 30 days,Past 90 days,Today,Yesterday,Week to Date,Previous Week,Month to Date,Previous Month",
             string.Join(",", r.GetProperty("windowOptions").EnumerateArray().Select(e => e.GetString())));
         Assert.Equal("Year to Date,Previous Year",
             string.Join(",", r.GetProperty("windowGreyed").EnumerateArray().Select(e => e.GetString())));
@@ -215,6 +215,17 @@ public sealed class AlertHistoryRangePageTests
         Assert.Equal("High CPU 0,High CPU 1,High CPU 2,High CPU 3", string.Join(",", r.GetProperty("after").EnumerateArray().Select(e => e.GetString())));
         Assert.True(r.GetProperty("keptNode").GetBoolean(), "an unchanged row keeps its DOM node across a window change");
         Assert.Equal("High CPU 3", string.Join(",", r.GetProperty("shrunk").EnumerateArray().Select(e => e.GetString())));
+    }
+
+    [Fact]
+    public void ARangeShorterThanTheWholeHoursItFetches_ListsOnlyTheAlertsInsideIt()
+    {
+        var r = Run("trim");
+        string[] Names(string key) => r.GetProperty(key).EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(new[] { "High CPU 0", "High CPU 19", "High CPU 89" }, Names("day"));
+        Assert.Equal(new[] { "High CPU 0" }, Names("fiveMinutes"));
+        Assert.Equal(new[] { "High CPU 0", "High CPU 19" }, Names("thirtyMinutes"));
+        Assert.Equal(new[] { "High CPU 0", "High CPU 19", "High CPU 89" }, Names("fourHours"));
     }
 
     [Fact]
