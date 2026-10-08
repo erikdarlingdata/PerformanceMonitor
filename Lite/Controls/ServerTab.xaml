@@ -207,7 +207,7 @@
                             </Grid>
                         </Border>
                     </Popup>
-                    <ComboBox x:Name="TimeRangeCombo" SelectedIndex="1" Width="120" Margin="0,0,8,0"
+                    <ComboBox x:Name="TimeRangeCombo" AutomationProperties.Name="Time range" SelectedIndex="1" Width="120" Margin="0,0,8,0"
                               SelectionChanged="TimeRangeCombo_SelectionChanged">
                         <ComboBoxItem Content="Last 1 hour"/>
                         <ComboBoxItem Content="Last 4 hours"/>
@@ -234,7 +234,7 @@
                             ToolTip="Apply this time range to all open server tabs"/>
                     <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="CompareToCombo" SelectedIndex="0" Width="130" Margin="0,0,8,0"
+                    <ComboBox x:Name="CompareToCombo" AutomationProperties.Name="Compare to" ToolTipService.ShowOnDisabled="True" SelectedIndex="0" Width="130" Margin="0,0,8,0"
                               SelectionChanged="CompareToCombo_SelectionChanged"
                               ToolTip="Compare current period against a baseline">
                         <ComboBoxItem Content="None"/>
@@ -246,7 +246,7 @@
                     <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
                     <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center" Margin="0,0,4,0"
                               IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
-                    <ComboBox x:Name="AutoRefreshIntervalCombo" SelectedIndex="1" Width="70" Margin="0,0,0,0"
+                    <ComboBox x:Name="AutoRefreshIntervalCombo" AutomationProperties.Name="Auto-refresh interval" SelectedIndex="1" Width="70" Margin="0,0,0,0"
                               SelectionChanged="AutoRefreshInterval_Changed">
                         <ComboBoxItem Content="30s"/>
                         <ComboBoxItem Content="1m"/>
@@ -254,7 +254,7 @@
                     </ComboBox>
                     <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
                     <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="TimeDisplayModeBox" Width="120" SelectionChanged="TimeDisplayMode_SelectionChanged"
+                    <ComboBox x:Name="TimeDisplayModeBox" AutomationProperties.Name="Time display" Width="120" SelectionChanged="TimeDisplayMode_SelectionChanged"
                               ToolTip="How timestamps are displayed">
                         <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
                         <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
@@ -2179,8 +2179,8 @@
                             </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
-                    <!-- Shown only where the running_jobs collector does not collect for this server and the grid has no rows. -->
-                    <TextBlock Grid.Row="2" x:Name="RunningJobsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                    <!-- Says no job is running when the grid has no rows; where the running_jobs collector does not collect for this server, or the login lacks msdb access, the not-collected note or the msdb warning replaces it. -->
+                    <TextBlock Grid.Row="2" x:Name="RunningJobsNoDataMessage" Text="No SQL Agent jobs are running." Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                 </Grid>
             </TabItem>
 

@@ -214,6 +214,13 @@ public partial class ServerTab : UserControl
         QueryStoreComparisonGrid.ItemsSource = sorted;
     }
 
+    /// <summary>
+    /// What the disabled Compare box says when the pointer rests on it (walk finding V10b: it was greyed with a tooltip that WPF never
+    /// showed on a disabled control, so nobody could tell why). It names the tabs <see cref="IsComparisonSupportedOnCurrentTab"/> accepts.
+    /// </summary>
+    internal const string CompareUnavailableToolTip =
+        "Compare works on the Overview tab and on the Top Queries, Top Procedures and Query Store sub-tabs of Queries. It is off on this tab.";
+
     private bool IsComparisonSupportedOnCurrentTab()
     {
         return MainTabControl.SelectedIndex switch
@@ -251,7 +258,7 @@ public partial class ServerTab : UserControl
 
             CompareToCombo.IsEnabled = false;
             CompareToCombo.Opacity = 0.5;
-            CompareToCombo.ToolTip = "Comparison is not available for this tab";
+            CompareToCombo.ToolTip = CompareUnavailableToolTip;
         }
     }
 }

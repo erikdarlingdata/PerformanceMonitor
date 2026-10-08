@@ -1161,7 +1161,10 @@ public partial class ServerTab : UserControl
             await runningJobsTask;
             _runningJobsFilterMgr!.UpdateData(runningJobsTask.Result);
             await RefreshRunningJobsSkippedNoteAsync();
-            ShowEngineGap(RunningJobsNoDataMessage, "running_jobs", runningJobsTask.Result.Count);
+            /* D20: an empty grid says no job is running, unless the login cannot read msdb (then the warning above the grid says
+               why the grid is empty, and "no jobs running" would be a claim nobody checked) or the not-collected note applies. */
+            ShowEngineGap(RunningJobsNoDataMessage, "running_jobs", runningJobsTask.Result.Count,
+                keepsOwnEmptyText: RunningJobsMsdbWarning.Visibility != System.Windows.Visibility.Visible);
         }
         catch (Exception ex)
         {

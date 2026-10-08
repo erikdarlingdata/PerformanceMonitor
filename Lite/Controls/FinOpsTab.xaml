@@ -183,6 +183,11 @@
                         <DataGridTextColumn Header="Finding" Binding="{Binding Finding}" MinWidth="250" Width="Auto"/>
                         <!-- Detail wraps instead of running off the column edge, with the full text in a tooltip. -->
                         <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" MinWidth="400" Width="*">
+                                <DataGridTextColumn.HeaderStyle>
+                                    <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                                        <Setter Property="ToolTip" Value="The full finding text: what was found and why it matters. Hover a row to read it in full."/>
+                                    </Style>
+                                </DataGridTextColumn.HeaderStyle>
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="TextWrapping" Value="Wrap"/>
@@ -192,6 +197,11 @@
                         </DataGridTextColumn>
                         <!-- No savings estimate (no monthly cost set for the server) reads as a dash with a tooltip naming the setting. -->
                         <DataGridTextColumn Header="Est. Savings ($/mo)" Binding="{Binding EstMonthlySavings, StringFormat='${0:N0}', TargetNullValue='-'}" MinWidth="110" Width="Auto" SortMemberPath="EstMonthlySavings">
+                                <DataGridTextColumn.HeaderStyle>
+                                    <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+                                        <Setter Property="ToolTip" Value="Estimated monthly savings in dollars if the finding is acted on, from this server's Monthly Cost. A dash means no estimate: no monthly cost is set."/>
+                                    </Style>
+                                </DataGridTextColumn.HeaderStyle>
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="HorizontalAlignment" Value="Right"/>

@@ -571,10 +571,13 @@ public partial class ServerTab : UserControl
             using var reader = await command.ExecuteReaderAsync();
             var results = new List<QuerySnapshotRow>();
             var snapshotTime = DateTime.UtcNow;
+            /* #4348: this read is the button's own, not the collector's, so the statement text and both plans are judged
+               here, one session (one shared budget) for the whole read. */
+            var scrub = new SensitiveStatements.Session();
 
             while (await reader.ReadAsync())
             {
-                results.Add(ReadLiveSnapshotRow(reader, snapshotTime));
+                results.Add(ReadLiveSnapshotRow(reader, snapshotTime, scrub));
             }
 
             _querySnapshotsFilterMgr!.UpdateData(results);
@@ -604,16 +607,20 @@ public partial class ServerTab : UserControl
     /// <see cref="PerformanceMonitor.Collectors.WaitTypeName"/>): a live row then shows the name a stored row
     /// carries. <c>WaitNameTrimTests</c> drives this method with the spaced name the server returns.
     /// </summary>
-    internal static QuerySnapshotRow ReadLiveSnapshotRow(DbDataReader reader, DateTime snapshotTime)
+    internal static QuerySnapshotRow ReadLiveSnapshotRow(DbDataReader reader, DateTime snapshotTime, SensitiveStatements.Session? scrub = null)
     {
-        var liveQueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
-        var liveActualPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString();
+        /* #4348: the statement text and both plans are judged where they enter the row, as the collector's read does
+           for a stored row (QuerySnapshotsCollector.ReadAsync). A named statement reads as the marker in the grid, in
+           every copy and CSV of it, and in a plan saved from it. */
+        scrub ??= new SensitiveStatements.Session();
+        var liveQueryPlan = reader.IsDBNull(4) ? null : scrub.Xml(reader.GetString(4));
+        var liveActualPlan = reader.IsDBNull(5) ? null : scrub.Xml(reader.GetValue(5)?.ToString());
         return new QuerySnapshotRow
         {
             SessionId = Convert.ToInt32(reader.GetValue(0)),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
             ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
-            QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            QueryText = reader.IsDBNull(3) ? "" : scrub.Text(reader.GetString(3)) ?? "",
             QueryPlan = liveQueryPlan,
             LiveQueryPlan = liveActualPlan,
             /* #4239: this row is never written to the store (CollectionTime is "now", not a
