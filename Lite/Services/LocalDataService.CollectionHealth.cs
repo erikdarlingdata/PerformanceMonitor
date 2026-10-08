@@ -1030,7 +1030,7 @@ internal static class CollectionHealthTime
         ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, rowClock ?? ServerTimeHelper.ActiveServerClock);
 
     internal static string Format(DateTime utc, ServerClock? rowClock) =>
-        ServerTimeHelper.FormatInstant(utc, Zone(rowClock), "g");
+        ServerTimeHelper.FormatInstant(utc, Zone(rowClock), "yyyy-MM-dd HH:mm:ss");
 }
 
 public class CollectionLogRow

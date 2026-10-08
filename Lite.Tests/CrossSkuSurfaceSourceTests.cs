@@ -47,6 +47,7 @@ namespace Lite.Tests;
 /// </summary>
 [Trait("Reads", "Darling")]
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class CrossSkuSurfaceSourceTests
 {
     /// <summary>

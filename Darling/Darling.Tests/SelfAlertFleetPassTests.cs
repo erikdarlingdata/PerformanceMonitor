@@ -186,7 +186,7 @@ public sealed class SelfAlertFleetPassTests
 
         Assert.True(await BecomesTrueAsync(() => harness.Deliverer.Outcomes.Any(o => o.MetricName == "Collection Stopped")));
         var fired = Assert.Single(harness.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
-        Assert.StartsWith("No successful collection in 30 minutes", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.StartsWith("No successful collection in 3 hours", fired.CurrentValue, StringComparison.Ordinal);
         Assert.True(worker.LaunchGuard.IsHolding, "the guard must still be holding when the alert fires");
         Assert.Null(servers[0].InFlightSweep);
     }

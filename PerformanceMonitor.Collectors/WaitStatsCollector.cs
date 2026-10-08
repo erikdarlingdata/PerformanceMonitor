@@ -47,7 +47,7 @@ public sealed class WaitStatsCollector : CollectorDefinitionBase<WaitStatsCollec
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     wait_type = ws.wait_type,
     waiting_tasks_count = ws.waiting_tasks_count,
     wait_time_ms = ws.wait_time_ms,
@@ -63,7 +63,7 @@ OPTION(RECOMPILE);";
        when the target is not Azure SQL DB (BuildQuery), so the Azure text stays the verbatim parity contract. */
     private const string IdentityResultSetText = @"
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     server_start_time = dosi.sqlserver_start_time,
     server_name = @@SERVERNAME
 FROM sys.dm_os_sys_info AS dosi;";

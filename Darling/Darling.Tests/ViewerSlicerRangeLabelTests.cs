@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// must be Lite's call (same method, same instants, same format, so the same culture), and the text that call gives for
 /// the pair is checked on US Eastern (autumn change 2026-11-01 at 06:00 UTC).</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerSlicerRangeLabelTests
 {
     private static readonly ServerClock Eastern = ServerClock.Resolve("Eastern Standard Time", -300);

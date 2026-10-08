@@ -44,7 +44,7 @@ public sealed class CollectionHealthDisplayZoneTests : IDisposable
 
     public CollectionHealthDisplayZoneTests()
     {
-        /* "g" runs on the current culture, as every grid's time does; the invariant one fixes its pattern (MM/dd/yyyy HH:mm). */
+        /* The times are culture-independent (yyyy-MM-dd HH:mm:ss, like every other grid), so this fixture's culture does not matter; the test below proves it. */
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
     }
 
@@ -90,14 +90,14 @@ public sealed class CollectionHealthDisplayZoneTests : IDisposable
         var instant = Utc(2026, 7, 1, 14, 30);
 
         var health = Health(instant, Eastern());
-        Assert.Equal("07/01/2026 10:30", health.LastSuccessFormatted);
-        Assert.Equal("07/01/2026 10:30", health.LastRunFormatted);
-        Assert.Equal("07/01/2026 10:30", health.LastErrorFormatted);
-        Assert.Equal("07/01/2026 10:30", Log(instant, Eastern()).CollectionTimeFormatted);
+        Assert.Equal("2026-07-01 10:30:00", health.LastSuccessFormatted);
+        Assert.Equal("2026-07-01 10:30:00", health.LastRunFormatted);
+        Assert.Equal("2026-07-01 10:30:00", health.LastErrorFormatted);
+        Assert.Equal("2026-07-01 10:30:00", Log(instant, Eastern()).CollectionTimeFormatted);
 
         ServerTimeHelper.ActiveServerClock = Eastern();
-        Assert.Equal("07/01/2026 20:00", Health(instant, India()).LastSuccessFormatted);
-        Assert.Equal("07/01/2026 20:00", Log(instant, India()).CollectionTimeFormatted);
+        Assert.Equal("2026-07-01 20:00:00", Health(instant, India()).LastSuccessFormatted);
+        Assert.Equal("2026-07-01 20:00:00", Log(instant, India()).CollectionTimeFormatted);
     }
 
     /// <summary>
@@ -113,18 +113,36 @@ public sealed class CollectionHealthDisplayZoneTests : IDisposable
         var after = Health(Utc(2026, 11, 1, 7, 30), Eastern());
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.Equal("11/01/2026 01:30 -04:00", first.LastSuccessFormatted);
-        Assert.Equal("11/01/2026 01:30 -05:00", second.LastSuccessFormatted);
-        Assert.Equal("11/01/2026 01:30 -05:00", second.LastRunFormatted);
-        Assert.Equal("11/01/2026 01:30 -05:00", second.LastErrorFormatted);
-        Assert.Equal("11/01/2026 02:30", after.LastSuccessFormatted);
-        Assert.Equal("11/01/2026 01:30 -04:00", Log(Utc(2026, 11, 1, 5, 30), Eastern()).CollectionTimeFormatted);
-        Assert.Equal("11/01/2026 01:30 -05:00", Log(Utc(2026, 11, 1, 6, 30), Eastern()).CollectionTimeFormatted);
+        Assert.Equal("2026-11-01 01:30:00 -04:00", first.LastSuccessFormatted);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", second.LastSuccessFormatted);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", second.LastRunFormatted);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", second.LastErrorFormatted);
+        Assert.Equal("2026-11-01 02:30:00", after.LastSuccessFormatted);
+        Assert.Equal("2026-11-01 01:30:00 -04:00", Log(Utc(2026, 11, 1, 5, 30), Eastern()).CollectionTimeFormatted);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", Log(Utc(2026, 11, 1, 6, 30), Eastern()).CollectionTimeFormatted);
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-        Assert.Equal("11/01/2026 05:30", first.LastSuccessFormatted);
-        Assert.Equal("11/01/2026 06:30", second.LastSuccessFormatted);
-        Assert.Equal("11/01/2026 06:30", Log(Utc(2026, 11, 1, 6, 30), Eastern()).CollectionTimeFormatted);
+        Assert.Equal("2026-11-01 05:30:00", first.LastSuccessFormatted);
+        Assert.Equal("2026-11-01 06:30:00", second.LastSuccessFormatted);
+        Assert.Equal("2026-11-01 06:30:00", Log(Utc(2026, 11, 1, 6, 30), Eastern()).CollectionTimeFormatted);
+    }
+
+    /// <summary>
+    /// F16 of the Lite click-through: Collection Health and Collection Log printed "10/7/2026 7:21 PM" (the current
+    /// culture's short format) while every other grid prints "2026-10-07 19:21:00". The format is fixed, so no culture
+    /// changes it, not even one that reorders the fields.
+    /// </summary>
+    [Theory]
+    [InlineData("en-US")]
+    [InlineData("de-DE")]
+    [InlineData("ja-JP")]
+    public void Times_AreTheSameIsoFormatAsEveryOtherGrid_InAnyCulture(string culture)
+    {
+        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(culture);
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        var instant = Utc(2026, 10, 7, 23, 21);
+
+        Assert.Equal("2026-10-07 19:21:00", Log(instant, Eastern()).CollectionTimeFormatted);
     }
 
     /// <summary>Local mode is this machine's zone, whatever clock the row carries (a summer instant, so no offset).</summary>
@@ -134,7 +152,7 @@ public sealed class CollectionHealthDisplayZoneTests : IDisposable
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
         var instant = Utc(2026, 7, 1, 14, 30);
         var expected = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(instant, DateTimeKind.Utc), TimeZoneInfo.Local)
-            .ToString("g", CultureInfo.InvariantCulture);
+            .ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
         foreach (var clock in new[] { Eastern(), India() })
         {
@@ -150,8 +168,8 @@ public sealed class CollectionHealthDisplayZoneTests : IDisposable
         ServerTimeHelper.ActiveServerClock = Eastern();
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
 
-        Assert.Equal("11/01/2026 01:30 -05:00", Health(Utc(2026, 11, 1, 6, 30), clock: null).LastSuccessFormatted);
-        Assert.Equal("11/01/2026 01:30 -05:00", Log(Utc(2026, 11, 1, 6, 30), clock: null).CollectionTimeFormatted);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", Health(Utc(2026, 11, 1, 6, 30), clock: null).LastSuccessFormatted);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", Log(Utc(2026, 11, 1, 6, 30), clock: null).CollectionTimeFormatted);
 
         var never = new CollectorHealthRow { CollectorName = "wait_stats", Clock = Eastern() };
         Assert.Equal("Never", never.LastSuccessFormatted);

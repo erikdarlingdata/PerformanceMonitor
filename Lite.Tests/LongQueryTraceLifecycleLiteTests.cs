@@ -35,6 +35,7 @@ namespace Lite.Tests;
 /// another reader would drain from under them.</para>
 /// </summary>
 [Collection("app-logger-statics")]
+[Trait("Cost", "Slow")]
 public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
 {
     private readonly List<DuckDbInitializer> _initializers = [];

@@ -732,8 +732,12 @@ ALTER TABLE config.config_notification
     /// privileges and pins <c>search_path</c> to <c>pg_catalog, pg_temp</c>, so it names every object schema-qualified;
     /// and the <c>collect</c> schema's blanket <c>GRANT SELECT ON ALL TABLES</c> covers a table a migration introduces.
     /// Every statement is idempotent, so a second run changes nothing. No index on
-    /// <c>query_store_interval_latest</c> is added here: V153's index on <c>first_execution_time</c> serves the per-day
-    /// builds, whose predicate bounds that column.</para>
+    /// <c>query_store_interval_latest</c> is added here. V153's index on <c>first_execution_time</c> alone serves the
+    /// retention purge, which has no <c>server_id</c>; it does not serve the per-day builds, which bound
+    /// <c>server_id</c> and <c>first_execution_time</c>. That read's index, a btree on
+    /// <c>(server_id, first_execution_time)</c>, is built in the background (#5507,
+    /// <c>QueryStoreBackgroundIndexes.LatestServerFirstExec</c>), not by a rung, because a rung's build would run inside
+    /// the startup transaction and could pass the migration silence limit on a large store.</para>
     /// </summary>
     private const string V168Sql = @"
 /* V168 (#5448): per-day per-plan totals for PLAN_REGRESSION's closed days, and the trigger that marks a day stale when
@@ -860,6 +864,15 @@ BEGIN
     END IF;
 END $$;";
 
+    /// <summary>
+    /// V170 (#5495) — <c>collect.pg_io_stats_hourly</c> and <c>collect.pg_io_stats_hourly_state</c>: the hourly rollup of the
+    /// differenced PostgreSQL I/O counters that <c>get_pg_io_stats</c> and the viewer's I/O tab read for long windows. The text and
+    /// the reasoning are on <see cref="PgIoStatsHourly"/>, which the rung embeds. <b>Both tables are empty when created</b> (the
+    /// data-moving census has nothing to declare): the service's hourly tick fills them (<see cref="PgIoStatsHourlyBuilder"/>), for at
+    /// most <see cref="PgIoStatsHourlyBuilder.TickBudget"/> per tick, and a read stays on raw rows until its window is covered.
+    /// Plain tables, no GRANT (the <c>collect</c> schema's blanket SELECT covers them). <b>No Lite twin:</b> Lite has no PostgreSQL targets.
+    /// </summary>
+    private const string V170Sql = PgIoStatsHourly.CreateSql;
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -1067,6 +1080,7 @@ END $$;";
         new Migration(167, "legacy-pin-candidates", V167Sql),
         new Migration(168, "plan-regression-daily", V168Sql),
         new Migration(169, "aws-per-server-role", V169Sql),
+        new Migration(170, "pg-io-stats-hourly", V170Sql),
     };
 
     /// <summary>

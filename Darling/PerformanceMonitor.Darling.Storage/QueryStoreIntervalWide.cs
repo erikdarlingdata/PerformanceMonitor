@@ -551,7 +551,8 @@ SELECT EXISTS
     /// <c>(server_id, first_execution_time)</c> (#4952), which the service builds in the background rather than a
     /// migration. A read that filters only by <c>collection_time</c> (or <c>interval_start_time_utc</c>) is served by
     /// none of them, so a per-server read walked all of the server's rows; the floor filters the unique key's entries
-    /// before the heap and, where the wide btree exists, is the range that btree scans. The Custom Views route, for all
+    /// before the heap and, where the wide btree exists, is the lower end of the range that btree scans (the upper end is
+    /// <see cref="FirstExecUpperSlackSql"/>, #5523). The Custom Views route, for all
     /// servers or some, does not carry the floor (see <c>ComposeCompiler.BuildFactRelation</c>).
     /// <para><b>Why no row is lost.</b> The collector keeps only intervals with <c>end_time &gt; @cutoff_time</c>,
     /// and the cutoff is never more than <see cref="WatermarkPolicy.MaxCatchup"/> before the row's
@@ -566,6 +567,65 @@ SELECT EXISTS
     /// </summary>
     public static readonly string PurgeEdgeMarginSql =
         $"interval '{(long)Math.Ceiling(PurgeEdgeMargin.TotalMinutes)} minutes'";
+
+    /// <summary>
+    /// How far past a read's window end a row's <c>first_execution_time</c> may sit, for the upper bound the
+    /// per-server reads placed by <c>collection_time</c> carry (#5523). A row is read by its <c>collection_time</c>,
+    /// which the service stamps from its own clock, and <c>first_execution_time</c> is the first execution inside the
+    /// interval by the MONITORED server's clock. So a row collected at or before the window end can hold a
+    /// <c>first_execution_time</c> past it by two things: the monitored clock running AHEAD of the service's, and the
+    /// length of the collection cycle (the cycle stamps <c>collection_time</c> once, at its start, and a later database
+    /// of the cycle is read minutes after that stamp, up to the collector's per-database budget each). Twelve hours
+    /// covers a server whose clock is set to local time in almost any zone, and a long cycle. The trade: a row from a
+    /// server whose clock runs more than this ahead of the service can drop from a closed window. A clock running
+    /// BEHIND is not what this bound is about (<c>WatermarkPolicy.ClampCatchup</c> only raises a watermark that is too
+    /// old, so it is a clock behind that the collector cannot tolerate). The slack only sets where the index range
+    /// ends, so it costs a few more hours of the server's rows read and turns a range that ran to now into a bounded
+    /// one. <see cref="QueryStoreTopDaily.SkewSlack"/> is one hour, because the daily summary is documented as
+    /// approximate; these reads were exact, so theirs is no shorter.
+    /// </summary>
+    public static readonly TimeSpan FirstExecUpperSlack = TimeSpan.FromHours(12);
+
+    /// <summary>
+    /// <see cref="FirstExecUpperSlack"/> as a Postgres interval literal (rounded UP to whole minutes), for the
+    /// <c>first_execution_time &lt;= &lt;window end&gt; + FirstExecUpperSlackSql</c> bound (#5523). With the floor
+    /// (<see cref="PurgeEdgeMarginSql"/>) it makes the <c>first_execution_time</c> range, the range
+    /// <c>ix_query_store_interval_wide_server_first_exec</c> (<c>(server_id, first_execution_time)</c>, #4952) scans,
+    /// finite at both ends: the floor alone ran from the window start to NOW, so a read of a window that ended days
+    /// ago, or the partial first or last day of a long one, walked every row of the server newer than the window.
+    /// </summary>
+    public static readonly string FirstExecUpperSlackSql =
+        $"interval '{(long)Math.Ceiling(FirstExecUpperSlack.TotalMinutes)} minutes'";
+
+    /// <summary>
+    /// The slack either side of a window placed by <c>interval_start_time_utc</c> (#5523, the duration trend's arm 1).
+    /// Both columns are the monitored server's own clock, so unlike <see cref="FirstExecUpperSlack"/> against
+    /// <c>collection_time</c> no cross-clock skew or collection cycle is involved, and an hour is enough. The floor
+    /// <c>first_execution_time &gt;= &lt;window start&gt; - </c> this slack holds because Microsoft documents
+    /// <c>sys.query_store_runtime_stats.first_execution_time</c> as: "First execution time for the query plan within the
+    /// aggregation interval. This is the end time of the query execution." The value is an end time inside the
+    /// interval, so it is never before the interval's start.
+    /// </summary>
+    public static readonly TimeSpan IntervalStartSlack = TimeSpan.FromHours(1);
+
+    /// <summary><see cref="IntervalStartSlack"/> as a Postgres interval literal (whole minutes, rounded up), the
+    /// <c>first_execution_time &gt;= &lt;window start&gt; - IntervalStartSlackSql</c> floor of a read placed by
+    /// <c>interval_start_time_utc</c> (#5523).</summary>
+    public static readonly string IntervalStartSlackSql =
+        $"interval '{(long)Math.Ceiling(IntervalStartSlack.TotalMinutes)} minutes'";
+
+    /// <summary>
+    /// How far a row's <c>first_execution_time</c> may sit from its own <c>interval_start_time_utc</c> and still
+    /// be read by a window placed on that column (#5523): <see cref="IntervalSpanMargin"/> after it (an interval spans
+    /// at most a day and <c>first_execution_time</c> lies inside it) and <see cref="IntervalStartSlack"/> as slack.
+    /// </summary>
+    public static readonly TimeSpan IntervalStartFirstExecMargin = IntervalSpanMargin + IntervalStartSlack;
+
+    /// <summary><see cref="IntervalStartFirstExecMargin"/> as a Postgres interval literal (whole minutes, rounded up),
+    /// the <c>first_execution_time &lt;= &lt;window end&gt; + IntervalStartFirstExecMarginSql</c> bound of a read placed
+    /// by <c>interval_start_time_utc</c> (#5523).</summary>
+    public static readonly string IntervalStartFirstExecMarginSql =
+        $"interval '{(long)Math.Ceiling(IntervalStartFirstExecMargin.TotalMinutes)} minutes'";
 
     /// <summary>True when the server's effective <c>query_store</c> cadence (null: the default) is at most
     /// <see cref="MaxBelowFloorCadence"/> and the largest gap between successive collections near the purge edge is

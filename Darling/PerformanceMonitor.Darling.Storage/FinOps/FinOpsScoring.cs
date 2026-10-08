@@ -51,6 +51,12 @@ public static class FinOpsHealthCalculator
         return (memory * 30 + storage * 30) / 60;
     }
 
+    /// <summary>The badge color of a health score that does not exist (no CPU sample in the window).</summary>
+    public const string NoScoreColor = "#7F8C8D";
+
+    /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
+    public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
+
     public static string ScoreColor(int score) => score switch
     {
         >= 80 => "#27AE60",

@@ -72,10 +72,25 @@ public sealed class ViewerFleetRollupSqlTests
     {
         var sql = ViewerDataService.FleetTotalsSql;
         Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        /* Only the pairs that moved are ordered (#5526), the shape the service's fleet reader carries: the LAG
+           partitions by database inside a server_id = s.server_id filter (the old (server_id, database_name)
+           series), and the single window over the whole fleet's rows (27 s for 30 days on a 50-server store)
+           stays gone. */
+        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PARTITION BY server_id", sql, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(sql, "OVER ("));
+        /* A pair whose counter never takes two values has only zero or NULL differences and adds nothing to the
+           total, so it is dropped before the ordered pass (this read needs no "a counter in every row" half:
+           it returns the total, not the number of differences). */
+        Assert.Contains("HAVING min(deadlocks) <> max(deadlocks)", sql, StringComparison.Ordinal);
+        Assert.Contains("database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
+        /* Both bounds in the pair aggregate AND in the per-server read, so each opens only the window's chunks;
+           the graph-count arm filters on $1/$2 through other column names, so these two are the PostgreSQL arm's. */
+        Assert.Equal(2, CountOccurrences(sql, "collection_time >= $1"));
+        Assert.Equal(2, CountOccurrences(sql, "collection_time <= $2"));
         Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
 
         /* The two halves are ONE column: a second column would let a reader that indexes the deadlock

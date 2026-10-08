@@ -68,6 +68,7 @@ namespace Darling.Tests;
 /// when that one file changes, so it has no exemption.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class CommentFilterAdoptionTests
 {
     /// <summary>

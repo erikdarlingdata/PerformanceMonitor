@@ -56,7 +56,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         var hasCpu = FinOpsUtilizationFigures.HasCpuSample(dto);
         var freePct = totals is { } t ? FinOpsUtilizationFigures.FreeSpacePct(t.AllocatedMb, t.FreeMb) : 100m;
-        var score = FinOpsUtilizationFigures.HealthScore(dto, freePct);
+        var score = FinOpsUtilizationFigures.HealthScoreOrNull(dto, freePct);
         var vcoreEdition = ServerHardwareScope.HardwareIsTheHosts(dto.EngineEdition);
         var noVcores = vcoreEdition && dto.CpuCount <= 0;
         var hasCost = monthly > 0m;
@@ -73,8 +73,8 @@ public sealed partial class DarlingMcpFinOpsTools
                 ? FinOpsUtilizationFigures.Explanation(dto, CultureInfo.InvariantCulture)
                 : "No CPU sample in the last 24 hours, so there is no verdict.",
             health_score = score,
-            health_band = FinOpsUtilizationFigures.HealthBand(score),
-            health_score_note = hasCpu ? null : ServerHardwareScope.HealthScoreWithoutCpuNote,
+            health_band = score is int scoreValue ? FinOpsUtilizationFigures.HealthBand(scoreValue) : null,
+            health_score_note = hasCpu ? null : FinOpsHealthCalculator.NoScoreNote,
             free_space_pct = Math.Round(freePct, 1, MidpointRounding.AwayFromZero),
             free_space_pct_reason = totals is null ? "no database size snapshot" : null,
             cpu = new

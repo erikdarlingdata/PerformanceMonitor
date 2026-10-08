@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// serialized on a clean pass and move its bytes. The descriptions name the field on both SKUs.</description></item>
 /// </list>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class CollectionCaveatsParityTests
 {
     private const string Record = "context.RecordCollectionFailure(";

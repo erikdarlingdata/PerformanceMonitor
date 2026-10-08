@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// The Optimization tab's most-expensive-queries read takes a top N by total CPU. Statements that tie on the total must
 /// not be cut by the engine's whim, so the order ends with every grouping key. Lite carries the same statement.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class FinOpsOptimizationTieBreakTests
 {
     private const string TieBreak = "ORDER BY SUM(delta_worker_time) DESC, database_name, sql_handle, query_text";

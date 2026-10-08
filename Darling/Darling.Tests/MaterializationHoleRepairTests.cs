@@ -131,7 +131,7 @@ public sealed class MaterializationHoleRepairTests
         var sql = TimescaleSupport.MaterializationHoleScanSql(target, ("_timescaledb_internal", "_materialized_hypertable_42"))
             .Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("generate_series($1::timestamp, $2::timestamp, $3::interval)", sql, StringComparison.Ordinal);
-        Assert.Contains("NOT EXISTS (SELECT 1 FROM \"_timescaledb_internal\".\"_materialized_hypertable_42\" AS m WHERE m.bucket = b.bucket OFFSET 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS (SELECT 1 FROM \"_timescaledb_internal\".\"_materialized_hypertable_42\" AS m WHERE m.bucket >= b.bucket AND m.bucket <= b.bucket OFFSET 0)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.query_stats AS s", sql, StringComparison.Ordinal);
         Assert.Contains("s.collection_time >= c.bucket", sql, StringComparison.Ordinal);
         Assert.Contains("s.collection_time < c.bucket + $3::interval", sql, StringComparison.Ordinal);
@@ -417,6 +417,13 @@ public sealed class MaterializationHoleRepairTests
         Assert.EndsWith(")", existsSql, StringComparison.Ordinal);
         Assert.Contains("generate_series(", existsSql, StringComparison.Ordinal);
         Assert.Contains("OFFSET 0", existsSql, StringComparison.Ordinal);
+
+        /* #5521: both bucket probes are range pairs (the equality is estimated from n_distinct and Seq Scans a
+           chunk with few bucket values for a missing bucket), the same text MaterializationHoleScanSql uses. */
+        Assert.Contains("hl.bucket >= hb.bucket AND hl.bucket <= hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.Contains("hs.bucket >= hb.bucket AND hs.bucket <= hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hl.bucket = hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hs.bucket = hb.bucket", existsSql, StringComparison.Ordinal);
     }
 
     /// <summary>

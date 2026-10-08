@@ -93,6 +93,7 @@ namespace Darling.Tests;
 /// allowance: the force-plan bot is not this campaign's to census.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class McpPayloadContractCensusTests
 {
     /* ───────────────────────── the population ───────────────────────── */
@@ -2115,6 +2116,8 @@ public sealed class McpPayloadContractCensusTests
             "SQL Server's own synchronization_health_desc token, PARSED on the way in and banded to HealthSeverity — input vocabulary, never emitted"),
         ("HEALTHY", "DarlingFleetReader.cs",
             "the collector-health row status (the shared NEVER_RUN / NO_PERMISSIONS / FAILING / STALE / WARNING / HEALTHY vocabulary), compared on the way in to count a server's healthy collectors — input vocabulary"),
+        ("HEALTHY", "DarlingGatedCollectorRows.cs",
+            "the collector-health row status (the same shared vocabulary as DarlingFleetReader's), compared on the way in to tell a HEALTHY Always On collector (shown as not applicable on a server without Always On) from a failing one that keeps its log row — input vocabulary, never emitted"),
         ("Unknown", "DarlingMcpTools.cs",
             "audit_config's edition-NAME fallback (Enterprise / Standard / … / Unknown) — a name, spelled as the canon by coincidence"),
         ("Unknown", "McpAnalysisTools.cs",
