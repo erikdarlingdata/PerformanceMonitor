@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using PerformanceMonitor.Ui;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
 using static PerformanceMonitor.Ui.DataGridHelpers;
@@ -104,6 +105,7 @@ public partial class ViewerServerTab
         var data = await _dataService.GetActiveQuerySlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _activeQueriesSlicerData = data;
         _activeQueriesSlicerMetric = "Sessions";
+        EmptyState.Show(ActiveQueriesSlicer, data.Count == 0, "No active query samples in the selected time window.");
         if (data.Count > 0)
             ActiveQueriesSlicer.LoadData(data, "Sessions", startUtc, endUtc);
     }

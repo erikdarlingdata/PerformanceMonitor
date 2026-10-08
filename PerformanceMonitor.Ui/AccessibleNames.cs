@@ -107,6 +107,13 @@ public static class AccessibleNames
         }
     }
 
-    private static System.Collections.IEnumerable LogicalTreeHelperChildren(DependencyObject d) =>
-        d is ContentControl { Content: { } content } ? new[] { content } : LogicalTreeHelper.GetChildren(d);
+    private static System.Collections.IEnumerable LogicalTreeHelperChildren(DependencyObject d)
+    {
+        if (d is ContentControl control && control.Content is not null)
+        {
+            return new[] { control.Content };
+        }
+
+        return LogicalTreeHelper.GetChildren(d);
+    }
 }

@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using PerformanceMonitor.Ui;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -465,6 +466,7 @@ public partial class ViewerServerTab
         var data = await _dataService.GetQueryStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStatsSlicerData = data;
         _queryStatsSlicerMetric = "TotalCpu";
+        EmptyState.Show(QueryStatsSlicer, data.Count == 0, "No query statistics in the selected time window.");
         if (data.Count > 0)
             QueryStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
     }
@@ -493,6 +495,7 @@ public partial class ViewerServerTab
         var data = await _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _procStatsSlicerData = data;
         _procStatsSlicerMetric = "TotalCpu";
+        EmptyState.Show(ProcStatsSlicer, data.Count == 0, "No procedure statistics in the selected time window.");
         if (data.Count > 0)
             ProcStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
     }
@@ -521,6 +524,7 @@ public partial class ViewerServerTab
         var data = await _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStoreSlicerData = data;
         _queryStoreSlicerMetric = "TotalCpu";
+        EmptyState.Show(QueryStoreSlicer, data.Count == 0, "No Query Store data in the selected time window.");
         if (data.Count > 0)
             QueryStoreSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
     }
