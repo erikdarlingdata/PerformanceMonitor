@@ -671,10 +671,29 @@ SELECT query_id, time_bucket('1 day', bucket) AS bucket, sum(s) AS s FROM collec
     private static async Task<NpgsqlConnection> OpenStoreAsync(ScratchPostgres scratch, CancellationToken ct)
     {
         var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, ct), "The live #5551 quiesce tests need TimescaleDB.");
-        return connection;
+        var handedOver = false;
+        try
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            /* #1922: CREATE EXTENSION can terminate the backend it runs on when timescaledb is on disk but not
+               preloaded, so it runs on the probe's own connection, never on the one this method hands back.
+               The store is migrated first, so the extension lands in `collect`, as the product's does. */
+            var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
+            Assert.SkipWhen(!timescaleEnabled, "The live #5551 quiesce tests need TimescaleDB.");
+
+            handedOver = true;
+            return connection;
+        }
+        finally
+        {
+            if (!handedOver)
+            {
+                /* A skip or a failed setup must not leak the connection: the caller never got it to dispose. */
+                await connection.DisposeAsync();
+            }
+        }
     }
 
     /// <summary>The pre-#2007 retired aggregate with a refresh, a compression and a retention job, none due for a day.</summary>
