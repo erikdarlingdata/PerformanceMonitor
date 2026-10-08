@@ -93,6 +93,24 @@ function serverRows(data) {
   return [];
 }
 
+/**
+ * Put the server on screen into the address (#5565). A bare #/finops, or a server with no tab, names no server in the
+ * hash, and the table filters are kept per route, so a filter set while one server was shown would also apply to
+ * whichever server a later bare visit opens on. Rewriting the address to the server and sub-tab form with replaceState
+ * (no hashchange, no history entry) gives every server its own filters. Returns the hash now in force.
+ */
+export function pinFinopsHash(server, tabId) {
+  const target = hashFor(server, tabId);
+  if (typeof location !== "undefined" && location && location.hash !== target && typeof history !== "undefined" && history && typeof history.replaceState === "function") {
+    try {
+      history.replaceState(history.state, "", target);
+    } catch {
+      /* an address that cannot be rewritten leaves the page as it was */
+    }
+  }
+  return target;
+}
+
 function tabBar(server, active) {
   return el(
     "nav",
@@ -162,6 +180,8 @@ export function renderFinops(main, server, tabId, opts) {
     const chosen = row.server_name;
     storedSet(SERVER_KEY, chosen);
     storedSet(TAB_KEY, active.id);
+    /* Before the sub-page builds, so the filter keys of its tables carry the server. */
+    pinFinopsHash(chosen, active.id);
     head.appendChild(el("div", { class: "spacer" }));
     head.appendChild(serverPicker(rows, chosen, active.id));
     setPanelSignal(controller.signal);

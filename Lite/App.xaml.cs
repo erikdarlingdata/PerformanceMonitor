@@ -541,6 +541,9 @@ public partial class App : Application
         var logDirectory = Path.Combine(appDataRoot, "logs");
         AppLogger.Initialize(logDirectory);
 
+        /* #5565: the grids' column filters survive a restart, in a file beside settings.json. */
+        ColumnFilterStore.Install(Path.Combine(ConfigDirectory, "column-filters.json"), message => AppLogger.Warn("ColumnFilterStore", message));
+
         // #3577: re-apply the current theme when theme-overrides.json is edited outside the app.
         ThemeManager.WatchOverridesFile();
 
