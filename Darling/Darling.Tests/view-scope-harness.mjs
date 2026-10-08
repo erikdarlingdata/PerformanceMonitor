@@ -51,6 +51,8 @@ console.log(JSON.stringify({
   noteOnServer: context.panelServerNote({ server: ["sql2025"] }, viewServer),
   noteOnOther: context.panelServerNote({ server: "All", picked: true }, viewServer),
   noteOnOtherNotPicked: context.panelServerNote({ server: ["sql2022"], picked: false }, viewServer),
+  noteOnAllNotPicked: context.panelServerNote({ server: "All", picked: false }, viewServer),
+  noteOnBlankNotPicked: context.panelServerNote({ server: "", picked: false }, viewServer),
   panelSeedVariableAll: seed("p4", sv("All"), viewServer),
   panelSeedVariableReference: seed("p5", sv("$other"), viewServer),
   panelSeedVariableUnknown: seed("p6", sv("nope"), viewServer),

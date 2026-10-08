@@ -157,6 +157,17 @@ public sealed class ViewSavedServerScopeTests
     }
 
     [Theory]
+    [InlineData("noteOnAllNotPicked")]
+    [InlineData("noteOnBlankNotPicked")]
+    public void WhenTheViewsOwnServerSettingIsAllOrBlank_TheNoteSaysAllServers_NotAServer(string scenario)
+    {
+        if (!TryRun(out var r)) return;
+        Assert.Equal(
+            "Showing all servers, as this view's own setting says, instead of SQL2025, the server this view's panels are set to.",
+            r.GetProperty(scenario).GetString());
+    }
+
+    [Theory]
     [InlineData("panelServerEqPlusIn")]
     [InlineData("panelServerEqPlusNeq")]
     public void APanelWithAnyServerFilterBesidesTheOneEq_HasNoPanelServer(string scenario)

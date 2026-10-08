@@ -514,8 +514,11 @@ function panelServerNote(state, panelServer) {
   if (onPanelServer(state, panelServer)) {
     return "This view sets its server: every panel is set to " + panelServer.label + ". Pick another server, or All servers, to replace that for every panel.";
   }
-  return state.picked
-    ? "Showing your pick instead of " + panelServer.label + ", the server this view's panels are set to."
+  if (state.picked) return "Showing your pick instead of " + panelServer.label + ", the server this view's panels are set to.";
+  /* The view's own server variable can be "All" (or blank): then the scope is every server, not a server it names. */
+  const allServers = state.server === "All" || state.server === "" || state.server == null || (Array.isArray(state.server) && state.server.length === 0);
+  return allServers
+    ? "Showing all servers, as this view's own setting says, instead of " + panelServer.label + ", the server this view's panels are set to."
     : "Showing the server this view's own setting names instead of " + panelServer.label + ", the server this view's panels are set to.";
 }
 
