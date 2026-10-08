@@ -168,7 +168,7 @@ public sealed class ScratchPostgresQuiesceCensusTests
     /// included, because the drop statement is itself a literal. Built on <see cref="CSharpSourceWalker"/>, so a
     /// line that merely starts with <c>*</c> inside a literal is still seen, and a comment is never.
     /// </summary>
-    private static string BlankComments(string text)
+    internal static string BlankComments(string text)
     {
         var keep = CSharpSourceWalker.CodeMask(text);
         foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))

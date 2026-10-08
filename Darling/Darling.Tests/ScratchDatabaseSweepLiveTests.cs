@@ -64,7 +64,8 @@ public sealed class ScratchDatabaseSweepLiveTests
         var bodySucceeded = false;
         try
         {
-            await using (var admin = new NpgsqlConnection(baseConnectionString))
+            /* #5549: unpooled, like every connection in this class that creates or drops a database. */
+            await using (var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString)))
             {
                 await admin.OpenAsync(ct);
 
@@ -110,7 +111,7 @@ public sealed class ScratchDatabaseSweepLiveTests
                 await busySession.DisposeAsync();
             }
 
-            await LiveStoreCleanup.RunAsync(baseConnectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            await LiveStoreCleanup.RunAsync(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString!), bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 foreach (var name in planted)
                 {
@@ -209,7 +210,7 @@ public sealed class ScratchDatabaseSweepLiveTests
     }
 
     private static Task DropIfStillThereAsync(string connectionString, string name, bool bodySucceeded) =>
-        LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+        LiveStoreCleanup.RunAsync(ScratchPostgres.UnpooledAdminConnectionString(connectionString), bodySucceeded, async (cleanup, cleanupCt) =>
         {
             /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
             await ScratchPostgres.QuiesceTimescaleJobsAsync(connectionString, name);

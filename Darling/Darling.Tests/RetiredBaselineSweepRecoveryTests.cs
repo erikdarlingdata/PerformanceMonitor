@@ -110,13 +110,13 @@ $fn$", ct);
     /// now staged instead. The refresh job still runs for real, to completion, before the sweep starts. Then the
     /// runner holds what a refresh holds until it commits, <c>ROW EXCLUSIVE</c> on the materialization hypertable
     /// (its DELETE and INSERT), in an open transaction. A <c>lock_timeout</c> on the test's own sweeper session makes
-    /// the drop give up behind that lock instead of waiting it out. That is the drop losing to the job with the
+    /// the first drop give up behind that lock instead of waiting it out (the limit is reset right after that attempt, so the retries run with the server's own). That is the drop losing to the job with the
     /// connection still Open, the shape of the deadlock arm (40P01), on every iteration. The broken-connection arm
     /// (XX000) is pinned by the deterministic test above. The policy stays a day out, so the scheduler never
     /// launches its own refresh beside the drop either.</para>
     /// </summary>
     [Fact]
-    public async Task Sweep_LeavesItsConnectionOpen_WhenARefreshJobRunsDuringTheDrop_AgainstDevPostgres()
+    public async Task Sweep_LeavesItsConnectionOpen_WhenARefreshHoldsALockDuringTheDrop_AgainstDevPostgres()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -171,6 +171,9 @@ $fn$", ct);
                         Assert.Equal(1, log.Lines.Count(l => l.StartsWith("Warning:", StringComparison.Ordinal)
                             && l.Contains("cpu_utilization_baseline", StringComparison.Ordinal)
                             && l.Contains("55P03", StringComparison.Ordinal)));
+                        /* The 500 ms limit was for the attempt that has to lose. Later attempts run with the server's own
+                           lock_timeout, so autovacuum or another job holding a lock briefly does not fail the test. */
+                        await ExecuteAsync(sweeper, "RESET lock_timeout", ct);
                         await inFlight.CommitAsync(ct);
                     }
 
@@ -182,7 +185,6 @@ $fn$", ct);
                     await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
                 }
 
-                await ExecuteAsync(sweeper, "RESET lock_timeout", ct);
                 Assert.True(await ScalarAsync<bool>(sweeper, "SELECT to_regclass('collect.cpu_utilization_baseline') IS NULL AND to_regclass('collect.file_io_baseline') IS NULL", ct),
                     $"iteration {i}: the retired relations survived five sweep attempts: {log.Joined}");
             }
@@ -214,8 +216,9 @@ SELECT server_id, time_bucket('1 hour', collection_time) AS bucket, collection_t
 FROM collect.cpu_utilization_stats
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA", ct);
-        /* The policy is parked a day out in both tests, so the scheduler never launches a refresh while the sweep is
-           dropping the aggregate (#5549). */
+        /* The refresh policy of this fixture's aggregate is parked a day out in both tests, so the scheduler never launches
+           that policy's refresh while the sweep is dropping the aggregate (#5549). It stops only this policy: the other
+           jobs the migration scheduled in the test database still run on their own schedules. */
         const string initialStart = "now() + INTERVAL '1 day'";
         await ExecuteAsync(connection,
             $"SELECT add_continuous_aggregate_policy('collect.cpu_utilization_baseline', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => {initialStart}, if_not_exists => true)", ct);
