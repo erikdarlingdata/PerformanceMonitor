@@ -78,14 +78,22 @@ internal static class QueryStoreRankedHarness
     }
 
     /// <summary>Runs <paramref name="planJson"/> through both compilers over the same context and compares the rows.</summary>
-    internal static async Task<Comparison> CompareAsync(
+    internal static Task<Comparison> CompareAsync(
         NpgsqlConnection connection, string planJson, ComposeRunContext context, Compiler candidate, Compiler oracle,
-        double relativeTolerance, CancellationToken ct)
+        double relativeTolerance, CancellationToken ct) =>
+        CompareAsync(connection, planJson, context, candidate, context, oracle, relativeTolerance, ct);
+
+    /// <summary>The same comparison with a context of its own for each side (#5582 part 3): the stamp route's candidate carries a
+    /// <c>QueryStoreStampThrough</c> and its oracle, the wide-table route, does not.</summary>
+    internal static async Task<Comparison> CompareAsync(
+        NpgsqlConnection connection, string planJson, ComposeRunContext candidateContext, Compiler candidate,
+        ComposeRunContext context, Compiler oracle, double relativeTolerance, CancellationToken ct)
     {
         var plan = Parse(planJson);
-        var (candidateSql, candidateRows) = await RunAsync(connection, plan, context, candidate, ct);
+        var (candidateSql, candidateRows) = await RunAsync(connection, plan, candidateContext, candidate, ct);
         var (oracleSql, oracleRows) = await RunAsync(connection, plan, context, oracle, ct);
-        var width = plan.GroupBy.Count + 2;
+        /* The columns before the value: the groups, plus the bucket for a time series (#5582 part 3 widened this from the ranked time series only). */
+        var width = plan.GroupBy.Count + 1 + (plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries ? 1 : 0);
         var candidateByKey = ByKey(candidateRows, width, out var candidateDuplicate);
         var oracleByKey = ByKey(oracleRows, width, out var oracleDuplicate);
 
