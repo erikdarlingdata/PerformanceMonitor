@@ -378,6 +378,41 @@ public static class DarlingManagedRoles
     }
 
     /// <summary>
+    /// The advisory-lock key every role-provisioning write takes (#5560): "DARLROLE" in ASCII. Distinct from the
+    /// migration lock's key on purpose, so a long migration never makes a provisioning start wait for it.
+    /// </summary>
+    internal const long ProvisioningLockKey = 0x4441524C_524F4C45;
+
+    /// <summary>
+    /// Runs a role-provisioning batch in ONE transaction that first takes <see cref="ProvisioningLockKey"/>
+    /// (#5560). Roles, database privileges and default privileges are rows in shared catalogs, and PostgreSQL does
+    /// not lock the row a GRANT, DROP OWNED or ALTER ROLE rewrites: two sessions rewriting the same row at once
+    /// make the second fail with XX000 "tuple concurrently updated" once the first commits. The service adopts a
+    /// postmaster that is already running, so two services can start against one cluster at once, each running the
+    /// same batch against the same <c>CONNECT</c> ACL and the same roles. The batch is idempotent, so the loser
+    /// has only to wait for the winner: a transaction-scoped lock is released by the commit (or the rollback, or
+    /// the connection dropping), so it can never outlive the pooled connection it was taken on.
+    /// </summary>
+    /// <remarks>
+    /// Takes the CALLER's command rather than SQL text, so each call site keeps spelling its own
+    /// <c>CommandTimeout</c> (the startup-deadline census reads it there); the lock wait runs under the same bound.
+    /// </remarks>
+    internal static async Task ExecuteSerializedAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        var connection = command.Connection ?? throw new ArgumentException("The command has no connection.", nameof(command));
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var acquire = new NpgsqlCommand(
+            $"SELECT pg_advisory_xact_lock({ProvisioningLockKey})", connection, transaction) { CommandTimeout = command.CommandTimeout })
+        {
+            await acquire.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        command.Transaction = transaction;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// The rest of provisioning once each role's password is in hand — shared by
     /// <see cref="EnsureProvisionedAsync"/> and <see cref="EnsureComposeStoreProvisionedAsync"/> (#3914), which
     /// differ only in where the passwords live and in <paramref name="target"/>. Returns the compose
@@ -402,6 +437,7 @@ public static class DarlingManagedRoles
         var stored = await ReadStoredRoleSecretsAsync(connection, logger, cancellationToken);
         var reassert = PlanPasswordReassert(stored, adminPassword, viewerPassword, mcpPassword);
 
+        /* #5560: under the provisioning lock, so a sibling service's batch cannot rewrite the same catalog rows at once. */
         await using var command = new NpgsqlCommand(
             BuildProvisioningSql(
                 ScramSha256Verifier.Create(adminPassword),
@@ -411,7 +447,7 @@ public static class DarlingManagedRoles
                 reassert,
                 target),
             connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        await ExecuteSerializedAsync(command, cancellationToken);
 
         logger.LogInformation(
             "Role passwords: {Reasserted} (sent as SCRAM-SHA-256 verifiers, never as the password)",
@@ -593,10 +629,11 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         try
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            /* #5560: the same lock as provisioning, so a reload cannot rewrite a role row a starting sibling is rewriting. */
             await using var command = new NpgsqlCommand(
                 BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds) + "\n" + BuildComposeTempFileLimitSql(),
                 connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            await ExecuteSerializedAsync(command, cancellationToken);
 
             logger.LogInformation(
                 "Compose statement_timeout re-asserted on the viewer/mcp roles at {Seconds}s, with slow-statement logging at {SlowMs} ms and a temp_file_limit of {TempFileLimit} — takes effect on each role's next session (an already-connected viewer keeps the old ceiling until it reconnects)",
