@@ -2868,11 +2868,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            milliseconds, before any fact row is read. Both callers of this runner (the web endpoint and the MCP tool
            run_custom_view_panel) get it, because it lives in the shared body. Fails open: no built day, or a fault in
            the lookup, never refuses. The range passed is the one the wide table is read for. */
+        DateTime? stampThrough = null;
         if (queryStoreWideEligible)
         {
             var countedStart = wideResolution.WideStart is { } wideReadStart && wideReadStart > start ? wideReadStart : start;
             var limit = QueryStoreWideReadGuard.LimitFor(ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(plan!, start, end, wideResolution.GroupMembers));
-            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken, limit) is { } tooBig)
+            /* #5582 part 3: the hours the rollup answers count at ComposeLimits.StampRowWeight, but only when this panel's text really reads
+               the rollup. A panel it cannot serve compiles to the wide-table text, and keeping the stamp-through would under-count it. */
+            if (wideResolution.StampThrough is not null
+                && ComposeCompiler.ReadsStampRollup(plan!, new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, true, wideResolution.WideStart, QueryStoreStampThrough: wideResolution.StampThrough)))
+            {
+                stampThrough = wideResolution.StampThrough;
+            }
+
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken, limit, stampThrough) is { } tooBig)
             {
                 return ComposeRunOutcome.BadRequest(tooBig);
             }
@@ -2919,7 +2928,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -3060,7 +3069,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
     /// the same rule #3953 already applies to the single-server reads.
     /// </summary>
-    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers)> ResolveQueryStoreWideEligibleAsync(
+    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers, DateTime? StampThrough)> ResolveQueryStoreWideEligibleAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
         DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken, PanelPlan? groupMembersFor = null)
     {
@@ -3143,7 +3152,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? null
                 : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, cancellationToken);
 
-            return (true, wideStart, bound, settingServer, groupMembers);
+            /* #5582 part 3: where the compose rollup stops answering, on this same connection. Null (today's route) on any fault. */
+            var stampThrough = await ResolveQueryStoreStampThroughAsync(connection, wideServers.Select(w => w.Id).ToArray(), wideStart, end, schemaVersion, cancellationToken);
+
+            return (true, wideStart, bound, settingServer, groupMembers, stampThrough);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3151,6 +3163,56 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return default;
         }
     }
+
+    /// <summary>
+    /// #5582 part 3: the first hour of the window the compose rollup (V173) cannot answer. The hours checked run from
+    /// <c>date_trunc('hour', wideStart)</c> to the hour of the window end. An hour is unusable when it is missing from
+    /// <c>query_store_compose_stamp_hours</c> (never built), or when a <c>_built</c> pair for a server in scope has
+    /// <c>built_seq IS DISTINCT FROM late_seq</c> (a late write since the build). The statement's own stale arm covers the
+    /// race between this lookup and the read, so this is only where the rollup arm stops and the wide-table tail starts.
+    /// Null means today's route: the schema is below V173, the very first hour is already unusable (nothing to gain), or
+    /// the lookup faulted (it leans toward the route that needs no rollup). A usable run to the end is capped at the window
+    /// end, because a later instant makes the rollup arm read rows the statement's outer WHERE throws away.
+    /// </summary>
+    internal static async Task<DateTime?> ResolveQueryStoreStampThroughAsync(
+        NpgsqlConnection connection, int[] serverIds, DateTime wideStart, DateTime end, int schemaVersion, System.Threading.CancellationToken cancellationToken)
+    {
+        if (schemaVersion < QueryStoreComposeStamp.RungVersion || end <= wideStart)
+        {
+            return null;
+        }
+
+        try
+        {
+            await using var lookup = new NpgsqlCommand(QueryStoreStampThroughSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(wideStart, DateTimeKind.Unspecified) });
+            lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
+            lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, Value = serverIds });
+            var found = await lookup.ExecuteScalarAsync(cancellationToken);
+            var firstHour = new DateTime(wideStart.Year, wideStart.Month, wideStart.Day, wideStart.Hour, 0, 0, DateTimeKind.Unspecified);
+            var through = found is DateTime unusable ? unusable : end;
+            if (through > end)
+            {
+                through = end;
+            }
+
+            return through <= firstHour || through <= wideStart ? null : DateTime.SpecifyKind(through, DateTimeKind.Unspecified);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "#5582 compose rollup stamp-through lookup", ex);
+            return null;
+        }
+    }
+
+    /// <summary>#5582 part 3: see <see cref="ResolveQueryStoreStampThroughAsync"/>. $1 wide start, $2 window end, $3 server ids in scope.</summary>
+    internal const string QueryStoreStampThroughSql = """
+        SELECT MIN(g.hour)
+        FROM generate_series(date_trunc('hour', $1::timestamp), date_trunc('hour', $2::timestamp), interval '1 hour') AS g(hour)
+        WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours h WHERE h.hour = g.hour)
+           OR EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_built b
+                      WHERE b.hour = g.hour AND b.server_id = ANY($3::integer[]) AND b.built_seq IS DISTINCT FROM b.late_seq)
+        """;
 
     /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a
     /// start later than the window's. Same wording as the MCP top-queries table route, and #4966 the same text for
