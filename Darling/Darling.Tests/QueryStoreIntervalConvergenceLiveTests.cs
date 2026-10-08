@@ -479,6 +479,135 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
     }
 
     [Fact]
+    public async Task AFarFutureLegacyRow_AnHourOfBothLoops_RequestsNoLock_WhileAnAutovacuumLikeLockIsHeld()
+    {
+        /* #5589. A SHARE UPDATE EXCLUSIVE lock stands in for a running autovacuum: any lock request that conflicts with it would wait
+           (and in production cancel the autovacuum). With the newest row beyond the horizon, neither the hourly convergence step nor
+           the background loop's pass (arm, validate, promote, analyze) may request one: every call returns NotReady in well under
+           the 5 s lock_timeout, and a third connection never sees a backend waiting on the legacy table. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var loopConnection = await OpenStoreAsync(scratch, ct);
+        await using var blocker = await OpenStoreAsync(scratch, ct);
+        await using var watcher = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+        QueryStoreIntervalPartitions.ResetFarFutureMaxWarnings();
+
+        await InsertAsync(connection, Wide, new DateTime(2026, 10, 19, 0, 0, 0, DateTimeKind.Unspecified), 1, ct);
+
+        var waiters = 0;
+        var stop = false;
+        var steps = new List<(string What, QueryStoreIntervalPartitions.StepOutcome Outcome, TimeSpan Elapsed)>();
+        Task poll;
+        await using (var hold = await blocker.BeginTransactionAsync(ct))
+        {
+            await ExecAsync(blocker, $"LOCK TABLE {Wide.Legacy} IN SHARE UPDATE EXCLUSIVE MODE", ct);
+
+            poll = Task.Run(
+                async () =>
+                {
+                    while (!Volatile.Read(ref stop))
+                    {
+                        await using var command = new NpgsqlCommand(
+                            $"SELECT count(*) FROM pg_locks WHERE NOT granted AND relation = '{Wide.Legacy}'::regclass;", watcher);
+                        waiters = Math.Max(waiters, (int)(long)(await command.ExecuteScalarAsync(ct))!);
+                        await Task.Delay(20, ct);
+                    }
+                },
+                ct);
+
+            /* The hourly convergence step, a few hours running. */
+            for (var hour = 0; hour < 3; hour++)
+            {
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var step = await QueryStoreIntervalPartitions.ConvergeUnpromotedAsync(connection, Wide, Now.AddHours(hour), logger, ct);
+                steps.Add(("converge", step.Outcome, watch.Elapsed));
+            }
+
+            /* The background loop's own body, through the loop entry: its promotion step is RunPromotionAsync and its analyze step is
+               AnalyzeIfDueAsync, each on its own connection exactly as the production lambdas do. The index ensure is a no-op here: it
+               runs once per start, not hourly. */
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var passes = 0;
+            await QueryStoreIntervalPartitions.RunDelayedAsync(
+                logger,
+                TimeSpan.Zero,
+                TimeSpan.FromMilliseconds(20),
+                OnlyWide,
+                async (table, token) =>
+                {
+                    var watch = System.Diagnostics.Stopwatch.StartNew();
+                    var result = await QueryStoreIntervalPartitions.RunPromotionAsync(loopConnection, table, Now.AddHours(passes), logger, token);
+                    steps.Add(("promotion", result.Outcome, watch.Elapsed));
+                    return result;
+                },
+                async (table, token) =>
+                {
+                    var watch = System.Diagnostics.Stopwatch.StartNew();
+                    var result = await QueryStoreIntervalPartitions.AnalyzeIfDueAsync(loopConnection, table, Now.AddHours(passes), logger, token);
+                    steps.Add(("analyze", result.Outcome, watch.Elapsed));
+                    if (++passes >= 3)
+                    {
+                        cts.Cancel();
+                    }
+
+                    return result;
+                },
+                _ => Task.CompletedTask,
+                cts.Token);
+
+            Volatile.Write(ref stop, true);
+            await poll;
+            await hold.RollbackAsync(ct);
+        }
+
+        Assert.Equal(3, steps.Count(x => x.What == "converge"));
+        Assert.Equal(3, steps.Count(x => x.What == "promotion"));
+        Assert.Equal(3, steps.Count(x => x.What == "analyze"));
+        foreach (var (what, outcome, elapsed) in steps)
+        {
+            Assert.True(outcome == QueryStoreIntervalPartitions.StepOutcome.NotReady, $"{what} ended {outcome} (RetryLater means it requested a conflicting lock)");
+            Assert.True(elapsed < TimeSpan.FromSeconds(3), $"{what} took {elapsed.TotalSeconds:F1} s: it waited on a lock");
+        }
+
+        Assert.Equal(0, waiters);
+        Assert.Equal(1, FarMaxWarnings(logger));
+        Assert.False((await StateAsync(connection, ct)).CheckPresent);
+    }
+
+    [Fact]
+    public async Task ALegacyRowInsideTheHorizon_StillTakesTheArmLock_AndIsRetryLaterWhileAnAutovacuumLikeLockIsHeld()
+    {
+        /* #5589. The pre-check is only a refusal: a maximum inside the horizon goes on to the locked, authoritative arm. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var blocker = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+        QueryStoreIntervalPartitions.ResetFarFutureMaxWarnings();
+
+        await InsertAsync(connection, Wide, new DateTime(2026, 10, 12, 0, 0, 0, DateTimeKind.Unspecified), 1, ct);
+
+        await using (var hold = await blocker.BeginTransactionAsync(ct))
+        {
+            await ExecAsync(blocker, $"LOCK TABLE {Wide.Legacy} IN SHARE UPDATE EXCLUSIVE MODE", ct);
+            var blocked = await QueryStoreIntervalPartitions.ConvergeUnpromotedAsync(connection, Wide, Now, logger, ct);
+            Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.RetryLater, blocked.Outcome);
+            await hold.RollbackAsync(ct);
+        }
+
+        var armed = await QueryStoreIntervalPartitions.ConvergeUnpromotedAsync(connection, Wide, Now, logger, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, armed.Outcome);
+        Assert.True((await StateAsync(connection, ct)).CheckPresent);
+        Assert.Equal(0, FarMaxWarnings(logger));
+    }
+
+    [Fact]
     public async Task ALegacyRowOneMicrosecondInsideTheHorizon_IsArmedOver_AndTheValidatePasses()
     {
         var baseCs = BaseConnectionString;
@@ -744,10 +873,20 @@ public sealed class QueryStoreIntervalConvergencePinTests
 
         /* M1: a far-future legacy maximum is never armed over; the transaction ends before the CHECK is added. */
         Assert.True(
-            arm.IndexOf("IsLegacyMaxBeyondHorizon(", StringComparison.Ordinal) is var m1 && m1 > arm.IndexOf("ReadLegacyMaxAsync(", StringComparison.Ordinal)
+            arm.LastIndexOf("IsLegacyMaxBeyondHorizon(", StringComparison.Ordinal) is var m1 && m1 > arm.IndexOf("ReadLegacyMaxAsync(", StringComparison.Ordinal)
             && m1 < arm.IndexOf("AddCheckSql(", StringComparison.Ordinal),
             "the horizon test sits between the maximum read and the ADD CONSTRAINT");
-        Assert.Contains("RollbackAsync", arm[arm.IndexOf("IsLegacyMaxBeyondHorizon(", StringComparison.Ordinal)..arm.IndexOf("AddCheckSql(", StringComparison.Ordinal)], StringComparison.Ordinal);
+        Assert.Contains("RollbackAsync", arm[arm.LastIndexOf("IsLegacyMaxBeyondHorizon(", StringComparison.Ordinal)..arm.IndexOf("AddCheckSql(", StringComparison.Ordinal)], StringComparison.Ordinal);
+
+        /* #5589: the same test also runs first, on an unlocked read, so a far-future row never requests ACCESS EXCLUSIVE (it would cancel autovacuum). */
+        var firstTest = arm.IndexOf("IsLegacyMaxBeyondHorizon(", StringComparison.Ordinal);
+        Assert.True(firstTest < arm.LastIndexOf("IsLegacyMaxBeyondHorizon(", StringComparison.Ordinal), "the horizon test runs twice");
+        Assert.True(
+            arm.IndexOf("ReadLegacyMaxUnlockedAsync(", StringComparison.Ordinal) is var pre && pre > 0
+            && pre < firstTest && firstTest < arm.IndexOf("BeginTransactionAsync(", StringComparison.Ordinal)
+            && firstTest < arm.IndexOf("ACCESS EXCLUSIVE MODE", StringComparison.Ordinal),
+            "the unlocked read and its horizon test come before the lock transaction");
+        Assert.Contains("WarnFarFutureMax(", arm[firstTest..arm.IndexOf("BeginTransactionAsync(", StringComparison.Ordinal)], StringComparison.Ordinal);
 
         /* L1: the guard is derived from the deadline and the re-arm window. */
         Assert.Contains("ValidateGuard = TimeSpan.FromSeconds(ValidateTimeoutSeconds) + ReArmWithin;", source, StringComparison.Ordinal);
