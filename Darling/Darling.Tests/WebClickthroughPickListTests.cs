@@ -167,13 +167,26 @@ public sealed class WebClickthroughPickListTests
     }
 
     [Fact]
+    public void ANamedColumn_PutsOnlyTheNamedTokensIntoWords_AndLeavesAnErrorsOwnTextAlone()
+    {
+        var r = Run("plainCell");
+        Assert.Equal(
+            "Could not find stored procedure 'dbo.get_orders' (timeout=30, sales_2024); widen the time range or call get_collection_health.",
+            Strings(r.GetProperty("named")).Single());
+        Assert.Contains("call Collection Health", Strings(r.GetProperty("full")).Single());
+    }
+
+    [Fact]
     public void TheCollectorGridsMessageColumns_ArePlain_AndTheQueryStorePageTextNamesNoTool()
     {
         var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
-        foreach (var key in new[] { "last_error", "note_summary", "output_finding", "regression_finding" })
+        foreach (var key in new[] { "note_summary", "output_finding", "regression_finding" })
         {
             Assert.Matches("key: \"" + key + "\"[^}]*plain: true", tabs);
         }
+
+        /* Round-1 M4: a Last Error is a real error message that may echo user data, so only the named-token rules apply. */
+        Assert.Matches("key: \"last_error\"[^}]*plain: \"named\"", tabs);
 
         Assert.DoesNotContain("which is what get_query_trend", tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("no query_store_health capture", tabs, StringComparison.Ordinal);

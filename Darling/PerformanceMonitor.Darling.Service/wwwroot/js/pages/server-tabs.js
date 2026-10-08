@@ -4863,7 +4863,7 @@ const COLLECTOR_COLUMNS = [
   { key: "run_at", label: "Run at", hideWhenEmpty: true },
   { key: "next_run_utc", label: "Next run", format: "time", hideWhenEmpty: true },
   { key: "run_time_note", label: "Run time", wrap: true, hideWhenEmpty: true },
-  { key: "last_error", label: "Last Error", wrap: true, plain: true },
+  { key: "last_error", label: "Last Error", wrap: true, plain: "named" },
   /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
      plainly healthy collector; the same column the two WPF grids carry, so the web view is not the one
      Collection Health surface that still hides it. note_summary, not the raw last_note: it carries the

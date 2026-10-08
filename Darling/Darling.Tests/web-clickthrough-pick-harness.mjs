@@ -282,7 +282,13 @@ const scenarios = {
       const g = modules.panels.VIZ.table({ rows }, { rowsKey: "rows", columns: [{ key: "note", label: "Note", wrap: true, plain }] });
       return all(g, (n) => n.tag === "td").map((n) => n.textContent);
     };
-    return { plain: cellText(true), raw: cellText(false) };
+    /* A Last Error column is marked "named": only the named tokens are put into words, never a count or a get_ word. */
+    const errorRows = [{ note: "Could not find stored procedure 'dbo.get_orders' (timeout=30, sales_2024); widen hours_back or call get_collection_health." }];
+    const namedText = (plain) => {
+      const g = modules.panels.VIZ.table({ rows: errorRows }, { rowsKey: "rows", columns: [{ key: "note", label: "Note", wrap: true, plain }] });
+      return all(g, (n) => n.tag === "td").map((n) => n.textContent);
+    };
+    return { plain: cellText(true), raw: cellText(false), named: namedText("named"), full: namedText(true) };
   },
   plain: async () => ({
     out: JSON.parse(process.env.HARNESS_INPUT).map((t) => modules.plain.plainText(t)),
