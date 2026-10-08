@@ -170,7 +170,8 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
         /* Server B: one snapshot, so the latest probe's two-day window is empty and the fallback finds it. */
         await Size(c, ct, ServerIdB, ServerNameB, anchor.AddDays(-5), "OnlyBeta", 1, 123.75m);
 
-        /* Server C: both at-or-before probes take the fallback; the 7-day point is the latest itself and is dropped. */
+        /* Server C: a baseline is the sample nearest each mark within one day, and neither snapshot (-10d, -40d) is within a day of
+           the 7-day or the 30-day mark, so both growth figures are null. */
         await Size(c, ct, ServerIdC, ServerNameC, anchor.AddDays(-10), "StaleGamma", 1, 600m);
         await Size(c, ct, ServerIdC, ServerNameC, anchor.AddDays(-40), "StaleGamma", 1, 450m);
 

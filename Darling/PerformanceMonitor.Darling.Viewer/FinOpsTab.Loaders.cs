@@ -584,9 +584,14 @@ public partial class FinOpsTab
 
     // ── Server Inventory (cross-server) ──
 
+    /* Newest Server Inventory load wins: a read that finishes after a later one began is dropped (#5492 round 2). */
+    private readonly FinOpsLoadSequence _finopsInventoryLoads = new();
+
     private async Task LoadFinOpsServerInventoryAsync()
     {
-        var servers = await _dataService.GetServerInventoryAsync(FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked));
+        var token = _finopsInventoryLoads.Begin();
+        var includeRemoved = FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked);
+        var servers = await _dataService.GetServerInventoryAsync(includeRemoved);
 
         /* Overlay each server's collected metrics + compute the health score (mirrors Lite's
            LoadServerInventoryAsync minus the live query). memScore/storScore use Lite's inventory-path
@@ -595,6 +600,7 @@ public partial class FinOpsTab
            this loop used to need (#3016) existed only to bound how many PER-SERVER reads ran concurrently,
            and there is now exactly one read total. */
         var metrics = await _dataService.GetServerMetricsAsync();
+        if (!_finopsInventoryLoads.IsCurrent(token)) return;
         foreach (var item in servers)
         {
             if (metrics.TryGetValue(item.ServerId, out var row))
@@ -610,7 +616,7 @@ public partial class FinOpsTab
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);
         FinOpsNoServerInventoryMessage.Visibility = servers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsServerInventoryCountIndicator.Text = servers.Count > 0 ? $"{servers.Count} server(s)" : "";
+        FinOpsServerInventoryCountIndicator.Text = FinOpsServerChoice.InventoryCountText(servers.Count, includeRemoved);
     }
 
     // ── Refresh buttons + time-range combos (all route through the shell's overlap-guarded loop where they

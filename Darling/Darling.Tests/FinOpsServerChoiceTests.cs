@@ -129,6 +129,66 @@ public sealed class FinOpsServerChoiceTests
     public void IncludeRemoved_IsOnlyTheCheckedState(bool? isChecked, bool expected) =>
         Assert.Equal(expected, FinOpsServerChoice.IncludeRemoved(isChecked));
 
+    [Theory]
+    [InlineData(0, false, "")]
+    [InlineData(0, true, "")]
+    [InlineData(3, false, "3 server(s)")]
+    [InlineData(3, true, "3 server(s) (removed servers included)")]
+    public void InventoryCountText_NamesRemovedServers_LikeTheWebPage(int count, bool removed, string expected) =>
+        Assert.Equal(expected, FinOpsServerChoice.InventoryCountText(count, removed));
+
+    /// <summary>Round-2 L4: tick then untick fast. The untick's read ends first; the tick's slow read ends last and must be dropped.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task ASlowerEarlierLoad_ThatFinishesLast_IsDropped()
+    {
+        var sequence = new FinOpsLoadSequence();
+        var applied = new List<string>();
+        var slowRead = new System.Threading.Tasks.TaskCompletionSource();
+        var fastRead = new System.Threading.Tasks.TaskCompletionSource();
+
+        async System.Threading.Tasks.Task Load(string label, System.Threading.Tasks.TaskCompletionSource read)
+        {
+            var token = sequence.Begin();
+            await read.Task;
+            if (!sequence.IsCurrent(token)) return;
+            applied.Add(label);
+        }
+
+        var ticked = Load("removed included", slowRead);
+        var unticked = Load("removed left out", fastRead);
+        fastRead.SetResult();
+        await unticked;
+        slowRead.SetResult();
+        await ticked;
+
+        Assert.Equal(["removed left out"], applied);
+    }
+
+    [Fact]
+    public void OnlyTheLoadThatBeganLast_IsCurrent()
+    {
+        var sequence = new FinOpsLoadSequence();
+        var first = sequence.Begin();
+        Assert.True(sequence.IsCurrent(first));
+        var second = sequence.Begin();
+        Assert.False(sequence.IsCurrent(first));
+        Assert.True(sequence.IsCurrent(second));
+    }
+
+    [Fact]
+    public void TheInventoryLoader_UsesTheSequenceAndTheCountHelper()
+    {
+        var loaders = ViewerFile("FinOpsTab.Loaders.cs");
+        var load = loaders[loaders.IndexOf("private async Task LoadFinOpsServerInventoryAsync()", StringComparison.Ordinal)..];
+        load = load[..load.IndexOf("// ── Refresh buttons", StringComparison.Ordinal)];
+        Assert.Contains("_finopsInventoryLoads.Begin()", load, StringComparison.Ordinal);
+        Assert.True(load.IndexOf("IsCurrent(token)", StringComparison.Ordinal) > load.IndexOf("GetServerMetricsAsync()", StringComparison.Ordinal),
+            "the staleness check runs after the last await");
+        Assert.True(load.IndexOf("IsCurrent(token)", StringComparison.Ordinal) < load.IndexOf("UpdateData(servers)", StringComparison.Ordinal),
+            "a superseded load must not reach the grid");
+        Assert.Contains("FinOpsServerChoice.InventoryCountText(servers.Count, includeRemoved)", load, StringComparison.Ordinal);
+    }
+
     // ── Wiring, pinned against the source ──
 
     private static string ViewerFile(string name, [CallerFilePath] string thisFile = "") =>
@@ -170,7 +230,8 @@ public sealed class FinOpsServerChoiceTests
         Assert.DoesNotContain("IsChecked=\"True\"", tag, StringComparison.Ordinal);
 
         var loaders = ViewerFile("FinOpsTab.Loaders.cs");
-        Assert.Contains("GetServerInventoryAsync(FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked))", loaders, StringComparison.Ordinal);
+        Assert.Contains("var includeRemoved = FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked);", loaders, StringComparison.Ordinal);
+        Assert.Contains("GetServerInventoryAsync(includeRemoved)", loaders, StringComparison.Ordinal);
 
         var service = ViewerFile("ViewerDataService.FinOps.Inventory.cs");
         Assert.Contains("includeRemoved: includeRemoved", service, StringComparison.Ordinal);

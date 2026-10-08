@@ -64,7 +64,7 @@ export function dockPanelUnderRow(host, panel) {
     if (docked.get(host) !== state) return;
     if (state.seen && !host.isConnected) { release(host); return; }
     fitSpacer(host, spacer, panel);
-    watchRowAndWrap(host, panel, state, fit);
+    watchRowAndWrap(host, panel, state);
     pinPanel(host, panel);
   };
   if (typeof ResizeObserver === "function") {

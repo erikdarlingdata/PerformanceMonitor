@@ -78,4 +78,24 @@ internal static class FinOpsServerChoice
 
     /// <summary>The reader's <c>include_removed</c> flag for the Server Inventory "Show removed servers" checkbox: on only when checked, off when unchecked or unset.</summary>
     internal static bool IncludeRemoved(bool? showRemovedChecked) => showRemovedChecked == true;
+
+    /// <summary>The Server Inventory "N server(s)" line, with the web page's "(removed servers included)" when the box was ticked for the read that produced the list. Blank for an empty list.</summary>
+    internal static string InventoryCountText(int count, bool removedIncluded) =>
+        count > 0 ? $"{count} server(s)" + (removedIncluded ? " (removed servers included)" : "") : "";
+}
+
+/// <summary>
+/// Newest request wins (#5492 round 2), the Viewer's form of the web FinOps tab's <c>seq</c> guard. Each load takes a
+/// token before its reads; when the reads finish it applies its result only if no later load has begun, so a slow read
+/// for "Show removed servers" ticked that finishes after the box was cleared cannot put removed servers back in the grid.
+/// </summary>
+internal sealed class FinOpsLoadSequence
+{
+    private int _latest;
+
+    /// <summary>Starts a load and returns its token. Every earlier token stops being current.</summary>
+    internal int Begin() => System.Threading.Interlocked.Increment(ref _latest);
+
+    /// <summary>True while no load newer than <paramref name="token"/> has begun.</summary>
+    internal bool IsCurrent(int token) => System.Threading.Volatile.Read(ref _latest) == token;
 }
