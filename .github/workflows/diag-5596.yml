@@ -16,8 +16,13 @@ permissions:
 
 jobs:
   diag:
+    name: diag (WPF switch ${{ matrix.wpfswitch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        wpfswitch: [on, off]
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
 
@@ -51,6 +56,12 @@ jobs:
           $err = Join-Path $env:RUNNER_TEMP 'suite-err.txt'
           $beat = Join-Path $env:RUNNER_TEMP 'diag5596-heartbeat.txt'
           $env:DIAG_5596 = '1'
+          if ('${{ matrix.wpfswitch }}' -eq 'off') {
+              $rc = Join-Path (Split-Path $exe) 'Darling.Tests.runtimeconfig.json'
+              (Get-Content $rc) | Where-Object { $_ -notmatch 'DoNotInvokeInWeakEventTableShutdownListener' } | Set-Content $rc
+              Write-Host "switch removed from $rc (baseline run)"
+          }
+          Write-Host "runtimeconfig has switch: $((Get-Content (Join-Path (Split-Path $exe) 'Darling.Tests.runtimeconfig.json') -Raw) -match 'DoNotInvokeInWeakEventTableShutdownListener')"
           $p = Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
           Write-Host "started pid $($p.Id)"
           $dumped = $false
@@ -87,7 +98,14 @@ jobs:
           Write-Host "exit code $($p.ExitCode) after $($sw.Elapsed), now $((Get-Date).ToUniversalTime().ToString('HH:mm:ss.fff')) UTC"
           Get-Content $out | Select-String -Pattern 'Total:|\[FAIL\]|Waiting 10|FATAL' | Select-Object -First 20 | ForEach-Object { Write-Host $_.Line }
           Get-Content $err -Tail 20 | ForEach-Object { Write-Host $_ }
-          Write-Host '::group::heartbeat tail'
-          if (Test-Path $beat) { Get-Content $beat -Tail 60 | ForEach-Object { Write-Host $_ } } else { Write-Host 'no heartbeat file' }
+          Write-Host '::group::heartbeat summary'
+          if (Test-Path $beat) {
+              $lines = Get-Content $beat
+              $lines | Where-Object { $_ -notmatch 'handler: ' -and $_ -notmatch ' beat ' } | Select-Object -First 30 | ForEach-Object { Write-Host $_ }
+              Write-Host 'handlers by target:'
+              $lines | Where-Object { $_ -match 'handler: ' } | ForEach-Object { ($_ -replace '^[0-9:.]+\s+','') } | Group-Object | Sort-Object Count -Descending | Select-Object -First 12 | ForEach-Object { Write-Host ("{0} x {1}" -f $_.Count, $_.Name) }
+              Write-Host 'last beats:'
+              $lines | Where-Object { $_ -match ' beat ' } | Select-Object -Last 4 | ForEach-Object { Write-Host $_.Substring(0, [Math]::Min(300, $_.Length)) }
+          } else { Write-Host 'no heartbeat file' }
           Write-Host '::endgroup::'
           exit 0
