@@ -16,6 +16,11 @@ on:
         type: boolean
         required: false
         default: true
+      altcover_probe:
+        description: 'Run the AltCover per-test coverage probe job (#5459). Off by default and never set by the scheduled re-dispatch; it only measures, publishes nothing and gates nothing.'
+        type: boolean
+        required: false
+        default: false
 
 # Read-only by default; the release-publishing steps (gh release, the ghcr push, cosign, the
 # provenance attestation) run only in the publish job below, which declares its own write
@@ -598,6 +603,213 @@ jobs:
             ${{ runner.temp }}/darling-pg.log
             ${{ runner.temp }}/darling-cluster-logs/**
             TestResults/
+          if-no-files-found: ignore
+          overwrite: true
+
+  # ── AltCover per-test coverage probe (#5459, change 4 slice 2) ───────────────────────────────────
+  # Dispatch-only and off by default: the scheduled re-dispatch never sets `altcover_probe`, so the
+  # nightly never runs this. It answers one question for the class-to-file map the PR test selection
+  # would read: can AltCover (--callContext on [Fact]/[Theory]) give a per-test-class list of product
+  # source files for the Darling xUnit v3 project on .NET 10, at what overhead, and with what holes?
+  # It runs about 100 classes (plain, TestHost/web, live PostgreSQL) once plain and once instrumented,
+  # and uploads the raw OpenCover report plus a summary and the schema-1 `classes` map for those
+  # classes. Nothing here publishes or gates, and no job lists it in `needs`.
+  # Dispatch on a branch with:
+  #   gh workflow run nightly.yml --ref <branch> -f altcover_probe=true -f publish=false
+  altcover-probe:
+    name: AltCover per-test coverage probe
+    if: github.event_name == 'workflow_dispatch' && inputs.altcover_probe == true
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      # Pinned: a probe whose tool floats cannot be compared run to run.
+      ALTCOVER_VERSION: '9.0.145'
+      PROBE_BIN: ${{ github.workspace }}\Darling\Darling.Tests\bin\Release\net10.0-windows
+      PROBE_OUT: ${{ runner.temp }}\altcover-probe
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      - name: Restore Darling.Tests
+        run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+
+      - name: Build Darling.Tests
+        run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      # The same throwaway cluster the darling-pg job stands up (CiClusterWorkerSizingTests compares the
+      # appended settings of both jobs), so the live classes in the sample behave as they do there.
+      - name: Initialize and start throwaway PostgreSQL
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          $logFile = "$env:RUNNER_TEMP\darling-pg.log"
+          & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
+          if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
+          if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
+          & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
+          if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
+
+      - name: Install AltCover (pinned)
+        shell: pwsh
+        run: |
+          dotnet tool install altcover.global --version $env:ALTCOVER_VERSION --tool-path "$env:RUNNER_TEMP\altcover-tool"
+          if ($LASTEXITCODE -ne 0) { throw "altcover install failed ($LASTEXITCODE)" }
+          New-Item -ItemType Directory -Force -Path $env:PROBE_OUT | Out-Null
+
+      # About 100 classes, spread over plain unit classes, TestHost/web classes and live PostgreSQL
+      # classes, taken from the built assembly's own class listing (Stage=Guard classes read source text
+      # and never run product code, so they are left out).
+      - name: Choose the sample classes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = @(& "$env:PROBE_BIN\Darling.Tests.exe" -list classes/json -trait- Stage=Guard)
+          if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count)" }
+          Set-Content -Path "$env:PROBE_OUT\all-classes.json" -Value $json[0]
+          python .github/scripts/altcover-probe.py select --list "$env:PROBE_OUT\all-classes.json" --tests-dir Darling/Darling.Tests --root . --total 100 --web 25 --live 12 --out "$env:PROBE_OUT\classes.txt" --manifest "$env:PROBE_OUT\manifest.json"
+          if ($LASTEXITCODE -ne 0) { throw "class selection failed ($LASTEXITCODE)" }
+
+      # Baseline: the same classes, un-instrumented. Failures here are recorded, not fatal: this is a
+      # measurement, and a class that fails plain is a hole in the comparison, not in the tool.
+      - name: Run the sample classes (plain)
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $classes = @(Get-Content "$env:PROBE_OUT\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:PROBE_BIN\Darling.Tests.exe" @classArgs -xml "$env:PROBE_OUT\plain.xml"
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "plain run: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s for $($classes.Count) classes"
+          @{ plain_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); plain_exit = $code; classes = $classes.Count } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-plain.json"
+          exit 0
+
+      # Instrument IN PLACE (originals saved aside): the tests locate the repository by walking up from
+      # their own directory, so an instrumented copy outside the checkout would read nothing. Product,
+      # test and Lite assemblies only; every NuGet dependency stays un-instrumented. --methodpoint keeps
+      # one visit record per method, which is all a file-level map needs.
+      - name: Instrument the assemblies (AltCover, callContext on Fact and Theory)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" --inplace --inputDirectory $env:PROBE_BIN --outputDirectory "$env:PROBE_OUT\saved" `
+            --report "$env:PROBE_OUT\coverage.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" --methodpoint `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Tee-Object -FilePath "$env:PROBE_OUT\altcover-instrument.log" | Select-Object -Last 15
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "instrument: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+          @{ instrument_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrument_exit = $code } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-instrument.json"
+          if ($code -ne 0) { throw "altcover instrumentation failed ($code)" }
+
+      - name: Run the sample classes (instrumented, AltCover runner)
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $classes = @(Get-Content "$env:PROBE_OUT\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" Runner --recorderDirectory $env:PROBE_BIN --workingDirectory $env:PROBE_BIN --executable "$env:PROBE_BIN\Darling.Tests.exe" -- @classArgs -xml "$env:PROBE_OUT\instrumented.xml" 2>&1 | Tee-Object -FilePath "$env:PROBE_OUT\altcover-run.log" | Select-Object -Last 25
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "instrumented run: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+          @{ instrumented_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrumented_exit = $code } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-instrumented.json"
+          exit 0
+
+      - name: Summarize the coverage (map for the sampled classes)
+        if: always()
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $timing = @{}
+          foreach ($name in 'plain', 'instrument', 'instrumented') {
+            $file = "$env:PROBE_OUT\timing-$name.json"
+            if (Test-Path $file) { (Get-Content $file -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $timing[$_.Name] = $_.Value } }
+          }
+          $timing | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing.json"
+          $report = "$env:PROBE_OUT\coverage.xml"
+          if (-not (Test-Path $report)) { Write-Host "::warning::no coverage report was produced"; exit 0 }
+          $item = Get-Item $report
+          Write-Host "coverage.xml: $($item.Length) bytes"
+          python .github/scripts/altcover-probe.py summarize --report $report --root $env:GITHUB_WORKSPACE --manifest "$env:PROBE_OUT\manifest.json" --plain-xml "$env:PROBE_OUT\plain.xml" --instr-xml "$env:PROBE_OUT\instrumented.xml" --timing "$env:PROBE_OUT\timing.json" --tool "altcover $env:ALTCOVER_VERSION" --summary-out "$env:PROBE_OUT\summary.json" --map-out "$env:PROBE_OUT\test-map-probe.json" | Select-Object -First 80
+          if (Test-Path "$env:PROBE_OUT\summary.json") {
+            "### AltCover probe" | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```json' | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content "$env:PROBE_OUT\summary.json" -TotalCount 120 | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+          exit 0
+
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+          exit 0
+
+      - name: Upload the raw coverage and the summary
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: altcover-probe
+          path: |
+            ${{ runner.temp }}/altcover-probe/coverage.xml
+            ${{ runner.temp }}/altcover-probe/summary.json
+            ${{ runner.temp }}/altcover-probe/test-map-probe.json
+            ${{ runner.temp }}/altcover-probe/manifest.json
+            ${{ runner.temp }}/altcover-probe/classes.txt
+            ${{ runner.temp }}/altcover-probe/timing.json
+            ${{ runner.temp }}/altcover-probe/plain.xml
+            ${{ runner.temp }}/altcover-probe/instrumented.xml
+            ${{ runner.temp }}/altcover-probe/altcover-*.log
+          retention-days: 7
           if-no-files-found: ignore
           overwrite: true
 
