@@ -178,6 +178,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **Lite keeps query stats and Query Store stats in one archive file per day** ([#5482])
 - **The plan regression check in Darling reads stored per-day totals for closed days** ([#5467])
 - **procedure_stats now fetches plans only for plans the collector has not stored** ([#5502])
+- **Recommendations skip databases that are a secondary copy on this node** ([#5564])
 
 ### Fixed
 
@@ -301,6 +302,16 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **Small fixes across Lite and the Darling Viewer from the final release walk: Collector Schedules wording, Server Inventory health, time columns, screen-reader names and FinOps dashes** ([#5542])
 - **Lite's Job History tab reads only the selected time range, and tab loads no longer wait on the database from the window** ([#5553])
 - **Darling stops a rollup's refresh jobs before it drops the rollup** ([#5552])
+- **The Darling Viewer's Top Queries, Top Procedures and Query Store tabs load faster over a network** ([#5556])
+- **Two services starting against one PostgreSQL store no longer fail each other's role provisioning** ([#5566])
+- **The Query Store interval purge finishes on a large store** ([#5572])
+- **Running Jobs in Lite and the Viewer, and the get_running_jobs tool, list only jobs the collector's latest successful run found** ([#5554])
+- **Each File I/O chart draws its own ten files, so Read Latency no longer goes blank when logs are busiest** ([#5554])
+- **Lite's own queries no longer top Top Queries by Duration or Query Store by Duration** ([#5554])
+- **The Live Snapshot button and the Get Actual Plan buttons in Lite judge statement text and plans with the screens' statement filter** ([#5554])
+- **Select All in the Databases filter, or ticking every collected database, now means All** ([#5554])
+- **Empty server-tab grids in Lite and the Viewer say why they are empty, and screen readers get names for toolbar combos and plan operators** ([#5554])
+- **The web dashboard's footer time, Job History messages, saved views, offline fleet cards and service log read correctly** ([#5554])
 
 ## [3.9.0] - 2026-10-02
 
@@ -5142,3 +5153,8 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5544]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5544
 [#5552]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5552
 [#5553]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5553
+[#5554]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5554
+[#5556]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5556
+[#5564]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5564
+[#5566]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5566
+[#5572]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5572
