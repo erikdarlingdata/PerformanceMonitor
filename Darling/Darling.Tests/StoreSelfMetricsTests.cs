@@ -635,11 +635,12 @@ public sealed class StoreSelfMetricsTests
                     continue;
                 }
 
-                var lines = text.Split('\n');
+                /* Comments are blanked by the shared walker, not a line-prefix filter, so a // note or a block comment that names RowCount is not read as a use. */
+                var lines = CSharpSourceWalker.StripCommentsAndStrings(text).Split('\n');
                 for (var i = 0; i < lines.Length; i++)
                 {
                     var line = lines[i].Trim();
-                    if (!Regex.IsMatch(line, @"\bRowCount\b") || line.StartsWith("///", StringComparison.Ordinal))
+                    if (!Regex.IsMatch(line, @"\bRowCount\b"))
                     {
                         continue;
                     }
