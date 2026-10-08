@@ -693,6 +693,8 @@ jobs:
               - 'Lite/**/*.csproj'
               # #4966: Darling.Tests' CommentFilterAdoptionTests reads this Lite.Tests file, so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/DataStartBannerQueriesTabTests.cs'
+              # #5562: same, for the Lite.Tests file CommentFilterAdoptionTests lists as a stated bound.
+              - 'Lite.Tests/LiteTimeRangeGapTests.cs'
             # #5459 cut 3a: the part of `darling` that is NOT a Lite file. A diff that reaches `darling` through
             # these (or core, root, a release) runs the whole Darling suite; a diff that reaches it only through the
             # Lite entries above runs the Stage=Guard classes and the classes tagged Reads=Lite, which are the ones
