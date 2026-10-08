@@ -157,7 +157,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
 
         /* Scoped to this scratch database by name, so a class running in parallel against another database is
            invisible to the count. */
-        using var floorReads = new NpgsqlCommandCounter(scratch.DatabaseName, "table_is_hypertable", "raw_floor");
+        using var floorReads = new NpgsqlCommandCounter(scratch.DatabaseName, "raw_floor");
         using var controlReads = new NpgsqlCommandCounter(scratch.DatabaseName, "fleet_floor_count_control");
         await using (var control = postgres.CreateCommand("SELECT 1 AS fleet_floor_count_control"))
         {
@@ -191,7 +191,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
 
         /* A literal end before applied_through refuses at the step ahead of the floors read. */
         var literalEnd = S.AddHours(13);
-        using var floorReads = new NpgsqlCommandCounter(scratch.DatabaseName, "table_is_hypertable", "raw_floor");
+        using var floorReads = new NpgsqlCommandCounter(scratch.DatabaseName, "raw_floor");
         using var controlReads = new NpgsqlCommandCounter(scratch.DatabaseName, "fleet_floor_count_control");
         await using (var control = postgres.CreateCommand("SELECT 1 AS fleet_floor_count_control"))
         {
