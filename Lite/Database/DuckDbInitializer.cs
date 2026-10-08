@@ -815,8 +815,15 @@ public partial class DuckDbInitializer : IDisposable
             /* No key for query_store_stats: its rows are cumulative snapshots of an interval, the open interval is
                read again every cycle by design, and every reader takes the latest snapshot per interval or plan. */
             /* sysjobhistory.instance_id: a unique monotonic IDENTITY per server that survives
-               sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark. */
-            ["job_history"] = "server_id, instance_id",
+               sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark.
+               run_datetime is in the key so DuckDB can run a reader's run_datetime filter BELOW the window
+               (#5457): DuckDB moves a filter under a window only when the filter reads nothing but PARTITION BY
+               columns. Keyed on (server_id, instance_id) alone, every Job History read sorted the server's whole
+               archive, message text included, before it could drop a row: on a 30-server store that took a
+               per-server read from 0.7 s to 11 s and ran Lite's 1 GB cap out of memory. It does not change
+               which copies collapse: run_datetime is worked out on the server from the msdb row's own run_date
+               and run_time, which never change for an instance_id, so every copy of a run carries the same value. */
+            ["job_history"] = "server_id, instance_id, run_datetime",
             /* The default trace's EventSequence is unique within a trace; pairing it with event_time
                (the StartTime watermark) keeps events distinct across the server restarts that reset
                EventSequence, and groups identical re-collected rows (NULLs included) for dedup. */
