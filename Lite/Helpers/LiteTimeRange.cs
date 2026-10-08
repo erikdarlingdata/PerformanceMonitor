@@ -51,8 +51,11 @@ internal static class LiteTimeRange
     /// read can return rows newer than a range that ended earlier. <paramref name="fallbackHours"/> when the held range
     /// cannot be used at this moment ('Today' in the first minutes after midnight).
     /// </summary>
-    internal static int HoursBackOf(TimeRangePicker picker, int fallbackHours) =>
-        picker.Resolve() is { } range ? WindowFor(range).hoursBack : fallbackHours;
+    internal static int HoursBackOf(TimeRangePicker picker, int fallbackHours)
+    {
+        var range = picker.Resolve();
+        return range != null ? WindowFor(range).hoursBack : fallbackHours;
+    }
 
     /// <summary>True when <paramref name="range"/> carries its own instants rather than 'the last N hours'.</summary>
     internal static bool HasExplicitInstants(ResolvedTimeRange range) => range.Spec.WholeHours is not > 0;

@@ -17,7 +17,7 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #4766: a custom range on the Queries tab comes back as the instants that were picked. The tab holds the range
-/// as UTC instants (<see cref="PerformanceMonitorLite.Controls.ServerTab.CurrentWindowUtc"/>) and the toolbar pickers only show them in the display
+/// as UTC instants (<see cref="PerformanceMonitorLite.Helpers.LiteTimeRange.WindowFor"/>, #5562) and the toolbar picker only shows them in the display
 /// zone; <see cref="LocalDataService.GetQueriesTabWindowUtc"/> hands the same two instants to the read that compares
 /// them against <c>collection_time</c>. No conversion sits between the pickers and the read, so the window is the
 /// instant the user picked in every display mode, on either side of a clock change (the second 01:30 of the
