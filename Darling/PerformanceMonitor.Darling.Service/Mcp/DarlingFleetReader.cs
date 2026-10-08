@@ -442,9 +442,10 @@ GROUP BY server_id";
     /// <para><b>One server at a time (#5526).</b> The read used to be one <c>LAG</c> window,
     /// <c>PARTITION BY server_id, database_name</c>, over every server's rows at once, which meant one sort
     /// and one window pass over the whole fleet's window: 26.9 s for 30 days on a 50-server store (17.1 M
-    /// rows, 29 of 31 chunks decompressed), nearly all of it the sort and the window rather than I/O. Now
-    /// <c>servers</c> lists the servers that have a row in the window (a skip scan over the
-    /// <c>(server_id, collection_time)</c> index, or the segmentby column of a compressed chunk), and the
+    /// rows, 29 of 31 chunks decompressed), most of it the sort and the window rather than I/O. Now
+    /// <c>window_servers</c> lists the servers that have a row in the window (TimescaleDB can answer that with
+    /// a skip scan over the <c>(server_id, collection_time)</c> index or the segmentby column of a compressed
+    /// chunk; on plain PostgreSQL it is an index range read of the window), and the
     /// <c>LATERAL</c> differences, clamps and counts ONE server's series at a time, so no sort or window
     /// ever covers more than a server's rows. The arithmetic is the old one unchanged: the same
     /// <c>LAG</c> per database series (a server's rows are one partition's worth of series, so
@@ -453,7 +454,7 @@ GROUP BY server_id";
     /// same clamp, the same <c>intervals</c>. A server whose only row in the window is one sample still gets
     /// its row, <c>cnt</c> 0 and <c>intervals</c> 0, exactly as the grouped read gave it.</para></summary>
     public const string FleetPgDeadlockSql = @"
-WITH servers AS
+WITH window_servers AS
 (
     SELECT DISTINCT
         server_id
@@ -466,7 +467,7 @@ SELECT
     d.cnt,
     d.last_seen,
     d.intervals
-FROM servers AS s
+FROM window_servers AS s
 CROSS JOIN LATERAL
 (
     SELECT

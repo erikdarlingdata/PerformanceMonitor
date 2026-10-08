@@ -80,8 +80,10 @@ public sealed class ViewerFleetRollupSqlTests
         Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
+        /* Both bounds in the server list AND in the per-server read, so each opens only the window's chunks;
+           the graph-count arm filters on $1/$2 through other column names, so these two are the PostgreSQL arm's. */
+        Assert.Equal(2, CountOccurrences(sql, "collection_time >= $1"));
+        Assert.Equal(2, CountOccurrences(sql, "collection_time <= $2"));
         Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
 
         /* The two halves are ONE column: a second column would let a reader that indexes the deadlock

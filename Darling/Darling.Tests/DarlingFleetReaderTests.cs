@@ -639,6 +639,9 @@ public sealed class DarlingFleetDeadlockCoverageTests
            whole fleet's rows (27 s for 30 days on a 50-server store) must not come back. */
         Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("PARTITION BY server_id", sql, StringComparison.Ordinal);
+        /* The server list is not named for the registry table it must not be mistaken for. */
+        Assert.Contains("WITH window_servers AS", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("WITH servers AS", sql, StringComparison.Ordinal);
         Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);

@@ -33,7 +33,8 @@ namespace Darling.Tests;
 /// counter reset inside the window (110 → 113 → 5, a −108 that must clamp to zero and not subtract), a
 /// stats reset (the post-reset rows carry a new <c>stats_reset</c>), a NULL-named shared-relation series, a
 /// database that first appears mid-window, and a row BEFORE the window that a difference must not reach
-/// back to (the window-bounded <c>LAG</c> gives the first in-window row a NULL difference). A second
+/// back to (the window-bounded <c>LAG</c> gives the first in-window row a NULL difference), and a retried
+/// write of one sample (two rows, same timestamp and value). A second
 /// server has one row in the window and the same database name as the first (a read that lost the server
 /// partition would difference across them; a rewrite that dropped one-row servers would lose its
 /// <c>intervals</c> = 0 row). A third has a flat series and a rising one. A fourth has rows only outside the
@@ -110,6 +111,7 @@ FROM
             await InsertAsync(connection, ResetServerId, "orders", M(150), 110, null, ct);
             await InsertAsync(connection, ResetServerId, "orders", M(120), 110, null, ct);
             await InsertAsync(connection, ResetServerId, "orders", M(90), 113, null, ct);
+            await InsertAsync(connection, ResetServerId, "orders", M(90), 113, null, ct);   // a retried write of the same sample
             await InsertAsync(connection, ResetServerId, "orders", M(60), 5, M(61), ct);    // reset: -108 clamps to 0
             await InsertAsync(connection, ResetServerId, "orders", M(30), 6, M(61), ct);    // +1 survives the reset
             await InsertAsync(connection, ResetServerId, "orders", M(10), 6, M(61), ct);
@@ -142,18 +144,22 @@ FROM
             Assert.Equal(previous.OrderBy(r => r.ServerId).ToList(), shipped.OrderBy(r => r.ServerId).ToList());
 
             /* And the sentinels carry the numbers worked out by hand, so a pair of queries that agreed on a
-               wrong answer would still fail. Server 1: orders 0+3+0+1+0 = 4 over 5 differences (last
-               increase 30 minutes ago); NULL series 0+3 = 3 over 2 (50 ago); billing 2 over 1 (20 ago).
-               Server 2: one row, no difference. Server 3: 0 and 5 over 4. Server 4: absent. */
+               wrong answer would still fail. Server 1: orders 0+3+0+0+1+0 = 4 over 6 differences (the
+               duplicate-timestamp row differences against its equal-valued twin, 0, whichever of the two
+               comes first; last increase 30 minutes ago); NULL series 0+3 = 3 over 2 (50 ago); billing 2
+               over 1 (20 ago); so 9 over 9, last_seen the newest increase, billing's, 20 minutes ago.
+               Server 2: one row, no difference, last_seen NULL. Server 3: app 0+0, reports 2+3 = 5 over 4,
+               last_seen the last rise, 60 minutes ago. Server 4: absent. */
             var byId = shipped.ToDictionary(r => r.ServerId);
             Assert.Equal(9, byId[ResetServerId].Count);
-            Assert.Equal(8, byId[ResetServerId].Intervals);
+            Assert.Equal(9, byId[ResetServerId].Intervals);
             Assert.Equal(DateTime.SpecifyKind(M(20), DateTimeKind.Unspecified), byId[ResetServerId].LastSeen!.Value, TimeSpan.FromMilliseconds(1));
             Assert.Equal(0, byId[LonelyServerId].Count);
             Assert.Equal(0, byId[LonelyServerId].Intervals);
             Assert.Null(byId[LonelyServerId].LastSeen);
             Assert.Equal(5, byId[FlatServerId].Count);
             Assert.Equal(4, byId[FlatServerId].Intervals);
+            Assert.Equal(DateTime.SpecifyKind(M(60), DateTimeKind.Unspecified), byId[FlatServerId].LastSeen!.Value, TimeSpan.FromMilliseconds(1));
             Assert.False(byId.ContainsKey(OutsideServerId));
 
             /* The viewer's fleet total: graphs counted by the unchanged arm, plus the PostgreSQL counter
