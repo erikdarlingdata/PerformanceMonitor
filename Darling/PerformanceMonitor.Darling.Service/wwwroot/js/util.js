@@ -131,6 +131,7 @@ export function rollupTextId(lbl, part, used) {
 /* ─────────────────────────── state strips ─────────────────────────── */
 
 export function errorStrip(message) {
+  readErrors++;
   return el("div", { class: "strip error", role: "alert" }, [message]);
 }
 export function emptyStrip(message) {
@@ -534,19 +535,17 @@ export function buildQuery(params) {
    a poll tick should wait out. */
 let inFlightReads = 0;
 
-/* How many page reads have come back as an error since the page loaded (the red strips). The page scheduler compares it before and
-   after a render, so the footer's "Updated" time moves only when the render's reads settled without one (W-round fix). Aborted
-   reads and a signed-out session are not errors of the page; only { kind: "error" } counts. */
+/* How many red error strips the page has drawn since it loaded (errorStrip counts each one). The page scheduler compares it before
+   and after a render, so the footer's "Updated" time moves only when the render ended without a red strip. It is counted where
+   the strip is drawn, not where a read fails: a read refused for a window wider than it takes (readWithinKeptHistory) is asked
+   again for the widest window, and a retry that answers draws data and a notice, so that first refusal is no fault of the page.
+   readErrorStrip turns the same refusal into a notice and does not call errorStrip. Aborted reads and a signed-out session
+   draw no strip and never count. */
 let readErrors = 0;
 
-/** The running count of reads that came back as an error — see the counter comment above. */
+/** The running count of red error strips drawn — see the counter comment above. */
 export function readErrorCount() {
   return readErrors;
-}
-
-function noteRead(result) {
-  if (result && result.kind === "error") readErrors++;
-  return result;
 }
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
@@ -566,10 +565,6 @@ export function hasInFlightReads() {
  * sidebar, the view list) simply omits it, exactly as before.
  */
 export async function apiGet(path, signal) {
-  return noteRead(await apiGetUncounted(path, signal));
-}
-
-async function apiGetUncounted(path, signal) {
   inFlightReads++;
   try {
     let resp;
@@ -601,10 +596,6 @@ const joinedReads = new Map();
  * and the request itself is cancelled only when no caller is left waiting on it.
  */
 export async function apiGetJoined(path, signal) {
-  return noteRead(await apiGetJoinedUncounted(path, signal));
-}
-
-async function apiGetJoinedUncounted(path, signal) {
   if (signal && signal.aborted) return { kind: "aborted" };
   inFlightReads++;
   let entry = null;
@@ -660,10 +651,6 @@ let fleetRequest = null;
  * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
  */
 export async function apiGetFleet() {
-  return noteRead(await apiGetFleetUncounted());
-}
-
-async function apiGetFleetUncounted() {
   inFlightReads++;
   try {
     if (!fleetRequest) {
@@ -771,7 +758,7 @@ export async function apiWrite(method, path, body) {
 export async function apiSendRead(method, path, body) {
   inFlightReads++;
   try {
-    return noteRead(await apiSend(method, path, body));
+    return await apiSend(method, path, body);
   } finally {
     inFlightReads--;
   }
