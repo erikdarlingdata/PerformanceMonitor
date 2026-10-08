@@ -377,9 +377,10 @@ public partial class FinOpsTab
         empty.Width = new GridLength(Math.Max(100 - clamped, 0.1), GridUnitType.Star);
     }
 
-    /// <summary>The hours-back a FinOps list reads for its picker (#5562): whole hours from the range's start to now, rounded
-    /// up, at least one. These reads take "hours back from now", so a span under an hour reads as one hour, and a range that
-    /// ended in the past reads everything since its start (<see cref="ViewerTimeRangeWindow.HoursBack"/>).</summary>
+    /// <summary>The hours-back a FinOps list reads for its picker (#5562 R5). These reads take "hours back from now", so the
+    /// pickers are rolling-only in whole hours (<see cref="RollingUnitRule"/>): the span is the hours back, exactly. The
+    /// round-up in <see cref="ViewerTimeRangeWindow.HoursBack"/> is only a guard; the picker never offers a finished period
+    /// or a span under an hour.</summary>
     private static int HoursBackFromPicker(TimeRangePicker picker)
     {
         var now = DateTime.UtcNow;

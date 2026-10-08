@@ -253,16 +253,17 @@ public sealed class ViewerTypedRangeTests
     }
 
     [Fact]
-    public void TheDataStartNote_IsFedByTheProbeThePrimarySurfacesAlreadyAwait()
+    public void TheDataStartNote_IsFedByTheFloorEveryBannerSiteAlreadyAwaits()
     {
-        var body = StripComments(MemberText(TabSource(), "PrimaryDataStartAsync"));
-
-        Assert.Contains("DataStartOrNullAsync(probe, surface)", body);
-        Assert.Contains("RecordDataStart(floor)", body);
+        /* #5562 R7: the six primary surfaces once awaited their probe through a feeding helper; now every banner site reaches the
+           picker through UpdateTruncationBanner (ViewerTimeRangeGapFixTests pins the site counts and the feed). */
         Assert.Contains("RangePicker.DataStartUtc = floor", StripComments(MemberText(TabSource(), "RecordDataStart")));
+        Assert.DoesNotContain("PrimaryDataStartAsync", TabSource());
         foreach (var file in new[] { "ViewerServerTab.Queries.cs", "ViewerServerTab.ActiveQueries.cs", "ViewerServerTab.Blocking.cs" })
         {
-            Assert.Contains("PrimaryDataStartAsync(", ViewerSource(file, ThisFile()));
+            var code = ViewerSource(file, ThisFile());
+            Assert.Contains("DataStartOrNullAsync(", code);
+            Assert.DoesNotContain("PrimaryDataStartAsync(", code);
         }
     }
 

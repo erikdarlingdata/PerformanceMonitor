@@ -96,7 +96,7 @@ public partial class ViewerServerTab
         var (totalCount, snapshots) = dataReadTask.Result;
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
-        UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await PrimaryDataStartAsync(dataStartTask, "Active Queries"), startUtc);
+        UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), startUtc);
         await LoadActiveQueriesSlicerAsync(startUtc, endUtc);
     }
 

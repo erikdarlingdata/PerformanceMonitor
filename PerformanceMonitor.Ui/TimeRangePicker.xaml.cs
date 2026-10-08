@@ -57,6 +57,8 @@ public partial class TimeRangePicker : UserControl
     private DateTime? _dataStartUtc;
     private TimeSpan? _sampleInterval;
     private bool _compact;
+    private TimeSpan? _rollingUnit;
+    private Button? _longestButton;
     private long _closedAtTick;
     private TimeRangeParseResult? _typed;
     private Func<TimeZoneInfo>? _zoneProvider;
@@ -158,6 +160,80 @@ public partial class TimeRangePicker : UserControl
         }
     }
 
+    /// <summary>
+    /// Makes the picker rolling-only, in whole units of this length (#5562 R5): one hour for a FinOps list, one day for the
+    /// object heatmap. These reads take "N units back from now", so the picker offers no calendar period, no custom end and no
+    /// "since" range, no preset or typed length under one unit, and no length that is not a whole number of units
+    /// (<see cref="RollingUnitRule"/>). Null (the default) offers everything.
+    /// </summary>
+    public TimeSpan? RollingUnit
+    {
+        get => _rollingUnit;
+        set
+        {
+            if (value is { } unit && unit <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), "A rolling unit is positive.");
+            }
+
+            _rollingUnit = value;
+            var calendar = value is null ? Visibility.Visible : Visibility.Collapsed;
+            CalendarHeader.Visibility = calendar;
+            PeriodPanel.Visibility = calendar;
+            PickCalendar.Visibility = calendar;
+            UpdateRollingButtons();
+            Refresh();
+        }
+    }
+
+    /// <summary>
+    /// Adds one more rolling choice after the presets, for a surface whose data has a natural longest span (#5562 R8): Alert
+    /// History's "All" is the span its table keeps. Pass <c>null</c> to remove it. A rolling-only picker still refuses it when its
+    /// unit does not fit (<see cref="RollingUnit"/>).
+    /// </summary>
+    /// <param name="spec">The span the choice selects.</param>
+    /// <param name="label">The button text, such as "All".</param>
+    public void SetLongestChoice(TimeRangeSpec? spec, string label = "All")
+    {
+        if (_longestButton is not null)
+        {
+            RollingPanel.Children.Remove(_longestButton);
+            _rollingButtons.RemoveAll(entry => ReferenceEquals(entry.Button, _longestButton));
+            _longestButton = null;
+        }
+
+        if (spec is not null)
+        {
+            var button = new Button
+            {
+                Content = label,
+                MinWidth = 40,
+                Padding = new Thickness(6, 3, 6, 3),
+                Margin = new Thickness(0, 0, 4, 4),
+                Tag = spec
+            };
+            AutomationProperties.SetName(button, label + " (" + spec.Name + ")");
+            button.Click += Preset_Click;
+            RollingPanel.Children.Add(button);
+            _rollingButtons.Add((button, spec));
+            _longestButton = button;
+        }
+
+        UpdateRollingButtons();
+        Refresh();
+    }
+
+    /// <summary>Why this picker cannot take <paramref name="spec"/> (rolling-only form), or <c>null</c> when it can.</summary>
+    public string? Refusal(TimeRangeSpec spec)
+    {
+        if (_rollingUnit is not { } unit)
+        {
+            return null;
+        }
+
+        return RollingUnitRule.Refusal(spec, unit);
+    }
+
     /// <summary>True while the popup is open.</summary>
     public bool IsPopupOpen => PickerPopup.IsOpen;
 
@@ -169,7 +245,7 @@ public partial class TimeRangePicker : UserControl
     public bool Select(TimeRangeSpec spec)
     {
         ArgumentNullException.ThrowIfNull(spec);
-        if (!spec.TryResolve(NowUtc, Zone, out var range, out _))
+        if (Refusal(spec) is not null || !spec.TryResolve(NowUtc, Zone, out var range, out _))
         {
             return false;
         }
@@ -270,6 +346,17 @@ public partial class TimeRangePicker : UserControl
             button.Click += Preset_Click;
             PeriodPanel.Children.Add(button);
             _periodButtons.Add((button, spec, length));
+        }
+    }
+
+    /// <summary>Greys the rolling presets a rolling-only picker cannot take (under one unit); a plain picker enables them all.</summary>
+    private void UpdateRollingButtons()
+    {
+        foreach (var (button, spec) in _rollingButtons)
+        {
+            var refusal = Refusal(spec);
+            button.IsEnabled = refusal is null;
+            button.ToolTip = refusal ?? spec.Name;
         }
     }
 
@@ -406,12 +493,23 @@ public partial class TimeRangePicker : UserControl
         {
             _typed = null;
             ApplyButton.IsEnabled = false;
-            EchoText.Text = "Examples: 45m, 3 days, last month, Oct 1 - Oct 2, 1:00 am - 7:00 am, since 10/1";
+            EchoText.Text = _rollingUnit is null
+                ? "Examples: 45m, 3 days, last month, Oct 1 - Oct 2, 1:00 am - 7:00 am, since 10/1"
+                : "Examples: 4h, 3 days, 2 weeks";
             EchoText.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundDimBrush");
             return;
         }
 
         _typed = TimeRangeParser.Parse(text, NowUtc, Zone);
+        if (_typed.Ok && _typed.Spec is { } typedSpec && Refusal(typedSpec) is { } refusal)
+        {
+            _typed = null;
+            EchoText.Text = refusal;
+            EchoText.SetResourceReference(TextBlock.ForegroundProperty, "ErrorBrush");
+            ApplyButton.IsEnabled = false;
+            return;
+        }
+
         if (_typed.Ok)
         {
             var notes = NotesFor(_typed.Range!);

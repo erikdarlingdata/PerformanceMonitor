@@ -58,15 +58,19 @@ public partial class FinOpsTab : UserControl
         InitializeComponent();
 
         /* #5562: the shared time range pickers. The old combos opened on 24 hours (the heatmap on 30 days); the pickers
-           open on the same, drawn in the display zone in force. */
+           open on the same, drawn in the display zone in force. Every FinOps read takes "hours back from now" (the heatmap
+           days), so the pickers are rolling-only in whole hours (days): no calendar period, no custom end, no span under
+           one unit (R5). A picker must never offer a range its read cannot honor. */
         foreach (var picker in new[] { FinOpsResourceUsageTimeRangeCombo, FinOpsWaitStatsTimeRangeCombo,
                      FinOpsExpensiveQueriesTimeRangeCombo, FinOpsHighImpactTimeRangeCombo })
         {
             picker.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+            picker.RollingUnit = RollingUnitRule.Hour;
             picker.Value = TimeRangePresets.Find("1d")!;
         }
 
         FinOpsObjectHeatmapWindowCombo.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        FinOpsObjectHeatmapWindowCombo.RollingUnit = RollingUnitRule.Day;
         FinOpsObjectHeatmapWindowCombo.Value = TimeRangePresets.Find("1mo")!;
 
         /* Register the FinOps grids' column-filter managers into _filterManagers (defined below), after

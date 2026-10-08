@@ -90,6 +90,16 @@ public partial class JobHistoryTab : UserControl
     internal static Task ShowJobHistoryDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<ViewerJobHistoryRow> read) =>
         ViewerServerTab.ShowEventDataStartAsync(banner, probe, "Job History", startUtc, read.Select(r => r.RunDateTimeUtc), RowCap);
 
+    /// <summary>Sets the picker's "Data starts ..." note from the data-start probe the tab already awaited (#5562 R7): the floor its
+    /// "Showing since" banner reads, fed by <see cref="ViewerServerTab.UpdateTruncationBanner"/>. No query of its own.</summary>
+    internal void RecordDataStart(DateTime? floor)
+    {
+        if (TimeRangePickerControl.DataStartUtc != floor)
+        {
+            TimeRangePickerControl.DataStartUtc = floor;
+        }
+    }
+
     private async Task LoadJobsAsync()
     {
         if (_dataService == null)
@@ -116,18 +126,11 @@ public partial class JobHistoryTab : UserControl
             using var readFanOut = ViewerReadFanOut.Of(2);
             var dataStartTask = _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc);
 
-            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap);
+            /* #5562 R6: a range that ended in the past sends its end to the read, so the end bound is applied before the row cap. */
+            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc);
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
             readFanOut.Release();
-            if (!windowIsLive)
-            {
-                /* #5562: the read is start-only (newest first, capped), so a range that ended in the past drops the runs after
-                   its end here. A finished range inside a busy fleet's newest 2,000 runs is exact; beyond that the cap note says
-                   the list is the newest N of everything since the start. */
-                all = all.Where(r => r.RunDateTimeUtc is not { } ran || ran < windowEndUtc).ToList();
-            }
-
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* Populate the Server / Category combos from the full (pre status/category) result, then apply

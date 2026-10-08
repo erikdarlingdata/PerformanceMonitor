@@ -68,7 +68,7 @@
                         <TextBlock Text="Past" FontWeight="SemiBold" Margin="0,0,0,4"
                                    Foreground="{DynamicResource ForegroundDimBrush}"/>
                         <WrapPanel x:Name="RollingPanel"/>
-                        <TextBlock Text="Calendar" FontWeight="SemiBold" Margin="0,10,0,4"
+                        <TextBlock x:Name="CalendarHeader" Text="Calendar" FontWeight="SemiBold" Margin="0,10,0,4"
                                    Foreground="{DynamicResource ForegroundDimBrush}"/>
                         <StackPanel x:Name="PeriodPanel"/>
                     </StackPanel>

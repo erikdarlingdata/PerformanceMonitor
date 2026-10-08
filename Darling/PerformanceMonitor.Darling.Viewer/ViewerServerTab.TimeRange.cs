@@ -215,7 +215,8 @@ public partial class ViewerServerTab
     /// <summary>
     /// Sets the picker's "Data starts ..." note from a data-start probe a surface already awaited (#5562, the desktop twin
     /// of the web's retention note): the same <c>floor</c> the surface's "Showing since" banner reads. No query of its own.
-    /// A null floor (the probe found nothing, or failed) clears the note.
+    /// Every banner site reaches it through <see cref="UpdateTruncationBanner"/> and <see cref="ViewerDataStartNote.Feed"/>
+    /// (#5562 R7), for the tab on screen. A null floor (the probe found nothing, or failed) clears the note.
     /// </summary>
     internal void RecordDataStart(DateTime? floor)
     {
@@ -223,15 +224,6 @@ public partial class ViewerServerTab
         {
             RangePicker.DataStartUtc = floor;
         }
-    }
-
-    /// <summary><see cref="DataStartOrNullAsync"/> that also feeds the picker's data-start note with its answer. Used by the
-    /// primary surface of each top-level tab.</summary>
-    private async Task<DateTime?> PrimaryDataStartAsync(Task<DateTime?> probe, string surface)
-    {
-        var floor = await DataStartOrNullAsync(probe, surface);
-        RecordDataStart(floor);
-        return floor;
     }
 
     private async void RefreshDataButton_Click(object sender, RoutedEventArgs e)
@@ -425,7 +417,6 @@ public partial class ViewerServerTab
         }
     }
 
-    /// <summary>
     /// <summary>
     /// Applies a range chosen on another server tab (the "Apply to All" broadcast). The range arrives as a spec whose
     /// instants are already fixed where they must be (<see cref="ViewerTimeRangeWindow.ForBroadcast"/>): this tab holds

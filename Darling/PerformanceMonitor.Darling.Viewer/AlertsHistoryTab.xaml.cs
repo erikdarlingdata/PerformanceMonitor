@@ -65,6 +65,8 @@ public partial class AlertsHistoryTab : UserControl
         /* #5562: the shared picker; the old combo defaulted to the last 24 hours. */
         TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
+        /* #5562 R8: the old list's "All" is one choice again, the span the alert table keeps (90 days), not a year. */
+        TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.AlertHistoryLongestChoice, "All");
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }

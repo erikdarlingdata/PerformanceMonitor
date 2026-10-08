@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -125,6 +126,12 @@ internal static class ViewerTimeRangeWindow
         var minutes = CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(collector, serverId, overrides);
         return minutes is > 0 ? TimeSpan.FromMinutes(minutes.Value) : null;
     }
+
+    /// <summary>The longest choice Alert History offers (#5562 R8), the "All" the old list had: a span equal to what the alert
+    /// table keeps, <see cref="DarlingRetentionHorizons.AlertHistoryRetentionDays"/> (90 days; <c>config_alert_log</c> is purged
+    /// past it), and never longer than a year when that retention is raised. A longer range would only read the same rows.</summary>
+    internal static TimeRangeSpec AlertHistoryLongestChoice { get; } =
+        TimeRangeSpec.Relative(TimeSpan.FromDays(Math.Min(DarlingRetentionHorizons.AlertHistoryRetentionDays, 365)));
 
     /// <summary>The range a newly-opened tab starts on, from the persisted preference (a string id wins; the legacy
     /// index stands in for a file written before the string existed).</summary>

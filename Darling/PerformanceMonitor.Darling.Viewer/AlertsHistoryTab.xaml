@@ -82,7 +82,7 @@
                        Foreground="{DynamicResource ForegroundBrush}"/>
             <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <!-- #5562: the shared time range picker. The old "All" (8760 hours) is a typed range now ("365d"). -->
+            <!-- #5562: the shared time range picker. The old "All" (8760 hours) is the picker's longest choice again, the span the alert table keeps (DarlingRetentionHorizons.AlertHistoryRetentionDays, 90 days); the code sets it. -->
             <ui:TimeRangePicker x:Name="TimeRangePickerControl" Compact="True" VerticalAlignment="Center"
                                 RangeChanged="TimeRangePicker_RangeChanged"/>
             <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"

@@ -170,7 +170,7 @@ public sealed class JobHistoryGroupedStatsMatchWindowFunctionLiveTests
             const int limit = 5;
 
             var oldRows = await ReadOldAsync(connection, sinceUtc, ct, limit);
-            var newRows = await viewer.GetJobHistoryAsync(sinceUtc, ServerId, limit, ct);
+            var newRows = await viewer.GetJobHistoryAsync(sinceUtc, ServerId, limit, cancellationToken: ct);
 
             /* Same count, same rows, same order, same values — the join replaces the window function without
                changing what the tab shows. */
@@ -328,7 +328,7 @@ public sealed class JobHistoryGroupedStatsMatchWindowFunctionLiveTests
             /* Fleet-wide (no server filter) is the shape whose job_stats join actually needs the server_id
                half; a large limit plus a client-side filter to just these two rows keeps the shared
                darlingtest store's other rows from being the thing that decides the LIMIT boundary here. */
-            var rows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit: 2000, ct);
+            var rows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit: 2000, cancellationToken: ct);
             var mine = rows.Where(r => r.JobId == "shared_job" && (r.ServerId == ServerId || r.ServerId == ServerId2)).ToList();
 
             Assert.Equal(2, mine.Count);

@@ -44,8 +44,9 @@ public partial class FinOpsTab
     private TextBlock? _finopsObjHeatmapPopupText;
     private DateTime _finopsLastObjHeatmapHover;
 
-    /// <summary>Whole days back for the object heatmap (#5562): the picker's range start to now, rounded up, at least one day.
-    /// The old combo offered 7, 30 and 90 days; the picker's "1mo" is 30, and any other length is typed.</summary>
+    /// <summary>Whole days back for the object heatmap (#5562 R5). The picker is rolling-only in whole days
+    /// (<see cref="RollingUnitRule"/>), so the span is the days back, exactly; the round-up is only a guard. The old combo
+    /// offered 7, 30 and 90 days; the picker's "1mo" is 30, and any other length is typed.</summary>
     private int GetFinOpsObjectHeatmapDaysBack()
     {
         if (FinOpsObjectHeatmapWindowCombo is null)
