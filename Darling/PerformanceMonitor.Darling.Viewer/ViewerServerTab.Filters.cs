@@ -75,6 +75,7 @@ public partial class ViewerServerTab : UserControl
         EmptyState.SetText(ProcedureStatsGrid, "No procedure executions in the selected time window.");
         EmptyState.SetText(BlockedProcessReportGrid, "No blocked process reports in the selected time window.");
         EmptyState.SetText(DeadlockGrid, "No deadlocks in the selected time window.");
+        EmptyState.SetText(QueryStoreRegressionsGrid, QueryStoreRegressionsEmptyText);
         _querySnapshotsFilterMgr = new DataGridFilterManager<ViewerQuerySnapshotRow>(QuerySnapshotsGrid);
         _queryStatsFilterMgr = new DataGridFilterManager<ViewerQueryStatsRow>(QueryStatsGrid);
         _procStatsFilterMgr = new DataGridFilterManager<ViewerProcedureStatsRow>(ProcedureStatsGrid);
@@ -145,7 +146,7 @@ public partial class ViewerServerTab : UserControl
         /* Where the collector cannot run (Azure SQL Database) or has never run for this server, an empty grid says so. Keyed on the
            unfiltered row count. */
         await ShowEngineGapAsync(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
-        await ShowEngineGapAsync(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count);
+        await ShowEngineGapAsync(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count, keepsOwnEmptyText: true);
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the
