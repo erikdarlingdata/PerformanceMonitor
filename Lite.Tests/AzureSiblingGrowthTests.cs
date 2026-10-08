@@ -123,18 +123,46 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
     }
 
     [Fact]
-    public async Task StorageGrowth_ASiblingCollectedAfterTheFix_GrowsLikeAnyOtherDatabase()
+    public async Task StorageGrowth_OldWholeDatabaseRows_ThenPerFileRowsWithTheLog_ShowNoGrowthFigure_NotTheLogAsGrowth()
     {
-        /* Once the new shape is old enough to compare against, the sibling reports its growth. */
-        await SeedSiblingAsync("sibdb", 10_000, 100, Collected.AddDays(-30.5));
-        await SeedSiblingAsync("sibdb", 10_100, 110, Collected.AddDays(-7.5));
-        await SeedSiblingAsync("sibdb", 10_240, 119);
+        /* #5498: before the upgrade the database had one "(whole database)" row per snapshot, data space only (written
+           with its used space after #3262). The newest snapshot holds its real data and log files. The old rows are
+           left out of the 7-day and 30-day sides, so the log allocation does not read as growth: the database shows a
+           blank past size and growth n/a, as a database added inside the window does. */
+        await SeedSiblingAsync("sibdb", 10_000, 100, Collected.AddDays(-30));
+        await SeedSiblingAsync("sibdb", 10_100, 110, Collected.AddDays(-7));
+        await SeedAsync("sibdb", 1, "sibdb_data", 10_240, 119);
+        await SeedAsync("sibdb", 2, "sibdb_log", 1_000, 5);
 
         var sib = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "sibdb");
 
-        Assert.Equal(10_240m, sib.CurrentSizeMb);
-        Assert.Equal(10_100m, sib.Size7dAgoMb);
-        Assert.Equal(10_000m, sib.Size30dAgoMb);
+        Assert.Equal(11_240m, sib.CurrentSizeMb);
+        Assert.Null(sib.Size7dAgoMb);
+        Assert.Null(sib.Size30dAgoMb);
+        Assert.Null(sib.Growth7dMb);
+        Assert.Null(sib.Growth30dMb);
+        Assert.Null(sib.DailyGrowthRateMb);
+        Assert.Null(sib.GrowthPct30d);
+    }
+
+    [Fact]
+    public async Task StorageGrowth_APerFileDatabase_GrowsOnceItsPerFileRowsAreOldEnoughToCompare()
+    {
+        /* Once the per-file shape is old enough to compare against, the database reports its growth, and an old
+           "(whole database)" row beside it is still left out. */
+        await SeedSiblingAsync("sibdb", 9_000, 90, Collected.AddDays(-30.5));
+        await SeedAsync("sibdb", 1, "sibdb_data", 10_000, 100, Collected.AddDays(-30.5));
+        await SeedAsync("sibdb", 2, "sibdb_log", 1_000, 5, Collected.AddDays(-30.5));
+        await SeedAsync("sibdb", 1, "sibdb_data", 10_100, 110, Collected.AddDays(-7.5));
+        await SeedAsync("sibdb", 2, "sibdb_log", 1_000, 5, Collected.AddDays(-7.5));
+        await SeedAsync("sibdb", 1, "sibdb_data", 10_240, 119);
+        await SeedAsync("sibdb", 2, "sibdb_log", 1_000, 5);
+
+        var sib = Assert.Single(await new LocalDataService(_duckDb).GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "sibdb");
+
+        Assert.Equal(11_240m, sib.CurrentSizeMb);
+        Assert.Equal(11_100m, sib.Size7dAgoMb);
+        Assert.Equal(11_000m, sib.Size30dAgoMb);
         Assert.Equal(140m, sib.Growth7dMb);
         Assert.Equal(240m, sib.Growth30dMb);
         /* 240 MB over the 30.5 real days between the 30-day-old snapshot and now. */
@@ -395,15 +423,21 @@ ORDER BY n";
     }
 
     [Fact]
-    public void StorageGrowthSql_LeavesTheOldShapeRowsOutOfTheLatestAnd7dAnd30dSums()
+    public void StorageGrowthSql_LeavesTheOldShapeRowsOutOfTheLatestSum_AndEverySiblingRowOutOfThe7dAnd30dSums()
     {
         var sql = LocalDataService.StorageGrowthSql;
 
-        foreach (var sum in new[] { "latest", "past_7d", "past_30d" })
+        Assert.True(
+            Squash(CteBody(sql, "latest")).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
+            "The latest sum does not leave the old-shape sibling rows out.");
+
+        // #5498: the newest side holds data plus log per database now, so a past side that kept the old data-only
+        // sibling rows would read the log as growth.
+        foreach (var sum in new[] { "past_7d", "past_30d" })
         {
             Assert.True(
-                Squash(CteBody(sql, sum)).Contains(AzureSiblingDatabaseSize.ExcludePreFixRows, StringComparison.Ordinal),
-                $"The {sum} sum does not leave the old-shape sibling rows out.");
+                Squash(CteBody(sql, sum)).Contains(AzureSiblingDatabaseSize.ExcludeAllSiblingRows, StringComparison.Ordinal),
+                $"The {sum} sum does not leave every sibling row out.");
         }
     }
 

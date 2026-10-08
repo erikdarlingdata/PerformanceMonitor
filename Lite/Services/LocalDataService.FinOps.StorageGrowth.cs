@@ -34,13 +34,14 @@ public partial class LocalDataService
     /// already skips. A file that is gone from the latest snapshot has no row there, so it still counts on the
     /// past side, as shrinkage.</para>
     ///
-    /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds that
-    /// database's USED space as its total, where every later row holds the ALLOCATED size
-    /// (<see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>). The same predicate leaves those rows out of
-    /// all three sums, so the one-time change reads as no history and not as growth: the database shows a blank past
-    /// size and growth n/a (null) until a newer sample is old enough to compare against, as a database added inside the window
-    /// does. Until the first collection after the upgrade the latest snapshot holds only old-shape rows, so the
-    /// database is not listed here at all.</para>
+    /// <para>#5498: a row named "(whole database)" for another database on an Azure SQL Database server is history from
+    /// before the collector read each user database on its own connection: it holds data space only, and the newest
+    /// snapshot of that database now holds its data and log files
+    /// (<see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>). The 7-day and 30-day sums leave EVERY such
+    /// row out (<c>ExcludeAllSiblingRows</c>), so the log does not read as growth. The latest sum leaves out only the
+    /// old shape that holds no used space (<c>ExcludePreFixRows</c>), so a snapshot taken before the upgrade still
+    /// lists the database. A database with no comparable older row shows a blank past size and growth n/a (null), as
+    /// a database added inside the window does, until a newer sample is old enough to compare against.</para>
     ///
     /// <para>The <c>latest</c> CTE also flags each database whose size leaves its log out: <c>has_sibling_row</c> is true
     /// when the database has the one row another database on an Azure SQL Database server gets
@@ -124,7 +125,7 @@ past_7d AS (
         WHERE ls.database_name = s.database_name
         AND   ls.file_id = s.file_id
     )
-    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
+    AND   " + AzureSiblingDatabaseSize.ExcludeAllSiblingRows + @"
     GROUP BY s.database_name
 ),
 past_30d AS (
@@ -141,7 +142,7 @@ past_30d AS (
         WHERE ls.database_name = s.database_name
         AND   ls.file_id = s.file_id
     )
-    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
+    AND   " + AzureSiblingDatabaseSize.ExcludeAllSiblingRows + @"
     GROUP BY s.database_name
 )
 SELECT

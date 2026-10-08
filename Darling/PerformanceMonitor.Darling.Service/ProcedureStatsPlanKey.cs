@@ -32,12 +32,12 @@ public enum ProcedureStatsPlanFetchMode
 
 /// <summary>
 /// Reads the <c>procedureStatsDeferredPlanFetch</c> value (#5158): <c>off</c>, <c>shadow</c> or <c>on</c>, ignoring
-/// case and surrounding blanks. A missing value is <c>off</c>; so is anything else, which the caller reports once.
+/// case and surrounding blanks. A blank value is <c>off</c> (the shipped config default is <c>on</c>); so is anything else, which the caller reports once.
 /// </summary>
 internal static class ProcedureStatsPlanFetchModes
 {
     /// <summary>The shipped value.</summary>
-    public const string DefaultValue = "off";
+    public const string DefaultValue = "on";
 
     /// <returns>True when <paramref name="value"/> named a mode (or was missing); false when it was unrecognized and the mode is Off.</returns>
     public static bool TryParse(string? value, out ProcedureStatsPlanFetchMode mode)

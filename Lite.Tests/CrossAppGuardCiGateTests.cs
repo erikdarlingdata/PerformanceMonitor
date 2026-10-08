@@ -2809,29 +2809,35 @@ public class CrossAppGuardCiGateTests
         var scope = StepBlock(job, "Decide how much of the Lite suite runs");
         Assert.Contains("id: scope", scope, StringComparison.Ordinal);
 
-        /* The ladder, in order: any Lite, core, root or linked-file change is the full suite; a Darling-only
-           diff is full on anything but a pull request and `reads` on a pull request; otherwise nothing. */
+        /* The ladder (any Lite, core, root or linked-file change is the full suite; a Darling-only diff is full on
+           anything but a pull request and `reads` on a pull request; otherwise nothing) and the rule that shard 0
+           alone runs the narrow selection live in .github/scripts/ci-select.py (#5459), the one place the selection
+           rules are kept. The step passes every filter answer and the event to it, and takes its answer from there. */
+        Assert.Contains("python .github/scripts/ci-select.py lite-scope", scope, StringComparison.Ordinal);
+        foreach (var flag in new[] { "--event \"${EVENT_NAME}\"", "--shard \"${SHARD}\"", "--lite \"${LITE}\"", "--core \"${CORE}\"",
+                                     "--root \"${ROOT}\"", "--reads \"${DARLING_READS}\"", "--linked \"${LINKED}\"" })
+        {
+            Assert.Contains(flag, scope, StringComparison.Ordinal);
+        }
+
+        var script = File.ReadAllText(Path.Combine(RepoRoot(), ".github", "scripts", "ci-select.py")).Replace("\r\n", "\n");
         var ladder = new[]
         {
-            "if [ \"${LITE}\" = \"true\" ] || [ \"${CORE}\" = \"true\" ] || [ \"${ROOT}\" = \"true\" ] || [ \"${LINKED}\" = \"true\" ]; then\n            mode=full",
-            "elif [ \"${DARLING_READS}\" = \"true\" ] && [ \"${EVENT_NAME}\" != \"pull_request\" ]; then\n            mode=full",
-            "elif [ \"${DARLING_READS}\" = \"true\" ]; then\n            mode=reads",
-            "else\n            mode=none",
+            "if lite or core or root or linked:\n        return \"full\"",
+            "if reads and event != \"pull_request\":\n        return \"full\"",
+            "if reads:\n        return \"reads\"",
+            "    return \"reads\"\n    return \"none\"",
         };
         var position = -1;
         foreach (var rung in ladder)
         {
-            var found = scope.IndexOf(rung, StringComparison.Ordinal);
-            Assert.True(found > position, $"the scope step's mode ladder lost or reordered this rung:\n{rung}");
+            var found = script.IndexOf(rung, StringComparison.Ordinal);
+            Assert.True(found > position, $"ci-select.py's lite_scope ladder lost or reordered this rung:\n{rung}");
             position = found;
         }
 
         /* Shard 0 alone runs the narrow selection; every shard runs a full one. */
-        Assert.Contains("run=false\n", scope, StringComparison.Ordinal);
-        Assert.Contains(
-            "if [ \"${mode}\" = \"full\" ] || { [ \"${mode}\" = \"reads\" ] && [ \"${SHARD}\" = \"0\" ]; }; then\n            run=true",
-            scope,
-            StringComparison.Ordinal);
+        Assert.Contains("run = mode == \"full\" or (mode == \"reads\" and args.shard == \"0\")", script, StringComparison.Ordinal);
         Assert.Contains("SHARD: ${{ matrix.shard }}", scope, StringComparison.Ordinal);
 
         /* And the run step honours the mode: the trait selection only in `reads`, the duration or hash cut otherwise. */

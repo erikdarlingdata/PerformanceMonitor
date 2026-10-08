@@ -178,9 +178,23 @@ public sealed class RollupFloorCacheLiveTests
 
     /// <summary>The hour two UTC days before today at 02:00: inside ONE one-day materialization chunk with 22 buckets
     /// after it, so a delete of its first two buckets can never empty that chunk (a 23:00 start would).</summary>
-    private static DateTime SeedStart() => DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-3).AddHours(2), DateTimeKind.Unspecified);
+    /* #5496: the start comes from the test's ONE clock reading (SeedEnd), never a second read: two reads straddling
+       midnight UTC gave the two stores of one test different seed starts. */
+    private static DateTime SeedStart(DateTime now) => DateTime.SpecifyKind(now.Date.AddDays(-3).AddHours(2), DateTimeKind.Unspecified);
 
     private static DateTime SeedEnd() => DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+    /// <summary>#5496: the seed start is a pure function of the one instant the test read, so it can be proved on both sides of
+    /// midnight UTC without waiting for one. A second clock read would have moved the start a whole day when it crossed.</summary>
+    [Theory]
+    [InlineData(2026, 10, 6, 23, 59, 59, 2026, 10, 3)]
+    [InlineData(2026, 10, 7, 0, 0, 0, 2026, 10, 4)]
+    [InlineData(2026, 10, 7, 0, 0, 1, 2026, 10, 4)]
+    public void TheSeedStart_IsDerivedFromTheOneInstantItIsGiven(int y, int mo, int d, int h, int mi, int s, int ey, int emo, int ed)
+    {
+        var start = SeedStart(new DateTime(y, mo, d, h, mi, s, DateTimeKind.Unspecified));
+        Assert.Equal(new DateTime(ey, emo, ed, 2, 0, 0), start);
+    }
 
     [Fact]
     public async Task TwoDataSourcesOnOneStore_MeasureTheFloorOnce_AndTwoStoresNeverShareAFloor()
@@ -192,8 +206,8 @@ public sealed class RollupFloorCacheLiveTests
 
         await using var storeA = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         await using var storeB = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
-        await PopulateStoreAsync(storeA.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: false, ct);
-        await PopulateStoreAsync(storeB.ConnectionString, SeedStart(), now, deleteRawBefore: SeedStart().AddHours(7), oneDayChunks: false, ct);
+        await PopulateStoreAsync(storeA.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: false, ct);
+        await PopulateStoreAsync(storeB.ConnectionString, SeedStart(now), now, deleteRawBefore: SeedStart(now).AddHours(7), oneDayChunks: false, ct);
 
         var truthA = await TruthAsync(storeA.ConnectionString, ct);
         var truthB = await TruthAsync(storeB.ConnectionString, ct);
@@ -235,7 +249,7 @@ public sealed class RollupFloorCacheLiveTests
         var now = SeedEnd();
 
         await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
-        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: false, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: false, ct);
         var truthBefore = await TruthAsync(store.ConnectionString, ct);
         var oldestChunkBefore = await OldestChunkAsync(store.ConnectionString, ct);
 
@@ -250,7 +264,7 @@ public sealed class RollupFloorCacheLiveTests
         /* Drop the database and build it again under the same name, laid out identically but with its oldest five
            hours removed: the same chunk and hypertable names, a later floor. */
         await RecreateDatabaseAsync(BaseConnectionString!, store.DatabaseName, ct);
-        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: SeedStart().AddHours(5), oneDayChunks: false, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: SeedStart(now).AddHours(5), oneDayChunks: false, ct);
         var truthAfter = await TruthAsync(store.ConnectionString, ct);
         Assert.True(truthAfter > truthBefore, "the recreated store's floor must be later, or a stale floor would go unnoticed");
         Assert.Equal(oldestChunkBefore, await OldestChunkAsync(store.ConnectionString, ct));
@@ -270,7 +284,7 @@ public sealed class RollupFloorCacheLiveTests
         var now = SeedEnd();
 
         await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
-        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: true, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: true, ct);
 
         var factory = new CommandCountingLoggerFactory();
         await using var dataSource = new NpgsqlDataSourceBuilder(store.ConnectionString).UseLoggerFactory(factory).Build();
@@ -326,7 +340,7 @@ public sealed class RollupFloorCacheLiveTests
         var now = SeedEnd();
 
         await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
-        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: true, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: true, ct);
 
         var factory = new CommandCountingLoggerFactory();
         await using var dataSource = new NpgsqlDataSourceBuilder(store.ConnectionString).UseLoggerFactory(factory).Build();
@@ -367,7 +381,7 @@ public sealed class RollupFloorCacheLiveTests
         var now = SeedEnd();
 
         await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
-        await PopulateStoreAsync(store.ConnectionString, SeedStart(), now, deleteRawBefore: null, oneDayChunks: false, ct);
+        await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: false, ct);
         var truth = await TruthAsync(store.ConnectionString, ct);
 
         /* The service's own data source warms; the MCP or web host's data source is the first CALLER. */
