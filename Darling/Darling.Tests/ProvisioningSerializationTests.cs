@@ -72,13 +72,23 @@ public sealed class ProvisioningSerializationTests
            the service's own writes. A fourth that built its own NpgsqlCommand from one of these renderers would run
            unserialized, so each renderer is built into exactly one command, inside the helper's call. */
         Assert.Matches(new Regex(@"ExecuteSerializedAsync\(connection, async \(transaction, token\) =>\s*\{(?:(?!ExecuteNonQueryAsync).)*?return new NpgsqlCommand\(\s*BuildProvisioningSql\(.*?connection, transaction\) \{ CommandTimeout = [^}]*\};\s*\}, logger, cancellationToken\);", RegexOptions.Singleline, TimeSpan.FromSeconds(5)), source);
-        Assert.Matches(new Regex(@"new NpgsqlCommand\(\s*BuildComposeStatementTimeoutSql\(.*?CommandTimeout = [^}]*\};\s*await ExecuteSerializedAsync\(command, logger, cancellationToken\);", RegexOptions.Singleline, TimeSpan.FromSeconds(5)), source);
+        Assert.Matches(new Regex(@"new NpgsqlCommand\(\s*BuildComposeStatementTimeoutSql\(.*?CommandTimeout = [^}]*\};\s*await ExecuteSerializedAsync\(\s*command, logger, cancellationToken, lockWait: TimeSpan\.FromSeconds\(ServiceCommandDeadlines\.SerialLoopSeconds\)\);", RegexOptions.Singleline, TimeSpan.FromSeconds(5)), source);
         Assert.Matches(new Regex(@"ExecuteSerializedAsync\(connection, async \(transaction, token\) =>\s*\{\s*alreadyInPlace = await ServerPasswordRulesAreInPlaceAsync\(connection, transaction, token\);.*?new NpgsqlCommand\(BuildServerPasswordRulesSql\(""config""\), connection, transaction\)\s*\{\s*CommandTimeout = [^}]*\};\s*\}, logger, cancellationToken\);", RegexOptions.Singleline, TimeSpan.FromSeconds(5)), source);
 
         foreach (var renderer in new[] { "BuildProvisioningSql", "BuildComposeStatementTimeoutSql", "BuildServerPasswordRulesSql" })
         {
             Assert.Single(Regex.Matches(source, @"new NpgsqlCommand\(\s*" + renderer + @"\(", RegexOptions.None, TimeSpan.FromSeconds(5)));
         }
+    }
+
+    /// <summary>The reload runs at the top of a sweep, so it waits for the key only the serial-loop deadline, not the
+    /// full provisioning wait; its bound is that wait plus the batch at its own timeout.</summary>
+    [Fact]
+    public void TheReload_WaitsForTheKeyOnlyTheSerialLoopDeadline()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedRoles.cs");
+        Assert.Single(Regex.Matches(source, @"ExecuteSerializedAsync\(\s*command, logger, cancellationToken,\s*lockWait: TimeSpan\.FromSeconds\(ServiceCommandDeadlines\.SerialLoopSeconds\)\)", RegexOptions.None, TimeSpan.FromSeconds(5)));
+        Assert.True(ServiceCommandDeadlines.SerialLoopSeconds < DarlingManagedRoles.ProvisioningLockWaitSeconds);
     }
 
     [Fact]
@@ -418,6 +428,29 @@ public sealed class ProvisioningSerializationTests
                 await drop.ExecuteNonQueryAsync(cleanupCt);
             });
         }
+    }
+
+    /* A rerun is right for each retried code: the batch is idempotent and the failed transaction rolled back, so the
+       rerun sees the row the other session made (the role exists, so the existence check skips the create). */
+    [Theory]
+    [InlineData("XX000")]
+    [InlineData("23505")]
+    [InlineData("42710")]
+    [InlineData("40P01")]
+    public void AConcurrentWriteFailure_IsRetried(string sqlState)
+    {
+        Assert.True(DarlingManagedRoles.IsConcurrentProvisioningConflict(
+            new PostgresException("failed", "ERROR", "ERROR", sqlState)));
+    }
+
+    [Theory]
+    [InlineData("42501")]
+    [InlineData("57014")]
+    [InlineData("22012")]
+    public void AnyOtherFailure_IsNotRetried(string sqlState)
+    {
+        Assert.False(DarlingManagedRoles.IsConcurrentProvisioningConflict(
+            new PostgresException("failed", "ERROR", "ERROR", sqlState)));
     }
 
     [Fact]

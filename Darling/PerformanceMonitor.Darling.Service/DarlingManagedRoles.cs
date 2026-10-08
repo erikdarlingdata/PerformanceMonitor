@@ -394,7 +394,7 @@ public static class DarlingManagedRoles
     internal const int ProvisioningLockPollMilliseconds = 1000;
 
     /// <summary>
-    /// How many times a write that fails with XX000 "tuple concurrently updated" is run again, each time in a fresh
+    /// How many times a write that fails with a concurrent-write code (<see cref="IsConcurrentProvisioningConflict"/>) is run again, each time in a fresh
     /// transaction (#5560). Three runs in all.
     /// </summary>
     internal const int ProvisioningConcurrentUpdateRetries = 2;
@@ -445,7 +445,7 @@ public static class DarlingManagedRoles
     /// <see cref="ProvisioningLockWaitSeconds"/> rather than waited on without end. When that budget runs out one
     /// warning names the key and the session holding it (pid, user, application name), and the write runs WITHOUT
     /// the lock, in a fresh transaction, in the same order (<paramref name="prepare"/>, then the command). A write
-    /// that fails XX000 is run again, up to <see cref="ProvisioningConcurrentUpdateRetries"/> more times, each in a
+    /// that fails with a concurrent-write code (<see cref="IsConcurrentProvisioningConflict"/>) is run again, up to <see cref="ProvisioningConcurrentUpdateRetries"/> more times, each in a
     /// fresh transaction, <paramref name="prepare"/> included. Npgsql closes the connection on an XX-class error, so a
     /// retry opens it again first (a new session from the same pool). That is safe because every write here is
     /// idempotent (the live tests run the real batch twice).</para>
@@ -456,14 +456,15 @@ public static class DarlingManagedRoles
     /// every writer connects to that one database: the managed store always uses the fixed database
     /// <c>darling</c>, and the compose path refuses a cluster that holds any other non-template database
     /// (<c>RefuseComposeStore</c>), so a second database with a provisioning writer cannot exist. If either rule is
-    /// ever relaxed, the lock stops serializing and only the XX000 retry is left;
+    /// ever relaxed, the lock stops serializing and only the retry is left;
     /// <c>ProvisioningSerializationTests</c> pins both rules.</para>
     /// </summary>
     /// <param name="connection">An open connection with no transaction on it.</param>
     /// <param name="prepare">Runs inside the transaction, after the lock, and returns the command to run (the helper
     /// disposes it) or <see langword="null"/>. It runs again on a retry, so it must not keep state between runs.
     /// A read in it that fails and is answered with a default must take the transaction's read savepoint first and
-    /// roll back to it, or the transaction stays aborted.</param>
+    /// roll back to it, or the transaction stays aborted. A callback whose read failed and was not rolled back to the
+    /// read savepoint must throw, never return null, because a null return commits.</param>
     /// <param name="lockWait">The wait for the key; defaults to <see cref="ProvisioningLockWaitSeconds"/>.</param>
     internal static Task ExecuteSerializedAsync(
         NpgsqlConnection connection, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
@@ -500,10 +501,10 @@ public static class DarlingManagedRoles
                 await RunInTransactionAsync(transaction, prepare, disposeCommand, cancellationToken);
                 return;
             }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InternalError && retries < ProvisioningConcurrentUpdateRetries)
+            catch (PostgresException ex) when (IsConcurrentProvisioningConflict(ex) && retries < ProvisioningConcurrentUpdateRetries)
             {
                 logger.LogInformation(
-                    "Role provisioning hit {SqlState} ({Message}) while another session was rewriting the same catalog rows; running it again in a new transaction (retry {Retry} of {Retries})",
+                    "Role provisioning write failed with {SqlState} ({Message}), which a concurrent catalog rewrite causes; running it again in a new transaction (retry {Retry} of {Retries})",
                     ex.SqlState, ex.MessageText, retries + 1, ProvisioningConcurrentUpdateRetries);
 
                 /* Npgsql breaks the connection on an XX-class error (it closes it, and the server rolls the transaction
@@ -514,6 +515,23 @@ public static class DarlingManagedRoles
                 }
             }
         }
+    }
+
+    /// <summary>Whether a failed provisioning write is the kind two sessions running the batch together cause, so a
+    /// rerun in a fresh transaction is right. Each is safe to rerun because the batch is idempotent and the failed
+    /// transaction rolled back, so the rerun sees the row the other session made: XX000 (a catalog row updated
+    /// under it), 23505 (both inserted the same catalog key; the rerun finds the row), 42710 (the role was created
+    /// between the existence check and the create; the rerun skips it) and 40P01 (the two took the same rows in
+    /// different orders; the other one finished). Any other code (a missing right, a timeout) is not a conflict
+    /// and reaches the caller on the first failure. Matched on the code, never the message, which
+    /// <c>lc_messages</c> translates.</summary>
+    internal static bool IsConcurrentProvisioningConflict(PostgresException ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+        return ex.SqlState is PostgresErrorCodes.InternalError
+            or PostgresErrorCodes.UniqueViolation
+            or PostgresErrorCodes.DuplicateObject
+            or PostgresErrorCodes.DeadlockDetected;
     }
 
     /// <summary>One run with the key taken. False when the wait for the key ran out (after the one warning), in which
@@ -576,8 +594,13 @@ public static class DarlingManagedRoles
     }
 
     /// <summary>The one warning for a wait that ran out: the key and the session that holds it, read from
-    /// <c>pg_locks</c> joined to <c>pg_stat_activity</c> in the current database. A login that cannot read other
-    /// roles' sessions sees no user or application name for them.</summary>
+    /// <c>pg_locks</c> joined to <c>pg_stat_activity</c> in the current database. A login that is not a superuser,
+    /// not a member of <c>pg_read_all_stats</c> and not in the holder's role sees "many columns" of the holder's row
+    /// as null (the query text, state and client fields among them), but the pid, the session user and the
+    /// application name stay visible to everyone, so the "(not visible)" text below shows only for a row that has
+    /// no name at all (a background worker, for example). See the PostgreSQL manual, "The Cumulative Statistics
+    /// System", security note on the dynamic statistics views
+    /// (https://www.postgresql.org/docs/current/monitoring-stats.html).</summary>
     private static async Task WarnLockHeldAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, TimeSpan wait, ILogger logger, CancellationToken cancellationToken)
     {
@@ -859,12 +882,15 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             /* #5560: the same lock as provisioning, so a reload cannot rewrite a role row a starting sibling is
-               rewriting, and the same bound on the wait for it: a key something else is holding delays the reload by
-               ProvisioningLockWaitSeconds at most, then the lines run without it. */
+               rewriting. The wait is the serial-loop deadline, not the full provisioning wait, because this runs at
+               the top of a sweep: a key something else is holding delays the reload by that wait, then the lines run
+               without it, so the bound is that wait plus the batch at its own CommandTimeout (and a rerun if it
+               hits a concurrent-write failure). */
             await using var command = new NpgsqlCommand(
                 BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds) + "\n" + BuildComposeTempFileLimitSql(),
                 connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
-            await ExecuteSerializedAsync(command, logger, cancellationToken);
+            await ExecuteSerializedAsync(
+                command, logger, cancellationToken, lockWait: TimeSpan.FromSeconds(ServiceCommandDeadlines.SerialLoopSeconds));
 
             logger.LogInformation(
                 "Compose statement_timeout re-asserted on the viewer/mcp roles at {Seconds}s, with slow-statement logging at {SlowMs} ms and a temp_file_limit of {TempFileLimit} — takes effect on each role's next session (an already-connected viewer keeps the old ceiling until it reconnects)",
