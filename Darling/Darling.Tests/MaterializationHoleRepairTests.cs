@@ -417,6 +417,13 @@ public sealed class MaterializationHoleRepairTests
         Assert.EndsWith(")", existsSql, StringComparison.Ordinal);
         Assert.Contains("generate_series(", existsSql, StringComparison.Ordinal);
         Assert.Contains("OFFSET 0", existsSql, StringComparison.Ordinal);
+
+        /* #5521: both bucket probes are range pairs (the equality is estimated from n_distinct and Seq Scans a
+           chunk with few bucket values for a missing bucket), the same text MaterializationHoleScanSql uses. */
+        Assert.Contains("hl.bucket >= hb.bucket AND hl.bucket <= hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.Contains("hs.bucket >= hb.bucket AND hs.bucket <= hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hl.bucket = hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hs.bucket = hb.bucket", existsSql, StringComparison.Ordinal);
     }
 
     /// <summary>

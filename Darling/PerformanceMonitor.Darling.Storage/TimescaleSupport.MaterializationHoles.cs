@@ -302,30 +302,31 @@ public static partial class TimescaleSupport
     /// <para><b>The materialization probe is a range pair, not an equality (#5521).</b> Every materialization has
     /// the default <c>bucket_idx</c> (<c>bucket DESC</c>), and the probe with <c>m.bucket = b.bucket</c> still did a
     /// Seq Scan of a whole uncompressed chunk for a bucket the chunk lacked: 240,137 blocks, 11.2 s, on a field
-    /// store's daily Query Store interval rollup, 23 times in 13 days. A chunk whose rows all carry one bucket
-    /// value has <c>n_distinct = 1</c> and a most-common-value frequency of 1, so <c>bucket = $param</c> is
-    /// estimated to match every row, and a SubPlan under <c>EXISTS</c> is costed for its FIRST row: a sequential
-    /// scan expected to hit a match at once costs next to nothing, so it beats the index. The estimate is wrong
-    /// exactly when the bucket is missing, and a missing bucket is what this scan looks for. Written as
-    /// <c>m.bucket &gt;= b.bucket AND m.bucket &lt;= b.bucket</c> the probe is the same set of rows for a
-    /// <c>timestamp</c> (and TimescaleDB still excludes chunks at run time and pushes the pair into a compressed
-    /// chunk's min/max metadata), but PostgreSQL cannot read a range with two non-constant bounds off the
-    /// statistics and uses its flat default of 0.5% of the rows, whatever the bucket values look like. The
-    /// first-row cost of the index then wins by a wide margin on a big chunk, and a missing bucket costs one index
-    /// seek instead of a chunk read. Measured on a rig shaped like the field chunk (default compression,
-    /// uncompressed chunks of 600 K and 100 K rows with every bucket value in a chunk the same, heap pages not
-    /// all-visible): 31,773 blocks before, 294 after, for the one missing bucket in an uncompressed chunk.</para>
+    /// store's daily Query Store interval rollup, 23 times in 13 days. A chunk with few distinct bucket values
+    /// has a large <c>1/n_distinct</c> (one value: <c>n_distinct = 1</c> and a most-common-value frequency of 1),
+    /// so <c>bucket = $param</c> is estimated to match a large share of the chunk, up to every row, and a SubPlan
+    /// under <c>EXISTS</c> is costed for its FIRST row: a sequential scan expected to hit a match at once costs
+    /// next to nothing, so it beats the index. The estimate is wrong exactly when the bucket is missing, and a
+    /// missing bucket is what this scan looks for. Written as <c>m.bucket &gt;= b.bucket AND m.bucket &lt;=
+    /// b.bucket</c> the probe is the same set of rows for a <c>timestamp</c> (and TimescaleDB still excludes
+    /// chunks at run time and pushes the pair into a compressed chunk's min/max metadata), but PostgreSQL cannot
+    /// read a range with two non-constant bounds off the statistics and uses its flat default of 0.5% of the
+    /// rows, whatever the bucket values look like. The first-row cost of the index then wins by a wide margin on
+    /// a big chunk, and a missing bucket costs one index seek instead of a chunk read. Measured on a rig shaped
+    /// like the field chunk (default compression, heap pages not all-visible), for one missing bucket: an
+    /// uncompressed chunk of 600 K rows over 6 bucket values, 31,773 blocks before and 297 after; an
+    /// uncompressed chunk of 100 K rows over one bucket value, 5,184 before and 89 after.</para>
     ///
     /// <para><b>Why not bound the probe by <c>server_id</c> instead (the issue's fix direction).</b> Measured on
     /// the same rig and kept out: <c>server_id = ANY(ids) AND bucket = $param</c> is still estimated to match
-    /// every row, so the planner kept the Seq Scan (24,766 blocks for the same bucket); with the range pair added
+    /// every row, so the planner kept the Seq Scan (24,765 blocks for the same bucket); with the range pair added
     /// it seeks, but the list of every <c>server_id</c> in the materialization, read in the same statement so the
-    /// answer stays exact, costs a seek per server per chunk (2,940 blocks for a window with no hole, against
-    /// 308), which grows with the chunk count and so cannot be bought back on a store with a year of daily
+    /// answer stays exact, costs a seek per server per chunk (3,275 blocks for a window with no hole, against
+    /// 304), which grows with the chunk count and so cannot be bought back on a store with a year of daily
     /// chunks. The range pair alone needs no list, no per-target index check and no fallback, and the
     /// Query Store interval hourly rollup's materialization, which has no <c>server_id</c> index, takes it too.
     /// The compressed chunks cost what they did (a scan of the compressed heap with the min/max filter; 82
-    /// blocks against 92 on the rig, 24.6 ms on the field store). "Walk forward from the oldest hole" is not
+    /// blocks against 88 on the rig, 24.6 ms on the field store). "Walk forward from the oldest hole" is not
     /// needed either: once a missing bucket costs a seek, the scan's cost follows the number of buckets and
     /// not the size of the chunks.</para>
     /// </summary>
@@ -398,11 +399,14 @@ ORDER BY c.bucket";
 
         var filterClause = sourceFilter.Length == 0 ? string.Empty : $"\n        AND   {sourceFilter}";
 
+        /* The two bucket probes are range pairs, not equalities, for the reason in MaterializationHoleScanSql's
+           #5521 paragraph: an equality against the outer bucket is estimated from n_distinct, and a chunk with few
+           distinct bucket values (an upgraded store's wide hourly chunks) gets a Seq Scan for a missing bucket. */
         return $@"
     SELECT hb.bucket
     FROM generate_series({fromExpr}, {toExpr}, {bucketWidthLiteral}) AS hb(bucket)
-    WHERE NOT EXISTS (SELECT 1 FROM collect.{legacy} AS hl WHERE hl.bucket = hb.bucket OFFSET 0)
-    AND   NOT EXISTS (SELECT 1 FROM collect.{successor} AS hs WHERE hs.bucket = hb.bucket OFFSET 0)
+    WHERE NOT EXISTS (SELECT 1 FROM collect.{legacy} AS hl WHERE hl.bucket >= hb.bucket AND hl.bucket <= hb.bucket OFFSET 0)
+    AND   NOT EXISTS (SELECT 1 FROM collect.{successor} AS hs WHERE hs.bucket >= hb.bucket AND hs.bucket <= hb.bucket OFFSET 0)
     AND   EXISTS (
               SELECT 1 FROM collect.{relation} AS hr
               WHERE hr.{sourceTimeColumn} >= hb.bucket

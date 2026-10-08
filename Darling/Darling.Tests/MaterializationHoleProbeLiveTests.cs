@@ -149,6 +149,7 @@ FROM generate_series(1, 60000) AS g", connection))
 
         var scan = TimescaleSupport.MaterializationHoleScanSql(target, materialization);
         var equality = scan.Replace("m.bucket >= b.bucket AND m.bucket <= b.bucket", "m.bucket = b.bucket", StringComparison.Ordinal);
+        Assert.NotEqual(scan, equality);
 
         /* The control: the equality probe seq-scans the chunk for the missing hours. If a planner version stops
            doing that the premise is gone and there is nothing to pin. */
