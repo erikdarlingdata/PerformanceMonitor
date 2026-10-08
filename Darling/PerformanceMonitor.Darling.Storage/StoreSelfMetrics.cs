@@ -322,7 +322,11 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
     /// estimate <see cref="TableInsertSql"/> already uses, so <c>row_count</c> means one thing across the kinds
     /// that carry it. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
     /// rather than a count of minus one, as it does there. Every reader of a dimension row's <c>row_count</c>
-    /// passes it through (<c>get_store_metrics</c> and its daily series); none computes from it. $1 metric_time.
+    /// passes it through (<c>get_store_metrics</c> and its daily series); none computes from it, and the test
+    /// <c>NoReaderComputesFromADimensionRowCount</c> pins that. Because it is an estimate, the daily <c>row_count</c>
+    /// series moves in steps between ANALYZE and autovacuum runs (flat for days, then a jump, so a flat day is not
+    /// "no new rows"), and <c>reltuples</c> is a 4-byte float, so above about 16.7 M rows (2^24) the value is
+    /// rounded to a multiple of the float's step. $1 metric_time.
     ///
     /// <para><b><c>toast_bytes</c> and <c>toast_live_bytes</c> (V137, #3783) — the dimension rows are the
     /// only kind that fills them.</b> <c>pg_total_relation_size</c> says how big the dimension is and nothing

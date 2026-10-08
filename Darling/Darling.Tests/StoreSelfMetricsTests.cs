@@ -574,6 +574,97 @@ public sealed class StoreSelfMetricsTests
         Assert.Empty(offenders);
     }
 
+    /// <summary>
+    /// #5520: the dimension rows' <c>row_count</c> is the planner's estimate, and the comment on the dimension
+    /// insert in <see cref="StoreSelfMetrics"/> says no reader computes from it. This pins that claim: in the
+    /// product source, a use of a store-metrics row's <c>RowCount</c> is a record parameter, a verbatim pass
+    /// through to the tool answer, or the owner-job-history evidence (a job row's own count, never a dimension's),
+    /// and the only reader of the column from the store is the metrics reader. A new use that does arithmetic, a
+    /// comparison or a threshold on it fails here, so the author decides whether an estimate that moves in steps
+    /// is fit for it.
+    /// </summary>
+    [Fact]
+    public void NoReaderComputesFromADimensionRowCount()
+    {
+        var root = RepoRoot();
+        var offenders = new List<string>();
+        var scanned = 0;
+        var passThroughs = 0;
+        var allowed = new[]
+        {
+            @"^long\? RowCount,$",
+            @"^row_count = \w+\.RowCount,$",
+            @"^var status = row\.RowCount is null \? OwnerJobHistoryEvidenceStatus\.Filtered$",
+            @"^row\.RowCount,$",
+        };
+
+        foreach (var project in new[]
+        {
+            "PerformanceMonitor.Darling.Storage", "PerformanceMonitor.Darling.Service",
+            "PerformanceMonitor.Darling.Analysis", "PerformanceMonitor.Darling.Viewer",
+        })
+        {
+            var dir = Path.Combine(root, "Darling", project);
+            Assert.True(Directory.Exists(dir), $"product project not found: {dir}");
+
+            foreach (var path in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(dir, path);
+                var top = relative.Split(Path.DirectorySeparatorChar)[0];
+                if (string.Equals(top, "bin", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(top, "obj", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                scanned++;
+                var text = File.ReadAllText(path);
+                var name = Path.GetFileName(path);
+
+                /* The store's own column: read by the metrics reader, written by the self-metrics collector, created by a migration. */
+                if (text.Contains("collect.store_metrics", StringComparison.Ordinal)
+                    && Regex.IsMatch(text, @"\brow_count\b")
+                    && name is not ("DarlingStoreMetricsReader.cs" or "StoreSelfMetrics.cs" or "PgMigrations.cs"))
+                {
+                    offenders.Add($"{project}/{relative}: reads store_metrics.row_count outside the metrics reader");
+                }
+
+                if (!text.Contains("StoreMetricRow", StringComparison.Ordinal)
+                    && !text.Contains("StoreMetricDailyPoint", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var lines = text.Split('\n');
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    var line = lines[i].Trim();
+                    if (!Regex.IsMatch(line, @"\bRowCount\b") || line.StartsWith("///", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (allowed.Any(a => Regex.IsMatch(line, a)))
+                    {
+                        if (line.StartsWith("row_count = ", StringComparison.Ordinal))
+                        {
+                            passThroughs++;
+                        }
+
+                        continue;
+                    }
+
+                    offenders.Add($"{project}/{relative}:{i + 1}: {line}");
+                }
+            }
+        }
+
+        /* An empty scan is how a guard starts reporting clean, so a moved tree or a renamed pass-through fails here. */
+        Assert.True(scanned >= 100, $"the product scan found only {scanned} source files; the projects have moved");
+        Assert.True(passThroughs >= 2, $"expected the two tool pass-throughs (the latest row and the daily point), found {passThroughs}");
+        Assert.True(offenders.Count == 0, string.Join(Environment.NewLine, offenders));
+    }
+
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
         var dir = Path.GetDirectoryName(thisFile);
