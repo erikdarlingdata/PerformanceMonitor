@@ -436,6 +436,16 @@ public sealed class DarlingWorker : BackgroundService
         new("composer performance tuning", StoreObjectConvergenceStage.Tuning, StoreObjectChangeSignal.InPlace,
             (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct),
             (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, hourly: true, ct)),
+
+        /* #5574: LAST on purpose. perfmon_stats chunks compressed before the segmentby change (server_id alone) are
+           re-grouped by counter, newest first, inside the 30-day trend reach, for at most two minutes of a pass, so the
+           cheap steps above are never made to wait behind it. Hourly only: the start path would hold the service's
+           start for those minutes, and a store that has not converged is served by the next :30 tick. It follows the
+           "compression policies" step in the same pass, which is what moves the hypertable to the new setting first
+           (the re-group does nothing until it has). Counted as a change per chunk re-grouped. */
+        new("perfmon chunk re-group", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => Task.FromResult(0),
+            (connection, logger, ct) => TimescaleSupport.RegroupPerfmonChunksAsync(connection, logger, ct)),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
