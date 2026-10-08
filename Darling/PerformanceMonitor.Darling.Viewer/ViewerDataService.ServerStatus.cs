@@ -57,23 +57,27 @@ CROSS JOIN LATERAL
 ) AS latest
 WHERE s.server_id <> 0";
 
-    /// <summary>The store's on-disk size in bytes (status-bar Database field). No parameters.
+    /// <summary>The store's on-disk size in bytes, measured live. No parameters.
     ///
     /// <para><c>pg_database_size</c> walks every file in the database directory, so its cost scales with the
     /// store rather than with the one number it returns (#4477 measured 468 ms mean / 1.96 s worst-case on a
-    /// production store, called on every status-bar refresh — 9 calls in one 4.5-minute session). See
-    /// <see cref="StoreSizeCacheLifetime"/> for why the fix here is a cache rather than a cheaper query.</para>
+    /// production store; walk finding D15 measured a mean of 4.4 s, worst 39.9 s, on a large one). The status-bar
+    /// Database field therefore reads the size the service records on its self-metrics sweep first
+    /// (<see cref="StoreSelfMetrics.LatestStoreSizeSql"/>) and runs this live walk only when no size is recorded, or
+    /// the recorded read fails (#5555). See <see cref="StoreSizeCacheLifetime"/>.</para>
     /// </summary>
     public const string StoreSizeSql = "SELECT pg_database_size(current_database())";
 
-    /// <summary>How long <see cref="GetStoreSizeBytesAsync"/> serves its cached reading before it re-runs
-    /// <see cref="StoreSizeSql"/> (#4477). Five minutes, not the refresh timer's own 10-600 s
-    /// <c>NocRefreshIntervalSeconds</c>: the status-bar field is a coarse operator signal ("about how big is
-    /// the store"), never a threshold or a stored numeric value, and a store's on-disk size does not move
-    /// enough within five minutes for the field to read stale to a human glancing at it — the same order of
-    /// staleness <see cref="StoreSelfMetrics.LatestStoreSizeSql"/> already accepts for the service's own
-    /// disk-pressure check (mean ~59 min between sweeps there). Five minutes keeps this field visibly fresher
-    /// than that self-metrics row while cutting the read from every refresh tick to at most one per window.</summary>
+    /// <summary>How long <see cref="GetStoreSizeBytesAsync"/> serves its cached reading before it reads again (#4477).
+    /// Five minutes, not the refresh timer's own 10-600 s <c>NocRefreshIntervalSeconds</c>: the status-bar field is a
+    /// coarse operator signal ("about how big is the store"), never a threshold or a stored numeric value.
+    ///
+    /// <para>#5555: the figure the field shows is now the self-metrics row, so it is only as fresh as the service's last
+    /// sweep: about an hour old on average (mean ~59 min between sweeps), and older still if the sweep stalls while
+    /// ingest continues. That is acceptable for a display-only field, but the five minutes now caches a figure that
+    /// changes about hourly; it still bounds the store round trips (one recorded read per window), it no longer keeps the
+    /// field fresher than that row. Only a store with no recorded size yet falls back to the live walk, and gets the
+    /// live figure.</para></summary>
     public static readonly TimeSpan StoreSizeCacheLifetime = TimeSpan.FromMinutes(5);
 
     /// <summary>#4477: single-flighted and TTL-memoized the same way as
@@ -109,8 +113,9 @@ WHERE s.server_id <> 0";
 
     /// <summary>The store database's size in bytes, or null when it can't be read. Cached for
     /// <see cref="StoreSizeCacheLifetime"/> (#4477): a call inside the window returns the cached reading with
-    /// no store round trip at all, rather than re-running <see cref="StoreSizeSql"/>'s whole-file-directory
-    /// walk on every status-bar refresh.</summary>
+    /// no store round trip at all. A cold read takes the size the service recorded on its last self-metrics sweep
+    /// (up to one sweep old, see <see cref="StoreSizeCacheLifetime"/>) and walks the live directory
+    /// (<see cref="StoreSizeSql"/>) only when none is recorded or the recorded read fails.</summary>
     public Task<long?> GetStoreSizeBytesAsync(CancellationToken cancellationToken = default)
         => _storeSizeCache.GetOrStartAsync(FetchStoreSizeBytesAsync, shouldCache: static bytes => bytes is not null, cancellationToken);
 
@@ -123,14 +128,21 @@ WHERE s.server_id <> 0";
            hourly self-metrics sweep (the #3209 shape the service's own disk check reads) and measures the live directory
            only for a store that has not swept yet. pg_database_size took a mean of 4.4 s (worst 39.9 s) on a large store,
            every five minutes, for a number the field rounds to a whole MB or one GB decimal. */
-        await using (var recorded = _dataSource.CreateCommand(StoreSelfMetrics.LatestStoreSizeSql))
+        try
         {
+            await using var recorded = _dataSource.CreateCommand(StoreSelfMetrics.LatestStoreSizeSql);
             recorded.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             var recordedBytes = await recorded.ExecuteScalarAsync(CancellationToken.None);
             if (recordedBytes is not null && recordedBytes != DBNull.Value)
             {
                 return Convert.ToInt64(recordedBytes);
             }
+        }
+        catch (Exception)
+        {
+            /* The recorded row is an optimisation. A viewer role without SELECT on collect.store_metrics, a store that does not
+               have the relation yet, or a transient error must not take the live answer away: before this read existed the live
+               directory walk answered, so it still does. */
         }
 
         await using var command = _dataSource.CreateCommand(StoreSizeSql);

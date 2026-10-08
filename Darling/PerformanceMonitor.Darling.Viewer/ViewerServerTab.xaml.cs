@@ -372,7 +372,7 @@ public partial class ViewerServerTab : UserControl
 
     /// <summary>Walk finding D15: the clock and phase record of the inner-tab load in flight. Loads are overlap-guarded
     /// (<see cref="RefreshActiveInnerTabAsync"/>), so one field serves them; a loader that wants its store reads in the
-    /// slow-load line wraps each in <c>_loadTimer?.Track(...)</c>.</summary>
+    /// slow-load line wraps each in <c>Timed(...)</c>. Cleared when the load ends, so it is null outside a timed load.</summary>
     private ViewerLoadTimer? _loadTimer;
 
     private async Task LoadInnerTabAsync(int tabIndex)
@@ -481,13 +481,26 @@ public partial class ViewerServerTab : UserControl
         finally
         {
             /* Walk finding D15: a slow load (over ViewerLoadTimer.SlowLoadThresholdMs) names its tab and where the time went. */
-            var slow = timer.Finish($"inner tab {tabIndex}");
+            var slow = timer.Finish(InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header));
+            /* #5555: the timer belongs to this load. Clearing it keeps a read started outside a load (a
+               day-summary drill into Top Queries, a slicer drag) from appending its phases to a finished load's clock, or
+               to a refresh's live one. A newer load has already replaced it, so only clear our own. */
+            if (ReferenceEquals(_loadTimer, timer))
+            {
+                _loadTimer = null;
+            }
+
             if (slow is not null)
             {
                 ViewerLogger.Warn("SlowLoad", $"[{_server.DisplayName}] {slow}");
             }
         }
     }
+
+    /// <summary>The name a slow-load line gives a tab that sets no sub-surface of its own: the tab's header text, or its index
+    /// when the header is not plain text or the tab is unknown.</summary>
+    internal static string InnerTabLoadName(int tabIndex, object? header) =>
+        header is string text && !string.IsNullOrWhiteSpace(text) ? text.Trim() : $"inner tab {tabIndex}";
 
     private async Task LoadOverviewChartsAsync()
     {

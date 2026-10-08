@@ -38,14 +38,27 @@ public partial class ViewerServerTab
     private async Task LoadLongQueriesAsync()
     {
         LongQueriesDisabledWarning.Text = LongQueriesDisabledText(_server.EngineEdition);
-        LongQueriesDisabledWarning.Visibility = await _dataService.GetLongQueryTraceEnabledAsync(_server.ServerId)
+
+        /* #5555: the trace check does not depend on the grid's reads, so it starts beside them and is awaited once the grid is in.
+           It used to be awaited first, which put one whole store round trip in front of the grid's two reads on every load. */
+        var traceTask = Timed("trace check", _dataService.GetLongQueryTraceEnabledAsync(_server.ServerId));
+        var (startUtc, endUtc) = GetWindowUtc();
+        var dataStartTask = Timed("data start", _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc));
+        var dataReadTask = Timed("grid read", _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        try
+        {
+            await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Long Queries");
+        }
+        catch
+        {
+            /* The grid's own error is the one the user sees; the trace check is observed, never waited for. */
+            _ = ViewerDataService.ObserveAsync(traceTask);
+            throw;
+        }
+
+        LongQueriesDisabledWarning.Visibility = await traceTask
             ? Visibility.Collapsed
             : Visibility.Visible;
-
-        var (startUtc, endUtc) = GetWindowUtc();
-        var dataStartTask = _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-        await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Long Queries");
         var rows = dataReadTask.Result;
         _longQueryFilterMgr!.UpdateData(rows);
         /* #4966: the read windows on collection_time but the grid shows event_time, and a first collection stores the events

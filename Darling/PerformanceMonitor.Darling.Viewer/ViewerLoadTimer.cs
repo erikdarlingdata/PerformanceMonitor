@@ -40,21 +40,32 @@ internal sealed class ViewerLoadTimer
     /// caller awaits it exactly as before. A faulted or cancelled task is still recorded; its own awaiter sees the error.</summary>
     internal Task<T> Track<T>(string phase, Task<T> task)
     {
-        var started = _total.ElapsedMilliseconds;
-        _ = task.ContinueWith(
-            _ => Record(phase, started),
-            System.Threading.CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        _ = Watch(phase, _total.ElapsedMilliseconds, task);
         return task;
     }
 
     /// <summary><see cref="Track{T}"/> for a task with no result.</summary>
     internal Task Track(string phase, Task task)
     {
-        var started = _total.ElapsedMilliseconds;
-        _ = task.ContinueWith(
-            _ => Record(phase, started),
-            System.Threading.CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        _ = Watch(phase, _total.ElapsedMilliseconds, task);
         return task;
+    }
+
+    /// <summary>Records <paramref name="phase"/> when <paramref name="task"/> ends, however it ends. Written as an await rather than a
+    /// <c>ContinueWith</c>, which the Viewer's concurrency census keeps out of the project (a continuation is a fan-out the width
+    /// pin does not model). A faulted task's error is its awaiter's to see, so it is swallowed here.</summary>
+    private async Task Watch(string phase, long startedMs, Task task)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            /* The awaiter of the task sees the failure; this watcher only needs to know when it ended. */
+        }
+
+        Record(phase, startedMs);
     }
 
     private void Record(string phase, long startedMs)

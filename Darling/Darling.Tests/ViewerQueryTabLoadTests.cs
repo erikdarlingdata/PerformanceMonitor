@@ -129,6 +129,102 @@ public sealed class ViewerQueryTabLoadTests
         Assert.Null(timer.Finish("fallback"));
     }
 
+    private static string LoaderBody(string file, string signature)
+    {
+        var source = Source(file);
+        var start = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, signature);
+        var end = source.IndexOf("\n    }\n", start, StringComparison.Ordinal);
+        return source[start..end];
+    }
+
+    [Fact]
+    public void LongQueries_StartsItsTraceCheck_BesideTheGridReads_NotBeforeThem()
+    {
+        var body = LoaderBody("ViewerServerTab.LongQueries.cs", "private async Task LoadLongQueriesAsync(");
+        var traceStarted = body.IndexOf("_dataService.GetLongQueryTraceEnabledAsync(", StringComparison.Ordinal);
+        var dataStarted = body.IndexOf("_dataService.GetRecentLongQueryCompletionsAsync(", StringComparison.Ordinal);
+        var gridAwaited = body.IndexOf("AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, \"Long Queries\")", StringComparison.Ordinal);
+        Assert.True(traceStarted >= 0 && dataStarted >= 0 && gridAwaited >= 0);
+        Assert.True(traceStarted < gridAwaited, "the trace check must be started before the grid read is awaited, so the round trips overlap");
+        Assert.DoesNotContain("await _dataService.GetLongQueryTraceEnabledAsync(", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("await Timed(\"trace check\"", body, StringComparison.Ordinal);
+        /* The note for a trace that is off is still driven by the check's answer. */
+        Assert.Contains("LongQueriesDisabledWarning.Visibility = await traceTask", body, StringComparison.Ordinal);
+        Assert.Contains("ViewerDataService.ObserveAsync(traceTask)", body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("GetQueryStatsComparisonAsync")]
+    [InlineData("GetProcedureStatsComparisonAsync")]
+    [InlineData("GetQueryStoreComparisonAsync")]
+    public void ComparisonReads_AreTimed_SoSlowLoadDoesNotCallThemClientWork(string read)
+    {
+        var source = Source("ViewerServerTab.QueriesComparison.cs");
+        Assert.Contains($"Timed(\"comparison read\", _dataService.{read}(", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadTimer_CountsALateComparisonRead_AsAStoreRead_NotAsClientWork()
+    {
+        var phases = new List<(string Phase, long StartedMs, long EndedMs)>
+        {
+            ("grid read", 0, 4000), ("slicer read", 0, 1000), ("comparison read", 4100, 6800),
+        };
+        var line = ViewerLoadTimer.Describe("Queries > Top Queries by Duration", 7000, phases);
+        Assert.NotNull(line);
+        Assert.Contains("comparison read 2700 ms", line, StringComparison.Ordinal);
+        Assert.Contains("200 ms of client work", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InnerTabLoad_ClearsItsTimer_WhenItEnds()
+    {
+        var shell = Source("ViewerServerTab.xaml.cs");
+        var finallyAt = shell.IndexOf("var slow = timer.Finish(", StringComparison.Ordinal);
+        Assert.True(finallyAt >= 0);
+        Assert.Contains("if (ReferenceEquals(_loadTimer, timer))", shell[finallyAt..], StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(7, "Wait Stats", "Wait Stats")]
+    [InlineData(7, "  Memory  ", "Memory")]
+    [InlineData(7, null, "inner tab 7")]
+    [InlineData(7, "", "inner tab 7")]
+    public void SlowLoadLine_NamesTheTab_ByItsHeader_AndByIndexOnlyWithoutOne(int index, string? header, string expected)
+    {
+        Assert.Equal(expected, ViewerServerTab.InnerTabLoadName(index, header));
+    }
+
+    [Fact]
+    public void SlowLoadLine_FallsBackToTheIndex_WhenTheHeaderIsNotText()
+    {
+        Assert.Equal("inner tab 3", ViewerServerTab.InnerTabLoadName(3, new object()));
+    }
+
+    [Theory]
+    [InlineData("private async Task LoadTopQueriesAsync(")]
+    [InlineData("private async Task LoadTopProceduresAsync(")]
+    [InlineData("private async Task LoadQueryStoreAsync(")]
+    public void AGridReadFailure_DoesNotWaitForTheSlicerRead(string loader)
+    {
+        var body = LoaderBody("ViewerServerTab.Queries.cs", loader);
+        Assert.DoesNotContain("await ViewerDataService.ObserveAsync(slicerTask)", body, StringComparison.Ordinal);
+        Assert.Contains("_ = ViewerDataService.ObserveAsync(slicerTask)", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StatusBarStoreSize_FallsBackToTheLiveDirectory_WhenTheRecordedReadFails()
+    {
+        var source = Source("ViewerDataService.ServerStatus.cs");
+        var start = source.IndexOf("private async Task<long?> FetchStoreSizeBytesAsync()", StringComparison.Ordinal);
+        var body = source[start..];
+        var recorded = body.IndexOf("StoreSelfMetrics.LatestStoreSizeSql", StringComparison.Ordinal);
+        var guard = body.IndexOf("catch (Exception)", recorded, StringComparison.Ordinal);
+        var live = body.IndexOf("CreateCommand(StoreSizeSql)", StringComparison.Ordinal);
+        Assert.True(recorded >= 0 && guard > recorded && live > guard, "a failed recorded read must fall through to the live read");
+    }
+
     /* ------------------------------------------------------------------ live pins */
 
     private static async Task<long> StartStatementCountingAsync(string connectionString, CancellationToken ct)
@@ -234,6 +330,106 @@ FROM generate_series(1, 30) q", setup);
             Assert.Equal(123456789L, await service.GetStoreSizeBytesAsync(ct));
             var live = await CountCallsAsync(scratch.ConnectionString, dbId, "%pg_database_size%current_database%", ct);
             Assert.True(live == 0, $"a recorded size must not trigger the live directory walk; saw {live} calls");
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task HourlyTextLookup_KeepsTheNewestTextPerKey_AndKeepsDatabasesApart()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setup.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setup, ct);
+            await using var seed = new NpgsqlCommand(@"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES (7002, 'tabtext', 'tabtext', TRUE, 15, now() at time zone 'utc', now() at time zone 'utc');
+INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text, delta_execution_count)
+SELECT v.id, (now() at time zone 'utc') - v.age, 7002, 'tabtext', v.db, v.hash, v.txt, 1
+FROM (VALUES
+    (2001, interval '3 hours', 'dbA', '0xA', 'old text'),
+    (2002, interval '1 hour',  'dbA', '0xA', 'new text'),
+    (2003, interval '3 hours', 'dbA', '0xB', 'kept text'),
+    (2004, interval '1 hour',  'dbA', '0xB', NULL),
+    (2005, interval '2 hours', 'dbB', '0xA', 'other database text')
+) AS v(id, age, db, hash, txt)", setup);
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        var bodySucceeded = false;
+        await using var service = new ViewerDataService(scratch.ConnectionString);
+        try
+        {
+            var texts = await service.ReadHourlyQueryTextsAsync(7002, new[] { "dbA", "dbA", "dbB", "dbB" }, new[] { "0xA", "0xB", "0xA", "0xB" }, ct);
+            Assert.Equal("new text", texts[0]);           /* two texts for one key: the newest wins, as the per-row read did */
+            Assert.Equal("kept text", texts[1]);          /* a newer row with no text does not blank an older text */
+            Assert.Equal("other database text", texts[2]); /* the same hash in another database is its own key */
+            Assert.Equal("", texts[3]);                   /* no row for the key */
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setup.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setup, ct);
+        }
+
+        var dbId = await StartStatementCountingAsync(scratch.ConnectionString, ct);
+        var bodySucceeded = false;
+        await using var service = new ViewerDataService(scratch.ConnectionString);
+        try
+        {
+            var size = await service.GetStoreSizeBytesAsync(ct);
+            Assert.True(size > 0, "a store with no recorded size reads its live size");
+            var live = await CountCallsAsync(scratch.ConnectionString, dbId, "%pg_database_size%current_database%", ct);
+            Assert.True(live == 1, $"one live directory walk expected; saw {live}");
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task StatusBarStoreSize_StillAnswers_WhenTheRecordedRowCannotBeRead()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setup.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setup, ct);
+            /* A store the viewer's role cannot read the self-metrics table of fails the recorded read the same way a missing table does. */
+            await using var drop = new NpgsqlCommand("DROP TABLE collect.store_metrics CASCADE", setup);
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        var bodySucceeded = false;
+        await using var service = new ViewerDataService(scratch.ConnectionString);
+        try
+        {
+            var size = await service.GetStoreSizeBytesAsync(ct);
+            Assert.True(size > 0, "a failed recorded read falls back to the live size and does not leave the field blank");
             bodySucceeded = true;
         }
         finally

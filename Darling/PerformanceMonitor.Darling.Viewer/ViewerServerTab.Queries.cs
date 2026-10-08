@@ -201,7 +201,9 @@ public partial class ViewerServerTab
         }
         catch
         {
-            await ViewerDataService.ObserveAsync(slicerTask);
+            /* #5555: the grid's own error is the one the user sees, and at once. The slicer read is still observed, so a
+               fault in it is not left unobserved, but nothing waits for it. */
+            _ = ViewerDataService.ObserveAsync(slicerTask);
             throw;
         }
 
@@ -264,7 +266,9 @@ public partial class ViewerServerTab
         }
         catch
         {
-            await ViewerDataService.ObserveAsync(slicerTask);
+            /* #5555: the grid's own error is the one the user sees, and at once. The slicer read is still observed, so a
+               fault in it is not left unobserved, but nothing waits for it. */
+            _ = ViewerDataService.ObserveAsync(slicerTask);
             throw;
         }
 
@@ -293,7 +297,9 @@ public partial class ViewerServerTab
         }
         catch
         {
-            await ViewerDataService.ObserveAsync(slicerTask);
+            /* #5555: the grid's own error is the one the user sees, and at once. The slicer read is still observed, so a
+               fault in it is not left unobserved, but nothing waits for it. */
+            _ = ViewerDataService.ObserveAsync(slicerTask);
             throw;
         }
 
