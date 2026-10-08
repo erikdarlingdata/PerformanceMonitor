@@ -1351,9 +1351,9 @@ public static class ComposeCompiler
         && !plan.UsesModuleJoin
         && windowBuckets > 0
         && windowBuckets <= ComposeLimits.MaxSingleScanBuckets
-        && groupMembers is { } members
-        && members >= 0
-        && windowBuckets * members <= ComposeLimits.MaxSingleScanBaseRows
+        && groupMembers.HasValue
+        && groupMembers.Value >= 0
+        && windowBuckets * groupMembers.Value <= ComposeLimits.MaxSingleScanBaseRows
         && plan.GroupBy.All(dim => !dim.ViaModuleJoin && !dim.TrailingSpaceHistory && !s_unboundedGroupColumns.Contains(dim.Column))
         && TryBuildPartialValueExpr(plan.Measure, plan.Aggregate, plan.Unit, new PartialColumns()) is not null;
 
