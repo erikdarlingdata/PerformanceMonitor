@@ -36,7 +36,7 @@ public sealed class FinOpsIdleCoverageLiveTests
 
     private static string? Cs => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static async Task<(int Id, string Name)> RegisterAsync(NpgsqlConnection c, string name, CancellationToken ct)
+    internal static async Task<(int Id, string Name)> RegisterAsync(NpgsqlConnection c, string name, CancellationToken ct)
     {
         var id = ServerIdHelper.GetDeterministicHashCode(name);
         await DarlingMcpTestData.RegisterServerAsync(c, id, name, ct);
@@ -44,7 +44,7 @@ public sealed class FinOpsIdleCoverageLiveTests
     }
 
     /// <summary>One zero-execution sample every half day from <paramref name="days"/> back up to <paramref name="now"/>, skipping those <paramref name="skip"/> accepts.</summary>
-    private static async Task SeedHalfDaysAsync(
+    internal static async Task SeedHalfDaysAsync(
         NpgsqlConnection c, int id, string name, DateTime now, double days, Func<DateTime, bool> skip, CancellationToken ct)
     {
         var steps = (int)Math.Round(days * 2);
@@ -201,6 +201,46 @@ AND   collection_time <  $3";
             var (oldFull, probedFull) = await CountDaysBothWaysAsync(dataSource, fullId, now, ct);
             Assert.Equal(oldFull, probedFull);
             Assert.Equal(7L, probedFull);
+        }
+    }
+
+    /// <summary>
+    /// Round-2 L5 (#5492): the day edges. D-3 holds no half-day sample here; a sample exactly at D-3 00:00:00.000000 is the
+    /// start of that day (half-open day, so it covers it); D-4 23:59:59.999999 and D-2 00:00:00.000000 belong to the
+    /// neighbouring days and leave D-3 uncovered. The per-day probes count the same days as the old distinct-date count in both.
+    /// </summary>
+    [Fact]
+    public async Task ASampleOnTheExactDayEdge_CoversOnlyItsOwnDay()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live idle-coverage test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Cs!, ct);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        foreach (var hour in HoursOfDay)
+        {
+            var now = Day.AddHours(hour);
+            var dMinus3 = now.Date.AddDays(-3);
+
+            var (midId, midName) = await RegisterAsync(c, $"darling-idle-edge-mid-{hour}", ct);
+            await SeedHalfDaysAsync(c, midId, midName, now, 7.5, at => at.Date == dMinus3, ct);
+            await FinOpsIdleCoverageSeed.InsertAsync(c, ct, midId, midName, dMinus3, "mid");
+            Assert.True(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, midId, now, TimeoutSeconds, ct), $"00:00:00.000000 of D-3 at hour {hour}");
+            var (oldMid, probedMid) = await CountDaysBothWaysAsync(dataSource, midId, now, ct);
+            Assert.Equal(oldMid, probedMid);
+            Assert.Equal(7L, probedMid);
+
+            var (edgeId, edgeName) = await RegisterAsync(c, $"darling-idle-edge-near-{hour}", ct);
+            await SeedHalfDaysAsync(c, edgeId, edgeName, now, 7.5, at => at.Date == dMinus3, ct);
+            await FinOpsIdleCoverageSeed.InsertAsync(c, ct, edgeId, edgeName, dMinus3.AddTicks(-10), "prevEnd");
+            await FinOpsIdleCoverageSeed.InsertAsync(c, ct, edgeId, edgeName, dMinus3.AddDays(1), "nextStart");
+            Assert.False(await DarlingFinOpsOptimizationReader.HasIdleCoverageAtAsync(dataSource, edgeId, now, TimeoutSeconds, ct), $"neighbouring edges at hour {hour}");
+            var (oldEdge, probedEdge) = await CountDaysBothWaysAsync(dataSource, edgeId, now, ct);
+            Assert.Equal(oldEdge, probedEdge);
+            Assert.Equal(6L, probedEdge);
         }
     }
 }
