@@ -764,13 +764,45 @@ jobs:
           @{ instrumented_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrumented_exit = $code } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-instrumented.json"
           exit 0
 
+      # Overhead comparison only: put the original assemblies back, instrument again with AltCover's default
+      # (sequence-point and branch) recording, run the same classes, and keep only the timings and the report
+      # size. The method-level pass above is what the summary and the map read.
+      - name: Overhead comparison (default line and branch recording)
+        continue-on-error: true
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          Copy-Item -Path "$env:PROBE_OUT\saved\*" -Destination $env:PROBE_BIN -Recurse -Force
+          $altcover = "$env:RUNNER_TEMP\altcover-tool\altcover.exe"
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & $altcover --inplace --inputDirectory $env:PROBE_BIN --outputDirectory "$env:PROBE_OUT\saved-line" `
+            --report "$env:PROBE_OUT\coverage-line.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Out-Null
+          $instrument = $LASTEXITCODE
+          $instrumentSeconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+          if ($instrument -ne 0) { Write-Host "line instrumentation failed ($instrument)"; exit 0 }
+          $classes = @(Get-Content "$env:PROBE_OUT\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch.Restart()
+          & $altcover Runner --recorderDirectory $env:PROBE_BIN --workingDirectory $env:PROBE_BIN --executable "$env:PROBE_BIN\Darling.Tests.exe" -- @classArgs -xml "$env:PROBE_OUT\instrumented-line.xml" 2>&1 | Out-Null
+          $code = $LASTEXITCODE
+          $runSeconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+          $bytes = if (Test-Path "$env:PROBE_OUT\coverage-line.xml") { (Get-Item "$env:PROBE_OUT\coverage-line.xml").Length } else { 0 }
+          Write-Host "line and branch recording: instrument $instrumentSeconds s, run $runSeconds s (exit $code), report $bytes bytes"
+          @{ line_instrument_seconds = $instrumentSeconds; line_run_seconds = $runSeconds; line_run_exit = $code; line_report_bytes = $bytes } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-line.json"
+          Remove-Item "$env:PROBE_OUT\coverage-line.xml" -Force -ErrorAction SilentlyContinue
+          exit 0
+
       - name: Summarize the coverage (map for the sampled classes)
         if: always()
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $timing = @{}
-          foreach ($name in 'plain', 'instrument', 'instrumented') {
+          foreach ($name in 'plain', 'instrument', 'instrumented', 'line') {
             $file = "$env:PROBE_OUT\timing-$name.json"
             if (Test-Path $file) { (Get-Content $file -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $timing[$_.Name] = $_.Value } }
           }

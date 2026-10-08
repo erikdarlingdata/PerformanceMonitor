@@ -131,11 +131,14 @@ def parse_report(path, root):
     ctx_files: dict[str, set] = {}
     file_stats: dict[str, list] = {}  # file -> [visits, visits with a context]
     totals = {"modules": 0, "methods": 0, "points": 0, "points_visited": 0, "points_visited_with_context": 0,
-              "visits": 0, "visits_with_context": 0, "tracked_methods": 0, "tracked_refs": 0,
+              "visits": 0, "visits_with_context": 0, "tracked_methods": 0, "tracked_refs": 0, "tracked_uid_collisions": 0, "unresolved_refs": 0, "points_partly_outside_context": 0, "points_fully_in_context": 0, "context_refs_on_visited_points": 0,
               "ref_owner": {}}
     stack = []
+    names: dict[str, str] = {}
+    resolved: set = set()
     files = {}
     pairs = set()
+    mod_stats: dict = {}  # file uid -> [visits, visits with a context], per module (uids repeat across modules)
     method_file = None
     point = None  # [file, vc, ref_vc, ref_count]
 
@@ -151,7 +154,11 @@ def parse_report(path, root):
             totals["visits_with_context"] += min(ref_vc, vc) if ref_count else 0
             if ref_count:
                 totals["points_visited_with_context"] += 1
-            stat = file_stats.setdefault(file, [0, 0])
+                # A point whose per-context visit counts add up to less than its total was also reached
+                # outside every context (a constructor, a fixture, a pool thread started by the test).
+                totals["points_partly_outside_context" if ref_vc < vc else "points_fully_in_context"] += 1
+                totals["context_refs_on_visited_points"] += ref_count
+            stat = mod_stats.setdefault(file, [0, 0])
             stat[0] += vc
             stat[1] += min(ref_vc, vc) if ref_count else 0
         point = None
@@ -164,6 +171,7 @@ def parse_report(path, root):
                 totals["modules"] += 1
                 files = {}
                 pairs = set()
+                mod_stats = {}
             elif tag == "File":
                 files[el.get("uid")] = norm(el.get("fullPath") or "")
             elif tag == "Method":
@@ -196,20 +204,31 @@ def parse_report(path, root):
             elif tag == "TrackedMethods":
                 pass
             elif tag == "Module":
-                names = {}
+                for fuid, (visit_count, ctx_count) in mod_stats.items():
+                    if fuid in files:
+                        stat = file_stats.setdefault(files[fuid], [0, 0])
+                        stat[0] += visit_count
+                        stat[1] += ctx_count
+                # TrackedMethod uids are numbered across the whole report, and a product module's points
+                # refer to test methods listed in the TEST module, so names are resolved after the last
+                # module rather than inside the module that holds the reference.
                 for tm in el.iter("TrackedMethod"):
-                    names[tm.get("uid")] = tm.get("name") or ""
+                    uid, name = tm.get("uid"), tm.get("name") or ""
+                    if uid in names and names[uid] != name:
+                        totals["tracked_uid_collisions"] += 1
+                    names[uid] = name
                 for uid, fuid in pairs:
-                    name = names.get(uid)
-                    if not name or fuid not in files:
-                        continue
-                    full = files[fuid]
-                    low = full.lower()
-                    if not low.startswith(root_norm):
-                        continue
-                    ctx_files.setdefault(class_of_tracked(name), set()).add(full[len(root_norm):])
+                    if fuid in files:
+                        resolved.add((uid, files[fuid]))
                 el.clear()
             stack.pop()
+    for uid, full in resolved:
+        name = names.get(uid)
+        if not name:
+            totals["unresolved_refs"] += 1
+            continue
+        if full.lower().startswith(root_norm):
+            ctx_files.setdefault(class_of_tracked(name), set()).add(full[len(root_norm):])
     return ctx_files, file_stats, totals, root_norm
 
 
@@ -273,12 +292,27 @@ def cmd_summarize(args):
             return None
         return {"n": len(values), "min": min(values), "median": statistics.median(values), "max": max(values)}
 
-    visits = totals["visits"]
-    with_ctx = totals["visits_with_context"]
+    # Visits to product files only: test-method bodies are always inside a context by construction, so the
+    # overall share flatters the tool.  `outside_root` is source the checkout does not hold (generated code).
+    visits = with_ctx = test_visits = outside_visits = 0
+    for path, (visit_count, ctx_count) in file_stats.items():
+        if not path.lower().startswith(root_prefix):
+            outside_visits += visit_count
+        elif is_test_file(path[len(root_prefix):]):
+            test_visits += visit_count
+        else:
+            visits += visit_count
+            with_ctx += ctx_count
     weakest = sorted(
         ((f, v, c) for f, (v, c) in file_stats.items()
          if f.lower().startswith(root_prefix) and v >= 5 and not is_test_file(f[len(root_prefix):])),
         key=lambda row: (row[2] / row[1], -row[1]))[:25]
+    # File-level view, the one the map cares about: a product file the run visited but never attributed
+    # to any test class cannot select a single class.
+    product_files = {f[len(root_prefix):]: v for f, (v, c) in file_stats.items()
+                     if f.lower().startswith(root_prefix) and not is_test_file(f[len(root_prefix):]) and v > 0}
+    attributed = set(universe)
+    unattributed = sorted(((v, f) for f, v in product_files.items() if f not in attributed), reverse=True)
     plain_total = timing.get("plain_seconds")
     instr_total = timing.get("instrumented_seconds")
     summary = {
@@ -293,16 +327,29 @@ def cmd_summarize(args):
         "visits": {
             "points_in_report": totals["points"], "points_visited": totals["points_visited"],
             "points_visited_with_context": totals["points_visited_with_context"],
-            "visits": visits, "visits_with_context": with_ctx,
+            "product_visits": visits, "product_visits_with_context": with_ctx,
             "share_with_context": round(with_ctx / visits, 4) if visits else None,
+            "test_file_visits": test_visits, "outside_root_visits": outside_visits,
+            "points_partly_outside_context": totals["points_partly_outside_context"],
+            "points_fully_in_context": totals["points_fully_in_context"],
+            "contexts_per_context_bearing_point": round(
+                totals["context_refs_on_visited_points"] / totals["points_visited_with_context"], 2)
+            if totals["points_visited_with_context"] else None,
+            "unresolved_refs": totals["unresolved_refs"], "tracked_uid_collisions": totals["tracked_uid_collisions"],
             "tracked_methods": totals["tracked_methods"], "tracked_refs": totals["tracked_refs"],
             "tracked_ref_owner_tags": totals["ref_owner"],
         },
+        "files_visited_by_any_code": len(product_files),
+        "files_attributed_to_a_class": len(attributed & set(product_files)),
+        "files_visited_never_attributed": len(unattributed),
+        "never_attributed_top": [{"file": f, "visits": v} for v, f in unattributed[:40]],
         "weakest_context_files": [{"file": f[len(root_prefix):], "visits": v, "with_context": c}
                                   for f, v, c in weakest],
         "timing_seconds": {"plain": plain_total, "instrumented": instr_total,
                            "ratio": round(instr_total / plain_total, 2) if plain_total and instr_total else None,
                            "instrument_step": timing.get("instrument_seconds"),
+                           "line_and_branch_mode": {k: v for k, v in timing.items() if k.startswith("line_")},
+                           "method_mode_report_bytes": os.path.getsize(args.report),
                            "xunit_plain_sum": round(sum(plain_seconds.values()), 1),
                            "xunit_instrumented_sum": round(sum(instr_seconds.values()), 1)},
         "outcomes": {"plain": plain_counts, "instrumented": instr_counts},
