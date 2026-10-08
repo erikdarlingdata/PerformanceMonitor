@@ -87,7 +87,7 @@ public sealed class ComposeQueryStoreStampCompileTests
         var stale = arms[1];
         Assert.Contains("FROM collect.query_store_compose_stamp_built AS b CROSS JOIN LATERAL (SELECT w.* FROM collect.query_store_interval_wide AS w", stale, StringComparison.Ordinal);
         Assert.Contains("w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour'", stale, StringComparison.Ordinal);
-        Assert.Contains("w.collection_time >= $1 AND w.collection_time < $3) AS f", stale, StringComparison.Ordinal);
+        Assert.Contains("w.collection_time >= $1 AND w.collection_time < $3 OFFSET 0) AS f", stale, StringComparison.Ordinal);
         Assert.Contains("b.hour >= date_trunc('hour', $1) AND b.hour < $3 AND b.built_seq IS DISTINCT FROM b.late_seq", stale, StringComparison.Ordinal);
 
         /* The tail starts at $stampThrough (never the window start) and ends at the window end, inclusive as the wide read is. */
@@ -107,7 +107,7 @@ public sealed class ComposeQueryStoreStampCompileTests
 
         /* $1 start, $2 end, $3 wideStart, $4 stampThrough. */
         Assert.Contains("f.collection_time >= $3 AND f.collection_time < $4", arms[0], StringComparison.Ordinal);
-        Assert.Contains("w.collection_time >= $3 AND w.collection_time < $4) AS f", arms[1], StringComparison.Ordinal);
+        Assert.Contains("w.collection_time >= $3 AND w.collection_time < $4 OFFSET 0) AS f", arms[1], StringComparison.Ordinal);
         Assert.Contains("b.hour >= date_trunc('hour', $3) AND b.hour < $4", arms[1], StringComparison.Ordinal);
         Assert.EndsWith("WHERE f.collection_time >= $4 AND f.collection_time <= $2", arms[2], StringComparison.Ordinal);
         Assert.Equal(5, compiled.Parameters.Count);
@@ -127,6 +127,12 @@ public sealed class ComposeQueryStoreStampCompileTests
             Assert.Contains("s.server_name = ", arm, StringComparison.Ordinal);
             Assert.DoesNotContain("f.server_name", arm, StringComparison.Ordinal);
         }
+
+        /* #5582 part 3: the stale arm also scopes the LEDGER row, so a stale pair of a server out of scope costs no wide-table probe (found
+           on a live plan: the scope over the registry join alone is applied after the lateral). */
+        Assert.Contains("AND b.server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($3)))", arms[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("b.server_id = ANY", arms[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("b.server_id = ANY", arms[2], StringComparison.Ordinal);
 
         /* The scope is bound once and the stamp bound is the next parameter after it is not: window, stampThrough, scope, filters. */
         Assert.Equal(6, compiled.Parameters.Count);
@@ -291,7 +297,7 @@ public sealed class ComposeQueryStoreStampCompileTests
     {
         var sql = Compile(TopQueriesOverTime(), Context(Day, Day.AddDays(1), Day.AddHours(20))).Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
         const string Relation = "SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name, f.cpu_wsum FROM collect.query_store_compose_stamp AS f JOIN collect.servers AS s ON s.server_id = f.server_id WHERE f.collection_time >= $1 AND f.collection_time < $3 AND EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_built AS b WHERE b.server_id = f.server_id AND b.hour = date_trunc('hour', f.collection_time) AND b.built_seq = b.late_seq) UNION ALL "
-            + "SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name, CAST(f.avg_cpu_time_us * f.execution_count AS numeric) AS cpu_wsum FROM collect.query_store_compose_stamp_built AS b CROSS JOIN LATERAL (SELECT w.* FROM collect.query_store_interval_wide AS w WHERE w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour' AND w.collection_time >= $1 AND w.collection_time < $3) AS f JOIN collect.servers AS s ON s.server_id = f.server_id WHERE b.hour >= date_trunc('hour', $1) AND b.hour < $3 AND b.built_seq IS DISTINCT FROM b.late_seq UNION ALL "
+            + "SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name, CAST(f.avg_cpu_time_us * f.execution_count AS numeric) AS cpu_wsum FROM collect.query_store_compose_stamp_built AS b CROSS JOIN LATERAL (SELECT w.* FROM collect.query_store_interval_wide AS w WHERE w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour' AND w.collection_time >= $1 AND w.collection_time < $3 OFFSET 0) AS f JOIN collect.servers AS s ON s.server_id = f.server_id WHERE b.hour >= date_trunc('hour', $1) AND b.hour < $3 AND b.built_seq IS DISTINCT FROM b.late_seq UNION ALL "
             + "SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, s.server_name, CAST(f.avg_cpu_time_us * f.execution_count AS numeric) AS cpu_wsum FROM collect.query_store_interval_wide AS f JOIN collect.servers AS s ON s.server_id = f.server_id WHERE f.collection_time >= $3 AND f.collection_time <= $2";
         const string Expected = """
             WITH topn AS (
