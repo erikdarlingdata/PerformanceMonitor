@@ -66,7 +66,7 @@ const RECOMMENDATION_COLUMNS = [
   { key: "target_index_name", label: "Target Index" },
   { key: "superseded_by", label: "Superseded / Related", wrap: true },
   { key: "additional_info", label: "Info", wrap: true },
-  { key: "original_index_definition", label: "Original Definition", valueList: false, wrap: true, mono: true, pre: true },
+  { key: "original_index_definition", label: "Original Definition", wrap: true, mono: true, pre: true },
   { key: "script", label: "Script", wrap: true, mono: true, pre: true },
   { key: "captured_at", label: "Collected", format: "time" },
 ];
