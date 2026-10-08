@@ -1699,28 +1699,47 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     /// connection if the failure broke it, then schedule the jobs again. Returns false when the connection could not
     /// be reopened (the sweep ends, as before); that log line names the stopped jobs and the view, so the operator
     /// knows which to schedule again. With nothing stopped it is exactly <see cref="ReopenBrokenConnectionAsync"/>.
-    /// The reopen of a sweep that holds jobs runs on the resume grace, not the caller's token.
+    /// The reopen of a sweep that holds jobs runs on the resume grace, not the caller's token, so an
+    /// <see cref="OperationCanceledException"/> out of it is the GRACE running out (a pool wait, a host that stopped
+    /// answering; Npgsql's own connect timeout is longer than the grace) and never the caller's cancellation: it is
+    /// logged with the stopped job ids and the view, and the sweep ends like any failed reopen. It reaches the caller
+    /// only when the caller's own token was cancelled too, and then after that same log line. This method never
+    /// throws anything else: the resume it ends with takes every exception itself.
+    /// <paramref name="resumeGrace"/> is the seam for a test; production leaves it at <see cref="s_resumeGrace"/>.
     /// </summary>
-    private static async Task<bool> ReopenAndResumeAfterFailedDropAsync(
+    internal static async Task<bool> ReopenAndResumeAfterFailedDropAsync(
         NpgsqlConnection connection,
         AggregateJobHold hold,
         string view,
         ILogger? logger,
         string reopenFailedTemplate,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? resumeGrace = null)
     {
         if (hold.Unscheduled.Count == 0)
         {
             return await ReopenBrokenConnectionAsync(connection, logger, cancellationToken, reopenFailedTemplate);
         }
 
-        using (var grace = new CancellationTokenSource(s_resumeGrace))
+        var reopenFailed = reopenFailedTemplate + " " + StoppedJobsNote(hold.Unscheduled, view);
+        var reopened = false;
+        try
         {
-            if (!await ReopenBrokenConnectionAsync(
-                    connection, logger, grace.Token, reopenFailedTemplate + " " + StoppedJobsNote(hold.Unscheduled, view)))
+            using var grace = new CancellationTokenSource(resumeGrace ?? s_resumeGrace);
+            reopened = await ReopenBrokenConnectionAsync(connection, logger, grace.Token, reopenFailed);
+        }
+        catch (OperationCanceledException)
+        {
+            logger?.LogWarning(reopenFailed, "the connection did not reopen within " + (resumeGrace ?? s_resumeGrace).TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " s");
+            if (cancellationToken.IsCancellationRequested)
             {
-                return false;
+                throw;
             }
+        }
+
+        if (!reopened)
+        {
+            return false;
         }
 
         await ResumeContinuousAggregateJobsAsync(connection, hold.Unscheduled, view, logger);

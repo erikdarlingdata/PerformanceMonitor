@@ -119,8 +119,9 @@ public sealed class AggregateJobQuiescePinTests
             for (var i = 0; i < lines.Length; i++)
             {
                 var trimmed = lines[i].TrimStart();
-                var isComment = trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed.StartsWith("*", StringComparison.Ordinal)
-                    || trimmed.StartsWith("/*", StringComparison.Ordinal);
+                /* A whole-line comment (//, ///, a block comment's first or continuation line). Matched with a regex, not a
+                   prefix call, which CommentFilterAdoptionTests' census reads as a hand-rolled comment filter. */
+                var isComment = Regex.IsMatch(trimmed, @"^(//|/\*|\*)");
                 if (!isComment && lines[i].Contains("DROP MATERIALIZED VIEW", StringComparison.Ordinal))
                 {
                     sites.Add((Path.GetFileName(file), i + 1));
@@ -186,6 +187,11 @@ public sealed class AggregateJobQuiescePinTests
 
         /* A resume that cannot happen names the jobs and the view. */
         Assert.Equal(4, Regex.Matches(source, @"StoppedJobsNote\(").Count); // the definition + the three log lines that use it
+
+        /* Round 2: the caller's reopen on the grace is inside a try that takes the grace's OperationCanceledException,
+           names the jobs, and lets it through only when the caller's own token is cancelled. */
+        Assert.Matches(@"try\s+\{\s+using var grace = new CancellationTokenSource\(resumeGrace \?\? s_resumeGrace\);\s+reopened = await ReopenBrokenConnectionAsync\(connection, logger, grace\.Token, reopenFailed\);\s+\}\s+catch \(OperationCanceledException\)\s+\{\s+logger\?\.LogWarning\(reopenFailed,[^;]+;\s+if \(cancellationToken\.IsCancellationRequested\)\s+\{\s+throw;", source);
+        Assert.Equal(2, Regex.Matches(source, @"new CancellationTokenSource\((resumeGrace \?\? )?s_resumeGrace\)").Count); // the resume's and the reopen's: the only two grace tokens
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
@@ -198,6 +204,53 @@ public sealed class AggregateJobQuiescePinTests
 
         Assert.False(dir is null, "could not locate the repo root from the test source path");
         return dir!;
+    }
+}
+
+/// <summary>
+/// #5551 review round 2: the reopen after a failed drop runs on the resume grace, so a reopen that outlasts the grace
+/// must end the sweep with the stopped jobs named, like any failed reopen, and must never reach the caller as a
+/// cancellation the caller did not make. No database: the connection is never opened and the grace is zero, so the
+/// reopen's token is cancelled before it starts.
+/// </summary>
+[Trait("Stage", "Guard")]
+public sealed class AggregateJobGraceReopenTests
+{
+    private const string ReopenFailed = "The retired-baseline sweep's connection broke and could not be reopened, so the rest of the sweep is skipped until the next pass retries it: {Message}";
+
+    private static NpgsqlConnection ClosedConnection()
+        => new("Host=127.0.0.1;Port=1;Username=nobody;Database=none;Timeout=1");
+
+    [Fact]
+    public async Task ReopenThatOutlastsTheGrace_EndsTheSweepAndNamesTheStoppedJobs_NotACancellation()
+    {
+        var log = new CapturingTestLogger();
+        await using var connection = ClosedConnection();
+        var hold = new TimescaleSupport.AggregateJobHold(new[] { 41, 42 }, false);
+
+        var proceed = await TimescaleSupport.ReopenAndResumeAfterFailedDropAsync(
+            connection, hold, "some_view", log, ReopenFailed, CancellationToken.None, TimeSpan.Zero);
+
+        Assert.False(proceed);
+        Assert.Contains("did not reopen within 0 s", log.Joined);
+        Assert.Contains("Job(s) 41, 42 of continuous aggregate some_view are still stopped", log.Joined);
+        Assert.Contains("alter_job(<job id>, scheduled => true)", log.Joined);
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+    }
+
+    [Fact]
+    public async Task ReopenThatOutlastsTheGrace_WhileTheCallerIsCancelled_LogsTheJobsThenLetsTheCancellationThrough()
+    {
+        var log = new CapturingTestLogger();
+        await using var connection = ClosedConnection();
+        var hold = new TimescaleSupport.AggregateJobHold(new[] { 7 }, false);
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => TimescaleSupport.ReopenAndResumeAfterFailedDropAsync(
+            connection, hold, "some_view", log, ReopenFailed, cts.Token, TimeSpan.Zero));
+
+        Assert.Contains("Job(s) 7 of continuous aggregate some_view are still stopped", log.Joined);
     }
 }
 
