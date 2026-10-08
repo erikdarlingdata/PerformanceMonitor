@@ -103,6 +103,9 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// </summary>
     public bool IsPostgres => MonitoredEngineKind.IsPostgres(EngineKind);
 
+    /// <summary>The FinOps picker's text: <see cref="DisplayName"/>, with " (PostgreSQL)" after a PostgreSQL target's, as the web page's server list does.</summary>
+    public string PickerLabel => FinOpsServerChoice.Label(this);
+
     /// <summary>
     /// True only when the store says this target is Amazon Aurora PostgreSQL specifically. Same asymmetry as
     /// <see cref="IsPostgres"/>. Read for the Overview card's CPU row (#3267): instance CPU comes from

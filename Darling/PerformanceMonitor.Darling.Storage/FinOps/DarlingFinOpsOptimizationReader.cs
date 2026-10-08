@@ -18,6 +18,10 @@ namespace PerformanceMonitor.Darling.Storage.FinOps;
 /// <c>query_stats.last_execution_time</c>, the monitored server's own wall clock, read verbatim.</summary>
 public sealed record IdleDatabase(string DatabaseName, decimal TotalSizeMb, int FileCount, DateTime? LastExecutionTime);
 
+/// <summary>The idle-database read: whether query stats cover each of the last 7 UTC days (<see cref="Covered"/>), and the idle
+/// databases, which are empty when they do not (an idle claim needs the days to have been watched).</summary>
+public sealed record IdleDatabaseRead(bool Covered, List<IdleDatabase> Rows);
+
 /// <summary>One tempdb pressure metric: the latest value against the window's peak.</summary>
 public sealed record TempdbSummaryMetric(string Metric, decimal CurrentMb, decimal Peak24hMb, string Warning);
 
@@ -75,6 +79,85 @@ WHERE COALESCE(a.total_executions, 0) = 0
 AND   (a.last_execution IS NULL OR a.last_execution < $2)
 AND   ds.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
 ORDER BY ds.total_size_mb DESC";
+
+    /// <summary>The number of COMPLETE UTC days (D-7 through D-1, today excluded) that must each hold a query-stats sample before a database is called idle for 7 days.</summary>
+    public const int IdleCoverageDays = 7;
+
+    /// <summary>The first complete UTC day of the idle-coverage window, D-7 at 00:00. Every idle claim (the recommendation row, the Idle Databases grid, the Server Inventory count) shares it.</summary>
+    public static DateTime IdleCoverageStartUtc(DateTime? nowUtc = null) => (nowUtc ?? DateTime.UtcNow).Date.AddDays(-IdleCoverageDays);
+
+    /// <summary>The end of the idle-coverage days: today at 00:00 (exclusive). Today is not required to hold a sample, so just after 00:00 UTC a covered server stays covered.</summary>
+    public static DateTime IdleCoverageEndUtc(DateTime? nowUtc = null) => (nowUtc ?? DateTime.UtcNow).Date;
+
+    /// <summary>
+    /// The coverage rule in one place: the oldest query-stats sample is at or before now - 7 days (so 7 days of history exist, not 6 days
+    /// that happen to touch 7 UTC dates) AND each of the 7 complete UTC days before today holds a sample (so a gap inside the window
+    /// reads as not covered). The inventory SQL (<c>idle_coverage</c>) is the same rule fleet-wide.
+    /// </summary>
+    public static bool IdleCoverageHolds(DateTime? oldestSampleUtc, long completeDaysWithSamples, DateTime? nowUtc = null) =>
+        oldestSampleUtc is DateTime oldest
+        && oldest <= (nowUtc ?? DateTime.UtcNow).AddDays(-IdleCoverageDays)
+        && completeDaysWithSamples >= IdleCoverageDays;
+
+    /// <summary>What the Idle Databases grid says when it is empty: that no database is idle, or (when the query stats do not cover
+    /// the last 7 UTC days) that idle cannot be judged yet. An empty grid after a collection gap must not read as a clean bill.</summary>
+    public static string IdleDatabasesEmptyText(bool hasCoverage) => hasCoverage
+        ? "No idle databases detected"
+        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
+
+    /// <summary>
+    /// The oldest query-stats sample, and the number of distinct COMPLETE UTC days in [$2, $3) that hold one. The advice text claims
+    /// "no query activity in 7 days", so 7 days must have been watched: the oldest sample at or before now - 7 days (with fewer days of
+    /// history, six days of samples touch seven UTC dates), and a sample on each complete day (after a collection gap the oldest
+    /// sample is old, yet the days since hold none, and every database reads as idle because nothing was watching, not because
+    /// nothing ran). <see cref="IdleCoverageHolds"/> reads both. The days are counted by one <c>EXISTS</c> probe per complete day (a
+    /// <c>generate_series</c> of the day starts D-7 .. D-1), each an index range seek on <c>(server_id, collection_time)</c> that stops at its
+    /// first row, not a <c>COUNT(DISTINCT ...)</c> over 7 days of raw rows (the same answer, #5492). The probe is an <c>EXISTS</c> in the select list,
+    /// not in a <c>WHERE</c>: a <c>WHERE EXISTS</c> is flattened to a semi join, and on a hypertable the planner then chose to read every chunk of the
+    /// server once and filter the days in the join (measured on a test store). The select-list form stays one parameterized index scan per day, with
+    /// the chunks outside that day excluded at run time. The oldest sample is <c>ORDER BY collection_time LIMIT 1</c> rather than <c>MIN</c>, which
+    /// through this view read every row of the server in the store's whole history (an ordered index scan that stops at its first row does not). $1 server_id, $2 D-7 00:00, $3 today 00:00 (naive UTC).
+    /// </summary>
+    public const string IdleCoverageSql = @"
+SELECT (SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY collection_time LIMIT 1),
+       (SELECT COUNT(*)
+        FROM (SELECT EXISTS (SELECT 1
+                             FROM v_query_stats q
+                             WHERE q.server_id = $1
+                             AND   q.collection_time >= d.day_start
+                             AND   q.collection_time <  d.day_start + INTERVAL '1 day') AS has_sample
+              FROM generate_series(CAST($2 AS timestamp), CAST($3 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day') AS d(day_start)) AS probes
+        WHERE has_sample)";
+
+    /// <summary>True once <see cref="IdleCoverageHolds"/>: 7 days of query-stats history and a sample on each complete UTC day of them.</summary>
+    public static Task<bool> HasIdleCoverageAsync(
+        NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
+        HasIdleCoverageAtAsync(dataSource, serverId, DateTime.UtcNow, commandTimeoutSeconds, cancellationToken);
+
+    /// <summary><see cref="HasIdleCoverageAsync"/> as of <paramref name="now"/> (UTC), so a test can ask just after 00:00.</summary>
+    public static async Task<bool> HasIdleCoverageAtAsync(
+        NpgsqlDataSource dataSource, int serverId, DateTime now, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand(IdleCoverageSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(IdleCoverageStartUtc(now), DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(IdleCoverageEndUtc(now), DateTimeKind.Unspecified) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+            return false;
+        var days = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture);
+        return IdleCoverageHolds(reader.GetDateTime(0), days, now);
+    }
+
+    /// <summary>The idle databases, only when the query stats cover each of the last 7 UTC days; otherwise an uncovered read with no rows.</summary>
+    public static async Task<IdleDatabaseRead> GetIdleDatabaseReadAsync(
+        NpgsqlDataSource dataSource, int serverId, DateTime cutoffUtc, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        if (!await HasIdleCoverageAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken))
+            return new IdleDatabaseRead(false, new List<IdleDatabase>());
+        return new IdleDatabaseRead(true, await GetIdleDatabasesAsync(dataSource, serverId, cutoffUtc, commandTimeoutSeconds, cancellationToken));
+    }
 
     public static async Task<List<IdleDatabase>> GetIdleDatabasesAsync(
         NpgsqlDataSource dataSource, int serverId, DateTime cutoffUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)

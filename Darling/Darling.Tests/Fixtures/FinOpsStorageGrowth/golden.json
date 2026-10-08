@@ -8,7 +8,7 @@
         "Size30dAgoMb": 800.00,
         "Growth7dMb": 150.50,
         "Growth30dMb": 450.50,
-        "DailyGrowthRateMb": 14.5322580645161290,
+        "DailyGrowthRateMb": 15.0166666666666667,
         "GrowthPct30d": 56.3125000000000000,
         "HasSiblingRow": false,
         "HasLogServiceFile": false
@@ -20,7 +20,7 @@
         "Size30dAgoMb": 300.00,
         "Growth7dMb": 100.00,
         "Growth30dMb": 200.00,
-        "DailyGrowthRateMb": 6.4516129032258065,
+        "DailyGrowthRateMb": 6.6666666666666667,
         "GrowthPct30d": 66.6666666666666667,
         "HasSiblingRow": false,
         "HasLogServiceFile": false
@@ -32,7 +32,7 @@
         "Size30dAgoMb": 300.00,
         "Growth7dMb": 100.00,
         "Growth30dMb": 200.00,
-        "DailyGrowthRateMb": 6.4516129032258065,
+        "DailyGrowthRateMb": 6.6666666666666667,
         "GrowthPct30d": 66.6666666666666667,
         "HasSiblingRow": false,
         "HasLogServiceFile": false
@@ -44,7 +44,7 @@
         "Size30dAgoMb": null,
         "Growth7dMb": 20.00,
         "Growth30dMb": null,
-        "DailyGrowthRateMb": 2.5000000000000000,
+        "DailyGrowthRateMb": 2.8571428571428571,
         "GrowthPct30d": null,
         "HasSiblingRow": false,
         "HasLogServiceFile": false
@@ -56,7 +56,7 @@
         "Size30dAgoMb": null,
         "Growth7dMb": 10.00,
         "Growth30dMb": null,
-        "DailyGrowthRateMb": 1.2500000000000000,
+        "DailyGrowthRateMb": 1.4285714285714286,
         "GrowthPct30d": null,
         "HasSiblingRow": false,
         "HasLogServiceFile": true
@@ -309,11 +309,11 @@
         "DatabaseName": "StaleGamma",
         "CurrentSizeMb": 600.00,
         "Size7dAgoMb": null,
-        "Size30dAgoMb": 450.00,
+        "Size30dAgoMb": null,
         "Growth7dMb": null,
-        "Growth30dMb": 150.00,
-        "DailyGrowthRateMb": 5.0000000000000000,
-        "GrowthPct30d": 33.3333333333333333,
+        "Growth30dMb": null,
+        "DailyGrowthRateMb": null,
+        "GrowthPct30d": null,
         "HasSiblingRow": false,
         "HasLogServiceFile": false
       }

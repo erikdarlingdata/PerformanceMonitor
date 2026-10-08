@@ -428,6 +428,41 @@ public sealed class DarlingSelfAlertTests
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
 
     [Fact]
+    public async Task CollectionStopped_TextCountsFromTheStoresLastSuccess_NotTheServiceStart()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* Down for 12 days before this service start. The firing rule still waits out the window from the
+           start (#4757), but the sentence says how long the store has gone without a success (#5489): it
+           used to read "30 minutes" here, a clock restarted by the restart. */
+        var lastSuccess = start.AddDays(-12);
+
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        h.Now = start.AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        var fired = SingleCollectionStopped(h);
+        Assert.StartsWith("No successful collection in 12 days", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.DoesNotContain("minutes", fired.CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(1, "1 minute")]
+    [InlineData(47, "47 minutes")]
+    [InlineData(119, "119 minutes")]
+    [InlineData(120, "2 hours")]
+    [InlineData(5 * 60 + 40, "5 hours")]
+    [InlineData(47 * 60, "47 hours")]
+    [InlineData(2 * 24 * 60, "2 days")]
+    [InlineData(12 * 24 * 60 + 3 * 60, "12 days 3 hours")]
+    [InlineData(12 * 24 * 60 + 60, "12 days 1 hour")]
+    public void FormatSilence_ReadsLongGapsInDaysAndHours(int minutes, string expected)
+    {
+        Assert.Equal(expected, DarlingSelfAlertEvaluator.FormatSilence(TimeSpan.FromMinutes(minutes)));
+    }
+
+    [Fact]
     public async Task CollectionStopped_ServerDownAcrossARestart_FiresOnceTheWindowPassesAfterTheStart()
     {
         var h = new Harness();
@@ -448,7 +483,7 @@ public sealed class DarlingSelfAlertTests
         Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
         var fired = SingleCollectionStopped(h);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
-        Assert.StartsWith("No successful collection in 30 minutes", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.StartsWith("No successful collection in 3 hours", fired.CurrentValue, StringComparison.Ordinal);
 
         /* Still down a minute later: a state alert (#5493) sends once per occurrence, so the standing alert stays at the one fire. */
         h.Now = start.AddMinutes(31);
@@ -547,7 +582,7 @@ public sealed class DarlingSelfAlertTests
 
         h.Now = start.AddMinutes(30);
         Assert.True(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
-        Assert.StartsWith("No successful collection in 30 minutes", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+        Assert.StartsWith("No successful collection in 3 hours", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -5687,7 +5722,9 @@ public sealed class DarlingSelfAlertTests
             hDown.Now = hDown.Now.AddMinutes(31);
             await downEvaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
             var stoppedByStaleness = Assert.Single(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
-            Assert.StartsWith("No successful collection in 31 minutes", stoppedByStaleness.CurrentValue, StringComparison.Ordinal);
+            /* #5489: the text counts from the store's own last success (seeded 45 minutes ago) plus the 31
+               minutes waited here, not from the service start. */
+            Assert.StartsWith("No successful collection in 76 minutes", stoppedByStaleness.CurrentValue, StringComparison.Ordinal);
 
             /* Capture-down: latest deadlocks run is SESSION_MISSING, latest blocked_process_report is fine. */
             await InsertLogAsync(connection, ct, logId++, "blocked_process_report", utcNow.AddMinutes(-1), "SUCCESS");

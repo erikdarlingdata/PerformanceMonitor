@@ -14,7 +14,7 @@
         "Severity": "Medium",
         "Confidence": "Medium",
         "Finding": "CPU over-provisioned (16 cores, P95 = 24.0%)",
-        "Detail": "P95 CPU utilization is 24.0% (avg 21.9%, max 24%) across 16 cores. Consider reducing to ~5 cores.",
+        "Detail": "P95 CPU utilization is 24.0% (avg 21.8%, max 24%) across 16 cores. Consider reducing to ~5 cores.",
         "EstMonthlySavings": 412.500000
       },
       {
@@ -40,14 +40,6 @@
         "Finding": "WeeklyRebuildA ran long 5 times in 7 days",
         "Detail": "Average duration: 1h 6m 40s, max: 1h 6m 40s, historical average: 1m 0s. Review whether this job's schedule or operations need tuning.",
         "EstMonthlySavings": null
-      },
-      {
-        "Category": "Hardware",
-        "Severity": "Medium",
-        "Confidence": "Medium",
-        "Finding": "CPU: reduce from 16 to 8 cores (P95 CPU 24.0%)",
-        "Detail": "From 30 samples over 21 hours, P95 CPU utilization was 24.0%. Current allocation of 16 cores can safely be reduced to 8 cores.",
-        "EstMonthlySavings": 250.000
       },
       {
         "Category": "Hardware",
@@ -101,8 +93,8 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.9%, CV 0.06) — reserved capacity candidate",
-        "Detail": "CPU utilization is consistently 21.9% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
     ],
@@ -120,7 +112,7 @@
         "Severity": "Medium",
         "Confidence": "Medium",
         "Finding": "CPU over-provisioned (16 cores, P95 = 24.0%)",
-        "Detail": "P95 CPU utilization is 24.0% (avg 21.9%, max 24%) across 16 cores. Consider reducing to ~5 cores.",
+        "Detail": "P95 CPU utilization is 24.0% (avg 21.8%, max 24%) across 16 cores. Consider reducing to ~5 cores.",
         "EstMonthlySavings": null
       },
       {
@@ -145,14 +137,6 @@
         "Confidence": "High",
         "Finding": "WeeklyRebuildA ran long 5 times in 7 days",
         "Detail": "Average duration: 1h 6m 40s, max: 1h 6m 40s, historical average: 1m 0s. Review whether this job's schedule or operations need tuning.",
-        "EstMonthlySavings": null
-      },
-      {
-        "Category": "Hardware",
-        "Severity": "Medium",
-        "Confidence": "Medium",
-        "Finding": "CPU: reduce from 16 to 8 cores (P95 CPU 24.0%)",
-        "Detail": "From 30 samples over 21 hours, P95 CPU utilization was 24.0%. Current allocation of 16 cores can safely be reduced to 8 cores.",
         "EstMonthlySavings": null
       },
       {
@@ -207,8 +191,8 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.9%, CV 0.06) — reserved capacity candidate",
-        "Detail": "CPU utilization is consistently 21.9% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
     ]
@@ -219,8 +203,8 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.9%, CV 0.06) — reserved capacity candidate",
-        "Detail": "CPU utilization is consistently 21.9% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
     ],
@@ -229,8 +213,8 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.9%, CV 0.06) — reserved capacity candidate",
-        "Detail": "CPU utilization is consistently 21.9% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
     ]

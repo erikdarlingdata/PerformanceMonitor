@@ -106,11 +106,13 @@ AND   delta_reads > 0
 GROUP BY database_name
 HAVING SUM(delta_reads) > 1000";
 
-    /// <summary>Oldest query-stats sample for the server (idle-database advice waits until it is at or before the 7-day cutoff). $1 server_id.</summary>
-    public const string QueryStatsFirstSampleSql = @"
-SELECT MIN(collection_time)
-FROM v_query_stats
-WHERE server_id = $1";
+    /// <summary>The first and last CPU sample in the window (the span the CPU right-sizing rules need to be 24 hours). $1 server_id, $2 cutoff (naive UTC).</summary>
+    public const string CpuSampleSpanSql = @"
+SELECT MIN(collection_time), MAX(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   sqlserver_cpu_utilization IS NOT NULL";
 
     /// <summary>CPU utilization mean + standard deviation + sample count (reserved-capacity stability). $1 server_id, $2 cutoff (naive UTC).</summary>
     public const string ReservedCapacitySql = @"
@@ -187,14 +189,32 @@ ORDER BY database_name";
             : CollectorEngineCapability.UnknownEngineEdition;
     }
 
-    /// <summary>True once the server's query stats reach back to the start of the 7-day window. The advice text claims 7 days, so the data must cover all 7: the first sample has to be at or before the cutoff, with no slack.</summary>
-    public static async Task<bool> HasQueryStatsCoverageAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    /// <summary>True once the server's query stats hold a sample on each of the last 7 UTC days; see <see cref="DarlingFinOpsOptimizationReader.HasIdleCoverageAsync"/>.</summary>
+    public static Task<bool> HasQueryStatsCoverageAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
+        DarlingFinOpsOptimizationReader.HasIdleCoverageAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+
+    /// <summary>The oldest CPU sample since <paramref name="cutoff"/>, or null when there is none (the 24-hour rule's window check).</summary>
+    public static async Task<DateTime?> GetOldestCpuSampleAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
-        await using var command = dataSource.CreateCommand(QueryStatsFirstSampleSql);
+        await using var command = dataSource.CreateCommand(CpuSampleSpanSql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        var first = await command.ExecuteScalarAsync(cancellationToken);
-        return first is DateTime firstSample && firstSample <= cutoff;
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetDateTime(0) : null;
+    }
+
+    /// <summary>The span from the oldest to the newest CPU sample since <paramref name="cutoff"/>: zero when there is none.</summary>
+    public static async Task<TimeSpan> GetCpuSampleSpanAsync(NpgsqlDataSource dataSource, int serverId, DateTime cutoff, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        await using var command = dataSource.CreateCommand(CpuSampleSpanSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = cutoff });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1)
+            ? reader.GetDateTime(1) - reader.GetDateTime(0)
+            : TimeSpan.Zero;
     }
 
     /// <summary>Reads the 7-day P95 Total Server Memory (MB) + sample count (shared by the memory + VM right-sizing checks).</summary>
@@ -349,7 +369,7 @@ ORDER BY database_name";
             var facts = await GetEditionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
             if (facts is { } f)
             {
-                var isEnterprise = f.Edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase);
+                var isEnterprise = FinOpsRecommendationFigures.EditionNeedsLicensingAdvice(f.Edition);
 
                 // TDE is only the deciding factor on pre-2019 Enterprise — read the config snapshot just then.
                 var tdeDbNames = new List<string>();
@@ -370,13 +390,38 @@ ORDER BY database_name";
             onCheckFailed?.Invoke("Enterprise features", ex);
         }
 
+        /* A server enrolled minutes ago holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which
+           is not a day of load, so each CPU right-sizing rule waits for its own window to be watched, and the two never both land in
+           the list: the one that keeps more cores wins. The 24-hour rule (2, utilization efficiency) reads the last 24 hours, so its
+           oldest sample inside that window has to be 23 hours old; the 7-day rule (12) reads 7 days and keeps a 24-hour span. */
+        var cpuSpanEnough = false;
+        var cpu24HourWatched = false;
+        try
+        {
+            cpuSpanEnough = FinOpsRecommendationFigures.CpuSamplesSpanEnough(
+                await GetCpuSampleSpanAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken));
+            var now = DateTime.UtcNow;
+            cpu24HourWatched = FinOpsRecommendationFigures.Cpu24HourWindowWatched(
+                await GetOldestCpuSampleAsync(dataSource, serverId, DateTime.SpecifyKind(now.AddHours(-24), DateTimeKind.Unspecified), commandTimeoutSeconds, cancellationToken), now);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Recommendation check failed (CPU sample span): {ex.Message}");
+        }
+
+        FinOpsRecommendation? computeCpuRow = null;
+        int? computeCpuTarget = null;
+
         // 2. CPU right-sizing (collected utilization efficiency).
         try
         {
             var util = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
-            var cpuRecommendation = FinOpsRecommendationFigures.CpuRightSizing(util, monthlyCost);
-            if (cpuRecommendation != null)
-                recommendations.Add(cpuRecommendation);
+            computeCpuRow = cpu24HourWatched ? FinOpsRecommendationFigures.CpuRightSizing(util, monthlyCost) : null;
+            if (computeCpuRow != null)
+            {
+                computeCpuTarget = FinOpsRecommendationFigures.CpuRightSizingTargetCores(util);
+                recommendations.Add(computeCpuRow);
+            }
         }
         catch (Exception ex)
         {
@@ -428,11 +473,11 @@ ORDER BY database_name";
         // 6. Dormant database detection with cost impact (collected idle DBs + database sizes).
         try
         {
-            /* "No query activity in 7 days" is only true once 7 days of query stats exist: a server enrolled hours
-               ago has not been watched long enough to call any database idle. */
-            var idleDbs = await HasQueryStatsCoverageAsync(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken)
-                ? await DarlingFinOpsOptimizationReader.GetIdleDatabasesAsync(dataSource, serverId, DateTime.UtcNow.AddDays(-7), commandTimeoutSeconds, cancellationToken)
-                : new List<IdleDatabase>();
+            /* "No query activity in 7 days" is only true once each of the last 7 UTC days holds a query-stats sample: a server
+               enrolled hours ago, or one that was not collected for a stretch, has not been watched long enough to call any
+               database idle. */
+            var idleDbs = (await DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(
+                dataSource, serverId, DateTime.UtcNow.AddDays(-7), commandTimeoutSeconds, cancellationToken)).Rows;
             if (idleDbs.Count > 0)
             {
                 var allocatedTotalMb = 0m;
@@ -512,8 +557,15 @@ ORDER BY database_name";
 
                 var (p95MemMb, memSampleCount, memWindow) = await GetMemoryP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
 
+                /* One CPU right-sizing row per server: rule 2 may already have added its row, and this one then takes its place
+                   only when it keeps more cores. */
+                var vmCpuTarget = FinOpsRecommendationFigures.VmCpuTargetCores(p95Cpu7d, cpuCount);
+                var vmCpuRowWins = cpuSpanEnough && vmCpuTarget is int vmTarget && FinOpsRecommendationFigures.PrescriptiveCpuRowWins(computeCpuTarget, vmTarget);
+                if (vmCpuRowWins && computeCpuRow != null)
+                    recommendations.Remove(computeCpuRow);
+
                 foreach (var vmRecommendation in FinOpsRecommendationFigures.VmRightSizing(
-                    p95Cpu7d, cpuWindow, cpuCount, physMb, p95MemMb, memSampleCount, memWindow, monthlyCost))
+                    p95Cpu7d, cpuWindow, cpuCount, physMb, p95MemMb, memSampleCount, memWindow, monthlyCost, includeCpuRow: vmCpuRowWins))
                     recommendations.Add(vmRecommendation);
             }
         }

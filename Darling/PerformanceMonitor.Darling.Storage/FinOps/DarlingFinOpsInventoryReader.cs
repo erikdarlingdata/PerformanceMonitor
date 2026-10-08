@@ -51,7 +51,8 @@ public static class DarlingFinOpsInventoryReader
 {
     /// <summary>
     /// Collected 24h-CPU / storage / idle-DB / provisioning metrics for EVERY server, in one round trip (#4227).
-    /// $1 cpu cutoff (24h), $2 idle cutoff (7d). Used to be one call per server (<c>GetServerMetricsAsync</c>,
+    /// $1 cpu cutoff (24h), $2 idle cutoff (7d), $3 the idle-coverage start (first of the last 7 UTC days), $4 the days that must be
+    /// covered. Used to be one call per server (<c>GetServerMetricsAsync</c>,
     /// 43 round trips on a 43-server fleet); the five CTEs group naturally by <c>server_id</c>, so they read the
     /// fleet at once instead — 24h CPU and grants via <c>GROUP BY server_id</c>, latest memory and size snapshots
     /// via a per-server <c>LATERAL … LIMIT 1</c> descent (the <c>ServerFreshnessSql</c> shape, #3895).
@@ -149,6 +150,23 @@ active_dbs AS (
     WHERE collection_time >= $2
     AND   delta_execution_count > 0
 ),
+/* The recommendation row's coverage rule (DarlingFinOpsOptimizationReader.HasIdleCoverageAsync): a database is called idle for 7
+   days only when the oldest query-stats sample is at or before $2 (now - 7 days) AND each complete UTC day in [$3, $5) -- D-7 through
+   D-1, today excluded -- holds a sample ($4 is how many days). A server without that coverage gets NO idle_dbs row, so its
+   count is NULL (a dash), never a count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
+idle_coverage AS (
+    SELECT s.server_id
+    FROM servers s
+    WHERE (SELECT COUNT(*)
+           FROM (SELECT EXISTS (SELECT 1
+                                FROM v_query_stats q
+                                WHERE q.server_id = s.server_id
+                                AND   q.collection_time >= d.day_start
+                                AND   q.collection_time <  d.day_start + INTERVAL '1 day') AS has_sample
+                 FROM generate_series(CAST($3 AS timestamp), CAST($5 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day') AS d(day_start)) AS probes
+           WHERE has_sample) >= $4
+    AND   EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = s.server_id AND o.collection_time <= $2)
+),
 /* LEFT JOIN from servers, not an EXCEPT grouped by server_id: a server whose every known database is
    active has ZERO rows surviving an EXCEPT, and GROUP BY over zero rows contributes NO ROW for that
    server at all -- the outer LEFT JOIN then reads idle_db_count as NULL, not 0, and the loader's overlay-
@@ -162,6 +180,7 @@ idle_dbs AS (
         s.server_id,
         COUNT(ld.database_name) FILTER (WHERE ad.database_name IS NULL) AS idle_db_count
     FROM servers s
+    JOIN idle_coverage ic ON ic.server_id = s.server_id
     LEFT JOIN latest_dbs ld ON ld.server_id = s.server_id
     LEFT JOIN active_dbs ad
       ON ad.server_id = ld.server_id
@@ -197,6 +216,63 @@ LEFT JOIN storage_totals st ON st.server_id = s.server_id
 LEFT JOIN idle_dbs id ON id.server_id = s.server_id
 LEFT JOIN grants g ON g.server_id = s.server_id
 WHERE s.server_id <> 0";
+
+    /// <summary>The RAW <c>idle_coverage</c> CTE in <see cref="ServerMetricsSql"/>, verbatim — the second anchor <see cref="ServerMetricsSqlFor"/>
+    /// replaces, so the coverage days come from the same hourly rollup as the activity check rather than a raw 7-day scan of every server. The raw days are one <c>EXISTS</c> probe per complete day and server (an index range seek
+    /// on <c>(server_id, collection_time)</c> each, written in the select list so the planner keeps one index scan per day, see <c>IdleCoverageSql</c>), not a <c>COUNT(DISTINCT ...)</c> over every raw row of the 7 days (#5492).</summary>
+    private const string IdleCoverageRawCte = @"idle_coverage AS (
+    SELECT s.server_id
+    FROM servers s
+    WHERE (SELECT COUNT(*)
+           FROM (SELECT EXISTS (SELECT 1
+                                FROM v_query_stats q
+                                WHERE q.server_id = s.server_id
+                                AND   q.collection_time >= d.day_start
+                                AND   q.collection_time <  d.day_start + INTERVAL '1 day') AS has_sample
+                 FROM generate_series(CAST($3 AS timestamp), CAST($5 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day') AS d(day_start)) AS probes
+           WHERE has_sample) >= $4
+    AND   EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = s.server_id AND o.collection_time <= $2)
+),";
+
+    /// <summary>
+    /// The routed <c>idle_coverage</c>: the distinct complete UTC days ([$3, $5)) that hold a rollup bucket from <paramref name="relationSql"/>
+    /// (a bucket exists only for an hour that held a query-stats sample), UNION the raw days at or after <paramref name="watermarkUtc"/>
+    /// that the aggregate has not materialized yet. The oldest-sample check is a rollup bucket that starts before the hour of
+    /// <paramref name="idleCutoffUtc"/> (so a sample at or before the cutoff certainly exists), or a raw sample at or before the cutoff;
+    /// only the single hour that holds the cutoff itself is judged conservatively. $3 is D-7 at 00:00, after the ceiling hour of the
+    /// 7-day activity cutoff, so no leading raw edge is needed for the days.
+    /// </summary>
+    private static string IdleCoverageForCagg(string relationSql, DateTime watermarkUtc, DateTime idleCutoffUtc)
+    {
+        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        var floorHour = TimescaleSupport.AlignDown(idleCutoffUtc, TimescaleSupport.HourlyBucket);
+        var oldestBucketBefore = $"TIMESTAMP '{floorHour:yyyy-MM-dd HH:mm:ss.ffffff}'";
+
+        return $@"idle_coverage AS (
+    SELECT d.server_id
+    FROM (
+        SELECT server_id
+        FROM (
+            SELECT server_id, CAST(bucket AS DATE) AS sample_day
+            FROM {relationSql}
+            WHERE bucket >= $3
+            AND   bucket <  $5
+
+            UNION
+
+            SELECT server_id, CAST(collection_time AS DATE) AS sample_day
+            FROM v_query_stats
+            WHERE collection_time >= {watermark}
+            AND   collection_time >= $3
+            AND   collection_time <  $5
+        ) AS days
+        GROUP BY server_id
+        HAVING COUNT(DISTINCT sample_day) >= $4
+    ) AS d
+    WHERE EXISTS (SELECT 1 FROM {relationSql} WHERE server_id = d.server_id AND bucket < {oldestBucketBefore})
+       OR EXISTS (SELECT 1 FROM v_query_stats r WHERE r.server_id = d.server_id AND r.collection_time <= $2)
+),";
+    }
 
     /// <summary>The RAW <c>active_dbs</c> CTE in <see cref="ServerMetricsSql"/>, verbatim — the anchor
     /// <see cref="ServerMetricsSqlFor"/> replaces to route the idle check through the rollup.</summary>
@@ -261,11 +337,16 @@ WHERE s.server_id <> 0";
         var relationSql = coverage.StitchedRelationSql(
             TimescaleSupport.QueryStatsDbHourlyView, "f", ceilingHour, RollupCoverage.StitchTier.Hourly);
 
-        return FinOpsRollupRouting.RouteOrThrow(
+        var activeRouted = FinOpsRollupRouting.RouteOrThrow(
             ServerMetricsSql,
             IdleActiveDbsRawCte,
             IdleActiveDbsForCagg(relationSql, ceilingHour, watermarkUtc),
             "server inventory idle databases");
+        return FinOpsRollupRouting.RouteOrThrow(
+            activeRouted,
+            IdleCoverageRawCte,
+            IdleCoverageForCagg(relationSql, watermarkUtc, idleCutoffUtc),
+            "server inventory idle coverage");
     }
 
     /// <summary>
@@ -303,6 +384,9 @@ WHERE s.server_id <> 0";
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cpuCutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(idleCutoff, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now), DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DarlingFinOpsOptimizationReader.IdleCoverageDays });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now), DateTimeKind.Unspecified) });
 
         var results = new Dictionary<int, ServerMetricsDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -371,6 +455,12 @@ WHERE s.server_id <> 0";
     /// <summary>
     /// Latest collected properties per server joined to the registry — the Server Inventory base rows (metrics
     /// overlaid per row by the loader). DISTINCT ON keeps each server's newest server_properties row.
+    ///
+    /// <para>Only CONFIGURED servers by default (Web 11): a row stays when <c>is_enabled</c> is true (monitoring
+    /// is running) or a <c>config.config_monitored_servers</c> row exists (a configured but stopped server). A
+    /// removed server is <c>is_enabled = FALSE</c> with no config row (<c>DisableOrphanedServersSql</c>), so it drops
+    /// out of the list and of every count built from it. <c>$1</c> (include_removed) keeps those rows, for a caller
+    /// that asks for the history behind a removed server.</para>
     /// </summary>
     public const string ServerInventorySql = @"
 SELECT
@@ -407,13 +497,18 @@ FROM (
     ORDER BY server_id, collection_time DESC
 ) sp
 JOIN servers s ON s.server_id = sp.server_id
+WHERE $1
+   OR s.is_enabled
+   OR EXISTS (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id)
 ORDER BY s.is_enabled DESC, server_name";
 
     public static async Task<List<ServerInventoryDto>> GetServerInventoryAsync(
-        NpgsqlDataSource dataSource, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+        NpgsqlDataSource dataSource, int commandTimeoutSeconds, bool includeRemoved = false,
+        CancellationToken cancellationToken = default)
     {
         await using var command = dataSource.CreateCommand(ServerInventorySql);
         command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeRemoved });
 
         var items = new List<ServerInventoryDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
