@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -127,10 +128,11 @@ public sealed class ScratchDatabaseSweepLiveTests
 
     /// <summary>
     /// #5549: an abandoned database with TimescaleDB jobs is quiesced before the sweep drops it. A custom job that
-    /// sleeps 8 seconds is running in the database when the sweep starts, and 8 seconds is longer than the server's own
-    /// 5-second wait inside a plain <c>DROP DATABASE</c>: a sweep that dropped without quiescing first would be refused
-    /// with "being accessed by other users" and leave the database, while the quiesce waits the worker out (its cap is
-    /// 10 seconds) and the drop then goes through.
+    /// sleeps 8 seconds is running in the database when the sweep starts. A plain <c>DROP DATABASE</c> does not wait for
+    /// that worker: TimescaleDB ends it, which is the kill the quiesce exists to avoid, and the drop returns at once.
+    /// The quiesce unschedules the jobs and waits for the running worker to leave (its cap is 10 seconds), so the sweep
+    /// takes seconds. Measured on a rig: about 5 seconds with the quiesce, 0.1 to 0.3 seconds with the quiesce taken out
+    /// of the sweep, where the test fails on the elapsed time. The 2-second floor sits well between the two.
     /// </summary>
     [Fact]
     public async Task TheSweep_QuiescesAnAbandonedDatabasesTimescaleJobs_BeforeDroppingIt()
@@ -147,6 +149,7 @@ public sealed class ScratchDatabaseSweepLiveTests
         await (await ScratchPostgres.CreateAsync(baseConnectionString!, ct)).DisposeAsync();
 
         var bodySucceeded = false;
+        var workerAge = 0.0;
         try
         {
             var unpooledAdmin = ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString);
@@ -175,14 +178,15 @@ public sealed class ScratchDatabaseSweepLiveTests
                 }
             }
 
-            /* The job worker is attached to the database, and no client session is: that is what the sweep looks for. */
+            /* The slow job's worker (a "User-Defined Action", unlike the quick policy workers that run first) is attached to
+               the database, and no client session is: that is what the sweep looks for. */
             var workers = 0L;
             for (var poll = 0; poll < 100 && workers == 0; poll++)
             {
-                workers = await ScratchPostgres.JobWorkerCountAsync(admin, name, ct);
+                workers = await SlowJobWorkerCountAsync(admin, name, ct);
                 if (workers == 0)
                 {
-                    await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
                 }
             }
 
@@ -194,11 +198,26 @@ public sealed class ScratchDatabaseSweepLiveTests
 
             Assert.Equal(0L, await ClientSessionCountAsync(admin, name, ct));
 
+            /* How long the worker has run, by the server's clock: it has 8 seconds minus this left. */
+            await using (var age = new NpgsqlCommand(
+                @"SELECT extract(epoch FROM now() - min(backend_start))::float8 FROM pg_stat_activity
+                  WHERE datname = $1 AND backend_type LIKE 'User-Defined Action%'", admin))
+            {
+                age.Parameters.AddWithValue(name);
+                workerAge = (double)(await age.ExecuteScalarAsync(ct))!;
+            }
+
+            Assert.True(workerAge < 5, $"the job worker is already {workerAge:F1} s into its 8 s sleep, too little left to tell a quiesced drop from a plain one.");
+
             var log = new List<string>();
+            var clock = Stopwatch.StartNew();
             var dropped = await ScratchDatabaseSweep.SweepAsync(
                 baseConnectionString!, now, ScratchDatabaseSweep.AbandonedAfter, log.Add, ct);
+            clock.Stop();
 
             Assert.Contains(name, dropped);
+            Assert.True(clock.Elapsed >= TimeSpan.FromSeconds(2),
+                $"the sweep took {clock.Elapsed.TotalSeconds:F1} s with a job worker running in the database: it dropped the database without waiting the worker out.");
             Assert.Contains(log, line => line.Contains(name, StringComparison.Ordinal) && line.StartsWith("Dropped", StringComparison.Ordinal));
             Assert.Empty(await ExistingAsync(baseConnectionString!, new[] { name }, ct));
             Assert.Equal(0L, await ScratchPostgres.JobWorkerCountAsync(admin, name, ct));
@@ -208,6 +227,14 @@ public sealed class ScratchDatabaseSweepLiveTests
         {
             await DropIfStillThereAsync(baseConnectionString!, name, bodySucceeded);
         }
+    }
+
+    private static async Task<long> SlowJobWorkerCountAsync(NpgsqlConnection admin, string name, CancellationToken ct)
+    {
+        await using var count = new NpgsqlCommand(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND backend_type LIKE 'User-Defined Action%'", admin);
+        count.Parameters.AddWithValue(name);
+        return (long)(await count.ExecuteScalarAsync(ct))!;
     }
 
     private static async Task<long> ClientSessionCountAsync(NpgsqlConnection admin, string name, CancellationToken ct)

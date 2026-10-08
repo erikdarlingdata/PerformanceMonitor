@@ -49,7 +49,10 @@ public sealed class RetiredBaselineSweepRecoveryLiveTests
         var bodySucceeded = false;
         try
         {
-            using var connection = new NpgsqlConnection(connectionString);
+            /* The sweep runs on the connection shape the product's service uses: the product search path, so an
+               unqualified TimescaleDB call in the sweep (alter_job) resolves on a fresh store too, where the extension
+               lives in collect and a pooled backend started before the migration has no path to it. */
+            using var connection = new NpgsqlConnection(WithProductSearchPath(connectionString!));
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
             await CreateRetiredFixtureAsync(connection, ct);
@@ -145,9 +148,10 @@ $fn$", ct);
                 var materialization = await ScalarAsync<string>(setup,
                     "SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = 'cpu_utilization_baseline'", ct);
 
-                using var sweeper = new NpgsqlConnection(connectionString);
+                /* Opened with the product search path, like the service's own connections; run_job below stays qualified. */
+                using var sweeper = new NpgsqlConnection(WithProductSearchPath(connectionString!));
                 await sweeper.OpenAsync(ct);
-                using var runner = new NpgsqlConnection(connectionString);
+                using var runner = new NpgsqlConnection(WithProductSearchPath(connectionString!));
                 await runner.OpenAsync(ct);
 
                 /* The refresh runs for real and finishes before any drop starts (#5549). */
@@ -201,6 +205,10 @@ $fn$", ct);
             });
         }
     }
+
+    /// <summary>The connection string with <c>Search Path</c> set to the product's (<see cref="PgSchemaGenerator.SearchPath"/>), as DarlingWorker sets it.</summary>
+    private static string WithProductSearchPath(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
 
     /// <summary>The pre-#2007 shapes the sweep retires: cpu as a continuous aggregate with its policies, file_io as a plain view.</summary>
     private static async Task CreateRetiredFixtureAsync(NpgsqlConnection connection, CancellationToken ct)
