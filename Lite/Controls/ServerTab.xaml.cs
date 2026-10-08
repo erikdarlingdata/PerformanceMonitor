@@ -571,13 +571,7 @@ public partial class ServerTab : UserControl
             command.CommandTimeout = 30;
 
             using var reader = await command.ExecuteReaderAsync();
-            var results = new List<QuerySnapshotRow>();
-            var snapshotTime = DateTime.UtcNow;
-
-            while (await reader.ReadAsync())
-            {
-                results.Add(ReadLiveSnapshotRow(reader, snapshotTime));
-            }
+            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow);
 
             _querySnapshotsFilterMgr!.UpdateData(results);
             /* #4953: the grid now holds the live rows, not the range the "Showing since" banner described, so the banner
@@ -601,21 +595,43 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
+    /// The whole live snapshot read, on a thread-pool thread (#5554). This read is the button's own, not the collector's,
+    /// so the statement text and both plans are judged here (#4348), one session (one shared budget) for the whole read;
+    /// the judge parses every plan and can spend up to the session budget, so the loop never runs on the dispatcher.
+    /// </summary>
+    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime)
+        => Task.Run(async () =>
+        {
+            var results = new List<QuerySnapshotRow>();
+            var scrub = new SensitiveStatements.Session();
+            while (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                results.Add(ReadLiveSnapshotRow(reader, snapshotTime, scrub));
+            }
+
+            return results;
+        });
+
+    /// <summary>
     /// One row of the live snapshot query, read into the grid's row. The query is the scheduled collector's,
     /// but this read is the button's own, so it trims the wait type the same way the collector does (see
     /// <see cref="PerformanceMonitor.Collectors.WaitTypeName"/>): a live row then shows the name a stored row
     /// carries. <c>WaitNameTrimTests</c> drives this method with the spaced name the server returns.
     /// </summary>
-    internal static QuerySnapshotRow ReadLiveSnapshotRow(DbDataReader reader, DateTime snapshotTime)
+    internal static QuerySnapshotRow ReadLiveSnapshotRow(DbDataReader reader, DateTime snapshotTime, SensitiveStatements.Session? scrub = null)
     {
-        var liveQueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
-        var liveActualPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString();
+        /* #4348: the statement text and both plans are judged where they enter the row, as the collector's read does
+           for a stored row (QuerySnapshotsCollector.ReadAsync). A named statement reads as the marker in the grid, in
+           every copy and CSV of it, and in a plan saved from it. */
+        scrub ??= new SensitiveStatements.Session();
+        var liveQueryPlan = reader.IsDBNull(4) ? null : scrub.Xml(reader.GetString(4));
+        var liveActualPlan = reader.IsDBNull(5) ? null : scrub.Xml(reader.GetValue(5)?.ToString());
         return new QuerySnapshotRow
         {
             SessionId = Convert.ToInt32(reader.GetValue(0)),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
             ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
-            QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            QueryText = reader.IsDBNull(3) ? "" : scrub.Text(reader.GetString(3)) ?? "",
             QueryPlan = liveQueryPlan,
             LiveQueryPlan = liveActualPlan,
             /* #4239: this row is never written to the store (CollectionTime is "now", not a

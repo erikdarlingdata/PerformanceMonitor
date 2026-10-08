@@ -48,7 +48,7 @@ public class ServerManager
     /// 3 engine_edition, 4 is_aws_rds, 5 has_msdb_access.
     /// </summary>
     internal const string DetectionQueryText = @"
-        SELECT
+        SELECT /* PerformanceMonitorLite */
             @@VERSION AS sql_version,
             CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
             DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
@@ -63,7 +63,7 @@ public class ServerManager
     /// failing platform detection.
     /// </summary>
     internal const string ServerStartTimeQueryText =
-        "SELECT sqlserver_start_time FROM sys.dm_os_sys_info";
+        "SELECT /* PerformanceMonitorLite */ sqlserver_start_time FROM sys.dm_os_sys_info";
 
     public ServerManager(string configDirectory, ILogger<ServerManager>? logger = null)
     {

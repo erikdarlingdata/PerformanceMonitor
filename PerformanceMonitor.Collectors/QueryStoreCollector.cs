@@ -172,7 +172,7 @@ DECLARE
 
 DECLARE
     @db sysname,
-    @sql nvarchar(500),
+    @sql nvarchar(1000),
     @exec_sp nvarchar(256);
 
 DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
@@ -227,8 +227,12 @@ BEGIN
            (AG, RDS read replicas, geo-secondaries alike). An operator-set read-only QS on a PRIMARY has
            reason <> 8 and still collects; a 2025 READ_CAPTURE_SECONDARY (state 4, reason 0) captures
            REAL local secondary workload and still collects. */
+        /* V8 (release walk): the marker sits in THIS inner batch, the statement the monitored server
+           actually caches and Query Store records for each database. The marker in the cursor SELECT above
+           only reaches the outer batch, so without it this probe topped Top Queries by Duration and Query
+           Store by Duration, one row per database. */
         SET @sql = N'
-            SELECT ' + QUOTENAME(@db, '''') + N'
+            SELECT /* PerformanceMonitorLite */ ' + QUOTENAME(@db, '''') + N'
             WHERE EXISTS
             (
                 SELECT
@@ -260,7 +264,7 @@ END;
 CLOSE db_check;
 DEALLOCATE db_check;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     name
 FROM @result
 ORDER BY
@@ -268,7 +272,7 @@ ORDER BY
 
 /* Second result set = the driver's probe-failure contract (EnumeratedCollectorDriver.ReadEnumerationAsync).
    Always returned, normally empty; the driver reads zero rows and attaches no note. */
-SELECT
+SELECT /* PerformanceMonitorLite */
     name,
     error_text
 FROM @probe_failures
@@ -1320,7 +1324,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            nothing, so there is no join strategy to force. Not an oversight - checked. */
         var body = $@"SET NOCOUNT ON;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     plan_id = qsp.plan_id,
     query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
     query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
@@ -1329,7 +1333,7 @@ FROM sys.query_store_plan AS qsp
 WHERE qsp.plan_id IN ({idList})
 OPTION(RECOMPILE, HASH JOIN);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     plan_id = b.plan_id,
     query_plan_hash = b.query_plan_hash,
     query_plan_text = b.query_plan_text
@@ -1440,7 +1444,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            catalog with no spill. */
         var body = $@"SET NOCOUNT ON;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     query_id = qsq.query_id,
     query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
     query_sql_text = qst.query_sql_text
@@ -1451,7 +1455,7 @@ JOIN sys.query_store_query_text AS qst
 WHERE qsq.query_id IN ({idList})
 OPTION(RECOMPILE, HASH JOIN);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     query_id = b.query_id,
     query_hash = b.query_hash,
     query_sql_text = b.query_sql_text

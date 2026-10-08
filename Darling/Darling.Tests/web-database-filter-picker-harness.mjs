@@ -113,6 +113,23 @@ try {
 
   const out = {};
   const scenarios = {
+    /* W9: the open popover survives the 60 s poll's rebuild but not a tab click or any other navigation. */
+    async tabChange() {
+      inventory = names(3);
+      const { page } = await open();
+      const ctl = () => ({ button: page.byClass("db-filter-button")[0], popover: page.byClass("db-filter-popover")[0] });
+      ctl().button.fire("click");
+      await settle();
+      out.openAfterClick = !ctl().popover.hidden;
+      const server = await import(pathToFileURL(path.join(scratch, "pages", "server.js")).href);
+      server.renderServer(page, "SRV1", "cpu", { poll: true });
+      await settle();
+      out.openAfterPoll = !ctl().popover.hidden;
+      server.renderServer(page, "SRV1", "cpu", {});
+      await settle();
+      out.openAfterNavigation = !ctl().popover.hidden;
+      out.expandedAfterNavigation = ctl().button.getAttribute("aria-expanded");
+    },
     /* A PostgreSQL card gets no control, and no filter is active. */
     async postgres() {
       card = { ...card, is_postgres: true, engine_description: "PostgreSQL" };

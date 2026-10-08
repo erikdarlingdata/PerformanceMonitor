@@ -17,6 +17,7 @@ using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -567,6 +568,18 @@ public sealed class DarlingMcpCustomViewToolsLivePostgresTests
             Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpCustomViewTools.RunCustomViewPanel(
                 postgres, "{\"panel\":{\"source\":\"wait_stats\",\"measure\":\"nope\",\"aggregate\":\"sum\",\"viz\":\"table\"}}")));
 
+            /* W13: a server the registry does not know is not_found with a plain message, not a null row; the seeded, registered server
+               scoped the same way still returns its rows. */
+            var unknownRun = await DarlingMcpCustomViewTools.RunCustomViewPanel(
+                postgres, "{\"server\":\"cv_mcp_no_such_server\",\"panel\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"stat\"}}");
+            Assert.Equal("not_found", DarlingMcpTestData.StatusOf(unknownRun));
+            Assert.Contains("cv_mcp_no_such_server", unknownRun, StringComparison.Ordinal);
+            using (var scoped = JsonDocument.Parse(await DarlingMcpCustomViewTools.RunCustomViewPanel(
+                postgres, "{\"server\":\"" + seedServerName + "\",\"panel\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}")))
+            {
+                Assert.True(scoped.RootElement.GetProperty("rows").GetArrayLength() >= 1, scoped.RootElement.GetRawText());
+            }
+
             /* delete — deleted; then get + delete-again — not_found. */
             Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpCustomViewTools.DeleteCustomView(postgres, id)));
             Assert.Equal("not_found", DarlingMcpTestData.StatusOf(await DarlingMcpCustomViewTools.GetCustomView(postgres, id)));
@@ -590,5 +603,64 @@ public sealed class DarlingMcpCustomViewToolsLivePostgresTests
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.servers WHERE server_id = $1", seedServerId);
             });
         }
+    }
+}
+
+
+/// <summary>W13: the message a composed run answers for a scope that names only servers the registry does not know.</summary>
+public sealed class ComposeUnknownServerMessageTests
+{
+    private static readonly System.Text.Json.Nodes.JsonArray NullRow = new(new System.Text.Json.Nodes.JsonObject { ["value"] = null });
+
+    [Fact]
+    public void AnUnregisteredNameOverNothing_IsUnknown_AndNamesTheServer()
+    {
+        var message = DarlingWebEndpoints.UnknownServerMessage(new[] { "h4-walk-throwaway" }, new[] { "h4-walk-throwaway" }, NullRow);
+        Assert.Equal("No server named 'h4-walk-throwaway' is registered, and nothing is stored under that name in this time range.", message);
+        Assert.NotNull(DarlingWebEndpoints.UnknownServerMessage(new[] { "a", "b" }, new[] { "a", "b" }, new System.Text.Json.Nodes.JsonArray()));
+    }
+
+    /// <summary>W13: a registry lookup that FAULTED answers every name as unregistered (the old-read fallback), which is not a finding.
+    /// The run must keep the old empty answer, never a not_found for a server that is registered.</summary>
+    [Fact]
+    public void AFailedRegistryLookup_NeverMakesARegisteredServerUnknown()
+    {
+        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "a" }, new[] { "a" }, NullRow, lookupFailed: true));
+        Assert.NotNull(DarlingWebEndpoints.UnknownServerMessage(new[] { "a" }, new[] { "a" }, NullRow, lookupFailed: false));
+    }
+
+    /// <summary>The lookup reports its own fault to the caller (a store nobody listens on is the fault), and still answers every name.</summary>
+    [Fact]
+    public async Task TheRegistryLookup_ReportsAFault_AndStillAnswersEveryName()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var builder = new Npgsql.NpgsqlConnectionStringBuilder
+        {
+            Host = "127.0.0.1", Port = 1, Username = "x", Database = "x", Timeout = 2, CommandTimeout = 2, Pooling = false,
+        };
+        await using var dead = Npgsql.NpgsqlDataSource.Create(builder.ConnectionString);
+        var failed = false;
+        var answer = await ComposeServerScope.FindUnregisteredAsync(dead, new[] { "a", "b" }, ct, logger: null, onLookupFailed: () => failed = true);
+        Assert.True(failed);
+        Assert.Equal(new[] { "a", "b" }, answer);
+    }
+
+    [Fact]
+    public void ARemovedServersRetainedRows_ARegisteredServer_AndTheWholeFleet_AreNeverUnknown()
+    {
+        var rows = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["value"] = 12.5 });
+        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "gone" }, new[] { "gone" }, rows));
+        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "a" }, null, NullRow));
+        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(new[] { "a", "b" }, new[] { "b" }, NullRow));
+        Assert.Null(DarlingWebEndpoints.UnknownServerMessage(null, null, NullRow));
+    }
+
+    [Fact]
+    public void TheWebRoute_AnswersAnUnknownServerAs404WithItsMessage()
+    {
+        var outcome = DarlingWebEndpoints.ComposeRunOutcome.NotFound("No server named 'x' is registered, and nothing is stored under that name in this time range.");
+        Assert.True(outcome.IsNotFound);
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 1);
+        Assert.Equal(404, (result as Microsoft.AspNetCore.Http.IStatusCodeHttpResult)?.StatusCode);
     }
 }

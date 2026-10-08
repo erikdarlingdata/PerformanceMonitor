@@ -182,6 +182,12 @@ function panelMemoryKey(read, params, spec) {
 }
 function hidesPanel(spec, res, shell, key) {
   if (!spec.hideWhenNoRows) return false;
+  /* A failed read is not "no rows": hiding the card would leave a problem list that could not load looking like a clean server.
+     The card stays (or comes back) and shows the read's error (release walk, W12). */
+  if (res.kind === "error") {
+    shell.panel.style.display = "";
+    return false;
+  }
   const hasRows = res.kind === "data" && (getPath(res.data, spec.rowsKey) || []).length > 0;
   panelHadRows.set(key, hasRows);
   if (hasRows) {
@@ -992,9 +998,9 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope };
+  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   return renderPanel(desc);
@@ -2620,7 +2626,14 @@ export const POSTGRES_TABS = [
         "queries",
         PG_KERNEL_COLUMNS,
         ctx.label + ", CPU measured by the operating system; device bytes are not logical I/O",
-        "No per-query OS resource usage in this window."
+        "No per-query OS resource usage in this window.",
+        2,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "pg_stat_kcache is not installed on this server, so per-query OS CPU is not collected. Install the extension (it needs shared_preload_libraries and a restart) to fill this panel."
       ),
       /* #2663 the first PostgreSQL time series. The single-window panels above rank what this server waits
          on; this follows ONE of them over time, which is the question they cannot answer. Parameterised by
@@ -3309,7 +3322,7 @@ const SPINLOCK_COLUMNS = [
    server's clock) and print in the browser's local time; every grouped field is omitted by the read on the hourly tier and prints a dash. */
 const TOP_QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "host_object", label: "Module" },
   { key: "last_execution_time", label: "Last Execution", format: "time", group: "Times" },
   { key: "creation_time", label: "Creation Time", format: "time", group: "Times" },
@@ -3430,7 +3443,7 @@ const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU and reads", "Executions an
 const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "database_name", label: "Database" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
   { key: "additional_duration_ms", label: "Extra Duration", format: "ms" },
   { key: "duration_regression_percent", label: "Duration +%", format: "num1" },
@@ -3459,13 +3472,13 @@ const QUERY_HEATMAP_COLUMNS = [
   { key: "time_bucket", label: "Time Bin", format: "time" },
   { key: "bucket_label", label: "Magnitude" },
   { key: "query_count", label: "Queries", format: "int" },
-  { key: "top_query_text", label: "Most-Executed Query", render: (r) => codeDisclosure(r.top_query_text) },
+  { key: "top_query_text", label: "Most-Executed Query", valueList: false, render: (r) => codeDisclosure(r.top_query_text) },
   { key: "top_query_hash", label: "Query Hash" },
 ];
 
 const QUERY_STORE_COLUMNS = [
   { key: "database_name", label: "Database" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
   { key: "plan_id", label: "Plan ID", format: "int" },
   { key: "execution_count", label: "Execs", format: "int" },
@@ -3549,7 +3562,7 @@ const LONG_QUERY_GROUPS = { groups: ["I/O and rows", "Session"], defaultGroups: 
 
 const LONG_QUERY_COLUMNS = [
   { key: "event_time", label: "Time", format: "time" },
-  { key: "statement", label: "Statement", render: (r) => codeDisclosure(r.statement) },
+  { key: "statement", label: "Statement", valueList: false, render: (r) => codeDisclosure(r.statement) },
   { key: "event_type", label: "Event Type" },
   { key: "duration_ms", label: "Duration", format: "ms" },
   { key: "cpu_ms", label: "CPU", format: "ms" },
@@ -3572,7 +3585,7 @@ const PLAN_CORRECTION_GROUPS = { groups: ["Plans", "Plan metrics", "Lifecycle"],
 
 const PLAN_CORRECTION_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "database_name", label: "Database" },
   { key: "recommendation_state", label: "State" },
   { key: "recommendation_state_reason", label: "State Reason", wrap: true },
@@ -3608,7 +3621,7 @@ const AUTO_TUNING_COLUMNS = [
 /* The Active Queries grid, in the desktop viewer's column order and wording (Collected and Query Text lead, the anchor rule; the plan buttons are added where the grid is built: activePlanColumns). */
 const ACTIVE_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
-  { key: "query_text", label: "Query Text", render: (r) => codeDisclosure(r.query_text) },
+  { key: "query_text", label: "Query Text", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "session_id", label: "SPID", format: "int" },
   { key: "database_name", label: "Database" },
   { key: "login_name", label: "Login" },
@@ -3642,8 +3655,8 @@ const BLOCKING_GROUPS = { groups: ["Status and isolation", "Transaction", "Sessi
 
 const BLOCKING_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
-  { key: "blocked_sql_text", label: "Blocked SQL", render: (r) => codeDisclosure(r.blocked_sql_text) },
-  { key: "blocking_sql_text", label: "Blocking SQL", render: (r) => codeDisclosure(r.blocking_sql_text) },
+  { key: "blocked_sql_text", label: "Blocked SQL", valueList: false, render: (r) => codeDisclosure(r.blocked_sql_text) },
+  { key: "blocking_sql_text", label: "Blocking SQL", valueList: false, render: (r) => codeDisclosure(r.blocking_sql_text) },
   { key: "source", label: "Source" },
   { key: "database_name", label: "Database" },
   { key: "blocked_spid", label: "Blocked SPID", format: "int" },
@@ -3672,7 +3685,7 @@ const BLOCKING_COLUMNS = [
    The Victim plan button is added where the grid is built (deadlockPlanColumn, #5236), so the five columns here stay the summary. */
 const DEADLOCK_COLUMNS = [
   { key: "deadlock_time", label: "Deadlock Time", format: "time" },
-  { key: "victim_sql_text", label: "Victim SQL", render: (r) => codeDisclosure(r.victim_sql_text) },
+  { key: "victim_sql_text", label: "Victim SQL", valueList: false, render: (r) => codeDisclosure(r.victim_sql_text) },
   { key: "victim_process_id", label: "Victim" },
   { key: "process_summary", label: "Processes", wrap: true },
   { key: "has_deadlock_xml", label: "Graph", format: "bool" },
@@ -3701,7 +3714,7 @@ const DEADLOCK_PROCESS_COLUMNS = [
   { key: "host_name", label: "Host" },
   { key: "client_app", label: "App", wrap: true },
   { key: "status", label: "Status" },
-  { key: "sql_text", label: "Statement", render: (r) => codeDisclosure(r.sql_text) },
+  { key: "sql_text", label: "Statement", valueList: false, render: (r) => codeDisclosure(r.sql_text) },
 ];
 
 /* Which deadlocks have their process sub-grid open, at MODULE scope so the 60 s rebuild of the tab keeps it open. Keyed by
@@ -3812,7 +3825,7 @@ function deadlockXmlColumns(server, scope = null) {
     },
     { key: "graph", label: "Graph", sortable: false, csv: false, filter: false, copy: false, render: (r) => deadlockGraphCell(server, r) },
     { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r, scope) },
-    { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
+    { key: "deadlock_graph_xml", label: "Deadlock graph", valueList: false, render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
   ];
 }
 
@@ -3830,7 +3843,7 @@ const BPR_COLUMNS = [
   { key: "blocked_spid", label: "Blocked SPID", format: "int" },
   { key: "blocking_spid", label: "Blocking SPID", format: "int" },
   { key: "wait_time_ms", label: "Wait Time", format: "ms" },
-  { key: "blocked_process_report_xml", label: "Report", render: (r) => xmlDisclosure(r.blocked_process_report_xml) },
+  { key: "blocked_process_report_xml", label: "Report", valueList: false, render: (r) => xmlDisclosure(r.blocked_process_report_xml) },
 ];
 
 const OBJECT_LOCK_COLUMNS = [
@@ -4530,8 +4543,14 @@ const JOB_HISTORY_COLUMNS = [
   { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
   { key: "retries", label: "Retries", format: "int" },
   { key: "last_success", label: "Last Success", format: "time" },
-  { key: "message", label: "Message", wrap: true },
+  { key: "message", label: "Message", wrap: true, render: jobMessageCell },
 ];
+
+/* The same squeeze as the Job History page's Message column (W2): a readable width, the first 3 lines, and the whole text on hover. */
+function jobMessageCell(r) {
+  const text = r && r.message != null ? String(r.message) : "";
+  return el("div", { class: "jh-message", title: text || null, text });
+}
 
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },
@@ -4691,7 +4710,7 @@ const SIGNIFICANT_WAIT_COLUMNS = [
   { key: "signal_duration_ms", label: "Signal ms", format: "ms" },
   { key: "wait_resource", label: "Wait Resource", wrap: true },
   { key: "session_id", label: "Session", format: "int" },
-  { key: "query_text", label: "Query", render: (r) => codeDisclosure(r.query_text) },
+  { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
 ];
 
 /* The desktop grid's 28 columns in its order. */
@@ -5119,7 +5138,7 @@ const PG_DEADLOCK_COLUMNS = [
   { key: "participant_count", label: "Sessions", format: "int" },
   { key: "lock_modes", label: "Lock Modes" },
   { key: "resources", label: "Resources" },
-  { key: "victim_statement", label: "Victim Statement" },
+  { key: "victim_statement", label: "Victim Statement", valueList: false },
   { key: "times_seen", label: "Sightings", format: "int", small: true },
 ];
 
@@ -5378,7 +5397,7 @@ const PG_TOP_QUERY_COLUMNS = [
   { key: "temp_blks_written", label: "Temp Blocks Written", format: "int" },
   { key: "wal_bytes", label: "WAL (bytes)", format: "int" },
   { key: "max_exec_peakmem_bytes", label: "Peak Mem (bytes)", format: "int" },
-  { key: "query_text", label: "Query", wrap: true, render: (row) => codeDisclosure(row.query_text) },
+  { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },
 ];
 
 const PG_BLOCKING_CHAIN_COLUMNS = [
@@ -5397,7 +5416,7 @@ const PG_BLOCKING_CHAIN_COLUMNS = [
   /* Null here means "cannot tell how many samples this root appeared in", not one — the read carries the
      reason in samples_as_root_note, which is why this renders as "—" rather than as 1. */
   { key: "samples_as_root", label: "Samples as Root", format: "int" },
-  { key: "root_query", label: "Root Query", wrap: true, render: (row) => codeDisclosure(row.root_query) },
+  { key: "root_query", label: "Root Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.root_query) },
   { key: "recommended_action", label: "Action", wrap: true },
 ];
 
@@ -5588,7 +5607,7 @@ const PG_INDEX_USAGE_COLUMNS = [
   { key: "blocks_hit", label: "Blocks Hit", format: "int" },
   { key: "stats_were_reset_in_window", label: "Stats Reset", format: "bool" },
   { key: "sample_count", label: "Samples", format: "int" },
-  { key: "index_definition", label: "Definition", wrap: true },
+  { key: "index_definition", label: "Definition", wrap: true, valueList: false },
 ];
 
 /* peak_horizon_age is rendered rather than formatted, and that is the one non-negotiable cell on this grid:

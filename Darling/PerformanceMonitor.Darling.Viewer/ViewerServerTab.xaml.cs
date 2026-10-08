@@ -100,6 +100,7 @@ public partial class ViewerServerTab : UserControl
     private List<SelectableItem> _databaseFilterItems = new();
     private bool _isUpdatingDatabaseFilterSelection;
     private int _databaseFilterTotalCount;
+    private List<string>? _databaseFilterCollectedNames;
     private bool _databaseFilterDirty;
 
     /// <summary>The database filter as a reader argument: null (= All, unfiltered) when nothing is selected.</summary>
@@ -253,6 +254,9 @@ public partial class ViewerServerTab : UserControl
         {
             return;
         }
+
+        /* Compare works on three Queries sub-tabs only; off everywhere else (walk finding V10b). */
+        UpdateCompareDropdownState();
 
         /* A drill-down navigation switches the inner tab programmatically and runs its own targeted read;
            skip the generic loader so it doesn't race that (mirrors the sub-tab handlers' guard). */
