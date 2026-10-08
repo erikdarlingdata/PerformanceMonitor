@@ -43,8 +43,8 @@ public sealed class QueryStoreIntervalBrinLiveTests
 
     private const string LeafBrinOnCountSql = "SELECT count(*) " + LeafBrinFrom + " AND coalesce(i.reloptions @> ARRAY['autosummarize=on'], false)";
 
-    /* Enough rows for several COMPLETE 128-page ranges after the index exists: brin_summarize_new_values leaves the last, partial
-       range alone, so a handful of rows summarizes nothing. */
+    /* Enough rows for several COMPLETE 128-page ranges after the index exists: a handful of rows fills less than one range, and
+       the last, partial range is summarized too (brin_summarize_range passes include_partial), so the count would say little. */
     private static Task InsertManyAsync(NpgsqlConnection connection, CancellationToken ct) =>
         ExecAsync(
             connection,
@@ -251,6 +251,30 @@ public sealed class QueryStoreIntervalBrinLiveTests
         Assert.Contains("autovacuum_freeze_max_age", holders);
         Assert.Contains("autovacuum_multixact_freeze_max_age", holders);
         Assert.Contains("autovacuum worker", holders);
+
+        /* #5594 round 2 L1: the activity text autovacuum writes for an anti-wraparound vacuum is a signal of its own, and the age
+           limit is the smaller of the table's setting and the server's (LEAST), never the table's alone (COALESCE). */
+        Assert.Contains("(to prevent wraparound)", holders);
+        Assert.Contains(QueryStoreIntervalBrin.AntiWraparoundAgeSql, holders);
+        Assert.Contains("LEAST", QueryStoreIntervalBrin.AntiWraparoundAgeSql);
+        Assert.DoesNotContain("COALESCE", QueryStoreIntervalBrin.AntiWraparoundAgeSql);
+    }
+
+    /// <summary>
+    /// #5594 round 2 L2: brin_summarize_range raises XX000 for an index that is gone, so XX000 plus an index that no longer resolves
+    /// is a drop; XX000 for an index that is still there, or any other error, is a fault that must surface.
+    /// </summary>
+    [Theory]
+    [InlineData("XX000", false, true)]
+    [InlineData("42P01", false, true)]
+    [InlineData("XX000", true, false)]
+    [InlineData("42P01", true, false)]
+    [InlineData("55P03", false, false)]
+    [InlineData("57014", false, false)]
+    [InlineData(null, false, false)]
+    public void ASummarizeError_CountsAsADroppedIndex_OnlyWhenTheIndexIsGone(string? sqlState, bool indexStillExists, bool expectedDropped)
+    {
+        Assert.Equal(expectedDropped, QueryStoreIntervalBrin.IsDroppedIndexError(sqlState, indexStillExists));
     }
 
     /// <summary>V171's parent BRIN says off, so a leaf made by PARTITION OF or ATTACH clones off (#5594 review round 1).</summary>
@@ -528,7 +552,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         Assert.Equal(0L, done);
         Assert.Equal(rangesWalked, notStarted);
 
-        /* The next pass, with a budget it will not spend, does all of it (the last, partial range is left alone by design). */
+        /* The next pass, with a budget it will not spend, does all of it (the last, partial range is summarized too: brin_summarize_range passes include_partial). */
         (done, notStarted) = await RunSummarizeAsync(connection, LegacyBrin, 60.0, ct);
         Assert.InRange(done, fullRanges - 1, rangesWalked);
         Assert.Equal(0L, notStarted);
@@ -538,6 +562,79 @@ public sealed class QueryStoreIntervalBrinLiveTests
         /* A leaf dropped after the target list was read reads no rows: (0, 0), not a NULL scalar that throws. */
         (done, notStarted) = await RunSummarizeAsync(connection, "collect.no_such_brin_leaf", 60.0, ct);
         Assert.Equal((0L, 0L), (done, notStarted));
+    }
+
+    private static async Task<bool> AntiWraparoundAsync(NpgsqlConnection connection, string table, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            $"SELECT {QueryStoreIntervalBrin.AntiWraparoundAgeSql} FROM pg_class AS t WHERE t.oid = $1::regclass", connection) { CommandTimeout = 120 };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = table });
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// #5594 round 2 L3: the anti-wraparound age fragment reads false below the table's freeze limit and true past it, uses the
+    /// smaller of the table's and the server's limit, and a table with no setting of its own follows the server's.
+    /// </summary>
+    [Fact]
+    public async Task TheAntiWraparoundAge_ReadsTrueOnlyPastTheSmallerOfTheTablesAndTheServersFreezeLimit()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+
+        /* 100000 is the smallest autovacuum_freeze_max_age a table may set; 2000000000 the largest, far above the server's 200 M. */
+        await ExecAsync(connection, "CREATE TABLE collect.wrap_low (c int) WITH (autovacuum_freeze_max_age = 100000)", ct);
+        await ExecAsync(connection, "CREATE TABLE collect.wrap_high (c int) WITH (autovacuum_freeze_max_age = 2000000000)", ct);
+        await ExecAsync(connection, "CREATE TABLE collect.wrap_plain (c int)", ct);
+        await ExecAsync(
+            connection,
+            "CREATE PROCEDURE collect.burn_xids(n int) LANGUAGE plpgsql AS $$ BEGIN FOR i IN 1..n LOOP PERFORM pg_current_xact_id(); COMMIT; END LOOP; END $$",
+            ct);
+
+        /* An open transaction that holds an XID keeps VACUUM from freezing past it, so no autovacuum (the 100000 table is due for
+           one as soon as it is old enough) can reset the age this test is about to build. */
+        await using var holder = new NpgsqlConnection(scratch.ConnectionString);
+        await holder.OpenAsync(ct);
+        await using var holderTransaction = await holder.BeginTransactionAsync(ct);
+        await using (var xid = new NpgsqlCommand("SELECT pg_current_xact_id()::text", holder, holderTransaction))
+        {
+            await xid.ExecuteScalarAsync(ct);
+        }
+
+        Assert.False(await AntiWraparoundAsync(connection, "collect.wrap_low", ct));
+        Assert.False(await AntiWraparoundAsync(connection, "collect.wrap_high", ct));
+        Assert.False(await AntiWraparoundAsync(connection, "collect.wrap_plain", ct));
+
+        /* Just over the 100000 minimum. Commits are not flushed one by one (synchronous_commit off), and each one burns an XID. */
+        var burn = Stopwatch.StartNew();
+        await ExecAsync(connection, "SET synchronous_commit = off", ct);
+        await using (var call = new NpgsqlCommand("CALL collect.burn_xids(100200)", connection) { CommandTimeout = 600 })
+        {
+            await call.ExecuteNonQueryAsync(ct);
+        }
+
+        burn.Stop();
+        TestContext.Current.SendDiagnosticMessage($"burned 100200 XIDs in {burn.Elapsed.TotalSeconds:F1} s");
+
+        Assert.True(await AntiWraparoundAsync(connection, "collect.wrap_low", ct));
+        Assert.False(await AntiWraparoundAsync(connection, "collect.wrap_high", ct), "a per-table limit above the server's 200 M must not count as past it");
+        Assert.False(await AntiWraparoundAsync(connection, "collect.wrap_plain", ct));
+
+        /* The server setting cannot change without a restart, so the smaller-limit leg lowers the setting the fragment reads: a
+           function earlier in search_path answers for current_setting. The table's limit (2 billion) is now the larger of the two,
+           and autovacuum would use the server's, so the fragment must too; the table's alone (the old COALESCE) reads false. */
+        await ExecAsync(
+            connection,
+            "CREATE SCHEMA shadow; "
+            + "CREATE FUNCTION shadow.current_setting(text) RETURNS text LANGUAGE sql STABLE AS "
+            + "$$ SELECT CASE WHEN $1 = 'autovacuum_freeze_max_age' THEN '100000' ELSE pg_catalog.current_setting($1) END $$; "
+            + "SET search_path = shadow, pg_catalog",
+            ct);
+        Assert.True(await AntiWraparoundAsync(connection, "collect.wrap_high", ct), "the smaller of the table's and the server's limit decides");
+        Assert.True(await AntiWraparoundAsync(connection, "collect.wrap_plain", ct), "a table with no limit of its own follows the server's");
     }
 
     private static async Task<(long Done, long NotStarted)> RunSummarizeAsync(NpgsqlConnection connection, string index, double budgetSeconds, CancellationToken ct)

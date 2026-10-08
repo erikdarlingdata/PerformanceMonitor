@@ -51,10 +51,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// the ALTER, and the leaf's writers and readers with it. A store that never finished vacuuming its big legacy table is the
 /// likely one to be in anti-wraparound. So an index whose table <c>pg_stat_progress_vacuum</c> shows being vacuumed by one
 /// of those is not asked for at all: the step leaves it on, says so, and the next pass tries again
-/// (<see cref="QueryStoreIntervalPartitions.StepOutcome.RetryLater"/>). A vacuum is anti-wraparound when its table's
-/// <c>age(relfrozenxid)</c> or <c>mxid_age(relminmxid)</c> is past <c>autovacuum_freeze_max_age</c> or
-/// <c>autovacuum_multixact_freeze_max_age</c> (the table's own setting when it has one); a vacuum whose backend is not an
-/// autovacuum worker is a manual one. A role that may not see another role's worker reads NULL from
+/// (<see cref="QueryStoreIntervalPartitions.StepOutcome.RetryLater"/>). A vacuum is anti-wraparound by either of two signals.
+/// First, its table's <c>age(relfrozenxid)</c> or <c>mxid_age(relminmxid)</c> is past <c>autovacuum_freeze_max_age</c> or
+/// <c>autovacuum_multixact_freeze_max_age</c>, the smaller of the table's own setting and the server's (autovacuum does the
+/// same in <c>relation_needs_vacanalyze</c>; <see cref="AntiWraparoundAgeSql"/>). Second, the worker's own activity text ends
+/// in <c>(to prevent wraparound)</c>, which autovacuum writes for exactly that flag; it also covers a multixact member-space
+/// limit that SQL cannot read. A vacuum whose backend is not an autovacuum worker is a manual one. A role that may not see another role's worker reads NULL from
 /// <c>pg_stat_progress_vacuum</c> and <c>pg_stat_activity</c> (measured), and then only the next point applies.</item>
 /// <item>What no check can see waits at most <c>min(5 s, deadlock_timeout + 1 s)</c> (<see cref="TurnOffLockTimeoutMs"/>,
 /// read at run time in the same session): a regular autovacuum still gets its <c>deadlock_timeout</c> to be cancelled plus a
@@ -132,11 +134,35 @@ WHERE am.amname = 'brin'
 AND   i.relkind = 'i'
 AND   (x.indrelid = to_regclass($1) OR x.indrelid IN (SELECT pt.relid FROM pg_partition_tree(to_regclass($1)) AS pt))";
 
+    /* Whether the table (the pg_class row aliased t) is old enough that autovacuum runs an anti-wraparound vacuum on it (#5594
+       round 2 L1, L3): the XID age or the multixact age past the freeze limit. Autovacuum's limit is the SMALLER of the table's
+       reloption and the server setting (relation_needs_vacanalyze in autovacuum.c), so LEAST, which skips the NULL of an unset
+       reloption; a per-table value above the server's is ignored by autovacuum and must be ignored here. A fragment of its own
+       so a test can evaluate it alone against a table (SELECT <fragment> FROM pg_class AS t WHERE t.oid = $1::regclass). */
+    internal const string AntiWraparoundAgeSql = @"
+(
+    age(t.relfrozenxid) >
+        LEAST
+        (
+            (SELECT o.option_value::int FROM pg_options_to_table(t.reloptions) AS o WHERE o.option_name = 'autovacuum_freeze_max_age'),
+            current_setting('autovacuum_freeze_max_age')::int
+        )
+    OR mxid_age(t.relminmxid) >
+        LEAST
+        (
+            (SELECT o.option_value::int FROM pg_options_to_table(t.reloptions) AS o WHERE o.option_name = 'autovacuum_multixact_freeze_max_age'),
+            current_setting('autovacuum_multixact_freeze_max_age')::int
+        )
+)";
+
     /* Every BRIN leaf index of $1 whose autosummarize is on, and whether its table is being vacuumed by a vacuum the deadlock
        check never cancels (#5594 M1): a manual VACUUM (a backend that is not an autovacuum worker), or an autovacuum that is
-       anti-wraparound (the table's age past the freeze limit, the table's own reloption first). pg_stat_progress_vacuum and
-       pg_stat_activity read NULL for another role's worker the caller may not see, which makes this false for it, and the
-       lock_timeout decides instead. The option text is whatever the DDL said (on, true, yes, 1). */
+       anti-wraparound. Two signals for the second: the table's age (AntiWraparoundAgeSql), and the worker's activity text, which
+       autovacuum ends with ' (to prevent wraparound)' for an anti-wraparound vacuum (autovac_report_activity in autovacuum.c:
+       tab->at_params.is_wraparound ? " (to prevent wraparound)" : "", PostgreSQL 16-18). The text also covers the multixact
+       member-space limit, which lowers autovacuum's real multixact limit below the setting and which SQL cannot read.
+       pg_stat_progress_vacuum and pg_stat_activity read NULL for another role's worker the caller may not see, which makes
+       this false for it, and the lock_timeout decides instead. The option text is whatever the DDL said (on, true, yes, 1). */
     internal const string AutosummarizeOnSql = @"
 SELECT format('%I.%I', n.nspname, i.relname),
        EXISTS
@@ -148,19 +174,14 @@ SELECT format('%I.%I', n.nspname, i.relname),
            AND   v.relid = x.indrelid
            AND
            (
-               age(t.relfrozenxid) >
-                   COALESCE
-                   (
-                       (SELECT o.option_value::int FROM pg_options_to_table(t.reloptions) AS o WHERE o.option_name = 'autovacuum_freeze_max_age'),
-                       current_setting('autovacuum_freeze_max_age')::int
-                   )
-               OR mxid_age(t.relminmxid) >
-                   COALESCE
-                   (
-                       (SELECT o.option_value::int FROM pg_options_to_table(t.reloptions) AS o WHERE o.option_name = 'autovacuum_multixact_freeze_max_age'),
-                       current_setting('autovacuum_multixact_freeze_max_age')::int
-                   )
-               OR EXISTS (SELECT 1 FROM pg_stat_activity AS a WHERE a.pid = v.pid AND a.backend_type <> 'autovacuum worker')
+               " + AntiWraparoundAgeSql + @"
+               OR EXISTS
+               (
+                   SELECT 1
+                   FROM pg_stat_activity AS a
+                   WHERE a.pid = v.pid
+                   AND   (a.backend_type <> 'autovacuum worker' OR a.query LIKE '%(to prevent wraparound)')
+               )
            )
        )" + LeafBrinIndexesFrom + @"
 AND   EXISTS
@@ -191,7 +212,7 @@ ORDER BY 1;";
        order, each call behind a clock check, so the statement stops BETWEEN ranges (brin_summarize_new_values can only be
        cancelled, which strands a placeholder; see the class remarks). Column 0 is the ranges summarized, column 1 the ranges
        not started because the budget was spent. The index is resolved once in the inner query: a dropped index reads no rows
-       (0, 0) instead of a NULL scalar. The last, partial range is left alone by both functions. pages_per_range is the
+       (0, 0) instead of a NULL scalar. The last, partial range is summarized too (brin_summarize_range passes include_partial). pages_per_range is the
        index's own setting, 128 when unset. */
     internal const string SummarizeIndexSql = @"
 SELECT COALESCE(sum(s.r), 0)::bigint,
@@ -473,10 +494,18 @@ FROM
                     + "(deadlock_timeout is {DeadlockMs} ms); the next pass retries.",
                     table.Parent, index, lockMs, deadlockMs);
             }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InternalError || ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
-                /* The leaf was dropped (the sweep drops expired days) after the target list was read: nothing to summarize, and
-                   the table's other indexes still run. */
+                /* A leaf the sweep dropped (it drops expired days) after the target list was read: brin_summarize_range cannot open it
+                   and raises XX000 ("could not open relation with OID", index_open in brin.c), not 42P01 (#5594 round 2 L2). XX000 is
+                   also what any internal error says, so the index must read as gone before it counts as dropped. The transaction
+                   is already rolled back here (its scope ended with the try), so the check runs on a clean connection. */
+                var stillThere = await IndexExistsAsync(connection, index, cancellationToken).ConfigureAwait(false);
+                if (!IsDroppedIndexError(ex.SqlState, stillThere))
+                {
+                    throw;
+                }
+
                 dropped++;
                 logger.LogDebug("Query Store interval table {Table}: BRIN summarize of {Index} found it dropped.", table.Parent, index);
             }
@@ -501,5 +530,21 @@ FROM
         return new QueryStoreIntervalPartitions.StepResult(
             lockSkipped > 0 ? QueryStoreIntervalPartitions.StepOutcome.RetryLater : QueryStoreIntervalPartitions.StepOutcome.NothingToDo,
             detail);
+    }
+
+    /// <summary>
+    /// Whether a failed summarize means the index was dropped under it: the error is the one <c>brin_summarize_range</c> raises for
+    /// a missing index (XX000, or 42P01 from a name that no longer resolves) AND the index no longer resolves. Any other error, or
+    /// an XX000 for an index that is still there, is a real fault and is rethrown (#5594 round 2 L2).
+    /// </summary>
+    internal static bool IsDroppedIndexError(string? sqlState, bool indexStillExists) =>
+        !indexStillExists
+        && (sqlState == PostgresErrorCodes.InternalError || sqlState == PostgresErrorCodes.UndefinedTable);
+
+    private static async Task<bool> IndexExistsAsync(NpgsqlConnection connection, string index, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand("SELECT to_regclass($1) IS NOT NULL", connection) { CommandTimeout = CatalogReadTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = index });
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
     }
 }
