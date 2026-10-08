@@ -550,6 +550,13 @@ VALUES (1, $1, $2, $3, 'Db', 'nullreads_log', NULL, 7, NULL, 7, NULL, 7)", conne
             Assert.DoesNotContain("a9", read);
             Assert.DoesNotContain("nullreads_log", read);
 
+            /* Round 2, L4: the chart's ten are the read's ten (its flag columns), tie at rank 10 included: "a9" is out of both. */
+            var chartRead = PerformanceMonitor.Ui.FileIoChartFiles.ReadChartFiles(rows, p => p.FileName, p => p.InReadTen).Select(g => g.Key).ToList();
+            Assert.Equal(read.OrderBy(n => n, StringComparer.Ordinal), chartRead.OrderBy(n => n, StringComparer.Ordinal));
+            var chartWrite = PerformanceMonitor.Ui.FileIoChartFiles.WriteChartFiles(rows, p => p.FileName, p => p.InWriteTen).Select(g => g.Key).ToList();
+            Assert.Equal(rows.Where(p => p.InWriteTen).Select(p => p.FileName).Distinct().OrderBy(n => n, StringComparer.Ordinal), chartWrite.OrderBy(n => n, StringComparer.Ordinal));
+            Assert.DoesNotContain("a9", chartWrite);
+
             bodySucceeded = true;
         }
         finally
@@ -567,17 +574,20 @@ VALUES (1, $1, $2, $3, 'Db', 'nullreads_log', NULL, 7, NULL, 7, NULL, 7)", conne
         var points = new System.Collections.Generic.List<FileIoLatencyPoint>();
         for (var i = 0; i < 12; i++)
         {
-            points.Add(new FileIoLatencyPoint(t, $"Db{i:00}", "log", 0, 3.0, 0, 0, Reads: 0, Writes: 1000 + i));
+            points.Add(new FileIoLatencyPoint(t, $"Db{i:00}", "log", 0, 3.0, 0, 0, Reads: 0, Writes: 1000 + i, InWriteTen: i >= 2));
         }
 
-        points.Add(new FileIoLatencyPoint(t, "DbA", "data", 1.0, 0, 0, 0, Reads: 50, Writes: 1));
-        points.Add(new FileIoLatencyPoint(t, "DbB", "data", 1.0, 0, 0, 0, Reads: 40, Writes: 1));
+        points.Add(new FileIoLatencyPoint(t, "DbA", "data", 1.0, 0, 0, 0, Reads: 50, Writes: 1, InReadTen: true));
+        points.Add(new FileIoLatencyPoint(t, "DbB", "data", 1.0, 0, 0, 0, Reads: 40, Writes: 1, InReadTen: true));
+        /* In the read's ten although its reads sit on interval-0 rows (no rated reads in the points): the chart keeps it. */
+        points.Add(new FileIoLatencyPoint(t, "DbC", "data", 1.0, 0, 0, 0, Reads: 0, Writes: 0, InReadTen: true));
 
-        var read = PerformanceMonitor.Ui.FileIoChartFiles.ReadChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.Reads, p => p.Writes);
-        var write = PerformanceMonitor.Ui.FileIoChartFiles.WriteChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.Reads, p => p.Writes);
+        var read = PerformanceMonitor.Ui.FileIoChartFiles.ReadChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.InReadTen);
+        var write = PerformanceMonitor.Ui.FileIoChartFiles.WriteChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.InWriteTen);
 
-        Assert.Equal(new[] { "DbA.data", "DbB.data" }, read.Select(g => g.Key));
+        Assert.Equal(new[] { "DbA.data", "DbB.data", "DbC.data" }, read.Select(g => g.Key));
         Assert.Equal(10, write.Count);
+        Assert.DoesNotContain(write, g => g.Key is "Db00.log" or "Db01.log");
         Assert.All(write, g => Assert.EndsWith(".log", g.Key, StringComparison.Ordinal));
     }
 

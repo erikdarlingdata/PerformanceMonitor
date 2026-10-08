@@ -651,8 +651,8 @@ public partial class ServerTab : UserControl
            ten busiest by writes, and each chart takes its own ten as the read ranked them (FileIoChartFiles). Ranking
            the combined list by summed latency kept ten log files and no data file on the read chart. A file drawn on
            both charts keeps one color. */
-        var readFiles = FileIoChartFiles.ReadChartFiles(data, d => $"{d.DatabaseName}.{d.FileName}", d => d.Reads, d => d.Writes);
-        var writeFiles = FileIoChartFiles.WriteChartFiles(data, d => $"{d.DatabaseName}.{d.FileName}", d => d.Reads, d => d.Writes);
+        var readFiles = FileIoChartFiles.ReadChartFiles(data, d => $"{d.DatabaseName}.{d.FileName}", d => d.InReadTen);
+        var writeFiles = FileIoChartFiles.WriteChartFiles(data, d => $"{d.DatabaseName}.{d.FileName}", d => d.InWriteTen);
 
         double readMax = 0, writeMax = 0;
         var fileColors = new Dictionary<string, ScottPlot.Color>();

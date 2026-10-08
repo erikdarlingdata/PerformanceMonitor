@@ -36,7 +36,9 @@ public sealed record FileIoLatencyPoint(
     double AvgQueuedReadLatencyMs,
     double AvgQueuedWriteLatencyMs,
     long Reads = 0,
-    long Writes = 0);
+    long Writes = 0,
+    bool InReadTen = false,
+    bool InWriteTen = false);
 
 /// <summary>
 /// One file's throughput point (MB/s) for the File I/O tab's Throughput sub-tab — a mirror of Lite's
@@ -109,8 +111,14 @@ public sealed partial class ViewerDataService
                 ROW_NUMBER() OVER (ORDER BY total_writes DESC NULLS LAST, total_reads DESC NULLS LAST, database_name COLLATE "C" NULLS LAST, file_name COLLATE "C" NULLS LAST) AS write_rank
             FROM file_totals
         ),
+        /* Round 2, L4: the read says which ten each file is in (the two flags), so the charts draw exactly the files the read
+           ranked instead of ranking again on the bucketed counts, which drop rows with no interval and break ties in another order. */
         top_files AS (
-            SELECT database_name, file_name
+            SELECT
+                database_name,
+                file_name,
+                (read_rank <= 10 AND total_reads > 0) AS in_read_ten,
+                (write_rank <= 10 AND total_writes > 0) AS in_write_ten
             FROM ranked_files
             WHERE (read_rank <= 10 AND total_reads > 0)
             OR    (write_rank <= 10 AND total_writes > 0)
@@ -120,6 +128,8 @@ public sealed partial class ViewerDataService
                 f.collection_time,
                 f.database_name,
                 f.file_name,
+                tf.in_read_ten,
+                tf.in_write_ten,
                 /* #3540: a stored interval of 0 means this row's own deltas are not knowable, so they are
                    nulled out of the sums below — the row still counts as a physical collection (collection_count)
                    but contributes nothing to a bucket's rate. */
@@ -157,7 +167,9 @@ public sealed partial class ViewerDataService
                files' latencies by operations (total stall over total operations) instead of averaging a no-read
                log file as 0 ms. */
             COALESCE(SUM(rated_reads), 0)::bigint AS total_reads,
-            COALESCE(SUM(rated_writes), 0)::bigint AS total_writes
+            COALESCE(SUM(rated_writes), 0)::bigint AS total_writes,
+            bool_or(in_read_ten) AS in_read_ten,
+            bool_or(in_write_ten) AS in_write_ten
         FROM rated
         GROUP BY database_name, file_name, 3
         HAVING COUNT(rated_reads) > 0
@@ -271,7 +283,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime,
-            double AvgRead, double AvgWrite, double AvgQueuedRead, double AvgQueuedWrite, long Reads, long Writes)>();
+            double AvgRead, double AvgWrite, double AvgQueuedRead, double AvgQueuedWrite, long Reads, long Writes, bool InReadTen, bool InWriteTen)>();
         var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -292,7 +304,9 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
                 reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt64(10)));
+                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                !reader.IsDBNull(11) && reader.GetBoolean(11),
+                !reader.IsDBNull(12) && reader.GetBoolean(12)));
         }
 
         foreach (var row in rows)
@@ -306,7 +320,9 @@ public sealed partial class ViewerDataService
                 row.AvgQueuedRead,
                 row.AvgQueuedWrite,
                 row.Reads,
-                row.Writes));
+                row.Writes,
+                row.InReadTen,
+                row.InWriteTen));
         }
 
         return items;

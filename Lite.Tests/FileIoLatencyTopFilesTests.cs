@@ -203,6 +203,13 @@ public sealed class FileIoLatencyTopFilesTests : IClassFixture<SharedDuckDbFixtu
         Assert.Contains("C_data", read);
         Assert.DoesNotContain("a9", read);
         Assert.DoesNotContain("nullreads_log", read);
+
+        /* Round 2, L4: the chart's ten are the read's ten (its flag columns), tie at rank 10 included: "a9" is out of both. */
+        var chartRead = FileIoChartFiles.ReadChartFiles(points, p => p.FileName, p => p.InReadTen).Select(g => g.Key).ToList();
+        Assert.Equal(read.OrderBy(n => n, StringComparer.Ordinal), chartRead.OrderBy(n => n, StringComparer.Ordinal));
+        var chartWrite = FileIoChartFiles.WriteChartFiles(points, p => p.FileName, p => p.InWriteTen).Select(g => g.Key).ToList();
+        Assert.Equal(points.Where(p => p.InWriteTen).Select(p => p.FileName).Distinct().OrderBy(n => n, StringComparer.Ordinal), chartWrite.OrderBy(n => n, StringComparer.Ordinal));
+        Assert.DoesNotContain("a9", chartWrite);
     }
 
     [Fact]
@@ -224,22 +231,24 @@ public sealed class FileIoLatencyTopFilesTests : IClassFixture<SharedDuckDbFixtu
     {
         var t = DateTime.UtcNow;
         var points = new System.Collections.Generic.List<FileIoTrendPoint>();
+        /* The read flags the ten log files with the most writes (Db02..Db11) for the write chart and the two data files for the read chart. */
         for (var i = 0; i < 12; i++)
         {
-            points.Add(new FileIoTrendPoint { CollectionTime = t, DatabaseName = $"Db{i:00}", FileName = "log", AvgWriteLatencyMs = 3.0, Writes = 1000 + i });
+            points.Add(new FileIoTrendPoint { CollectionTime = t, DatabaseName = $"Db{i:00}", FileName = "log", AvgWriteLatencyMs = 3.0, Writes = 1000 + i, InWriteTen = i >= 2 });
         }
 
-        points.Add(new FileIoTrendPoint { CollectionTime = t, DatabaseName = "DbA", FileName = "data", AvgReadLatencyMs = 1.0, Reads = 50, Writes = 1 });
-        points.Add(new FileIoTrendPoint { CollectionTime = t, DatabaseName = "DbB", FileName = "data", AvgReadLatencyMs = 1.0, Reads = 40, Writes = 1 });
+        points.Add(new FileIoTrendPoint { CollectionTime = t, DatabaseName = "DbA", FileName = "data", AvgReadLatencyMs = 1.0, Reads = 50, Writes = 1, InReadTen = true });
+        points.Add(new FileIoTrendPoint { CollectionTime = t, DatabaseName = "DbB", FileName = "data", AvgReadLatencyMs = 1.0, Reads = 40, Writes = 1, InReadTen = true });
+        /* A file whose reads sit on interval-0 rows has no rated reads in the points, and is still in the read's ten: the chart keeps it. */
+        points.Add(new FileIoTrendPoint { CollectionTime = t, DatabaseName = "DbC", FileName = "data", AvgReadLatencyMs = 1.0, Reads = 0, Writes = 0, InReadTen = true });
 
-        var read = FileIoChartFiles.ReadChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.Reads, p => p.Writes);
-        var write = FileIoChartFiles.WriteChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.Reads, p => p.Writes);
+        var read = FileIoChartFiles.ReadChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.InReadTen);
+        var write = FileIoChartFiles.WriteChartFiles(points, p => $"{p.DatabaseName}.{p.FileName}", p => p.InWriteTen);
 
-        Assert.Equal(new[] { "DbA.data", "DbB.data" }, read.Select(g => g.Key));
+        Assert.Equal(new[] { "DbA.data", "DbB.data", "DbC.data" }, read.Select(g => g.Key));
 
-        /* The ten log files with the most writes (Db11 first) fill the write chart; the data files' 1 write each cannot reach the ten. */
         Assert.Equal(10, write.Count);
-        Assert.Equal("Db11.log", write[0].Key);
+        Assert.DoesNotContain(write, g => g.Key is "Db00.log" or "Db01.log");
         Assert.All(write, g => Assert.EndsWith(".log", g.Key, StringComparison.Ordinal));
     }
 

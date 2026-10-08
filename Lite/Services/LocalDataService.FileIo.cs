@@ -117,8 +117,14 @@ ranked_files AS (
         ROW_NUMBER() OVER (ORDER BY total_writes DESC NULLS LAST, total_reads DESC NULLS LAST, database_name NULLS LAST, file_name NULLS LAST) AS write_rank
     FROM file_totals
 ),
+/* Round 2, L4: the read says which ten each file is in (the two flags), so the charts draw exactly the files the read ranked
+   instead of ranking again on the bucketed counts, which drop rows with no interval and break ties in another order. */
 top_files AS (
-    SELECT database_name, file_name
+    SELECT
+        database_name,
+        file_name,
+        (read_rank <= 10 AND total_reads > 0) AS in_read_ten,
+        (write_rank <= 10 AND total_writes > 0) AS in_write_ten
     FROM ranked_files
     WHERE (read_rank <= 10 AND total_reads > 0)
     OR    (write_rank <= 10 AND total_writes > 0)
@@ -127,6 +133,8 @@ rated AS (
     SELECT
         f.database_name,
         f.file_name,
+        tf.in_read_ten,
+        tf.in_write_ten,
         f.collection_time,
         /* #3540: a stored interval of 0 is the calculator's no-delta-knowable marker — nulled here (not
            filtered in the WHERE) so an unrated row still counts toward collection_count below. IS DISTINCT
@@ -157,7 +165,9 @@ SELECT
     /* Release walk V9b: the bucket's read and write counts ride along so the Overview lane can weight the files'
        latencies by operations (total stall over total operations) instead of averaging a no-read log file as 0 ms. */
     CAST(COALESCE(SUM(rated_reads), 0) AS BIGINT) AS total_reads,
-    CAST(COALESCE(SUM(rated_writes), 0) AS BIGINT) AS total_writes
+    CAST(COALESCE(SUM(rated_writes), 0) AS BIGINT) AS total_writes,
+    BOOL_OR(in_read_ten) AS in_read_ten,
+    BOOL_OR(in_write_ten) AS in_write_ten
 FROM rated
 GROUP BY database_name, file_name, 3
 HAVING COUNT(rated_reads) > 0
@@ -198,7 +208,7 @@ ORDER BY database_name, file_name, 3";
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
-        var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime, double ReadLatency, double WriteLatency, double QueuedReadLatency, double QueuedWriteLatency, long Reads, long Writes)>();
+        var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime, double ReadLatency, double WriteLatency, double QueuedReadLatency, double QueuedWriteLatency, long Reads, long Writes, bool InReadTen, bool InWriteTen)>();
         var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
@@ -219,7 +229,9 @@ ORDER BY database_name, file_name, 3";
                 reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
-                reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10))));
+                reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
+                !reader.IsDBNull(11) && Convert.ToBoolean(reader.GetValue(11)),
+                !reader.IsDBNull(12) && Convert.ToBoolean(reader.GetValue(12))));
         }
 
         var items = new List<FileIoTrendPoint>();
@@ -235,7 +247,9 @@ ORDER BY database_name, file_name, 3";
                 AvgQueuedReadLatencyMs = row.QueuedReadLatency,
                 AvgQueuedWriteLatencyMs = row.QueuedWriteLatency,
                 Reads = row.Reads,
-                Writes = row.Writes
+                Writes = row.Writes,
+                InReadTen = row.InReadTen,
+                InWriteTen = row.InWriteTen
             });
         }
 
@@ -503,6 +517,10 @@ public class FileIoTrendPoint
     public long Reads { get; set; }
     /// <summary>Writes in this bucket (the denominator of <see cref="AvgWriteLatencyMs"/>).</summary>
     public long Writes { get; set; }
+    /// <summary>The read ranked this file in the ten busiest by reads (and it has reads): the Read Latency chart draws these.</summary>
+    public bool InReadTen { get; set; }
+    /// <summary>The read ranked this file in the ten busiest by writes (and it has writes): the Write Latency chart draws these.</summary>
+    public bool InWriteTen { get; set; }
 }
 
 public class FileIoThroughputPoint
