@@ -1827,7 +1827,9 @@ jobs:
               $chunkArgs = foreach ($class in $chunk) { '-class'; $class }
               $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
               Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
-              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @chunkArgs -trx TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx
+              # -xml: per-test durations for the darling-tests-timing artifact (#5459 change 4: the test map's
+              # selection estimates need a per-class Darling time, and none was recorded before).
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @chunkArgs -trx TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx -xml TestResults/darling-timing-${{ matrix.shard }}-$chunkNumber.xml
               if ($LASTEXITCODE -ne 0) {
                   $failedChunks++
                   Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
@@ -1880,6 +1882,18 @@ jobs:
             }
           }
           exit 0
+
+      # #5459 change 4: per-test durations of this shard, kept a week like the Lite shards' lite-tests-timing-N.
+      # Informational: a failed upload never turns the shard red.
+      - name: Upload Darling test timings
+        if: success() && steps.filter.outputs.darling == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-tests-timing-${{ matrix.shard }}
+          path: TestResults/darling-timing-*.xml
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Upload PG log and test results on failure
         if: failure() && steps.filter.outputs.darling == 'true'
