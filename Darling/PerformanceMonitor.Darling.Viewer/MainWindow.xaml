@@ -445,6 +445,7 @@
                          MouseDoubleClick="ServerList_MouseDoubleClick">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName, Mode=OneTime}"/>
                             <Setter Property="Background" Value="Transparent"/>
                             <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
                             <Setter Property="Padding" Value="8,5"/>

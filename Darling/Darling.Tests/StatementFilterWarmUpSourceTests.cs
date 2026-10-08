@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// filter on the UI thread, and its MCP server shares the process) and the Darling service (its MCP tools, plan
 /// analysis and alerts). The Darling viewer and the web host judge through the PostgreSQL predicate and never build
 /// the .NET judge, so they have nothing to warm.</summary>
+[Trait("Reads", "Lite")]
 public sealed class StatementFilterWarmUpSourceTests
 {
     private static readonly Regex s_warmUpCall = new(

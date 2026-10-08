@@ -380,13 +380,13 @@ public sealed partial class StatementCollectionCensusTests
 
     // ── timing: a 4 MB ring buffer of reports and graphs ──
 
-    [Fact]
-    public async Task ABlockingRingBufferOfAboutFourMegabytes_IsJudgedWellUnderTheBudget()
+    /// <summary>The input a timing run judges: about <paramref name="bytes"/> of blocked-process reports, a fifth of
+    /// them carrying the canary statement.</summary>
+    private static (DataTableReader Reader, int Count, int Bytes) BprInput(int bytes)
     {
-        await StatementFilterWarmUp.EnsureAsync();
         var reports = new List<(string, string?, string?)>();
         var size = 0;
-        for (var i = 0; size < 4_000_000; i++)
+        for (var i = 0; size < bytes; i++)
         {
             var text = i % 5 == 0 ? StatementScrubCanary.CanaryStatement : "SELECT col" + i + " FROM dbo.t" + i + " WHERE c = @c";
             var xml = BlockedReportXml(text, StatementScrubCanary.PlainStatement + new string('x', 1000));
@@ -394,13 +394,16 @@ public sealed partial class StatementCollectionCensusTests
             size += xml.Length;
         }
 
-        var watch = Stopwatch.StartNew();
-        var (rows, writer) = await RunBprAsync(BlockingContext(), BprReader(reports.ToArray()));
-        var bprSeconds = watch.Elapsed.TotalSeconds;
+        return (BprReader(reports.ToArray()), reports.Count, size);
+    }
 
+    /// <summary>The input a timing run judges: about <paramref name="bytes"/> of deadlock graphs, a fifth of them
+    /// carrying the canary statement.</summary>
+    private static (DataTableReader Reader, int Count, int Bytes) GraphInput(int bytes)
+    {
         var graphs = new List<(DateTime, string, string?)>();
-        size = 0;
-        for (var i = 0; size < 4_000_000; i++)
+        var size = 0;
+        for (var i = 0; size < bytes; i++)
         {
             var text = i % 5 == 0 ? StatementScrubCanary.CanaryStatement : "SELECT col" + i + " FROM dbo.t" + i + " WHERE c = @c";
             var graph = DeadlockGraph(text, StatementScrubCanary.PlainStatement + new string('x', 1000));
@@ -408,14 +411,93 @@ public sealed partial class StatementCollectionCensusTests
             size += graph.Length;
         }
 
-        watch.Restart();
-        var (graphRows, graphWriter) = await RunDeadlocksAsync(BlockingContext(), DeadlockReader(graphs.ToArray()));
-        var deadlockSeconds = graphWriter.Strings.Count() >= 0 ? watch.Elapsed.TotalSeconds : 0;
+        return (DeadlockReader(graphs.ToArray()), graphs.Count, size);
+    }
+
+    /// <summary>Judges one blocked-process buffer of about <paramref name="bytes"/> and returns the seconds it took,
+    /// its size in megabytes, and the writer (for the no-leak check). The input is built before the clock starts.</summary>
+    private static async Task<(double Seconds, double Megabytes, int Count, StatementScrubRecordingWriter Writer)> TimeBprAsync(int bytes)
+    {
+        var (reader, count, size) = BprInput(bytes);
+        var watch = Stopwatch.StartNew();
+        var (_, writer) = await RunBprAsync(BlockingContext(), reader);
+        return (watch.Elapsed.TotalSeconds, size / 1_000_000.0, count, writer);
+    }
+
+    /// <summary>The deadlock-graph twin of <see cref="TimeBprAsync"/>.</summary>
+    private static async Task<(double Seconds, double Megabytes, int Count, StatementScrubRecordingWriter Writer)> TimeDeadlocksAsync(int bytes)
+    {
+        var (reader, count, size) = GraphInput(bytes);
+        var watch = Stopwatch.StartNew();
+        var (_, writer) = await RunDeadlocksAsync(BlockingContext(), reader);
+        return (watch.Elapsed.TotalSeconds, size / 1_000_000.0, count, writer);
+    }
+
+    /// <summary>
+    /// The seconds-per-megabyte of the fastest of <paramref name="runs"/> runs at <paramref name="bytes"/>, with the
+    /// last run's count and writer. The fastest, not the mean: a busy machine only ever adds time, so the minimum is
+    /// the run least touched by it.
+    /// </summary>
+    private static async Task<(double SecondsPerMegabyte, double Seconds, int Count, StatementScrubRecordingWriter Writer)> FastestRateAsync(
+        Func<int, Task<(double Seconds, double Megabytes, int Count, StatementScrubRecordingWriter Writer)>> run, int bytes, int runs)
+    {
+        var best = double.MaxValue;
+        var bestSeconds = double.MaxValue;
+        var count = 0;
+        StatementScrubRecordingWriter? writer = null;
+        for (var i = 0; i < runs; i++)
+        {
+            var result = await run(bytes);
+            best = Math.Min(best, result.Seconds / result.Megabytes);
+            bestSeconds = Math.Min(bestSeconds, result.Seconds);
+            count = result.Count;
+            writer = result.Writer;
+        }
+
+        return (best, bestSeconds, count, writer!);
+    }
+
+    /// <summary>
+    /// A blocked-process ring buffer and a deadlock set of about 4 MB each are judged in time LINEAR in their size.
+    /// The guard's purpose is a judge that goes quadratic on a big buffer, and it is not a clock test: a fixed
+    /// seconds ceiling failed on a busy machine, because a busy machine slows a correct judge too. So the 4 MB
+    /// seconds-per-megabyte is compared with a 1 MB baseline measured in the SAME run, each the fastest of a few
+    /// runs: load scales both, a quadratic judge makes the 4 MB rate about four times the baseline's, and a linear
+    /// one keeps the two equal. The 2.5 limit sits between. The absolute ceiling is only a hang backstop, far above
+    /// anything a loaded machine produces.
+    /// </summary>
+    [Fact]
+    public async Task ABlockingRingBufferOfAboutFourMegabytes_IsJudgedInTimeLinearInItsSize()
+    {
+        const int Small = 1_000_000;
+        const int Big = 4_000_000;
+        const double RateGrowthLimit = 2.5;
+        const double BaselineFloorSecondsPerMegabyte = 0.02;
+        const double HangBackstopSeconds = 60;
+
+        await StatementFilterWarmUp.EnsureAsync();
+        await TimeBprAsync(Small);
+        await TimeDeadlocksAsync(Small);
+
+        var bprBase = await FastestRateAsync(TimeBprAsync, Small, 3);
+        var bprBig = await FastestRateAsync(TimeBprAsync, Big, 2);
+        var deadlockBase = await FastestRateAsync(TimeDeadlocksAsync, Small, 3);
+        var deadlockBig = await FastestRateAsync(TimeDeadlocksAsync, Big, 2);
 
         TestContext.Current.SendDiagnosticMessage(
-            $"R4 timing: {rows.Count} reports in {bprSeconds:F2} s, {graphRows.Count} graphs in {deadlockSeconds:F2} s");
-        AssertNoNeedle(writer);
-        AssertNoNeedle(graphWriter);
-        Assert.True(bprSeconds < 5 && deadlockSeconds < 5, $"{bprSeconds:F2} s for reports, {deadlockSeconds:F2} s for graphs");
+            $"R4 timing: {bprBig.Count} reports in {bprBig.Seconds:F2} s ({bprBig.SecondsPerMegabyte:F3} s/MB; 1 MB baseline {bprBase.SecondsPerMegabyte:F3} s/MB), "
+            + $"{deadlockBig.Count} graphs in {deadlockBig.Seconds:F2} s ({deadlockBig.SecondsPerMegabyte:F3} s/MB; 1 MB baseline {deadlockBase.SecondsPerMegabyte:F3} s/MB)");
+        AssertNoNeedle(bprBase.Writer);
+        AssertNoNeedle(bprBig.Writer);
+        AssertNoNeedle(deadlockBase.Writer);
+        AssertNoNeedle(deadlockBig.Writer);
+        Assert.True(bprBig.Seconds < HangBackstopSeconds && deadlockBig.Seconds < HangBackstopSeconds,
+            $"{bprBig.Seconds:F2} s for reports, {deadlockBig.Seconds:F2} s for graphs: past the hang backstop");
+        Assert.True(
+            bprBig.SecondsPerMegabyte <= Math.Max(bprBase.SecondsPerMegabyte, BaselineFloorSecondsPerMegabyte) * RateGrowthLimit,
+            $"reports: {bprBig.SecondsPerMegabyte:F3} s/MB at 4 MB against {bprBase.SecondsPerMegabyte:F3} s/MB at 1 MB is not linear");
+        Assert.True(
+            deadlockBig.SecondsPerMegabyte <= Math.Max(deadlockBase.SecondsPerMegabyte, BaselineFloorSecondsPerMegabyte) * RateGrowthLimit,
+            $"graphs: {deadlockBig.SecondsPerMegabyte:F3} s/MB at 4 MB against {deadlockBase.SecondsPerMegabyte:F3} s/MB at 1 MB is not linear");
     }
 }

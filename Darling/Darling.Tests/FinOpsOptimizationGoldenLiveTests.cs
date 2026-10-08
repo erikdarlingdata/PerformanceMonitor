@@ -146,6 +146,8 @@ public sealed class FinOpsOptimizationGoldenLiveTests
         await Query(connection, ct, now.AddDays(-2), "BusyAlpha", "0xBH", "SELECT busy", 2_000_000, 12, 100, 60, anchor.AddDays(-1).AddHours(5), null);
         await Query(connection, ct, now.AddDays(-8), "IdleOld", "0xOH", "SELECT old", 1_000_000, 4, 10, 60, anchor.AddDays(-8).AddHours(7).AddMinutes(30), null);
         await Query(connection, ct, now.AddDays(-2), "IdleZero", "0xZH", "SELECT zero", 0, 0, 0, 60, anchor.AddDays(-9).AddHours(2), null);
+        /* A database is idle only where query stats cover 7 days: a sample on each complete UTC day and one at least 7 days old. */
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerIdA, ServerNameA, now);
 
         /* tempdb: the newest sample is the latest; the 30-hour-old sample is outside the peak window. */
         await Tempdb(connection, ct, now.AddHours(-30), 9000m, 9000m, 9000m, 27000m);

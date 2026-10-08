@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// <c>SUM(bigint)</c> returns numeric while the typed <c>GetInt64</c> reader (and DuckDB) want an
 /// integral type.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerPerfmonSqlTests
 {
     [Fact]
@@ -111,6 +112,7 @@ public sealed class ViewerPerfmonSqlTests
 /// derivation read that stands in for Lite's live <c>_hasMsdbAccess</c> probe — the running_jobs
 /// collector's most recent collection_log status.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerRunningJobsSqlTests
 {
     [Fact]
@@ -207,6 +209,7 @@ public sealed class ViewerRunningJobsSqlTests
 /// the clear-only-the-filtered-visible-set semantics — pinned against the SHARED
 /// <see cref="PerfmonPacks"/> parity data the real picker reads.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerPerfmonPickerLogicTests
 {
     private static readonly HashSet<string> GeneralThroughput =
@@ -309,6 +312,7 @@ public sealed class ViewerPerfmonPickerLogicTests
 /// keeps one of them (or drops one of the calls) fails here with the file named. The shaping itself is
 /// pinned value-by-value in <c>Lite.Tests/DeltaSeriesShapingTests</c>, which runs off Windows.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerPerfmonShapingParityTests
 {
     public static IEnumerable<object[]> Charts()
@@ -376,6 +380,7 @@ public sealed class ViewerPerfmonShapingParityTests
 /// "live-postgres" collection; uses negative sentinel server_ids and cleans up in finally.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class ViewerPerfmonRunningJobsLivePostgresTests
 {
     private const int PerfmonServerId = -949501;

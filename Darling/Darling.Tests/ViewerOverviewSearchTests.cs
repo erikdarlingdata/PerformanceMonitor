@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// needs-attention toggle) lives in the pure <see cref="OverviewCardView"/> so it is testable without WPF; the
 /// source pins show the XAML box is wired to the one projection point.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ViewerOverviewSearchTests
 {
     private static ServerSummaryItem Card(string name, int id, bool online = true, params string[] tags) =>

@@ -4507,7 +4507,7 @@ public sealed class DarlingCollectorRunner
         var fencedServerId = queryStoreDatabases is not null ? server.ServerId : (int?)null;
         if (fencedServerId is { } beginServerId)
         {
-            _queryStoreWriteFence?.BeginWrite(beginServerId);
+            _queryStoreWriteFence?.BeginWrite(beginServerId, queryStoreDatabases);
         }
 
         var fenceSucceeded = false;

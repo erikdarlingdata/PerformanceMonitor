@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// dictionary — moving it there is the fix this test demands, never widening the model back.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class XamlStaticResourceHygieneTests
 {
     /* Each app scope: its XAML subtrees. Shared control libraries would join the scope of every

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -84,6 +85,57 @@ public static class DarlingFinOpsStorageGrowthReader
         var unbounded = await fallback.ExecuteScalarAsync(cancellationToken);
         return unbounded is DateTime unboundedStamp ? unboundedStamp : null;
     }
+
+    /// <summary>The words for a blank baseline cell (shown as n/a): no snapshot within a day of <paramref name="days"/> days ago. Null when there is a baseline.</summary>
+    public static string? NoBaselineNote(int days, decimal? baselineSizeMb) =>
+        baselineSizeMb == null ? $"No sample from {days} days ago" : null;
+
+    /// <summary>The note for a database row's blank baselines: "No sample from 7 days ago", "No sample from 30 days ago", both joined by a semicolon, or null when both exist.</summary>
+    public static string? BaselineNote(decimal? size7dAgoMb, decimal? size30dAgoMb)
+    {
+        var parts = new[] { NoBaselineNote(7, size7dAgoMb), NoBaselineNote(30, size30dAgoMb) }.Where(n => n != null);
+        var joined = string.Join("; ", parts);
+        return joined.Length == 0 ? null : joined;
+    }
+
+    /// <summary>How far from its mark (7 or 30 days ago) a baseline snapshot may be: one day either side. Beyond that the baseline
+    /// is not "N days ago" and the grid says there is no sample from that long ago.</summary>
+    public static readonly TimeSpan BaselineTolerance = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// The snapshot NEAREST <paramref name="mark"/> (7 or 30 days before now), only when it is within <see cref="BaselineTolerance"/>
+    /// of the mark and strictly older than <paramref name="latestSnapshot"/>; otherwise null. The older shape took the newest snapshot
+    /// at or before the mark, however far before: a store with 25 days of history then called its 25-day-old sample "30d ago" and
+    /// measured Growth % and the daily rate against it, and a store with a gap labeled whatever sample the gap left as the 7-day
+    /// baseline. With no snapshot near the mark the baseline is null, and the grid shows n/a with "No sample from N days ago".
+    /// </summary>
+    public static async Task<DateTime?> GetDatabaseSizeSnapshotNearestAsync(
+        NpgsqlDataSource dataSource, int serverId, DateTime mark, DateTime latestSnapshot, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = dataSource.CreateCommand(DatabaseSizeSnapshotNearestSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(mark, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(latestSnapshot, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = BaselineTolerance.TotalSeconds });
+        return await command.ExecuteScalarAsync(cancellationToken) is DateTime nearest ? nearest : null;
+    }
+
+    /// <summary>The nearest-to-the-mark baseline probe. $1 server_id, $2 the mark, $3 the latest snapshot (the baseline must be strictly
+    /// older), $4 the tolerance in seconds. The two bounds on <c>collection_time</c> let the planner exclude every chunk outside the
+    /// tolerance window before it builds a subplan.</summary>
+    public const string DatabaseSizeSnapshotNearestSql = @"
+SELECT t
+FROM (
+    SELECT DISTINCT collection_time AS t
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2::timestamp - make_interval(secs => $4)
+    AND   collection_time <= $2::timestamp + make_interval(secs => $4)
+    AND   collection_time < $3
+) AS candidates
+ORDER BY abs(EXTRACT(EPOCH FROM (t - $2::timestamp))), t DESC
+LIMIT 1";
 
     /// <summary>The windowed half of <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/>. $1 server_id,
     /// $2 window start, $3 asOf.</summary>
@@ -304,20 +356,11 @@ ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database
             return items;
         }
 
-        var past7Snapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(dataSource, serverId, now.AddDays(-7), commandTimeoutSeconds, cancellationToken);
-        var past30Snapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(dataSource, serverId, now.AddDays(-30), commandTimeoutSeconds, cancellationToken);
-
-        /* A past snapshot must be strictly older than the latest one. When collection stopped more than a
-           window ago, "at or before now - window" IS the latest snapshot, and comparing it with itself would read
-           as growth 0 over zero days; that is no comparison, so it is null (n/a). */
-        if (past7Snapshot is DateTime p7 && p7 >= latestSnapshot.Value)
-        {
-            past7Snapshot = null;
-        }
-        if (past30Snapshot is DateTime p30 && p30 >= latestSnapshot.Value)
-        {
-            past30Snapshot = null;
-        }
+        /* Each baseline is the snapshot nearest its mark and within a day of it, and strictly older than the latest one (the probe
+           bounds it): comparing the latest snapshot with itself would read as growth 0 over zero days. With none that near, the
+           baseline is null (n/a, "No sample from N days ago"). */
+        var past7Snapshot = await GetDatabaseSizeSnapshotNearestAsync(dataSource, serverId, now.AddDays(-7), latestSnapshot.Value, commandTimeoutSeconds, cancellationToken);
+        var past30Snapshot = await GetDatabaseSizeSnapshotNearestAsync(dataSource, serverId, now.AddDays(-30), latestSnapshot.Value, commandTimeoutSeconds, cancellationToken);
 
         await using var command = dataSource.CreateCommand(StorageGrowthSql);
         command.CommandTimeout = commandTimeoutSeconds;

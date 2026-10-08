@@ -47,6 +47,7 @@ namespace Darling.Tests;
 /// and the four metric queries cannot be conflated into four CPU readings.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class PgCpuCapacityHeadroomTests
 {
     internal const int RungVersion = 115;

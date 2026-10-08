@@ -26,7 +26,7 @@ public sealed class LatchStatsCollectorDefinitionTests
     private const string ExpectedQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     latch_class = ls.latch_class,
     waiting_requests_count = ls.waiting_requests_count,
     wait_time_ms = ls.wait_time_ms,

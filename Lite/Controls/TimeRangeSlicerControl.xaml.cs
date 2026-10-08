@@ -23,6 +23,7 @@ public partial class TimeRangeSlicerControl : UserControl
     private DateTime? _requestedEndUtc;
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
+    private string? _emptyText;
 
     // Overlay: per-item trend drawn on top of the aggregate area chart
     private List<(DateTime TimeUtc, double Value)>? _overlayData;
@@ -99,6 +100,7 @@ public partial class TimeRangeSlicerControl : UserControl
         _requestedStartUtc = requestedStartUtc;
         _requestedEndUtc = requestedEndUtc;
         _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc);
+        _emptyText = null;
         _metricLabel = metricLabel;
 
         if (prevStart.HasValue && prevEnd.HasValue && _data.Count >= 2)
@@ -114,6 +116,51 @@ public partial class TimeRangeSlicerControl : UserControl
 
         UpdateRangeLabel();
         Redraw();
+    }
+
+    /// <summary>
+    /// The window came back empty (Lite click-through F15): drops the previous window's bars and selection and says so over the
+    /// chart area only. The text is drawn on the canvas, so it never sits over the Time Range toggle or the quick-range chips,
+    /// and it is hidden with the canvas when the user collapses the slicer.
+    /// </summary>
+    public void ShowEmpty(string text)
+    {
+        _data = new List<TimeSliceBucket>();
+        _overlayData = null;
+        _requestedStartUtc = null;
+        _requestedEndUtc = null;
+        _rangeStart = 0;
+        _rangeEnd = 1.0;
+        _emptyText = text;
+        UpdateRangeLabel();
+        Redraw();
+    }
+
+    /// <summary>The empty-window text (null when the slicer holds data); exposed for the tests.</summary>
+    public string? EmptyText => _emptyText;
+
+    private void DrawEmptyText()
+    {
+        if (_emptyText is null) return;
+        var w = SlicerBorder.ActualWidth;
+        var h = SlicerBorder.ActualHeight;
+        if (w <= 0 || h <= 0) return;
+
+        var tb = new TextBlock
+        {
+            Text = _emptyText,
+            FontSize = 12,
+            FontStyle = FontStyles.Italic,
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = Math.Min(520, Math.Max(40, w - 16)),
+            Foreground = FindBrush("ForegroundDimBrush", "#C7CBD4"),
+            IsHitTestVisible = false,
+        };
+        tb.Measure(new Size(tb.MaxWidth, double.PositiveInfinity));
+        Canvas.SetLeft(tb, Math.Max(0, (w - tb.DesiredSize.Width) / 2));
+        Canvas.SetTop(tb, Math.Max(0, (h - tb.DesiredSize.Height) / 2));
+        SlicerCanvas.Children.Add(tb);
     }
 
     /// <summary>
@@ -233,7 +280,7 @@ public partial class TimeRangeSlicerControl : UserControl
     public void Redraw()
     {
         SlicerCanvas.Children.Clear();
-        if (_data.Count < 1) return;
+        if (_data.Count < 1) { DrawEmptyText(); return; }
 
         var w = SlicerBorder.ActualWidth;
         var h = SlicerBorder.ActualHeight;

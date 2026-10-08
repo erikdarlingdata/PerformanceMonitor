@@ -126,7 +126,8 @@ public sealed class FinOpsTabUtilizationRawPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\"").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "../../read-fields.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "../../read-fields.js", "./gate.js" }));
+        Assert.Contains("./gate.js", imports);
     }
 
     [Fact]

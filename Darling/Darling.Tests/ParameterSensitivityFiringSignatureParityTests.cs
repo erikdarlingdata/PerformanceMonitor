@@ -66,6 +66,7 @@ namespace Darling.Tests;
 /// file, so raising a number in one guard without the other fails. Its filter, <c>lite</c>, covers
 /// Darling's test tree — exactly the edits that could weaken this file.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ParameterSensitivityFiringSignatureParityTests
 {
     /// <summary>

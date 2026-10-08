@@ -47,6 +47,7 @@ namespace Darling.Tests;
 /// describing Darling's behaviour. <see cref="NeitherFixHasALiteTwinToDriftFrom"/> pins that, so a Lite
 /// twin appearing later fails asking for the same fix rather than drifting quietly.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ControlPlaneReloadDurabilityTests
 {
     /// <summary>

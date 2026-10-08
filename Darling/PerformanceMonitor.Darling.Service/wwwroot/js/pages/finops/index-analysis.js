@@ -19,7 +19,8 @@
 
 import { VIZ } from "../../panels.js";
 import { databaseBox, newBoxChoice } from "./database-box.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
+import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
+import { gatedEmptyStrip } from "./gate.js";
 
 // The most recommendations the view lists (#5238). The desktop grid shows every finding, so the tab asks for the ceiling, as the
 // Database Sizes tab asks for its 500 files; the view's own default of 10 and the 50 of its other top-N views are not for this tab.
@@ -144,7 +145,7 @@ export const tab = {
         if (mine !== generation) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(content, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(content, emptyStrip(res.message));
+        if (res.kind === "empty") return mount(content, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         if (!choice.db) {
           choice.names = (data.databases || []).map((d) => d.database_name).filter(Boolean);

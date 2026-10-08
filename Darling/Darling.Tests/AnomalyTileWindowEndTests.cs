@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// behavioural half, which seeds a sample at the end and runs the real detector, is
 /// <c>AnomalyTileWindowEndTests</c> in Lite.Tests.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AnomalyTileWindowEndTests
 {
     /// <summary>The closed spelling of the window end: a boundary sample is read.</summary>

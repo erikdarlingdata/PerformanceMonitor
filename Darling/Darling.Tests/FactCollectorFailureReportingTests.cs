@@ -45,6 +45,7 @@ namespace Darling.Tests;
 /// port of each other and the class doc says so; a blind spot repaired on one side only would
 /// silently re-open on the other the next time someone ports a method across.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class FactCollectorFailureReportingTests
 {
     /// <summary>

@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// (editions 1 to 4) and Managed Instance (8) behave exactly as before, and every test has that twin. Lite.Tests pins the
 /// same table for the other app, in the same words.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AzureSqlDatabaseHostMathTests
 {
     private static readonly DateTime s_start = new(2026, 9, 30, 0, 0, 0, DateTimeKind.Utc);

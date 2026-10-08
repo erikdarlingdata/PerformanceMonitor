@@ -110,8 +110,12 @@ VALUES (13, 'alpha-01', 'Alpha', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TI
 
             Assert.DoesNotContain(SecretPassword, text, StringComparison.Ordinal);
             Assert.DoesNotContain(SecretLogin, text, StringComparison.Ordinal);
-            Assert.DoesNotContain("username", text, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("password", text, StringComparison.OrdinalIgnoreCase);
+            /* The PostgreSQL Auth label is the words "Username and password" (#5492): it names how the server logs in and carries no login or
+               secret. Take that one label out, and the route must still hold no username, password or encrypted word anywhere else, in a
+               value or in a property name. The label itself is pinned on the pg-01 row below. */
+            var withoutLabel = text.Replace("Username and password", "", StringComparison.Ordinal);
+            Assert.DoesNotContain("username", withoutLabel, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("password", withoutLabel, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("encrypted", text, StringComparison.OrdinalIgnoreCase);
 
             using var doc = JsonDocument.Parse(text);
@@ -139,6 +143,7 @@ VALUES (13, 'alpha-01', 'Alpha', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TI
             var postgres = servers.Single(s => s.GetProperty("server_name").GetString() == "pg-01:pg");
             Assert.Equal("Disabled", postgres.GetProperty("status").GetString());
             Assert.Equal("postgres", postgres.GetProperty("engine").GetString());
+            Assert.Equal("Username and password", postgres.GetProperty("auth").GetString());
 
             /* Only GET is mapped: a write method on the route is refused by the router. */
             using var post = await client.PostAsync("/api/admin/servers", new StringContent("{}", System.Text.Encoding.UTF8, "application/json"), ct);
