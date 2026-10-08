@@ -36,7 +36,7 @@ public sealed class JobHistoryPageTests
     public void ThePageReadsGetJobHistoryThroughTheSharedReadWithASignal()
     {
         var page = Page();
-        Assert.Contains("readToolWithinKeptHistory(\"get_job_history\", readParams(), signal)", page);
+        Assert.Contains("readToolWithinKeptHistory(\"get_job_history\", readParams(w), signal)", page);
         Assert.Contains("readTool(\"list_servers\", {}, controller.signal)", page);
         Assert.Contains("VIZ.table(data,", page);
         Assert.Contains("rowsKey: \"runs\"", page);
