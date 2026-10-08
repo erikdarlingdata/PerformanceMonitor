@@ -55,7 +55,13 @@ internal sealed record IntervalFloorWarmUpResult(
 /// chooses between them, and a source pin fails if this file runs anything else against an interval table.</para>
 ///
 /// <para><b>Cost when nothing is dead.</b> Each read is then one index probe (milliseconds), which is why there
-/// is no size threshold: the caller gates on "the drain deleted any row", and a no-op warm-up is cheap.</para>
+/// is no size threshold: the caller gates on "the purge deleted any row or failed" (<see cref="LeftDeadEntries"/>),
+/// and a no-op warm-up is cheap.</para>
+///
+/// <para><b>Partitioned tables (#5573).</b> Both interval tables are partitioned by day, so the floor read on the
+/// parent is a MIN over each partition's (server_id, first_execution_time) index. Only the legacy table and the
+/// DEFAULT partition are ever row-deleted; a whole expired day is dropped with its indexes. So the dead entries the
+/// read walks past are in those two, and a pass that only dropped partitions leaves none.</para>
 ///
 /// <para><b>The limit.</b> PostgreSQL marks an index entry dead only when its row is dead to every open
 /// snapshot. A transaction that was open before the drain finished keeps the entries live, so the warm-up pays
@@ -101,21 +107,26 @@ internal static class QueryStoreIntervalFloorWarmUp
     };
 
     /// <summary>
-    /// The retention pass's entry: warms each table whose drain deleted rows. <paramref name="wideDeleted"/> and
-    /// <paramref name="latestDeleted"/> are the drains' row counts; null is a drain that failed part way, whose
-    /// committed batches left dead entries just the same, so it counts as "may have deleted". Never throws.
+    /// The retention pass's entry: warms each table whose interval purge may have left dead index entries.
+    /// <paramref name="wide"/> and <paramref name="latest"/> are <see cref="DarlingRetention.PurgeIntervalTableAsync"/>'s
+    /// results for the two day-partitioned tables (#5573). See <see cref="LeftDeadEntries"/> for which results warm.
+    /// Never throws.
     /// </summary>
     internal static async Task RunAfterDrainAsync(
-        NpgsqlDataSource postgres, int? wideDeleted, int? latestDeleted, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres,
+        DarlingRetention.IntervalPartitionPurge wide,
+        DarlingRetention.IntervalPartitionPurge latest,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         try
         {
-            if (wideDeleted is null or > 0)
+            if (LeftDeadEntries(wide))
             {
                 await WarmAsync(postgres, IntervalFloorTable.Wide, logger, cancellationToken);
             }
 
-            if (latestDeleted is null or > 0)
+            if (LeftDeadEntries(latest))
             {
                 await WarmAsync(postgres, IntervalFloorTable.Latest, logger, cancellationToken);
             }
@@ -127,6 +138,16 @@ internal static class QueryStoreIntervalFloorWarmUp
             logger?.LogWarning("Interval floor warm-up stopped: {Failure}", ex.Message);
         }
     }
+
+    /// <summary>
+    /// Whether one table's interval purge may have left dead index entries (#5573, #5581): it deleted rows, or a part
+    /// of it failed (a part that failed may have committed batches before it did). The dead entries live in the legacy
+    /// table and the DEFAULT partition, the only places rows are deleted one by one. A pass that only dropped whole
+    /// day partitions deleted no row and failed nothing: a dropped partition takes its indexes with it, so there is
+    /// nothing to walk past and nothing to warm.
+    /// </summary>
+    internal static bool LeftDeadEntries(DarlingRetention.IntervalPartitionPurge purge) =>
+        purge.RowsDeleted > 0 || purge.Failed > 0;
 
     /// <summary>
     /// Runs <paramref name="table"/>'s floor read once per registered server, one at a time. Logs one line for

@@ -53,6 +53,9 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
     {
         public string Qualified => "collect." + Name;
 
+        /// <summary>The renamed pre-partitioning table (#5571): on a store that is not promoted yet it holds every row, and it is where the retention pass deletes row by row.</summary>
+        public string Legacy => (Kind == IntervalFloorTable.Wide ? QueryStoreIntervalPartitions.Wide : QueryStoreIntervalPartitions.Latest).Legacy;
+
         public string FloorSql => Kind == IntervalFloorTable.Wide
             ? QueryStoreIntervalWide.PlainTableFloorSql
             : QueryStoreIntervalLatest.PlainTableFloorSql;
@@ -105,13 +108,14 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
 
     /// <summary>
     /// The sweep calls the warm-up exactly once, after the last <c>PurgeOneAsync</c> (so never between two purges),
-    /// handing it the two interval drains' row counts, and not through a size threshold.
+    /// handing it the two interval tables' <c>PurgeIntervalTableAsync</c> results (#5573), and not through a size
+    /// threshold.
     /// </summary>
     [Fact]
-    public void TheSweep_CallsTheWarmUpOnce_AfterTheLastPurge_WithTheTwoDrainCounts()
+    public void TheSweep_CallsTheWarmUpOnce_AfterTheLastPurge_WithTheTwoIntervalPurgeResults()
     {
         var source = ReadSource("Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs");
-        var calls = Regex.Matches(source, @"QueryStoreIntervalFloorWarmUp\.RunAfterDrainAsync\(\s*postgres, intervalWideDeleted, intervalLatestDeleted, logger, cancellationToken\)");
+        var calls = Regex.Matches(source, @"QueryStoreIntervalFloorWarmUp\.RunAfterDrainAsync\(\s*postgres, intervalWidePartitions, intervalLatestPartitions, logger, cancellationToken\)");
         Assert.Single(calls);
 
         /* The sweep body ends where BuildRunRecordSummary is defined; PurgeOneAsync is defined further down. */
@@ -124,6 +128,22 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
             calls[0].Index > source.IndexOf("var (status, message) = BuildRunRecordSummary(", StringComparison.Ordinal),
             "the warm-up runs after the run-record, so its time is not counted as the purge's");
     }
+
+    /// <summary>
+    /// Which interval purge results warm (#5573): rows deleted, or a failed part (it may have committed batches before
+    /// it failed). A pass that only dropped whole day partitions, or found nothing to do, does not.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, 0, false)]
+    [InlineData(3, 0, 0, false)]
+    [InlineData(1, 1, 0, true)]
+    [InlineData(2, 20_000, 0, true)]
+    [InlineData(0, 0, 1, true)]
+    [InlineData(2, 0, 1, true)]
+    public void OnlyAPurgeThatDeletedRowsOrFailed_LeavesDeadEntries(int purged, int rowsDeleted, int failed, bool expected) =>
+        Assert.Equal(
+            expected,
+            QueryStoreIntervalFloorWarmUp.LeftDeadEntries(new DarlingRetention.IntervalPartitionPurge(purged, rowsDeleted, failed)));
 
     /* ---- live ----------------------------------------------------------------------------------------- */
 
@@ -334,10 +354,65 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
             await cancelled.CancelAsync();
 
             var result = await QueryStoreIntervalFloorWarmUp.WarmAsync(postgres, IntervalFloorTable.Wide, log, cancelled.Token);
-            await QueryStoreIntervalFloorWarmUp.RunAfterDrainAsync(postgres, 5, 5, log, cancelled.Token);
+            await QueryStoreIntervalFloorWarmUp.RunAfterDrainAsync(
+                postgres, new DarlingRetention.IntervalPartitionPurge(1, 5, 0), new DarlingRetention.IntervalPartitionPurge(1, 5, 0), log, cancelled.Token);
 
             Assert.True(result.Cancelled);
             Assert.Equal(0, result.ServersWarmed);
+            Assert.Equal(0, log.CountAtLevel(LogLevel.Error));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>
+    /// #5573: a promoted store whose pass only DROPS a whole expired day partition (and the legacy table, whose bound
+    /// has expired) deletes no row, so it leaves no dead index entry (a dropped partition takes its indexes with it)
+    /// and the pass logs no warm-up line, for either table. The pass is still a real drain: the partition is gone.
+    /// </summary>
+    [Fact]
+    public async Task APassThatOnlyDropsWholePartitions_DoesNotWarm()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var log = new CapturingTestLogger();
+            var utcNow = DateTime.UtcNow;
+
+            var dropped = new List<string>();
+            foreach (var table in QueryStoreIntervalPartitions.All)
+            {
+                /* Promoted far enough back that the legacy bound and the first day partitions are older than the
+                   cutoff: a whole expired day exists, holding a row. */
+                await QueryStoreIntervalRetentionTestKit.PromoteAsync(
+                    connection, table, utcNow.AddDays(-(table.HorizonDays + 4)), log, ct);
+                await QueryStoreIntervalPartitions.CreateAheadAsync(connection, table, utcNow, log, ct);
+                var wholeDay = QueryStoreIntervalPartitions.DayStart(utcNow.AddDays(-table.HorizonDays)).AddDays(-1);
+                Assert.True(await QueryStoreIntervalRetentionTestKit.ExistsAsync(connection, table.DayPartition(wholeDay), ct));
+                await QueryStoreIntervalRetentionTestKit.InsertAsync(connection, table, wholeDay.AddHours(12), 1, ct);
+                dropped.Add(table.DayPartition(wholeDay));
+            }
+
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct);
+
+            foreach (var partition in dropped)
+            {
+                Assert.False(await QueryStoreIntervalRetentionTestKit.ExistsAsync(connection, partition, ct), partition + " was dropped by the pass");
+            }
+
+            Assert.DoesNotContain("Interval floor warm-up", log.Joined, StringComparison.Ordinal);
             Assert.Equal(0, log.CountAtLevel(LogLevel.Error));
 
             bodySucceeded = true;
@@ -398,7 +473,10 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
                 ct);
         }
 
-        await ExecuteAsync(connection, $"ALTER TABLE {table.Qualified} SET (autovacuum_enabled = false)", ct);
+        /* #5573: the table is partitioned, and a partitioned parent has no storage options. On a store that is not
+           promoted, the legacy table is attached as MINVALUE..MAXVALUE, so every seeded row lands in it and the
+           retention pass row-purges it by name: that is where the dead index entries are. */
+        await ExecuteAsync(connection, $"ALTER TABLE {table.Legacy} SET (autovacuum_enabled = false)", ct);
 
         var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         var expiredStart = utcNow.AddDays(-(table.HorizonDays + 5));
@@ -410,7 +488,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
             await SeedAsync(connection, table, serverId, keptStart, KeptPerServer, idOffset + ExpiredPerServer, ct);
         }
 
-        await ExecuteAsync(connection, $"VACUUM (ANALYZE) {table.Qualified}", ct);
+        await ExecuteAsync(connection, $"VACUUM (ANALYZE) {table.Legacy}", ct);
         return connection;
     }
 
