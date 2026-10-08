@@ -304,9 +304,19 @@ public sealed class StoreSelfMetricsTests
         foreach (var table in qualified)
         {
             Assert.Contains($"'{table}',", sql, StringComparison.Ordinal);
-            Assert.Contains($"pg_total_relation_size('{table}')", sql, StringComparison.Ordinal);
-            /* The planner's estimate, NULL where it is -1 (never analysed) — never a 15 GiB count(*) an hour. */
-            Assert.Contains($"(SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{table}'::regclass)", sql, StringComparison.Ordinal);
+            if (table is "collect." + QueryStoreIntervalLatest.TableName or "collect." + QueryStoreIntervalWide.TableName)
+            {
+                /* #5571: a day-partitioned parent has no storage of its own (its size reads 0), so its row sums the
+                   LEAF partitions through pg_partition_tree, bytes and the reltuples estimate alike. */
+                Assert.Contains($"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('{table}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('{table}'))::bigint", sql, StringComparison.Ordinal);
+                Assert.Contains($"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND c.oid IN (SELECT t.relid FROM pg_partition_tree('{table}'::regclass) AS t WHERE t.isleaf UNION ALL", sql, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains($"pg_total_relation_size('{table}')", sql, StringComparison.Ordinal);
+                /* The planner's estimate, NULL where it is -1 (never analysed) — never a 15 GiB count(*) an hour. */
+                Assert.Contains($"(SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{table}'::regclass)", sql, StringComparison.Ordinal);
+            }
 
             /* The census names the same table by the same compound constant, compared against the
                concatenated schema.relation — no hand-typed (schema, relation) tuple to drift (review catch). */
