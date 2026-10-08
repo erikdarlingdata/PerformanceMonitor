@@ -10641,6 +10641,8 @@ AND   j.hypertable_name = '{relation}'", connection))
                 ServerName = runtime.StorageName,
                 TimeRangeStart = latest.AddMinutes(-SameStatementPileupDetector.BaselineLookbackMinutes),
                 TimeRangeEnd = latest,
+                /* #5558: the same-statement pileup is a node-local finding (queries that piled up on THIS node), so there is nothing to skip. */
+                SecondaryReplicaDatabases = PerformanceMonitor.Darling.Analysis.PgSecondaryReplicaScope.NoneSkipped,
                 CancellationToken = stoppingToken,
                 ShutdownToken = stoppingToken,
             };

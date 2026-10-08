@@ -52,6 +52,8 @@ export const tab = {
         const skipped = data.skipped_checks || [];
         const parts = [noticeStrip(noticeText(rows.length))];
         if (data.monthly_cost_usd == null) parts.push(noticeStrip("Monthly cost not set for this server, so savings estimates are blank."));
+        /* Databases this server holds only as an availability group secondary copy are left to the primary's findings (#5558). */
+        if (data.secondary_replica_note) parts.push(noticeStrip(data.secondary_replica_note));
         if (skipped.length) parts.push(noticeStrip("Some checks could not run, so their findings are missing (not clean): " + skipped.join(", ") + "."));
         parts.push(VIZ.table({ rows }, { rowsKey: "rows", columns: COLUMNS, emptyText: "No recommendations: nothing needs attention, or not enough has been collected yet." }));
         mount(body, parts);

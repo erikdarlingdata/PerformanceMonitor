@@ -173,6 +173,7 @@ WITH latest AS (
     FROM v_database_config
     WHERE server_id = $1
     AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
+    /*SEC*/
 )
 SELECT
     COUNT(*) AS database_count,
@@ -189,6 +190,9 @@ FROM latest WHERE rn = 1
 AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            /* #5558: a database this node holds only as a secondary copy is the primary's to report (and drops out
+               of every count here, database_count included). */
+            cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "DB_CONFIG", "database_name", 2);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

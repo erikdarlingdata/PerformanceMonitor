@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -183,6 +184,23 @@ public sealed partial class ViewerDataService
     /// </summary>
     public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, decimal monthlyCost, CancellationToken cancellationToken = default) =>
         (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(_dataSource, serverId, monthlyCost, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken)).Select(RecommendationRow.From).ToList();
+
+    /// <summary>The same checks with the databases in <paramref name="secondaryDatabases"/> (a secondary copy on this node) left to the primary's findings (#5558).</summary>
+    public async Task<List<RecommendationRow>> GetRecommendationsAsync(int serverId, decimal monthlyCost, IReadOnlyCollection<string>? secondaryDatabases, CancellationToken cancellationToken = default) =>
+        (await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(_dataSource, serverId, monthlyCost, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, secondaryDatabases: secondaryDatabases, cancellationToken: cancellationToken)).Select(RecommendationRow.From).ToList();
+
+    /// <summary>
+    /// The recommendations with the databases this node holds only as a secondary copy in an Availability Group left to the
+    /// primary's findings (#5558), plus the one-sentence note for the tab. The set is read from the stored Availability Group
+    /// snapshots and fails open: stale or missing data, a standalone server and Azure SQL Database skip nothing and give no note.
+    /// </summary>
+    public async Task<(List<RecommendationRow> Rows, string? SkippedNote)> GetRecommendationsWithNoteAsync(
+        int serverId, decimal monthlyCost, CancellationToken cancellationToken = default)
+    {
+        var secondary = await PgSecondaryReplicaScope.ReadAsync(_dataSource, serverId, DateTime.UtcNow, logger: null, cancellationToken);
+        var rows = await GetRecommendationsAsync(serverId, monthlyCost, secondary, cancellationToken);
+        return (rows, AgReplicaScope.SkippedNote(secondary));
+    }
 
     /// <summary>Human-readable duration formatting for the maintenance-window finding (Lite's FinOps FormatDuration, verbatim).</summary>
     private static string FormatDuration(long seconds) => FinOpsRecommendationFigures.FormatDuration(seconds);

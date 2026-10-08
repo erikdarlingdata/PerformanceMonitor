@@ -88,7 +88,7 @@ public sealed class DarlingMcpFinOpsRecommendationsToolsTests
     {
         var env = Json(DarlingMcpFinOpsRecommendationsTools.Envelope("alpha", 0m, ["Storage tier"], [Rec(null, "B"), Rec(1m, "A")]));
         Assert.Equal(
-            new[] { "server", "monthly_cost_usd", "cost_reason", "recommendation_count", "skipped_checks", "recommendations" },
+            new[] { "server", "monthly_cost_usd", "cost_reason", "recommendation_count", "skipped_checks", "secondary_replica_note", "recommendations" },
             env.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal("alpha", env.GetProperty("server").GetString());
         Assert.Equal(JsonValueKind.Null, env.GetProperty("monthly_cost_usd").ValueKind);
@@ -96,6 +96,24 @@ public sealed class DarlingMcpFinOpsRecommendationsToolsTests
         Assert.Equal(2, env.GetProperty("recommendation_count").GetInt32());
         Assert.Equal(new[] { "Storage tier" }, env.GetProperty("skipped_checks").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.Equal(new[] { "B", "A" }, env.GetProperty("recommendations").EnumerateArray().Select(e => e.GetProperty("category").GetString()).ToArray());
+    }
+
+    [Fact]
+    public void Envelope_WithASecondaryNote_WritesItBetweenSkippedChecksAndTheRows_AndWithoutOneWritesNull()
+    {
+        var note = AgReplicaScope.SkippedNote(2);
+        var with = Json(DarlingMcpFinOpsRecommendationsTools.Envelope("alpha", 1000m, [], [Rec(1m, "A")], note));
+        Assert.Equal(
+            new[] { "server", "monthly_cost_usd", "cost_reason", "recommendation_count", "skipped_checks", "secondary_replica_note", "recommendations" },
+            with.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(note, with.GetProperty("secondary_replica_note").GetString());
+
+        /* #5558: one convention across every MCP note: the key is always there, null when nothing was skipped. */
+        var without = Json(DarlingMcpFinOpsRecommendationsTools.Envelope("alpha", 1000m, [], [Rec(1m, "A")], null));
+        Assert.Equal(JsonValueKind.Null, without.GetProperty("secondary_replica_note").ValueKind);
+        Assert.Equal(
+            new[] { "server", "monthly_cost_usd", "cost_reason", "recommendation_count", "skipped_checks", "secondary_replica_note", "recommendations" },
+            without.EnumerateObject().Select(p => p.Name).ToArray());
     }
 
     [Fact]
