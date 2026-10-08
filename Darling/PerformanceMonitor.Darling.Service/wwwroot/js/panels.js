@@ -136,6 +136,14 @@ async function loadPanelBody(desc, body, signal) {
     mount(body, emptyStrip(desc.notCollectedLine));
     return;
   }
+  /* A panel whose collector reads one optional PostgreSQL extension says plainly that the extension is not installed when the
+     server's precondition answer says that (pg_stat_kcache behind OS CPU by Query), a fixable state. It is not the
+     "does not apply to this kind of server" line, which is for a server that can never have the data. */
+  if (res.kind === "empty" && res.status === "precondition" && desc.extensionMissingLine
+      && typeof res.message === "string" && res.message.includes("extension it reads is not installed")) {
+    mount(body, emptyStrip(desc.extensionMissingLine));
+    return;
+  }
   if (res.kind === "empty") {
     /* #4966: a grid that looked and found nothing still says where its table's data starts when that is after the
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a

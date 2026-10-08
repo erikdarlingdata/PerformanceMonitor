@@ -674,7 +674,7 @@ function serverCard(c) {
     c.is_online === false
       ? c.last_collection
         ? " · last collect " + relTime(c.last_collection)
-        : " · no recent collection"
+        : " · " + DARK_PAST_WINDOW
       : " · last collect " + localClock(c.last_collection);
   const statusLine = c.awaiting_first_collection
     ? el("div", { class: "status-line awaiting", text: c.status })
@@ -710,6 +710,13 @@ function serverCard(c) {
    that says only "Warning" is #2422 rebuilt on a new surface. These chips are the answer, and they are the
    SERVER's severities read off the card (R1), so the two surfaces cannot drift into different opinions the way
    a second derivation would. */
+/* An offline server whose newest collection is older than the fleet read's two-day window comes with no last_collection (the
+   read looks back 48 hours on purpose: DarlingFleetReader.LastCollectionWindow). The card used to say only "no recent
+   collection", which reads as if nothing is known; what is known is that it last collected more than two days ago, and the
+   page says so (release walk, W1). The exact age would need a scan of the whole collection log on every refresh, which that
+   window avoids. */
+export const DARK_PAST_WINDOW = "last collected more than 2 days ago";
+
 export function metricBands(c) {
   const threadsValue =
     c.threads_severity === "Unknown"
@@ -774,7 +781,7 @@ export function metricBands(c) {
     ? "OK"
     : "n/a";
   const collectorsDetail = collectorsStale
-    ? "no recent collection" + (c.last_collection ? " · last " + relTime(c.last_collection) : "")
+    ? "no recent collection · " + (c.last_collection ? "last " + relTime(c.last_collection) : DARK_PAST_WINDOW)
     : c.collector_count > 0
     ? fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing"
     : "no collector banded yet";
@@ -786,7 +793,7 @@ export function metricBands(c) {
      12-day-old row read as live health beside a CPU chart that says it has no data. So the five measurement
      chips read "n/a" in the neutral Unknown tone, and each says when the last collection was. */
   if (c.is_online === false) {
-    const staleDetail = c.last_collection ? "last collected " + relTime(c.last_collection) : "no recent collection";
+    const staleDetail = c.last_collection ? "last collected " + relTime(c.last_collection) : DARK_PAST_WINDOW;
     return el("div", { class: "metric-bands stale" }, [
       chip("CPU", "n/a", "Unknown", staleDetail),
       chip("Threads", "n/a", "Unknown", staleDetail),

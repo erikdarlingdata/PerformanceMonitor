@@ -106,10 +106,11 @@ public sealed class DarlingMcpPgWraparoundTools
                     postgres, resolved.ServerId, resolved.ServerName, "pg_wraparound_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        "No PostgreSQL freeze-headroom data for this server and window. This collector runs on "
-                        + "any PostgreSQL target, so either pg_wraparound_stats has not collected yet, or the "
-                        + "store has not recorded this server's engine — and a target it cannot classify may "
-                        + "not be a PostgreSQL one at all. Check list_servers.");
+                        /* W6 (release walk): said in plain words, offline first. An offline server collects nothing, so an
+                           empty window is the likeliest reason; the store-internal "cannot classify" wording is gone. */
+                        "No PostgreSQL freeze-headroom data for this server and window. If the server is offline, "
+                        + "nothing is being collected from it. Otherwise this collector has not run on it yet, or the "
+                        + "store has not yet learned that it is a PostgreSQL server. Check list_servers.");
             }
 
             var databases = rows
