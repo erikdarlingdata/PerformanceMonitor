@@ -110,7 +110,7 @@ public partial class WaitDrillDownWindow : Window
         }
         catch (Exception ex)
         {
-            SummaryText.Text = $"Error: {ex.Message}";
+            SummaryText.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
     }
 

@@ -71,7 +71,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -126,7 +126,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

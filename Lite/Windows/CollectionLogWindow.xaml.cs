@@ -129,7 +129,7 @@ namespace PerformanceMonitorLite.Windows
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    $"Failed to load collection history:\n\n{ex.Message}",
+                    $"Failed to load collection history:\n\n{DuckDbMemoryLimitSetting.Describe(ex)}",
                     "Error",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error

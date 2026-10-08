@@ -867,11 +867,19 @@ public partial class DuckDbInitializer : IDisposable
     /// failed five measured wide reads (Query Store and query stats text over a multi-day archive) with
     /// out-of-memory; at 2 GB and <see cref="MainConnectionThreads"/> threads every measured read passes and the
     /// worst peak is 1,100 MB. Every place that puts the limit back after lowering or raising it (the trim
-    /// cycle, <c>ArchiveService.WithRaisedCopyMemoryLimit</c>) restores to THIS constant, never a literal.
+    /// cycle, <c>ArchiveService.WithRaisedCopyMemoryLimit</c>) restores to THIS property (the user's setting), never a literal.
     /// Compaction's own in-memory 4 GB instance and the data importer's plain connection are separate DuckDB
     /// instances and do not use it.
     /// </summary>
-    internal const string MainConnectionMemoryLimit = "2GB";
+    internal static string MainConnectionMemoryLimit => $"{ConfiguredMemoryLimitGb}GB";
+
+    /// <summary>
+    /// The user's DuckDB memory limit in whole GB (#5457, owner ruling 2026-10-08), set once at startup from
+    /// settings.json by <c>DuckDbMemoryLimitSetting.LoadAtStartup</c>. Defaults to
+    /// <see cref="DuckDbMemoryLimitSetting.DefaultGb"/> (2 GB, #5381). <c>memory_limit</c> belongs to a DuckDB
+    /// instance, so a value changed in Settings takes effect at the next start.
+    /// </summary>
+    internal static int ConfiguredMemoryLimitGb { get; set; } = Services.DuckDbMemoryLimitSetting.DefaultGb;
 
     /// <summary>
     /// The main connection's <c>threads</c> (#5381): min(8, logical processors), at least 1. Unset, DuckDB used
