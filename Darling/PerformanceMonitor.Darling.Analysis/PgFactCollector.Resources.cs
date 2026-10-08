@@ -360,19 +360,52 @@ AND   collection_time <= $3";
        (#2234); interval <= 0 marks an unknowable delta (first sighting, counter reset, gap past the
        policy), so those rows are filtered rather than emitted as 0 — rn = 1 lands on the newest row a
        rate can honestly be derived from. */
+    /* #5516: the newest usable row per counter, read per counter instead of numbering every row in the window.
+       The old shape (ROW_NUMBER over the whole window, rn = 1) read each snapshot in the window to keep the last
+       one - 1,547 blocks a call, and the older chunks decompressed only to be thrown away. Each counter now takes
+       ORDER BY collection_time DESC LIMIT 1, which the (server_id, collection_time) index serves backward, so the
+       read stops inside the newest snapshot.
+
+       Not "the newest snapshot, then equality": the usable-row filter (sample_interval_seconds > 0) can drop a
+       counter from the newest snapshot, and the old read then returned that counter's OLDER usable row. A
+       per-counter LIMIT 1 returns the same rows in that case too; a read of the newest snapshot alone would
+       silently lose the fact. The counter list is closed, so one LIMIT 1 branch per counter is exact. */
     public const string PerfmonSql = @"
-WITH latest AS (
-    SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds,
-           ROW_NUMBER() OVER (PARTITION BY counter_name ORDER BY collection_time DESC) AS rn
+(
+    SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
     FROM perfmon_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
-    AND   counter_name IN ('Batch Requests/sec', 'SQL Compilations/sec', 'SQL Re-Compilations/sec')
+    AND   counter_name = 'Batch Requests/sec'
     AND   sample_interval_seconds > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
 )
-SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
-FROM latest WHERE rn = 1";
+UNION ALL
+(
+    SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
+    FROM perfmon_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   counter_name = 'SQL Compilations/sec'
+    AND   sample_interval_seconds > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+)
+UNION ALL
+(
+    SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
+    FROM perfmon_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   counter_name = 'SQL Re-Compilations/sec'
+    AND   sample_interval_seconds > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+)";
 
     /// <summary>
     /// Collects key perfmon throughput counters: Batch Requests/sec, compilations, recompilations.

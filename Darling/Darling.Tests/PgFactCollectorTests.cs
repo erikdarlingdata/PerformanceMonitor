@@ -113,8 +113,10 @@ public sealed class PgFactCollectorTests
            the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery, plus
            PLAN_REGRESSION's #3953 table twin and #5448 daily-totals twin: the plan-regression method runs one of
            three reads per server, and Lite has no store for the second or the third (its DuckDB keeps no
-           latest-snapshot interval table). */
-        Assert.Equal(LiteCollectMethodSurface.Length + 3, PgFactCollector.AllSql.Count);
+           latest-snapshot interval table), plus #5516's DatabaseSizeNewestSql: the database-size method runs
+           it first and DatabaseSizeSql only when a file has dropped out of the newest snapshot. */
+        Assert.Equal(LiteCollectMethodSurface.Length + 4, PgFactCollector.AllSql.Count);
+        Assert.Contains(PgFactCollector.DatabaseSizeNewestSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionDailySql, PgFactCollector.AllSql);
         Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotSql, PgFactCollector.AllSql);
