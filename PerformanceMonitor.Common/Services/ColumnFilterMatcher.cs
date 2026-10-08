@@ -21,7 +21,8 @@ namespace PerformanceMonitor.Common;
 public static class ColumnFilterMatcher
 {
     /// <summary>
-    /// Checks if an item matches a ColumnFilterState using operator-based filtering.
+    /// Checks if an item matches a ColumnFilterState: it has to pass the text match (operator-based) AND the value
+    /// list part (#5565). A part that is not active passes everything.
     /// </summary>
     public static bool MatchesFilter(object item, ColumnFilterState filter)
     {
@@ -34,6 +35,26 @@ public static class ColumnFilterMatcher
 
         var rawValue = property.GetValue(item);
 
+        return (!filter.HasTextMatch || MatchesText(rawValue, filter)) &&
+               (!filter.HasValuePart || MatchesValuePart(rawValue, filter));
+    }
+
+    /// <summary>
+    /// The value list part: a blank cell (null, empty or whitespace) is the blank flag's, every other cell is
+    /// looked up ordinal ignore-case. Hide passes what is not named; ShowOnly passes only what is named.
+    /// </summary>
+    public static bool MatchesValuePart(object? rawValue, ColumnFilterState filter)
+    {
+        if (!filter.HasValuePart)
+            return true;
+
+        var text = rawValue?.ToString();
+        var named = string.IsNullOrWhiteSpace(text) ? filter.ValueBlank : filter.Values.Contains(text);
+        return filter.ValueMode == ColumnValueMode.Hide ? !named : named;
+    }
+
+    private static bool MatchesText(object? rawValue, ColumnFilterState filter)
+    {
         // Handle IsEmpty/IsNotEmpty operators first
         if (filter.Operator == FilterOperator.IsEmpty)
             return IsValueEmpty(rawValue);

@@ -178,6 +178,8 @@ public partial class ServerTab : UserControl
         SetupBarCellMaxes();
 
         _server = server;
+        /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
+        ColumnFilterScope.SetServer(this, server.Id);
         /* Default to "enabled" when no probe is supplied so the empty-state banner never falsely claims
            the trace is off; MainWindow always wires the live schedule probe. */
         _isLongQueryTraceEnabled = isLongQueryTraceEnabled ?? (() => true);
