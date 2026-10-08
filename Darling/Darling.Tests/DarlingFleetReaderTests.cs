@@ -634,14 +634,31 @@ public sealed class DarlingFleetDeadlockCoverageTests
         var sql = DarlingFleetReader.FleetPgDeadlockSql;
 
         Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(GREATEST(raw_delta, 0))", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time) FILTER (WHERE raw_delta > 0)", sql, StringComparison.Ordinal);
+        /* One server at a time (#5526): the LAG partitions by database inside a server_id = s.server_id
+           filter, which is the old (server_id, database_name) series; the previous single window over the
+           whole fleet's rows (27 s for 30 days on a 50-server store) must not come back. */
+        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PARTITION BY server_id", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(sampled.collection_time) FILTER (WHERE sampled.raw_delta > 0)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
-        /* Windowed on the partitioning column, both bounds, like the SQL Server twin. */
-        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
+        /* Windowed on the partitioning column, both bounds, like the SQL Server twin - in the server list AND
+           in the per-server read, so each opens only the window's chunks. */
+        Assert.Equal(2, CountOf(sql, "collection_time >= $1"));
+        Assert.Equal(2, CountOf(sql, "collection_time <= $2"));
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     /// <summary>

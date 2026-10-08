@@ -72,7 +72,13 @@ public sealed class ViewerFleetRollupSqlTests
     {
         var sql = ViewerDataService.FleetTotalsSql;
         Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        /* One server at a time (#5526), the shape the service's fleet reader carries: the LAG partitions by
+           database inside a server_id = s.server_id filter (the old (server_id, database_name) series), and
+           the single window over the whole fleet's rows (27 s for 30 days on a 50-server store) stays gone. */
+        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PARTITION BY server_id", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);

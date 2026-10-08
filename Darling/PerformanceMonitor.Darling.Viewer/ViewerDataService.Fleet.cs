@@ -67,6 +67,13 @@ public sealed partial class ViewerDataService
     /// <c>SUM(deadlocks)</c>: the column is a lifetime counter repeated in every sample. $1 window start,
     /// $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all naive UTC).
     ///
+    /// <para>The PostgreSQL arm differences ONE server at a time (#5526): the service's
+    /// <c>DarlingFleetReader.FleetPgDeadlockSql</c> carries the reasoning and the measurement, and this is the
+    /// same <c>LATERAL</c> without the per-server columns. One <c>LAG</c> window over every server's rows was
+    /// 26.9 s for 30 days on a 50-server store, nearly all of it the sort and the window; per server, no sort
+    /// or window covers more than one server's rows. The totals are unchanged: the same <c>LAG</c> per
+    /// database series, the same first-row NULL, the same clamp at zero.</para>
+    ///
     /// <para>$3 bounds the three event-table scans on the partition column (#3895), the bound the service's
     /// fleet reader carries on the same counts: bounded on <c>event_time</c> alone they open every retained
     /// chunk to count the last hour — 69.8 ms on DARLING01, 1.1 ms with it. The PostgreSQL arm is already
@@ -111,14 +118,27 @@ SELECT
     )
     +
     (
-        SELECT COALESCE(SUM(GREATEST(sampled.raw_delta, 0)), 0)
+        SELECT COALESCE(SUM(per_server.cnt), 0)
         FROM
         (
-            SELECT deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time) AS raw_delta
+            SELECT DISTINCT
+                server_id
             FROM pg_database_stats
             WHERE collection_time >= $1
             AND   collection_time <= $2
-        ) AS sampled
+        ) AS s
+        CROSS JOIN LATERAL
+        (
+            SELECT COALESCE(SUM(GREATEST(sampled.raw_delta, 0)), 0) AS cnt
+            FROM
+            (
+                SELECT deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time) AS raw_delta
+                FROM pg_database_stats
+                WHERE server_id = s.server_id
+                AND   collection_time >= $1
+                AND   collection_time <= $2
+            ) AS sampled
+        ) AS per_server
     ) AS total_deadlocks";
 
     /// <summary>

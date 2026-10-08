@@ -437,25 +437,53 @@ GROUP BY server_id";
     /// keeps the read to the window's chunk(s): on the one-minute cadence the default hour is ~60 rows per
     /// database per server, and the fleet's whole hour is tens of thousands of rows behind the
     /// <c>(server_id, collection_time)</c> index — the same order as <see cref="FleetBlockingSql"/>'s
-    /// two scans.</para></summary>
+    /// two scans.</para>
+    ///
+    /// <para><b>One server at a time (#5526).</b> The read used to be one <c>LAG</c> window,
+    /// <c>PARTITION BY server_id, database_name</c>, over every server's rows at once, which meant one sort
+    /// and one window pass over the whole fleet's window: 26.9 s for 30 days on a 50-server store (17.1 M
+    /// rows, 29 of 31 chunks decompressed), nearly all of it the sort and the window rather than I/O. Now
+    /// <c>servers</c> lists the servers that have a row in the window (a skip scan over the
+    /// <c>(server_id, collection_time)</c> index, or the segmentby column of a compressed chunk), and the
+    /// <c>LATERAL</c> differences, clamps and counts ONE server's series at a time, so no sort or window
+    /// ever covers more than a server's rows. The arithmetic is the old one unchanged: the same
+    /// <c>LAG</c> per database series (a server's rows are one partition's worth of series, so
+    /// <c>PARTITION BY database_name</c> inside a <c>server_id = s.server_id</c> filter is the old
+    /// <c>PARTITION BY server_id, database_name</c>), the same first-row-of-the-window NULL difference, the
+    /// same clamp, the same <c>intervals</c>. A server whose only row in the window is one sample still gets
+    /// its row, <c>cnt</c> 0 and <c>intervals</c> 0, exactly as the grouped read gave it.</para></summary>
     public const string FleetPgDeadlockSql = @"
-WITH sampled AS
+WITH servers AS
 (
-    SELECT
-        server_id,
-        collection_time,
-        deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time) AS raw_delta
+    SELECT DISTINCT
+        server_id
     FROM pg_database_stats
     WHERE collection_time >= $1
     AND   collection_time <= $2
 )
 SELECT
-    server_id,
-    CAST(coalesce(SUM(GREATEST(raw_delta, 0)), 0) AS bigint) AS cnt,
-    MAX(collection_time) FILTER (WHERE raw_delta > 0) AS last_seen,
-    CAST(count(raw_delta) AS bigint) AS intervals
-FROM sampled
-GROUP BY server_id";
+    s.server_id,
+    d.cnt,
+    d.last_seen,
+    d.intervals
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT
+        CAST(coalesce(SUM(GREATEST(sampled.raw_delta, 0)), 0) AS bigint) AS cnt,
+        MAX(sampled.collection_time) FILTER (WHERE sampled.raw_delta > 0) AS last_seen,
+        CAST(count(sampled.raw_delta) AS bigint) AS intervals
+    FROM
+    (
+        SELECT
+            collection_time,
+            deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time) AS raw_delta
+        FROM pg_database_stats
+        WHERE server_id = s.server_id
+        AND   collection_time >= $1
+        AND   collection_time <= $2
+    ) AS sampled
+) AS d";
 
     /// <summary>The deadlock health band's two tiers from the singleton settings row (#3368, V120).
     ///
