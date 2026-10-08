@@ -423,6 +423,31 @@ public sealed class TestMapProducerGuardTests : IDisposable
     }
 
     [Fact]
+    public void TheShardAndProbeJobs_WaitForBuildAndDarlingPg_ButStillRunAfterAFailedOne()
+    {
+        // The 10 windows shard legs and the AltCover probe used to need only `check`, so they raced build and darling-pg
+        // for runners and build checked out about 8 minutes late (#5459). They wait now; always() keeps them running
+        // after a failed build, and the check result must still be success (the check job is skipped on a schedule event).
+        var yaml = Nightly();
+        foreach (var name in new[] { "test-map-shard", "altcover-probe" })
+        {
+            var job = Job(yaml, name);
+            var needs = Regex.Match(job, @"\n    needs: \[([^\]]+)\]");
+            Assert.True(needs.Success, name + " has no needs list");
+            var listed = needs.Groups[1].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            Assert.Contains("check", listed);
+            Assert.Contains("build", listed);
+            Assert.Contains("darling-pg", listed);
+
+            var condition = Regex.Match(job, @"\n    if: ([^\n]+)").Groups[1].Value;
+            Assert.StartsWith("always() && needs.check.result == 'success' && ", condition);
+        }
+
+        // The join job keeps waiting on the shards alone.
+        Assert.Matches(@"\n    needs: test-map-shard\n", Job(yaml, "test-map"));
+    }
+
+    [Fact]
     public void TheJobs_CutTheSameShardCountTheyJoin_AndPinTheProbesAltCover()
     {
         var yaml = Nightly();
