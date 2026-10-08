@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -310,6 +311,19 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// </summary>
     internal const int ExitDrainCommandTimeoutSeconds = 30;
 
+    /// <summary>
+    /// How long the exit drain keeps starting new drops, in seconds. The test runner (xunit.v3 under Microsoft.Testing.Platform)
+    /// gives the process 10 seconds after the run returns to exit, then prints "Foreground threads were left running,
+    /// forcing process exit" and exits with code 1, whatever the tests did. This drain runs at that exit, so it is the
+    /// one thing that can hold the process. Each drop here also unschedules the database's TimescaleDB jobs and waits
+    /// for their workers (#5480), about 0.4 seconds a database on a CI runner, so 29 databases that outlived their tests
+    /// took 11 seconds and failed the nightly with every test green. The drain stops starting drops after this long and
+    /// names the rest; a database left this way is removed by the next run's start-of-run sweep, or goes with the
+    /// throwaway cluster. Tests that mint a database must still drop it themselves (see
+    /// <c>ScratchDatabaseDisposalCensusTests</c>); this budget only keeps a leak from failing a run.
+    /// </summary>
+    internal const int ExitDrainBudgetSeconds = 6;
+
     /// <summary>The admin connection string with the exit drain's own connect and command timeouts, and no pooling: one connection per drop.</summary>
     internal static string ExitDrainConnectionString(string adminConnectionString) =>
         new NpgsqlConnectionStringBuilder(adminConnectionString)
@@ -327,16 +341,27 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// Connects with the short connect wait above, and stops trying a cluster once a connect to it fails without the
     /// server answering (a stopped cluster, a refused or timed-out connection), so N databases on a dead cluster cost
     /// one short wait, not N. A server that answers with an error (a bad password, a missing database) is not a dead
-    /// cluster, and a failed drop on a live cluster never stops the others; each skipped database is still named.
+    /// cluster, and a failed drop on a live cluster never stops the others; each skipped database is still named. It
+    /// stops starting drops once <paramref name="budget"/> (default <see cref="ExitDrainBudgetSeconds"/> seconds) has
+    /// passed, counting the rest as skipped.
     /// </remarks>
-    internal static ExitDrainOutcome DropRememberedAtExit(IEnumerable<RememberedDatabase> remembered)
+    internal static ExitDrainOutcome DropRememberedAtExit(IEnumerable<RememberedDatabase> remembered, TimeSpan? budget = null)
     {
         var unreachable = new HashSet<string>(StringComparer.Ordinal);
+        var limit = budget ?? TimeSpan.FromSeconds(ExitDrainBudgetSeconds);
+        var clock = Stopwatch.StartNew();
         int attempts = 0, dropped = 0, failed = 0, skipped = 0;
         foreach (var db in remembered)
         {
             try
             {
+                if (clock.Elapsed >= limit)
+                {
+                    skipped++;
+                    Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and was not dropped at exit: the exit drain used its {limit.TotalSeconds:0.#} seconds.");
+                    continue;
+                }
+
                 var cluster = ClusterKey(db.AdminConnectionString);
                 if (unreachable.Contains(cluster))
                 {

@@ -40,28 +40,43 @@ public sealed class RawPurgeTriggerLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 trigger pins.");
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
-
-        /* Max Auto Prepare=0: RunRetentionPurgeJobSql is a multi-statement string (BEGIN; ...; COMMIT;) run
-           through NpgsqlCommand, and this rig's connection reruns other multi-statement SQL enough times over
-           its life that Npgsql's default auto-prepare threshold can trigger on it, which Npgsql rejects with
-           42601 ("cannot insert multiple commands into a prepared statement") — a client-side caching
-           artifact of this test's connection reuse, not a product behavior. */
-        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
-        var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync();
-        await PgMigrations.MigrateAsync(connection, default);
-
-        var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
-        Assert.SkipWhen(!enabled, "The live #4299 trigger pins need TimescaleDB.");
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
-
-        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+        NpgsqlConnection? connection = null;
+        /* A skip (no TimescaleDB) or a failed setup throws before the caller owns the store, so the opener drops it
+           here. Left alone it would survive to the process-exit drain, which the test runner waits only 10 s for. */
+        try
         {
-            await stop.ExecuteNonQueryAsync();
-        }
+            /* Max Auto Prepare=0: RunRetentionPurgeJobSql is a multi-statement string (BEGIN; ...; COMMIT;) run
+               through NpgsqlCommand, and this rig's connection reruns other multi-statement SQL enough times over
+               its life that Npgsql's default auto-prepare threshold can trigger on it, which Npgsql rejects with
+               42601 ("cannot insert multiple commands into a prepared statement") — a client-side caching
+               artifact of this test's connection reuse, not a product behavior. */
+            var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
+            connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync();
+            await PgMigrations.MigrateAsync(connection, default);
 
-        return (connection, scratch);
+            var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
+            Assert.SkipWhen(!enabled, "The live #4299 trigger pins need TimescaleDB.");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
+
+            await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await stop.ExecuteNonQueryAsync();
+            }
+
+            return (connection, scratch);
+        }
+        catch
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+
+            await scratch.DisposeAsync();
+            throw;
+        }
     }
 
     private static async Task<long> ReadPostmasterEpochAsync(NpgsqlConnection connection)
@@ -190,6 +205,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -245,6 +261,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -296,6 +313,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -355,6 +373,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -420,6 +439,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -472,6 +492,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -559,6 +580,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -640,6 +662,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
             await connection.DisposeAsync();
+            await scratch.DisposeAsync();
         }
     }
 
@@ -783,6 +806,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
                 var batch = new LiveCleanupBatch(cleanup);
                 await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
             });
+            await scratch.DisposeAsync();
         }
     }
 }

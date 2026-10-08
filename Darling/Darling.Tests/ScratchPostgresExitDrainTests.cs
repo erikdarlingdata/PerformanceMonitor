@@ -72,6 +72,33 @@ public sealed class ScratchPostgresExitDrainTests
     }
 
     [Fact]
+    public void TheDrain_OutOfBudget_StartsNoDrop_AndNamesEveryDatabaseItLeaves()
+    {
+        /* The test runner gives the process 10 seconds to exit once the run returns, then forces exit code 1. The
+           nightly of 2026-10-08 lost its publish to that with 28,763 tests green. A drain whose budget is spent
+           starts no connect at all: nothing is attempted, nothing is dropped, and every database is counted as
+           left, so the exit ends on time. */
+        var stopped = StoppedClusterConnectionString(ClosedPort());
+        var databases = new[] { Remembered(stopped, "budget one"), Remembered(stopped, "budget two"), Remembered(stopped, "budget three") };
+
+        var outcome = ScratchPostgres.DropRememberedAtExit(databases, TimeSpan.Zero);
+
+        Assert.Equal(0, outcome.ConnectAttempts);
+        Assert.Equal(0, outcome.Dropped);
+        Assert.Equal(0, outcome.Failed);
+        Assert.Equal(3, outcome.Skipped);
+    }
+
+    [Fact]
+    public void TheDrainBudget_StaysInsideTheRunnersExitWait_WithRoomForTheProcessToLeave()
+    {
+        /* The runner waits 10 seconds (shutdownForegroundThreadWaitSeconds) and the wait starts when the run returns.
+           The budget is how long the drain keeps starting drops; one drop already in flight can still run past it, so
+           the budget must leave real headroom and not equal the wait. */
+        Assert.InRange(ScratchPostgres.ExitDrainBudgetSeconds, 1, 7);
+    }
+
+    [Fact]
     public void TheDrain_ConnectsWithTheShortTimeouts_AndKeepsTheRestOfTheAdminConnectionString()
     {
         var admin = new NpgsqlConnectionStringBuilder
