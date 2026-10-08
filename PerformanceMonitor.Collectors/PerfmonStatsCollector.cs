@@ -160,7 +160,7 @@ public sealed class PerfmonStatsCollector : CollectorDefinitionBase<PerfmonStats
         var query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     object_name = RTRIM(pc.object_name),
     counter_name = RTRIM(pc.counter_name),
     instance_name = RTRIM(pc.instance_name),

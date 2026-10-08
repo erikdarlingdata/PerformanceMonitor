@@ -28,7 +28,7 @@ public sealed class CpuSchedulerStatsCollectorDefinitionTests
     private const string ExpectedQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     max_workers_count = osi.max_workers_count,
     scheduler_count = osi.scheduler_count,
     cpu_count = osi.cpu_count,

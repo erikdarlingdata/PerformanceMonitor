@@ -67,7 +67,7 @@ public sealed class DatabaseStateCollector : CollectorDefinitionBase<DatabaseSta
         var query = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name = d.name,
     database_id = d.database_id,
     state_desc = d.state_desc,

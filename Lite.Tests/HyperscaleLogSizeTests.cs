@@ -239,10 +239,10 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
     /// </summary>
     private async Task SeedGrowthHistoryAsync()
     {
-        foreach (var daysAgo in new[] { 31, 8 })
+        foreach (var daysAgo in new[] { 30.5, 7.5 })
         {
             var at = Collected.AddDays(-daysAgo);
-            await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", daysAgo == 31 ? 10_000 : 10_100, 300, 1_024, -1, at);
+            await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", daysAgo > 30 ? 10_000 : 10_100, 300, 1_024, -1, at);
             await SeedAsync("hsdb", 2, "LOG", "hsdb_log", LogServiceMb, 40, 1_024, 1_048_576, at);
 
             await SeedAsync("plain", 1, "ROWS", "plain_data", 1_000, 10, 64, -1, at);
@@ -269,7 +269,7 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
         Assert.Equal(140m, hs.Growth7dMb);
         Assert.Equal(2.4m, Math.Round(hs.GrowthPct30d!.Value, 4));
         Assert.Equal(240m, hs.Growth30dMb);
-        Assert.Equal(Math.Round(240m / 31m, 4), Math.Round(hs.DailyGrowthRateMb!.Value, 4)); // 31 real days, not a fixed 30
+        Assert.Equal(Math.Round(240m / 30.5m, 4), Math.Round(hs.DailyGrowthRateMb!.Value, 4)); // 30.5 real days between the two snapshots
         Assert.Equal(10_240m, hs.CurrentSizeMb);
         Assert.Equal(10_100m, hs.Size7dAgoMb);
         Assert.Equal(10_000m, hs.Size30dAgoMb);
@@ -298,8 +298,8 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
         /* Until the first hourly collection after the upgrade, the latest snapshot still holds the ~1 TB log row. The
            Database Sizes grid shows that stored figure, and Storage Growth counts it on both sides: growth is still
            the data file's own. */
-        await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", 10_000, 300, 1_024, -1, Collected.AddDays(-31));
-        await SeedAsync("hsdb", 2, "LOG", "hsdb_log", LogServiceMb, 40, 1_024, 1_048_576, Collected.AddDays(-31));
+        await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", 10_000, 300, 1_024, -1, Collected.AddDays(-30));
+        await SeedAsync("hsdb", 2, "LOG", "hsdb_log", LogServiceMb, 40, 1_024, 1_048_576, Collected.AddDays(-30));
         await SeedAsync("hsdb", 1, "ROWS", "hsdb_data", 10_240, 315, 1_024, -1);
         await SeedAsync("hsdb", 2, "LOG", "hsdb_log", LogServiceMb, 40, 1_024, 1_048_576);
 
@@ -307,7 +307,7 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
         var hs = Assert.Single(await service.GetStorageGrowthAsync(ServerId), r => r.DatabaseName == "hsdb");
 
         Assert.Equal(10_240m + (decimal)LogServiceMb, hs.CurrentSizeMb);
-        Assert.Equal(240m, hs.Growth7dMb);
+        Assert.Null(hs.Growth7dMb);   // the only older snapshot is 30 days old: not a 7-day baseline
         Assert.Equal(240m, hs.Growth30dMb);
 
         var grid = await service.GetDatabaseSizeLatestAsync(ServerId);

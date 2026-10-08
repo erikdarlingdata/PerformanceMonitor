@@ -158,7 +158,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding NotificationType}" Width="80">
+                    <DataGridTextColumn Binding="{Binding NotificationType}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NotificationType" Click="FilterButton_Click" Margin="0,0,4,0"/>
