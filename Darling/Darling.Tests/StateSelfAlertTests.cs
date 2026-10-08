@@ -51,6 +51,28 @@ public sealed class StateSelfAlertTests
         PolicyJobStuckEscalated,
     }
 
+    /// <summary>The alerts with severity bands: a rise inside one occurrence is a new alert (#5493).</summary>
+    public enum BandedState
+    {
+        StoreJobOverCadence,
+        RetentionHeld,
+        RawPurgeOverHorizon,
+    }
+
+    public static TheoryData<BandedState> BandedStates
+    {
+        get
+        {
+            var data = new TheoryData<BandedState>();
+            foreach (var state in Enum.GetValues<BandedState>())
+            {
+                data.Add(state);
+            }
+
+            return data;
+        }
+    }
+
     public static TheoryData<State> States
     {
         get
@@ -124,6 +146,28 @@ public sealed class StateSelfAlertTests
         public int Fires => Deliverer.Outcomes.Count;
 
         public void At(int minute) => Now = Start.AddMinutes(minute);
+
+        /// <summary>One check of a banded alert's condition at the warning or the critical band.</summary>
+        public Task HoldBandAsync(BandedState state, bool critical) => state switch
+        {
+            BandedState.StoreJobOverCadence => Evaluator.ApplyStoreJobCadenceAsync(
+                new[] { new StoreJobCadenceReading(1028, "policy_compression t", critical ? 3_600_000 : 1_800_000, 3_600_000) }, Ct),
+            BandedState.RetentionHeld => Evaluator.ApplyRetentionHoldsAsync(
+                new[] { new RetentionHoldReading(1, "t", false, "4 days", 19, critical ? 1_561_449 : 800_000, 345_600) }, Ct),
+            BandedState.RawPurgeOverHorizon => Evaluator.ApplyRawPurgeOverHorizonAsync(
+                new[] { new RawPurgeOverHorizonReading(1, "t", "4 days", critical ? 4.5 : 2.5, null) }, Ct),
+            _ => throw new ArgumentOutOfRangeException(nameof(state)),
+        };
+
+        public Task EndBandAsync(BandedState state) => state switch
+        {
+            BandedState.StoreJobOverCadence => Evaluator.ApplyStoreJobCadenceAsync(
+                new[] { new StoreJobCadenceReading(1028, "policy_compression t", 60_000, 3_600_000) }, Ct),
+            BandedState.RetentionHeld => Evaluator.ApplyRetentionHoldsAsync(new[] { Retention(armed: true) }, Ct),
+            BandedState.RawPurgeOverHorizon => Evaluator.ApplyRawPurgeOverHorizonAsync(
+                new[] { new RawPurgeOverHorizonReading(1, "t", "4 days", 0.5, new RawLastPurgeRecord(Now, "ran", null, null)) }, Ct),
+            _ => throw new ArgumentOutOfRangeException(nameof(state)),
+        };
 
         /// <summary>One check with the condition holding.</summary>
         public Task HoldAsync() => State switch
@@ -298,5 +342,150 @@ public sealed class StateSelfAlertTests
         }
 
         Assert.Equal(2, rig.Fires);
+    }
+
+    [Theory]
+    [MemberData(nameof(BandedStates))]
+    public async Task ARiseToTheCriticalBand_InsideOneOccurrence_SendsOneMoreAlert_WithRefireOff(BandedState state)
+    {
+        var rig = new Rig(State.StoreJobOverCadence);
+
+        await rig.HoldBandAsync(state, critical: false);
+        Assert.Equal(1, rig.Fires);
+
+        rig.At(1);
+        await rig.HoldBandAsync(state, critical: true);
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal(AlertSeverityLevel.Warning, rig.Deliverer.Outcomes[0].Severity);
+        Assert.Equal(AlertSeverityLevel.Critical, rig.Deliverer.Outcomes[1].Severity);
+
+        /* The rise is sent once, and a standing critical band does not repeat. */
+        for (var minute = 2; minute <= 60; minute++)
+        {
+            rig.At(minute);
+            await rig.HoldBandAsync(state, critical: true);
+        }
+
+        Assert.Equal(2, rig.Fires);
+    }
+
+    [Theory]
+    [MemberData(nameof(BandedStates))]
+    public async Task AFallToTheWarningBand_SendsNothing_AndSoDoesRisingBackToCriticalInTheSameOccurrence(BandedState state)
+    {
+        var rig = new Rig(State.StoreJobOverCadence);
+
+        await rig.HoldBandAsync(state, critical: true);
+        rig.At(1);
+        await rig.HoldBandAsync(state, critical: false);
+        Assert.Equal(1, rig.Fires);
+
+        rig.At(2);
+        await rig.HoldBandAsync(state, critical: true);
+        Assert.Equal(1, rig.Fires);
+    }
+
+    [Theory]
+    [MemberData(nameof(BandedStates))]
+    public async Task Recovery_ForgetsTheSeverity_SoCriticalThenWarningAfterRecoveryIsANewEntry(BandedState state)
+    {
+        var rig = new Rig(State.StoreJobOverCadence);
+
+        await rig.HoldBandAsync(state, critical: true);
+        rig.At(1);
+        await rig.EndBandAsync(state);
+        Assert.Single(rig.History.Records);
+
+        rig.At(2);
+        await rig.HoldBandAsync(state, critical: false);
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal(AlertSeverityLevel.Warning, rig.Deliverer.Outcomes[1].Severity);
+
+        /* ... and the warning-to-critical rise of that new occurrence alerts again. */
+        rig.At(3);
+        await rig.HoldBandAsync(state, critical: true);
+        Assert.Equal(3, rig.Fires);
+    }
+
+    [Theory]
+    [MemberData(nameof(BandedStates))]
+    public async Task ARepeat_WithRefireOn_CarriesTheCurrentSeverity(BandedState state)
+    {
+        var rig = new Rig(State.StoreJobOverCadence) { ConnectionRefireMinutes = 30 };
+
+        await rig.HoldBandAsync(state, critical: true);
+        rig.At(30);
+        await rig.HoldBandAsync(state, critical: false);
+
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal(AlertSeverityLevel.Critical, rig.Deliverer.Outcomes[0].Severity);
+        Assert.Equal(AlertSeverityLevel.Warning, rig.Deliverer.Outcomes[1].Severity);
+    }
+
+    private static CustomAlertHealthReport Rules(params long[] brokenIds) => new(
+        brokenIds.Select(id => new CustomAlertRuleHealthIssue(id, "rule-" + id, "invalid metric")).ToArray(),
+        Array.Empty<CustomAlertRuleHealthIssue>());
+
+    [Fact]
+    public async Task ARuleJoiningTheUnhealthySet_SendsOneAlert_NamingTheSetAndTheNewRule_WithRefireOff()
+    {
+        var rig = new Rig(State.CustomRuleHealth);
+
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(1, 2), Ct);
+        Assert.Equal(1, rig.Fires);
+        Assert.DoesNotContain("New since", rig.Deliverer.Outcomes[0].DetailText!);
+
+        rig.At(10);
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(1, 2), Ct);
+        Assert.Equal(1, rig.Fires);
+
+        rig.At(20);
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(1, 2, 3), Ct);
+        Assert.Equal(2, rig.Fires);
+        var detail = rig.Deliverer.Outcomes[1].DetailText!;
+        Assert.Contains("New since the previous alert were rule 3 \"rule-3\"", detail);
+        Assert.Contains("- Rule 1 ", detail);
+        Assert.Contains("- Rule 2 ", detail);
+        Assert.Contains("- Rule 3 ", detail);
+
+        /* The enlarged set is now the known one: no further alert while it stands. */
+        rig.At(90);
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(1, 2, 3), Ct);
+        Assert.Equal(2, rig.Fires);
+    }
+
+    [Fact]
+    public async Task ARuleLeavingTheUnhealthySet_SendsNothing_AndRejoiningItIsNewAgain()
+    {
+        var rig = new Rig(State.CustomRuleHealth);
+
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(1, 2), Ct);
+        rig.At(10);
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(1), Ct);
+        Assert.Equal(1, rig.Fires);
+        Assert.Empty(rig.History.Records);
+
+        rig.At(20);
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(1, 2), Ct);
+        Assert.Equal(2, rig.Fires);
+        Assert.Contains("New since the previous alert were rule 2", rig.Deliverer.Outcomes[1].DetailText!);
+    }
+
+    [Fact]
+    public async Task AnEmptySet_ResolvesOnce_AndTheNextRuleToBreakIsAnEntryWithNoNewRuleSentence()
+    {
+        var rig = new Rig(State.CustomRuleHealth);
+
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(1), Ct);
+        rig.At(1);
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(), Ct);
+        rig.At(2);
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(), Ct);
+        Assert.Single(rig.History.Records);
+
+        rig.At(3);
+        await rig.Evaluator.ApplyCustomRuleHealthAsync(Rules(7), Ct);
+        Assert.Equal(2, rig.Fires);
+        Assert.DoesNotContain("New since", rig.Deliverer.Outcomes[1].DetailText!);
     }
 }

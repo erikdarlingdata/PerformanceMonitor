@@ -576,6 +576,10 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, bool> _activeCustomRuleHealth = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCustomRuleHealthAlert = new();
 
+    /// <summary>#5493: the ids of the unhealthy rules the last check saw while the alert stood, so a rule that joins
+    /// the set is a new entry. A replaced snapshot, never changed in place; cleared when every rule is healthy.</summary>
+    private readonly ConcurrentDictionary<string, HashSet<long>> _customRuleHealthIds = new();
+
     /// <summary>The fixed key for the fleet-level custom-alert-rule-health edge (not a real server); non-numeric
     /// so the deliverer's #1236 int.TryParse override no-ops on it exactly like <see cref="DiskKey"/>.</summary>
     private const string CustomRuleHealthKey = "customalerts";
@@ -4932,8 +4936,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Edge-applies the fleet-level "some custom alert rules are broken or never firing" condition from the
     /// <see cref="CustomAlertHealthReport"/> the <see cref="CustomAlertEvaluator"/> builds: fire once on entry,
-    /// re-fire only after the alert cooldown while any rule stays unhealthy, and write ONE resolution row when
-    /// every rule is healthy again (the Collection-Stopped standing-condition edge shape). ONE alert aggregates
+    /// again when a rule joins the unhealthy set (naming the new ones, #5493), repeat only per
+    /// <c>connection_refire_minutes</c>, and write ONE resolution row when every rule is healthy again (the Collection-Stopped standing-condition edge shape). ONE alert aggregates
     /// ALL unhealthy rules — a <c>pg_*</c> rename can break many at once, and one-alert-per-rule would be an
     /// alert storm. Gated on the master alerts switch. The rule names/errors in the report are ALREADY
     /// newline-stripped + length-capped by the evaluator, and the detail NEVER contains the compiled SQL — only
@@ -4955,11 +4959,35 @@ internal sealed class DarlingSelfAlertEvaluator
             /* #5493: a state alert (see ApplyCaptureDownAsync): one alert on entry, a repeat only per
                connection_refire_minutes. The CURRENT report is rendered each time it is sent, so a rule that breaks
                later shows up in the next repeat. */
+            /* A rule that JOINS the unhealthy set while the alert stands is news: one alert that names the current
+               set and says which rules are new. A rule that leaves sends nothing. */
+            var currentIds = new HashSet<long>(
+                report.BrokenRules.Select(r => r.RuleId).Concat(report.NeverFiringRules.Select(r => r.RuleId)));
+            var newRules = new List<CustomAlertRuleHealthIssue>();
+            if (_customRuleHealthIds.TryGetValue(CustomRuleHealthKey, out var previousIds)
+                && LastFiredStamp.TryGet(_lastCustomRuleHealthAlert, CustomRuleHealthKey, now, out _))
+            {
+                newRules.AddRange(report.BrokenRules.Concat(report.NeverFiringRules)
+                    .Where(r => !previousIds.Contains(r.RuleId)).OrderBy(r => r.RuleId));
+                if (newRules.Count > 0)
+                {
+                    _lastCustomRuleHealthAlert.TryRemove(CustomRuleHealthKey, out _);
+                    _stateRetries.Clear(StateRetryKey(CustomRuleHealthMetric, CustomRuleHealthKey));
+                }
+            }
+
+            _customRuleHealthIds[CustomRuleHealthKey] = currentIds;
             var decision = DecideStateAlert(_lastCustomRuleHealthAlert, CustomRuleHealthKey, CustomRuleHealthMetric, CustomRuleHealthKey, now, out var refire);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastCustomRuleHealthAlert[CustomRuleHealthKey] = now;
                 var (shortMessage, detail) = RenderCustomRuleHealth(report);
+                if (newRules.Count > 0)
+                {
+                    detail = "New since the previous alert were " + string.Join(", ", newRules.Select(r =>
+                        string.Create(CultureInfo.InvariantCulture, $"rule {r.RuleId} \"{r.RuleName}\""))) + ". " + detail;
+                }
+
                 var delivery = await FireAsync(
                     StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                     currentValue: report.TotalIssues.ToString(CultureInfo.InvariantCulture),
@@ -4978,6 +5006,7 @@ internal sealed class DarlingSelfAlertEvaluator
         else if (_activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
         {
             EndStateAlert(_lastCustomRuleHealthAlert, CustomRuleHealthKey, CustomRuleHealthMetric, CustomRuleHealthKey);
+            _customRuleHealthIds.TryRemove(CustomRuleHealthKey, out _);
             await RecordResolutionAsync(new AlertResolution(
                 StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                 CustomRuleHealthResolvedMetric,
@@ -6476,7 +6505,8 @@ WHERE c.is_enabled";
             {
                 _activeJobOverCadence[key] = true;
                 /* #5493: a state alert (see ApplyCaptureDownAsync). */
-                var decision = DecideStateAlert(_lastJobOverCadenceAlert, key, JobCadenceMetric, key, now, out var refire);
+                var decision = DecideStateAlert(_lastJobOverCadenceAlert, key, JobCadenceMetric, key, now, out var refire,
+                    severityRank: percent >= 100.0 ? 2 : 1);
                 if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastJobOverCadenceAlert[key] = now;
@@ -6629,7 +6659,8 @@ WHERE c.is_enabled";
             {
                 _activeRetentionHold[key] = true;
                 /* #5493: a state alert (see ApplyCaptureDownAsync). */
-                var decision = DecideStateAlert(_lastRetentionHoldAlert, key, RetentionHoldMetric, key, now, out var refire);
+                var decision = DecideStateAlert(_lastRetentionHoldAlert, key, RetentionHoldMetric, key, now, out var refire,
+                    severityRank: ratio >= criticalRatio ? 2 : 1);
                 if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastRetentionHoldAlert[key] = now;
@@ -6788,7 +6819,8 @@ WHERE c.is_enabled";
             {
                 _activeRawPurgeOverHorizon[key] = true;
                 /* #5493: a state alert (see ApplyCaptureDownAsync). */
-                var decision = DecideStateAlert(_lastRawPurgeOverHorizonAlert, key, RawPurgeOverHorizonMetric, key, now, out var refire);
+                var decision = DecideStateAlert(_lastRawPurgeOverHorizonAlert, key, RawPurgeOverHorizonMetric, key, now, out var refire,
+                    severityRank: reading.OverHorizonRatio!.Value >= criticalRatio ? 2 : 1);
                 if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
                 {
                     _lastRawPurgeOverHorizonAlert[key] = now;
@@ -8549,6 +8581,13 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     private static string StateRetryKey(string metric, string grainKey) => metric + "|" + grainKey;
 
     /// <summary>
+    /// #5493: the highest severity rank (1 warning, 2 critical) an alert with severity bands has sent in its current
+    /// occurrence, keyed by <see cref="StateRetryKey"/>. <see cref="DecideStateAlert"/> sends a new entry when the
+    /// condition rises past it; <see cref="EndStateAlert"/> forgets it on recovery.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, int> _stateSeverityRank = new();
+
+    /// <summary>
     /// #5493: the decision for a lasting-state self-alert, the shape "Collection Stopped" took in #5489. The alert
     /// is a state: <paramref name="stamps"/> holds when it was last sent, and a grain with no stamp is the entry, so
     /// the first check that sees the condition (also the first after a restart, which loses the stamps) sends ONE
@@ -8558,10 +8597,25 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// </summary>
     private ConnectionAlertDecision DecideStateAlert(
         ConcurrentDictionary<string, DateTime> stamps, string key, string metric, string grainKey, DateTime now,
-        out int refireMinutes)
+        out int refireMinutes, int severityRank = 0)
     {
         refireMinutes = _connectionRefireMinutes();
         var known = LastFiredStamp.TryGet(stamps, key, now, out var last);
+        var rankKey = StateRetryKey(metric, grainKey);
+        if (!known)
+        {
+            _stateSeverityRank[rankKey] = severityRank;
+        }
+        else if (severityRank > _stateSeverityRank.GetValueOrDefault(rankKey))
+        {
+            /* A rise to a higher severity inside one occurrence is news: one alert at the new severity, a new entry
+               (its stamp and retry start over). A fall sends nothing, and the highest rank stays remembered until
+               recovery so a flap between the two bands sends one alert per rise only. */
+            _stateSeverityRank[rankKey] = severityRank;
+            _stateRetries.Clear(rankKey);
+            known = false;
+        }
+
         return ConnectionAlertPolicy.Decide(
             previousOnline: !known,
             online: false,
@@ -8590,6 +8644,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     {
         stamps.TryRemove(key, out _);
         _stateRetries.Clear(StateRetryKey(metric, grainKey));
+        _stateSeverityRank.TryRemove(StateRetryKey(metric, grainKey), out _);
     }
 
     /// <summary>The key an availability group alert is tracked under in <c>_agRetries</c>: the metric and the AG
