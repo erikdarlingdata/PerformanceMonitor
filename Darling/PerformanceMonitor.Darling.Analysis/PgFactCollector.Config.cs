@@ -160,6 +160,7 @@ WITH latest AS (
     FROM database_config
     WHERE server_id = $1
     AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+    /*SEC*/
 )
 SELECT
     COUNT(*) AS database_count,
@@ -187,6 +188,9 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
 
             using var cmd = new NpgsqlCommand(DatabaseConfigSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            /* #5558: a database this node holds only as a secondary copy is the primary's to report (and drops out of
+               every count here, database_count included). */
+            PgSecondaryReplicaScope.Apply(cmd, context, "DB_CONFIG", "database_name");
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

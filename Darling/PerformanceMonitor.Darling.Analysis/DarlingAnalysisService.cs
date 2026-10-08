@@ -266,6 +266,14 @@ public sealed class DarlingAnalysisService
         }
     }
 
+    /// <summary>
+    /// #5558: the databases this node holds only as a secondary Availability Group copy, as of the pass's window end,
+    /// so the replicated facts skip them. Every context this service builds goes through here. Fails open: any unknown
+    /// returns an empty set.
+    /// </summary>
+    internal Task<IReadOnlySet<string>> SecondaryScopeForAsync(int serverId, DateTime windowEndUtc, CancellationToken cancellationToken) =>
+        PgSecondaryReplicaScope.ReadAsync(_postgres, serverId, windowEndUtc, _logger, cancellationToken);
+
     /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
     /// <param name="planFetcher">Optional; the SQL Server drill-down's cached-plan fetch.</param>
     /// <param name="logger">Optional.</param>
@@ -342,6 +350,7 @@ public sealed class DarlingAnalysisService
         {
             ServerId = serverId,
             SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
+            SecondaryReplicaDatabases = await SecondaryScopeForAsync(serverId, timeRangeEnd, cancellationToken), /* #5558 */
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -766,6 +775,7 @@ public sealed class DarlingAnalysisService
         {
             ServerId = serverId,
             SeparatelyMonitoredDatabases = await ScopeForAsync(serverId, cancellationToken),
+            SecondaryReplicaDatabases = await SecondaryScopeForAsync(serverId, timeRangeEnd, cancellationToken), /* #5558 */
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
@@ -824,6 +834,8 @@ public sealed class DarlingAnalysisService
         var context = new AnalysisContext
         {
             ServerId = serverId,
+            /* #5558: audit_config reads server settings only, all node-local, so nothing is skipped and no AG read is paid for. */
+            SecondaryReplicaDatabases = PgSecondaryReplicaScope.NoneSkipped,
             ServerName = serverName,
             TimeRangeStart = timeRangeEnd.AddHours(-1),
             TimeRangeEnd = timeRangeEnd,
@@ -888,6 +900,8 @@ public sealed class DarlingAnalysisService
         {
             ServerId = serverId,
             SeparatelyMonitoredDatabases = separatelyMonitored,
+            /* #5558: per window, not shared: the windows can straddle a failover and each uses the role at its own end. */
+            SecondaryReplicaDatabases = await SecondaryScopeForAsync(serverId, baselineEnd, cancellationToken),
             ServerName = serverName,
             TimeRangeStart = baselineStart,
             TimeRangeEnd = baselineEnd,
@@ -898,6 +912,7 @@ public sealed class DarlingAnalysisService
         {
             ServerId = serverId,
             SeparatelyMonitoredDatabases = separatelyMonitored,
+            SecondaryReplicaDatabases = await SecondaryScopeForAsync(serverId, comparisonEnd, cancellationToken), /* #5558 */
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
             TimeRangeEnd = comparisonEnd,

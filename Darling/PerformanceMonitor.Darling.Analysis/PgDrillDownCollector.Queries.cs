@@ -1045,9 +1045,13 @@ LIMIT 5";
 
         ServerClock? clock = null;
         var items = new List<object>();
+        /* #5558: when the fact did not run the offender list above is NULL and every query is read, so the rows of a
+           database this node holds only as a secondary copy are dropped here, as the fact drops them. */
+        var skipped = FactReplicaScope.SecondariesFor(context, "PLAN_REGRESSION");
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            if (skipped.Length > 0 && !reader.IsDBNull(0) && Array.IndexOf(skipped, reader.GetString(0).ToLowerInvariant()) >= 0) continue;
             /* #4821: the newest snapshot's zone and offset ride on every row (columns 15 and 14), so the clock is built once. */
             clock ??= ServerLocalTimes.ClockFrom(
                 reader.IsDBNull(15) ? null : reader.GetString(15),

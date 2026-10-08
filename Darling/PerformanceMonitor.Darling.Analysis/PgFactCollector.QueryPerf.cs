@@ -565,6 +565,7 @@ WITH plan_agg AS
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
     FROM plan_agg
+    /*SEC*/
     GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execs) >= 25
 ),
@@ -742,6 +743,11 @@ LIMIT 20";
                     cmd.Parameters.AddWithValue(collectionBound);
                 }
             }
+
+            /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
+               primary stay in the window, so the read skips those databases. The marker sits in the suffix all three
+               variants share, so they cannot drift; bound after every other parameter. */
+            PgSecondaryReplicaScope.Apply(cmd, context, "PLAN_REGRESSION", "database_name", "WHERE");
 
             var offenderCount = 0;
             var worstFactor = 0.0;

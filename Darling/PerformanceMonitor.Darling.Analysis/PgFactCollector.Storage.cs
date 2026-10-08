@@ -351,7 +351,8 @@ FROM latest
 WHERE rn = 1
 AND   is_percent_growth = true
 AND   total_size_mb >= 10240
-AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
+AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
+/*SEC*/";
 
     /// <summary>
     /// Collects the percent-autogrowth-on-large-files config fact (WS3): data/log files set
@@ -372,6 +373,8 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name)));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            /* #5558: the file growth setting replicates from the primary; a secondary copy is the primary's to report. */
+            PgSecondaryReplicaScope.Apply(cmd, context, "FILE_AUTOGROWTH_PERCENT", "database_name");
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
