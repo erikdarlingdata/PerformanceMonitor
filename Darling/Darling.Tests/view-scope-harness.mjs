@@ -11,16 +11,45 @@ const end = full.indexOf("function rememberScope");
 if (start < 0 || end < start) throw new Error("views.js layout changed: the seeding region was not found");
 
 const context = vm.createContext({ Map, String, Array });
-vm.runInContext(full.slice(start, end) + "\nthis.seedState = seedState;", context);
+vm.runInContext(
+  full.slice(start, end) +
+    "\nthis.seedState = seedState; this.panelFilterServer = panelFilterServer; this.panelUnderScope = panelUnderScope; this.panelServerNote = panelServerNote;",
+  context,
+);
 
 const fleet = [
   { value: "sql2025", label: "SQL2025" },
   { value: "sql2022", label: "SQL2022" },
 ];
-const seed = (id, variables) => context.seedState(id, 24, variables, fleet).server;
+const seed = (id, variables, panelServer) => context.seedState(id, 24, variables, fleet, panelServer).server;
 const sv = (def) => [{ name: "server", dimension: "server", default: def }];
 
+/* W4b: a view with NO server variable whose every composed panel filters to one server (custom view 3's shape). */
+const eq = (v) => ({ dimension: "server", op: "eq", value: v });
+const composed = (...filters) => ({ source: "wait_stats", measure: "x", filters });
+const panelsServer = (panels) => { const r = context.panelFilterServer(panels, fleet); return r ? r.value : null; };
+const wholeView = [composed(eq("SQL2025")), composed(eq("SQL2025"), { dimension: "database", op: "eq", value: "d" }), composed(eq("sql2025"))];
+const viewServer = context.panelFilterServer(wholeView, fleet);
+const under = (p, server) => context.panelUnderScope(p, { server }, viewServer);
+
 console.log(JSON.stringify({
+  panelSeed: seed("p1", [], viewServer),
+  panelSeedVariableWins: seed("p2", sv("sql2022"), viewServer),
+  panelSeedNone: seed("p3", [], null),
+  panelServerOfWholeView: panelsServer(wholeView),
+  panelServerMixed: panelsServer([composed(eq("SQL2025")), composed(eq("SQL2022"))]),
+  panelServerOnePanelUnfiltered: panelsServer([composed(eq("SQL2025")), composed()]),
+  panelServerTwoServerFilters: panelsServer([composed(eq("SQL2025"), eq("SQL2022"))]),
+  panelServerInOp: panelsServer([composed({ dimension: "server", op: "in", value: "SQL2025" })]),
+  panelServerNotInFleet: panelsServer([composed(eq("SQL2019"))]),
+  panelServerReadPanelsIgnored: panelsServer([composed(eq("SQL2025")), { read: "get_x", params: {} }]),
+  panelServerNoComposed: panelsServer([{ read: "get_x" }]),
+  underSame: under(wholeView[1], ["sql2025"]).filters.length,
+  underOther: under(wholeView[1], ["sql2022"]).filters.map((f) => f.dimension),
+  underAll: under(wholeView[0], "All").filters.length,
+  underReadPanel: under({ read: "get_x" }, "All"),
+  noteOnServer: context.panelServerNote({ server: ["sql2025"] }, viewServer),
+  noteOnOther: context.panelServerNote({ server: "All" }, viewServer),
   none: seed("a", []),
   byName: seed("b", sv("sql2025")),
   byDisplayName: seed("c", sv("SQL2022")),

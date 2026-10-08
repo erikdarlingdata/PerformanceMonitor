@@ -126,17 +126,31 @@ function rollup(d) {
     const lblId = rollupTextId(lbl, "lbl", usedIds);
     return el("div", { class: "tile " + (cls || "") }, [
       el("div", { class: "num", text: fmtInt(num), "aria-describedby": lblId }),
-      el("div", { class: "lbl", id: lblId, text: lbl }),
+      el("div", { class: "lbl", id: lblId, text: countLabel(num, lbl) }),
     ]);
   };
 
+  /* Release walk: two reporting servers that see the same group made "1 Groups" over two cards, with nothing saying what a
+     card is. The note names it whenever there are more cards than groups. */
+  const moreCardsThanGroups = d.availability_group_count > d.distinct_ag_count;
   return el("div", { class: "rollup" }, [
     el("div", { class: "rollup-group" }, [
       tile(d.distinct_ag_count, "Groups"),
       tile(d.reporting_server_count, "Reporting servers"),
       tile(d.availability_group_count, "Views"),
     ]),
+    moreCardsThanGroups
+      ? el("div", {
+          class: "meta",
+          text: "Each card below is one reporting server's view of a group, so a group that two or more servers report appears once for each of them.",
+        })
+      : null,
   ]);
+}
+
+/* A tile's label in the number's own grammar: "1 Group", "2 Groups". Only the display text; the id derives from the plural. */
+export function countLabel(num, plural) {
+  return num === 1 ? plural.replace(/s$/, "") : plural;
 }
 
 function agCard(g) {
