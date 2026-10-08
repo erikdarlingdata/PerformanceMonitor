@@ -1294,6 +1294,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     {
         T result = default!;
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try { result = body(); }

@@ -183,6 +183,7 @@ public sealed class ViewerPlanCorrectionsDataStartTests : IDisposable
     private static void OnStaThread(Action body)
     {
         Exception? error = null;
+        using var staGate = WpfStaGate.Enter();
         var thread = new Thread(() =>
         {
             try { body(); }
