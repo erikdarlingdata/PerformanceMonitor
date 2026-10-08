@@ -76,7 +76,7 @@ public sealed partial class ViewerDataService
         var nowUtc = DateTime.UtcNow;
 
         var dtos = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(
-            _dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            _dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken);
 
         var items = new List<ServerPropertyRow>(dtos.Count);
         foreach (var dto in dtos)

@@ -77,7 +77,7 @@ public sealed class FinOpsInventoryGoldenLiveTests
             var dtos = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(dataSource, rollups, coverage, 30, cancellationToken: ct);
             var metrics = dtos.Where(kv => Ids.Contains(kv.Key)).OrderBy(kv => NameOf(kv.Key))
                 .Select(kv => new MetricsEntry { Server = NameOf(kv.Key), Metrics = ViewerDataService.ServerMetricsRow.From(kv.Value) }).ToList();
-            var inventory = (await DarlingFinOpsInventoryReader.GetServerInventoryAsync(dataSource, 30, ct))
+            var inventory = (await DarlingFinOpsInventoryReader.GetServerInventoryAsync(dataSource, 30, cancellationToken: ct))
                 .Where(d => Ids.Contains(d.ServerId)).Select(d => ServerPropertyRow.From(d, PerformanceMonitor.Analysis.Baselines.ServerClock.FixedOffset(0))).ToList();
 
             return Serialize(anchor, metrics, inventory);
@@ -128,6 +128,8 @@ public sealed class FinOpsInventoryGoldenLiveTests
         await DarlingMcpTestData.RegisterServerAsync(c, IdD, NameD, ct);
         await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET monthly_cost_usd = 1234.5 WHERE server_id = $1", IdA);
         await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET is_enabled = FALSE, display_name = 'Golden Disabled B' WHERE server_id = $1", IdB);
+        /* Web 11: a stopped server that is still configured stays in the default list; only a REMOVED one (no config row) drops out. */
+        await DarlingMcpTestData.ExecAsync(c, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, FALSE) ON CONFLICT DO NOTHING", IdB, NameB);
 
         var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
 

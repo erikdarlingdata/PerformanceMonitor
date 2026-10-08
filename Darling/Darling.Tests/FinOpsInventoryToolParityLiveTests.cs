@@ -59,6 +59,8 @@ public sealed class FinOpsInventoryToolParityLiveTests
         await DarlingMcpTestData.RegisterServerAsync(c, idB, Beta, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, idG, Gamma, ct);
         await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET is_enabled = FALSE WHERE server_id = $1", idB);
+        /* Web 11: Beta is stopped but still configured, so it stays in the default list. */
+        await DarlingMcpTestData.ExecAsync(c, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, FALSE)", idB, Beta);
         await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET monthly_cost_usd = 1234.5 WHERE server_id = $1", idA);
 
         var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
@@ -117,7 +119,7 @@ public sealed class FinOpsInventoryToolParityLiveTests
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
-        var inventory = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(postgres, 30, ct);
+        var inventory = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(postgres, 30, cancellationToken: ct);
         var metrics = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(postgres, rollups, coverage, 30, cancellationToken: ct);
         var expected = inventory.Where(s => s.ServerName.StartsWith("darling-finops-inv-tool-", StringComparison.Ordinal))
             .OrderByDescending(s => s.IsEnabled).ThenBy(s => s.ServerName, StringComparer.Ordinal)
@@ -125,7 +127,7 @@ public sealed class FinOpsInventoryToolParityLiveTests
                 DarlingMcpFinOpsInventoryTools.InventoryRow(s, metrics.TryGetValue(s.ServerId, out var m) ? m : default), DarlingMcpFinOpsInventoryTools.WireOptions))
             .ToList();
 
-        var body = await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 50, ct);
+        var body = await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 50, cancellationToken: ct);
         using var doc = JsonDocument.Parse(body);
         var servers = doc.RootElement.GetProperty("servers");
         Assert.Equal(3, expected.Count);
@@ -154,6 +156,73 @@ public sealed class FinOpsInventoryToolParityLiveTests
             Assert.Equal(ServerHardwareScope.InventoryHardwareNote, doc.RootElement.GetProperty("hardware_note_legend").GetProperty("host_scoped").GetString());
     }
 
+    private const string Removed = "darling-finops-inv-tool-removed";
+
+    /* A removed server: registered, disabled by DisableOrphanedServersSql (no config row), with a properties snapshot
+       and CPU history that would otherwise add to the list and to every count built from it. */
+    private static async Task AddRemovedServerAsync(string connectionString, CancellationToken ct)
+    {
+        using var c = new NpgsqlConnection(connectionString);
+        await c.OpenAsync(ct);
+        var id = ServerIdHelper.GetDeterministicHashCode(Removed);
+        await DarlingMcpTestData.RegisterServerAsync(c, id, Removed, ct);
+        await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET is_enabled = FALSE WHERE server_id = $1", id);
+        var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+        await InsertPropertiesAsync(c, id, Removed, now.AddHours(-8), "Standard Edition", "15.0.4000.1", 2, 4, 16384L, 1, 4, "Windows Server 2019", ct);
+    }
+
+    [Fact]
+    public async Task Tool_LeavesARemovedServerOutOfTheListAndTheTotal_UnlessIncludeRemoved()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live get_finops_inventory test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs!, true, ct);
+        await AddRemovedServerAsync(scratch.ConnectionString, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using (var doc = JsonDocument.Parse(await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 50, cancellationToken: ct)))
+        {
+            // Alpha, Gamma (enabled) and Beta (stopped but configured); the removed server is neither listed nor counted.
+            Assert.Equal(3, doc.RootElement.GetProperty("total_servers").GetInt32());
+            var names = doc.RootElement.GetProperty("servers").EnumerateArray().Select(s => s.GetProperty("server").GetString()).ToArray();
+            Assert.Equal(new[] { Alpha, Gamma, Beta }, names);
+        }
+
+        using (var doc = JsonDocument.Parse(await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 50, include_removed: true, cancellationToken: ct)))
+        {
+            Assert.Equal(4, doc.RootElement.GetProperty("total_servers").GetInt32());
+            var rows = doc.RootElement.GetProperty("servers").EnumerateArray().ToList();
+            Assert.Equal(Removed, rows[3].GetProperty("server").GetString());
+            Assert.Equal("stopped", rows[3].GetProperty("monitoring").GetString());
+        }
+
+        var (status, body) = await GetAsync(postgres, "/api/read/get_finops_inventory?view=server_inventory&include_removed=true", ct);
+        Assert.Equal(StatusCodes.Status200OK, status);
+        using var web = JsonDocument.Parse(body);
+        Assert.Equal(4, web.RootElement.GetProperty("total_servers").GetInt32());
+        var (defaultStatus, defaultBody) = await GetAsync(postgres, "/api/read/get_finops_inventory?view=server_inventory", ct);
+        Assert.Equal(StatusCodes.Status200OK, defaultStatus);
+        using var webDefault = JsonDocument.Parse(defaultBody);
+        Assert.Equal(3, webDefault.RootElement.GetProperty("total_servers").GetInt32());
+    }
+
+    [Fact]
+    public async Task Reader_DropsARemovedServerByDefault_AndKeepsAConfiguredStoppedOne()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live get_finops_inventory test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs!, true, ct);
+        await AddRemovedServerAsync(scratch.ConnectionString, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var byDefault = (await DarlingFinOpsInventoryReader.GetServerInventoryAsync(postgres, 30, cancellationToken: ct)).Select(s => s.ServerName).ToList();
+        Assert.DoesNotContain(Removed, byDefault);
+        Assert.Contains(Beta, byDefault);
+        var withRemoved = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(postgres, 30, includeRemoved: true, cancellationToken: ct);
+        Assert.Contains(Removed, withRemoved.Select(s => s.ServerName));
+        Assert.Equal(byDefault.Count + 1, withRemoved.Count);
+    }
+
     [Fact]
     public async Task Tool_WithLimitOne_IsTruncated()
     {
@@ -162,7 +231,7 @@ public sealed class FinOpsInventoryToolParityLiveTests
         await using var scratch = await SeedAsync(Cs!, true, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var doc = JsonDocument.Parse(await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 1, ct));
+        using var doc = JsonDocument.Parse(await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 1, cancellationToken: ct));
         Assert.True(doc.RootElement.GetProperty("truncated").GetBoolean());
         Assert.Equal(1, doc.RootElement.GetProperty("servers_returned").GetInt32());
         Assert.Equal(3, doc.RootElement.GetProperty("total_servers").GetInt32());
@@ -177,7 +246,7 @@ public sealed class FinOpsInventoryToolParityLiveTests
         await using var scratch = await SeedAsync(Cs!, true, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var tool = await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 2, ct);
+        var tool = await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 2, cancellationToken: ct);
         var (status, body) = await GetAsync(postgres, "/api/read/get_finops_inventory?view=server_inventory&limit=2", ct);
 
         Assert.Equal(StatusCodes.Status200OK, status);
@@ -196,7 +265,7 @@ public sealed class FinOpsInventoryToolParityLiveTests
         await using var scratch = await SeedAsync(Cs!, true, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        var tool = await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "nope", 10, ct);
+        var tool = await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "nope", 10, cancellationToken: ct);
         var (status, body) = await GetAsync(postgres, "/api/read/get_finops_inventory?view=nope", ct);
 
         Assert.Equal(StatusCodes.Status400BadRequest, status);
@@ -215,7 +284,7 @@ public sealed class FinOpsInventoryToolParityLiveTests
         await using var scratch = await SeedAsync(Cs!, false, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var doc = JsonDocument.Parse(await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 10, ct));
+        using var doc = JsonDocument.Parse(await DarlingMcpFinOpsInventoryTools.GetFinOpsInventory(postgres, "server_inventory", 10, cancellationToken: ct));
         Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
     }
 }

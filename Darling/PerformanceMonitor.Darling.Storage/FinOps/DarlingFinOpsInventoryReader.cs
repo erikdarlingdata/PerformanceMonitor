@@ -452,6 +452,12 @@ WHERE s.server_id <> 0";
     /// <summary>
     /// Latest collected properties per server joined to the registry — the Server Inventory base rows (metrics
     /// overlaid per row by the loader). DISTINCT ON keeps each server's newest server_properties row.
+    ///
+    /// <para>Only CONFIGURED servers by default (Web 11): a row stays when <c>is_enabled</c> is true (monitoring
+    /// is running) or a <c>config.config_monitored_servers</c> row exists (a configured but stopped server). A
+    /// removed server is <c>is_enabled = FALSE</c> with no config row (<c>DisableOrphanedServersSql</c>), so it drops
+    /// out of the list and of every count built from it. <c>$1</c> (include_removed) keeps those rows, for a caller
+    /// that asks for the history behind a removed server.</para>
     /// </summary>
     public const string ServerInventorySql = @"
 SELECT
@@ -488,13 +494,18 @@ FROM (
     ORDER BY server_id, collection_time DESC
 ) sp
 JOIN servers s ON s.server_id = sp.server_id
+WHERE $1
+   OR s.is_enabled
+   OR EXISTS (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id)
 ORDER BY s.is_enabled DESC, server_name";
 
     public static async Task<List<ServerInventoryDto>> GetServerInventoryAsync(
-        NpgsqlDataSource dataSource, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+        NpgsqlDataSource dataSource, int commandTimeoutSeconds, bool includeRemoved = false,
+        CancellationToken cancellationToken = default)
     {
         await using var command = dataSource.CreateCommand(ServerInventorySql);
         command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeRemoved });
 
         var items = new List<ServerInventoryDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

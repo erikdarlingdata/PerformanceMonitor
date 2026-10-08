@@ -50,7 +50,8 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
         Assert.Equal(typeof(Task<string>), method.ReturnType);
 
         var described = method.GetParameters().Where(p => p.GetCustomAttribute<DescriptionAttribute>() is not null).ToArray();
-        Assert.Equal(new[] { "view", "limit" }, described.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "view", "limit", "include_removed" }, described.Select(p => p.Name).ToArray());
+        Assert.Equal(false, described.Single(p => p.Name == "include_removed").DefaultValue);
         Assert.False(described.Single(p => p.Name == "view").HasDefaultValue, "view is required");
         Assert.Equal(DarlingMcpFinOpsInventoryTools.DefaultLimit, described.Single(p => p.Name == "limit").DefaultValue);
         Assert.Equal(200, DarlingMcpFinOpsInventoryTools.MaxLimit);
