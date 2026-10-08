@@ -166,6 +166,11 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
         Assert.Contains("no verdict", r.GetProperty("verdict_reason").GetString(), StringComparison.Ordinal);
         Assert.Equal(JsonValueKind.Null, r.GetProperty("health_score").ValueKind);
         Assert.Equal(JsonValueKind.Null, r.GetProperty("health_band").ValueKind);
+        /* The three CPU figures are null with no sample, never the 0 the read returns for nothing. */
+        var noCpu = r.GetProperty("cpu");
+        Assert.Equal(JsonValueKind.Null, noCpu.GetProperty("avg_cpu_pct").ValueKind);
+        Assert.Equal(JsonValueKind.Null, noCpu.GetProperty("p95_cpu_pct").ValueKind);
+        Assert.Equal(JsonValueKind.Null, noCpu.GetProperty("max_cpu_pct").ValueKind);
         Assert.Equal(100m, r.GetProperty("free_space_pct").GetDecimal());
         var dto = (await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerIdD, 30, ct))!;
         Assert.False(FinOpsUtilizationFigures.HasCpuSample(dto));

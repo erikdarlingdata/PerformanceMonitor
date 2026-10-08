@@ -575,7 +575,7 @@
                         </Grid>
 
                         <!-- Database Size Chart -->
-                        <GroupBox Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10"
+                        <GroupBox x:Name="DbSizeChartGroup" Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10"
                                   Foreground="{DynamicResource ForegroundBrush}">
                             <DockPanel>
                                 <!-- Says which bars leave the log out and why; the loader shows it only when a bar needs it -->
