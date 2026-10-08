@@ -179,13 +179,18 @@ LIMIT $3";
     /// <summary>The idle-database read's SQL; lives in <see cref="DarlingFinOpsOptimizationReader"/>.</summary>
     public const string IdleDatabasesSql = DarlingFinOpsOptimizationReader.IdleDatabasesSql;
 
-    public async Task<List<IdleDatabaseRow>> GetIdleDatabasesAsync(int serverId, int daysBack = 7, CancellationToken cancellationToken = default)
+    public async Task<List<IdleDatabaseRow>> GetIdleDatabasesAsync(int serverId, int daysBack = 7, CancellationToken cancellationToken = default) =>
+        (await GetIdleDatabaseReadAsync(serverId, daysBack, cancellationToken)).Rows;
+
+    /// <summary>The Idle Databases grid's read: the rows, and whether query stats cover each of the last 7 UTC days. Without that coverage
+    /// there are no rows (a database is idle only when the days were watched), and the grid says why instead of "No idle databases detected".</summary>
+    public async Task<(bool Covered, List<IdleDatabaseRow> Rows)> GetIdleDatabaseReadAsync(int serverId, int daysBack = 7, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddDays(-daysBack);
 
-        var rows = await DarlingFinOpsOptimizationReader.GetIdleDatabasesAsync(
+        var read = await DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(
             _dataSource, serverId, cutoff, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
-        return rows.Select(IdleDatabaseRow.From).ToList();
+        return (read.Covered, read.Rows.Select(IdleDatabaseRow.From).ToList());
     }
 
     /// <summary>The tempdb summary's SQL; lives in <see cref="DarlingFinOpsOptimizationReader"/>.</summary>

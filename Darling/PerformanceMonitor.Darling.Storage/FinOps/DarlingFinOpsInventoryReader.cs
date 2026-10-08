@@ -51,7 +51,8 @@ public static class DarlingFinOpsInventoryReader
 {
     /// <summary>
     /// Collected 24h-CPU / storage / idle-DB / provisioning metrics for EVERY server, in one round trip (#4227).
-    /// $1 cpu cutoff (24h), $2 idle cutoff (7d). Used to be one call per server (<c>GetServerMetricsAsync</c>,
+    /// $1 cpu cutoff (24h), $2 idle cutoff (7d), $3 the idle-coverage start (first of the last 7 UTC days), $4 the days that must be
+    /// covered. Used to be one call per server (<c>GetServerMetricsAsync</c>,
     /// 43 round trips on a 43-server fleet); the five CTEs group naturally by <c>server_id</c>, so they read the
     /// fleet at once instead — 24h CPU and grants via <c>GROUP BY server_id</c>, latest memory and size snapshots
     /// via a per-server <c>LATERAL … LIMIT 1</c> descent (the <c>ServerFreshnessSql</c> shape, #3895).
@@ -149,6 +150,16 @@ active_dbs AS (
     WHERE collection_time >= $2
     AND   delta_execution_count > 0
 ),
+/* The recommendation row's coverage rule (DarlingFinOpsOptimizationReader.HasIdleCoverageAsync): a database is called idle for 7
+   days only when query stats hold a sample on each of the last 7 UTC days. A server without that coverage gets NO idle_dbs row, so its
+   count is NULL (a dash), never a count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
+idle_coverage AS (
+    SELECT server_id
+    FROM v_query_stats
+    WHERE collection_time >= $3
+    GROUP BY server_id
+    HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
+),
 /* LEFT JOIN from servers, not an EXCEPT grouped by server_id: a server whose every known database is
    active has ZERO rows surviving an EXCEPT, and GROUP BY over zero rows contributes NO ROW for that
    server at all -- the outer LEFT JOIN then reads idle_db_count as NULL, not 0, and the loader's overlay-
@@ -162,6 +173,7 @@ idle_dbs AS (
         s.server_id,
         COUNT(ld.database_name) FILTER (WHERE ad.database_name IS NULL) AS idle_db_count
     FROM servers s
+    JOIN idle_coverage ic ON ic.server_id = s.server_id
     LEFT JOIN latest_dbs ld ON ld.server_id = s.server_id
     LEFT JOIN active_dbs ad
       ON ad.server_id = ld.server_id
@@ -197,6 +209,45 @@ LEFT JOIN storage_totals st ON st.server_id = s.server_id
 LEFT JOIN idle_dbs id ON id.server_id = s.server_id
 LEFT JOIN grants g ON g.server_id = s.server_id
 WHERE s.server_id <> 0";
+
+    /// <summary>The RAW <c>idle_coverage</c> CTE in <see cref="ServerMetricsSql"/>, verbatim — the second anchor <see cref="ServerMetricsSqlFor"/>
+    /// replaces, so the coverage days come from the same hourly rollup as the activity check rather than a raw 7-day scan of every server.</summary>
+    private const string IdleCoverageRawCte = @"idle_coverage AS (
+    SELECT server_id
+    FROM v_query_stats
+    WHERE collection_time >= $3
+    GROUP BY server_id
+    HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
+),";
+
+    /// <summary>
+    /// The routed <c>idle_coverage</c>: the distinct UTC days that hold a rollup bucket from <paramref name="relationSql"/> (a bucket
+    /// exists only for an hour that held a query-stats sample), UNION the raw days at or after <paramref name="watermarkUtc"/> that
+    /// the aggregate has not materialized yet. The coverage start ($3) is today minus six days at 00:00, after the ceiling hour of the
+    /// 7-day activity cutoff, so no leading raw edge is needed.
+    /// </summary>
+    private static string IdleCoverageForCagg(string relationSql, DateTime watermarkUtc)
+    {
+        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+
+        return $@"idle_coverage AS (
+    SELECT server_id
+    FROM (
+        SELECT server_id, CAST(bucket AS DATE) AS sample_day
+        FROM {relationSql}
+        WHERE bucket >= $3
+
+        UNION
+
+        SELECT server_id, CAST(collection_time AS DATE) AS sample_day
+        FROM v_query_stats
+        WHERE collection_time >= {watermark}
+        AND   collection_time >= $3
+    ) AS days
+    GROUP BY server_id
+    HAVING COUNT(DISTINCT sample_day) >= $4
+),";
+    }
 
     /// <summary>The RAW <c>active_dbs</c> CTE in <see cref="ServerMetricsSql"/>, verbatim — the anchor
     /// <see cref="ServerMetricsSqlFor"/> replaces to route the idle check through the rollup.</summary>
@@ -261,11 +312,16 @@ WHERE s.server_id <> 0";
         var relationSql = coverage.StitchedRelationSql(
             TimescaleSupport.QueryStatsDbHourlyView, "f", ceilingHour, RollupCoverage.StitchTier.Hourly);
 
-        return FinOpsRollupRouting.RouteOrThrow(
+        var activeRouted = FinOpsRollupRouting.RouteOrThrow(
             ServerMetricsSql,
             IdleActiveDbsRawCte,
             IdleActiveDbsForCagg(relationSql, ceilingHour, watermarkUtc),
             "server inventory idle databases");
+        return FinOpsRollupRouting.RouteOrThrow(
+            activeRouted,
+            IdleCoverageRawCte,
+            IdleCoverageForCagg(relationSql, watermarkUtc),
+            "server inventory idle coverage");
     }
 
     /// <summary>
@@ -303,6 +359,8 @@ WHERE s.server_id <> 0";
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cpuCutoff, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(idleCutoff, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now), DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DarlingFinOpsOptimizationReader.IdleCoverageDays });
 
         var results = new Dictionary<int, ServerMetricsDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

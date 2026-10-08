@@ -117,7 +117,7 @@ public sealed class DarlingMcpFinOpsInventoryTools
     {
         var note = NoteFor(s);
         var denied = s.HardwareUnavailableReason != null;
-        var score = FinOpsInventoryFigures.HealthScore(m.AvgCpuPct);
+        var score = FinOpsInventoryFigures.HealthScoreOrNull(m.AvgCpuPct);
         var annual = FinOpsCost.Annual(s.MonthlyCost);
         return new
         {
@@ -137,7 +137,8 @@ public sealed class DarlingMcpFinOpsInventoryTools
             storage_total_gb = m.StorageTotalGb is decimal gb ? Math.Round(gb, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
             idle_db_count = m.IdleDbCount,
             health_score = score,
-            health_band = FinOpsUtilizationFigures.HealthBand(score),
+            health_band = score is int scoreValue ? FinOpsUtilizationFigures.HealthBand(scoreValue) : null,
+            health_score_note = score is null ? FinOpsHealthCalculator.NoScoreNote : null,
             monthly_cost_usd = s.MonthlyCost,
             annual_cost_usd = annual,
             license_warning = FinOpsInventoryFigures.LicenseWarning(s.Edition, s.EngineEdition, s.CpuCount, s.PhysicalMemoryMb),

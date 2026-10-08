@@ -22,7 +22,7 @@ const COLUMNS = [
   { key: "confidence", label: "Confidence" },
   { key: "finding", label: "Finding", wrap: true },
   { key: "detail", label: "Detail", wrap: true },
-  { key: "est_savings_usd_month", label: "Est. Savings ($/mo)", format: "int" },
+  { key: "est_savings_usd_month", label: "Est. Savings ($/mo)", format: "int", nullKey: "est_savings_note" },
 ];
 
 function noticeText(n) {
@@ -31,7 +31,8 @@ function noticeText(n) {
 }
 
 function displayRow(r) {
-  return { ...r, severity_sev: SEV[r.severity] ?? null };
+  /* An empty estimate reads as a dash with the setting that fills it (the same words as the desktop viewer's tooltip). */
+  return { ...r, severity_sev: SEV[r.severity] ?? null, est_savings_note: r.est_savings_usd_month == null ? "No estimate: set this server's Monthly Cost ($) in Admin > Servers." : null };
 }
 
 export const tab = {
