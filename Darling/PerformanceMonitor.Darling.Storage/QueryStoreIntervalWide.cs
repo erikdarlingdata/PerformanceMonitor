@@ -622,9 +622,13 @@ FROM (
     /// <item>Coverage exists (<paramref name="filledSince"/> is not null) and there is no pending batch.</item>
     /// <item><c>filledSince &lt;= max(R, S)</c> (<paramref name="rawFloor"/>, <paramref name="windowStart"/>):
     /// the table holds every snapshot raw's own read would, and may hold more (the ruled window extension).</item>
-    /// <item><c>R &gt;= H</c> or <c>S - 1 day &gt;= H</c> (<paramref name="tableFloor"/>,
-    /// <see cref="IntervalSpanMargin"/>): raw holds no history the table has dropped, or every interval the
-    /// window needs starts inside the table. A NULL <paramref name="tableFloor"/> means the table holds nothing
+    /// <item><c>R &gt;= H + <see cref="PurgeEdgeMargin"/></c> or <c>S - 1 day &gt;= H</c> (<paramref name="tableFloor"/>,
+    /// <see cref="IntervalSpanMargin"/>): raw holds no snapshot of an interval the table has dropped, or every
+    /// interval the window needs starts inside the table. The margin is there because the two purge on different
+    /// columns (#5541): raw drops a snapshot by <c>collection_time</c>, the table drops an interval by
+    /// <c>first_execution_time</c>, and a snapshot lands in raw up to <see cref="PurgeEdgeMargin"/> after its interval
+    /// began. With <c>R</c> only at or above <c>H</c>, raw can still hold a snapshot of an interval that began below
+    /// <c>H</c> and that the table dropped. A NULL <paramref name="tableFloor"/> means the table holds nothing
     /// for the server, and clause 2 already refuses that case.</item>
     /// <item>A literal <paramref name="literalWindowEnd"/> (a custom range, MCP <c>as_of</c>) must be at or
     /// after <paramref name="appliedThrough"/>. NULL means an open end (a preset), which skips this clause
@@ -662,7 +666,7 @@ FROM (
         if (tableFloor is DateTime h)
         {
             var skewFloor = windowStart - IntervalSpanMargin;
-            if (!((rawFloor is DateTime floor && floor >= h) || skewFloor >= h))
+            if (!((rawFloor is DateTime floor && floor >= h + PurgeEdgeMargin) || skewFloor >= h))
             {
                 return false;
             }

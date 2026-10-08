@@ -370,10 +370,15 @@ WHERE t.server_id = $1;";
     /// <item><c>F</c> exists: this build has claimed coverage for the server.</item>
     /// <item><c>F &lt;= max(R, B)</c>: the table holds every snapshot the raw read would read (it reads
     /// <c>collection_time &gt;= max(R, B)</c>), and may hold more, which is the ruled window extension.</item>
-    /// <item><c>R &gt;= H</c> or <c>B &gt;= H</c>: raw holds no history the table has dropped, or every interval the
-    /// window needs starts inside the table (<c>B</c> is the window minus a day, and an interval spans at most a
-    /// day). A NULL <c>H</c> means the table holds nothing for the server, and then clause 2 already says raw holds
-    /// nothing in the window either.</item>
+    /// <item><c>R &gt;= H + <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/></c> or <c>B &gt;= H</c>: raw holds no
+    /// snapshot of an interval the table has dropped, or every interval the window needs starts inside the table
+    /// (<c>B</c> is the window minus a day, and an interval spans at most a day). The margin is there because the two
+    /// purge on different columns (#5541): raw drops a snapshot by <c>collection_time</c>, the table drops an interval
+    /// by <c>first_execution_time</c>, and a snapshot can be collected up to one interval length plus the collector's
+    /// lag after its interval began. So with <c>R</c> only at or above <c>H</c>, raw can still hold a snapshot of an
+    /// interval that began below <c>H</c> and that the table dropped; <c>R</c> a full margin above <c>H</c> rules that
+    /// out (same bound as the Wide gate's below-floor edge). A NULL <c>H</c> means the table holds nothing for the
+    /// server, and then clause 2 already says raw holds nothing in the window either.</item>
     /// <item>No pending batch: a batch that stored raw but missed the table is not in the claim.</item>
     /// </list>
     /// A NULL <c>R</c> is raw with no chunk floor (a plain store, whose raw keeps 30 days): minus infinity, which can
@@ -397,7 +402,7 @@ WHERE t.server_id = $1;";
             return true;
         }
 
-        return (rawFloor is DateTime floor && floor >= h) || rawBound >= h;
+        return (rawFloor is DateTime floor && floor >= h + QueryStoreIntervalWide.PurgeEdgeMargin) || rawBound >= h;
     }
 
     /// <summary>

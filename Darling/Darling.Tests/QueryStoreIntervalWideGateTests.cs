@@ -65,8 +65,23 @@ public sealed class QueryStoreIntervalWideGateTests
         Assert.True(Rule(tableFloor: WindowStart.AddDays(-1)));
 
     [Fact]
-    public void Clause3_RawFloorAtOrAboveTableFloor_ReadsTheTable_EvenOutsideTheMargin() =>
-        Assert.True(Rule(rawFloor: WindowStart.AddDays(-3), tableFloor: WindowStart.AddDays(-3)));
+    public void Clause3_RawFloorAtOrAboveTableFloorPlusMargin_ReadsTheTable_EvenOutsideTheMargin()
+    {
+        /* The table floor sits 12h under the window start, short of the one-day skew margin, so only 3a can pass. */
+        var h = WindowStart.AddHours(-12);
+        Assert.True(Rule(rawFloor: h + QueryStoreIntervalWide.PurgeEdgeMargin, tableFloor: h));
+        Assert.True(Rule(rawFloor: h + QueryStoreIntervalWide.PurgeEdgeMargin + TimeSpan.FromMinutes(1), tableFloor: h));
+    }
+
+    [Fact]
+    public void Clause3_RawFloorWithinTheMarginOfTheTableFloor_ReadsRaw()
+    {
+        /* #5541: raw drops a snapshot by collection_time, the table drops an interval by first_execution_time, so
+           raw at or just above the table floor can still hold a snapshot of an interval the table dropped. */
+        var h = WindowStart.AddHours(-12);
+        Assert.False(Rule(rawFloor: h, tableFloor: h));
+        Assert.False(Rule(rawFloor: h + QueryStoreIntervalWide.PurgeEdgeMargin - TimeSpan.FromMinutes(1), tableFloor: h));
+    }
 
     [Fact]
     public void Clause4_OpenEnd_SkipsTheAppliedThroughComparison() =>
