@@ -158,6 +158,9 @@ public partial class ColumnFilterPopup : UserControl
     {
         _storedValuesCleared = true;
         ShowStoredValues();
+        // At once, as the web page's clear does: the popup closes on a click outside (StaysOpen = false) and on Escape,
+        // and a clear that waited for Apply would be lost with it, leaving the value filter hiding rows.
+        ApplyFilter();
     }
 
     private void ClearAllButton_Click(object sender, RoutedEventArgs e)

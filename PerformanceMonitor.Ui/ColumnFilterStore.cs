@@ -109,9 +109,14 @@ public sealed class ColumnFilterStore : IDisposable
         public List<ColumnFilterState> Filters = new();
     }
 
-    private readonly object _gate = new();
+    /// <summary>The longest wait between two tries at a save that keeps failing.</summary>
+    public static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(60);
+
+    private readonly object _gate = new(); // the entries and the flags: held for memory work only, never for file I/O
+    private readonly object _ioGate = new(); // one write at a time: held for the file I/O, so a flush never blocks Load or Save
     private readonly string _filePath;
     private readonly Action<string>? _warn;
+    private readonly Action<string, string> _writeText;
     private readonly TimeSpan _debounce;
     private readonly Timer _timer;
     private readonly List<GridEntry> _entries = new(); // least recently used first
@@ -119,16 +124,42 @@ public sealed class ColumnFilterStore : IDisposable
     private bool _dirty;
     private bool _disposed;
     private bool _saveWarned;
+    private long _version; // bumped by every change, so a write that finishes after a newer change leaves the store dirty
+    private int _failedSaves; // in a row; the retry delay doubles with each
 
-    public ColumnFilterStore(string filePath, Action<string>? warn = null, TimeSpan? debounce = null)
+    /// <param name="writeText">Writes a text file (path, text). Null means <see cref="File.WriteAllText(string, string?)"/>; a test passes its own.</param>
+    public ColumnFilterStore(string filePath, Action<string>? warn = null, TimeSpan? debounce = null, Action<string, string>? writeText = null)
     {
         _filePath = filePath;
         _warn = warn;
+        _writeText = writeText ?? ((path, text) => File.WriteAllText(path, text));
         _debounce = debounce ?? TimeSpan.FromSeconds(1.5);
         _timer = new Timer(_ => Flush(), null, Timeout.Infinite, Timeout.Infinite);
     }
 
     public string FilePath => _filePath;
+
+    /// <summary>
+    /// How long the next retry of a failed save waits: the debounce after the first failure, doubling after each further
+    /// one, at most <see cref="MaxRetryDelay"/> (or the debounce itself when that is longer). A save that works resets it.
+    /// </summary>
+    public TimeSpan RetryDelay
+    {
+        get
+        {
+            lock (_gate)
+                return RetryDelayLocked();
+        }
+    }
+
+    private TimeSpan RetryDelayLocked()
+    {
+        if (_failedSaves <= 1)
+            return _debounce;
+        var cap = _debounce > MaxRetryDelay ? _debounce : MaxRetryDelay;
+        var doubled = _debounce.TotalMilliseconds * Math.Pow(2, Math.Min(_failedSaves - 1, 30));
+        return doubled >= cap.TotalMilliseconds ? cap : TimeSpan.FromMilliseconds(doubled);
+    }
 
     /// <summary>The active filters stored for a server's grid, or none. Counts as a use of the grid.</summary>
     public IReadOnlyList<ColumnFilterState> Load(string server, string grid)
@@ -185,17 +216,22 @@ public sealed class ColumnFilterStore : IDisposable
         }
     }
 
-    /// <summary>Writes any pending change now (the debounce timer and the process exit both end here).</summary>
+    /// <summary>
+    /// Writes any pending change now (the debounce timer and the process exit both end here). The text is made under
+    /// the lock; the file I/O runs outside it, so a slow or stuck disk never holds up a grid's Load or Save.
+    /// </summary>
     public void Flush()
     {
-        lock (_gate)
+        lock (_ioGate)
         {
-            if (!_dirty || _disposed)
-                return;
-
-            try
+            string text;
+            long version;
+            lock (_gate)
             {
-                var file = new FileDto
+                if (!_dirty || _disposed)
+                    return;
+                version = _version;
+                text = JsonSerializer.Serialize(new FileDto
                 {
                     Version = FileVersion,
                     Grids = _entries.Select(e => new GridDto
@@ -204,32 +240,54 @@ public sealed class ColumnFilterStore : IDisposable
                         Grid = e.Grid,
                         Columns = e.Filters.Select(ToDto).ToList()
                     }).ToList()
-                };
+                }, s_json);
+            }
 
+            Exception? failure = null;
+            try
+            {
                 var directory = Path.GetDirectoryName(_filePath);
                 if (!string.IsNullOrEmpty(directory))
                     Directory.CreateDirectory(directory);
 
                 var temp = _filePath + ".tmp";
-                File.WriteAllText(temp, JsonSerializer.Serialize(file, s_json));
+                _writeText(temp, text);
                 if (File.Exists(_filePath))
                     File.Replace(temp, _filePath, null);
                 else
                     File.Move(temp, _filePath);
-                _dirty = false;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
             {
-                /* Still dirty: the next debounce tick tries again (a locked file or a full disk is often gone by then).
-                   The warning is given once per run, not once per failed try. */
+                failure = ex;
+            }
+
+            string? warning = null;
+            lock (_gate)
+            {
+                if (failure is null)
+                {
+                    _failedSaves = 0;
+                    /* A change that came in during the write has its own timer tick and keeps the store dirty. */
+                    if (_version == version)
+                        _dirty = false;
+                    return;
+                }
+
+                /* Still dirty. The retry backs off (the debounce, then twice that, and so on up to a minute) and a change
+                   also tries again at its own debounce tick; the warning is given once per run, not once per failed try. */
+                _failedSaves++;
+                var delay = RetryDelayLocked();
                 if (!_saveWarned)
                 {
                     _saveWarned = true;
-                    _warn?.Invoke($"The column filters could not be saved to '{_filePath}' (the save is tried again at each change): {ex.Message}");
+                    warning = $"The column filters could not be saved to '{_filePath}': {failure.Message} The save is tried again in {delay.TotalSeconds:0.#} seconds, with longer waits (up to {MaxRetryDelay.TotalSeconds:0} seconds) while it keeps failing, and at the next change.";
                 }
                 if (!_disposed)
-                    _timer.Change(_debounce, Timeout.InfiniteTimeSpan);
+                    _timer.Change(delay, Timeout.InfiniteTimeSpan);
             }
+            if (warning is not null)
+                _warn?.Invoke(warning);
         }
     }
 
@@ -247,6 +305,7 @@ public sealed class ColumnFilterStore : IDisposable
     private void MarkDirty()
     {
         _dirty = true;
+        _version++;
         if (!_disposed)
             _timer.Change(_debounce, Timeout.InfiniteTimeSpan);
     }
@@ -287,8 +346,12 @@ public sealed class ColumnFilterStore : IDisposable
                 if (index++ < skip)
                     continue;
                 var entry = ReadGrid(grid);
-                if (entry is not null)
-                    _entries.Add(entry);
+                if (entry is null)
+                    continue;
+                /* The same server and grid twice (a hand edit, a merge): the last one in the file is kept, so Load and
+                   Save act on the one entry there is. */
+                _entries.RemoveAll(e => Matches(e, entry.Server, entry.Grid));
+                _entries.Add(entry);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException or ArgumentException or InvalidOperationException)
@@ -310,10 +373,14 @@ public sealed class ColumnFilterStore : IDisposable
         var filters = new List<ColumnFilterState>();
         foreach (var column in columns.EnumerateArray())
         {
-            if (filters.Count >= MaxColumnsPerGrid)
-                break;
             var filter = ReadColumn(column);
-            if (filter is not null)
+            if (filter is null)
+                continue;
+            /* A column named twice keeps its last copy; a new column past the limit is left out. */
+            var at = filters.FindIndex(f => string.Equals(f.ColumnName, filter.ColumnName, StringComparison.Ordinal));
+            if (at >= 0)
+                filters[at] = filter;
+            else if (filters.Count < MaxColumnsPerGrid)
                 filters.Add(filter);
         }
         return filters.Count == 0 ? null : new GridEntry { Server = server, Grid = name, Filters = filters };

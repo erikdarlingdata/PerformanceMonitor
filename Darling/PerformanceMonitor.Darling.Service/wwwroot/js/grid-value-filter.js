@@ -59,7 +59,7 @@ export const valueKey = (s) => {
 
 /**
  * The name rule for a column that never gets a value list (#5565), the twin of the desktop's ColumnValueListColumns:
- * query and statement text, plans, XML, scripts, prose (messages, details, descriptions, errors), and the display
+ * query and statement text, plans, XML, scripts, prose (messages, details, descriptions, errors, reasons), and the display
  * strings that stand in for a number or a time. A list of them is a wall of near-unique strings, and its ticked
  * values would be kept in the browser. The key is compared with its punctuation dropped, lower-cased, so the page's
  * snake_case keys ("blocked_sql_text") and the desktop's property names ("BlockedSqlText") read the same. A column
@@ -67,7 +67,7 @@ export const valueKey = (s) => {
  */
 export const NO_LIST_SUFFIXES = [
   "text", "formatted", "display", "xml", "plan", "message", "definition", "preview", "sql", "detail", "details",
-  "description", "statement", "query", "command", "json", "graph", "script", "error", "info",
+  "description", "statement", "query", "command", "json", "graph", "script", "error", "info", "reason",
 ];
 export const NO_LIST_FRAGMENTS = ["querytext", "queryplan", "sqltext", "statementtext", "batchtext", "planxml", "textdata"];
 

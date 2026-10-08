@@ -294,6 +294,97 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     }
 
     [Fact]
+    public void A_save_that_keeps_failing_backs_off_from_the_debounce_up_to_a_minute_and_a_good_save_resets_it()
+    {
+        var failing = true;
+        var warnings = new List<string>();
+        var store = new ColumnFilterStore(FilePath, warnings.Add, TimeSpan.FromSeconds(10),
+            (path, text) => { if (failing) throw new IOException("the disk is full"); File.WriteAllText(path, text); });
+        store.Save("srv", "Grid", new[] { Hide("c", "v") });
+        Assert.Equal(TimeSpan.FromSeconds(10), store.RetryDelay);
+
+        var seen = new List<double>();
+        for (var i = 0; i < 6; i++)
+        {
+            store.Flush();
+            seen.Add(store.RetryDelay.TotalSeconds);
+        }
+
+        // 10 s after the first failure, then doubling, never more than 60 s.
+        Assert.Equal(new[] { 10d, 20d, 40d, 60d, 60d, 60d }, seen);
+        Assert.Single(warnings);
+        Assert.Contains("is tried again in 10 seconds", warnings[0], StringComparison.Ordinal);
+        Assert.Contains("up to 60 seconds", warnings[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("each change", warnings[0], StringComparison.Ordinal);
+
+        failing = false;
+        store.Flush();
+        Assert.True(File.Exists(FilePath));
+        Assert.Equal(TimeSpan.FromSeconds(10), store.RetryDelay);
+        store.Dispose();
+    }
+
+    [Fact]
+    public void A_slow_write_does_not_hold_up_Load_or_Save()
+    {
+        using var writing = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        var store = new ColumnFilterStore(FilePath, null, TimeSpan.FromHours(1), (path, text) =>
+        {
+            writing.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+            File.WriteAllText(path, text);
+        });
+        store.Save("srv", "Grid", new[] { Hide("c", "v") });
+        var flush = new Thread(store.Flush) { IsBackground = true };
+        flush.Start();
+        Assert.True(writing.Wait(TimeSpan.FromSeconds(15)), "the write never started");
+
+        // The file I/O is outside the store's lock: a grid's Load and Save on the UI thread do not wait for it.
+        var loadedCount = -1;
+        var meanwhile = new Thread(() =>
+        {
+            loadedCount = store.Load("srv", "Grid").Count;
+            store.Save("srv", "Other", new[] { Hide("d", "w") });
+        }) { IsBackground = true };
+        meanwhile.Start();
+        var finished = meanwhile.Join(TimeSpan.FromSeconds(5));
+        release.Set();
+        flush.Join(TimeSpan.FromSeconds(15));
+        Assert.True(finished, "Load and Save waited for the file write");
+        Assert.Equal(1, loadedCount);
+
+        // The change made during the write is not lost: the store is still dirty, and the next flush writes it.
+        store.Flush();
+        Assert.Single(NewStore().Load("srv", "Other"));
+        store.Dispose();
+    }
+
+    [Fact]
+    public void The_same_server_and_grid_twice_in_a_file_keeps_the_last_copy_so_Load_and_Save_agree()
+    {
+        File.WriteAllText(FilePath, "{\"Version\":1,\"Grids\":[" +
+            "{\"Server\":\"s\",\"Grid\":\"g\",\"Columns\":[{\"Column\":\"LoginName\",\"Value\":\"old\"}]}," +
+            "{\"Server\":\"s\",\"Grid\":\"other\",\"Columns\":[{\"Column\":\"HostName\",\"Value\":\"h\"}]}," +
+            "{\"Server\":\"s\",\"Grid\":\"g\",\"Columns\":[{\"Column\":\"LoginName\",\"Value\":\"first\"}," +
+            "{\"Column\":\"HostName\",\"Value\":\"h2\"},{\"Column\":\"LoginName\",\"Value\":\"last\"}]}]}");
+        var store = NewStore();
+
+        var loaded = store.Load("s", "g");
+        Assert.Equal(2, loaded.Count);
+        Assert.Equal("last", loaded.Single(f => f.ColumnName == "LoginName").Value);
+        Assert.Equal("h2", loaded.Single(f => f.ColumnName == "HostName").Value);
+
+        // Saving the grid replaces the one entry: the older copy does not come back on the next read.
+        store.Save("s", "g", Array.Empty<ColumnFilterState>());
+        store.Flush();
+        var again = NewStore();
+        Assert.Empty(again.Load("s", "g"));
+        Assert.Single(again.Load("s", "other"));
+        store.Dispose();
+    }
+
+    [Fact]
     public void A_write_goes_through_a_temp_file_so_a_failed_write_leaves_the_old_file_whole()
     {
         var warnings = new List<string>();

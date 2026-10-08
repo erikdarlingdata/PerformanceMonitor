@@ -51,7 +51,9 @@
         { "desktop": "TextData", "web": "text_data" },
         { "desktop": "Definition", "web": "definition" },
         { "desktop": "DurationFormatted", "web": "duration_formatted" },
-        { "desktop": "Preview", "web": "sql_preview" }
+        { "desktop": "Preview", "web": "sql_preview" },
+        { "desktop": "Reason", "web": "reason" },
+        { "desktop": "RecommendationReason", "web": "recommendation_reason" }
       ],
       "listed": [
         { "desktop": "LoginName", "web": "login_name" },

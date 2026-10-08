@@ -3120,7 +3120,7 @@ const COLLECTION_CAVEATS_PANEL = {
   hideWhenNoRows: true,
   columns: [
     { key: "family", label: "Family" },
-    { key: "reason", label: "Reason", wrap: true, valueList: false },
+    { key: "reason", label: "Reason", wrap: true },
     { key: "first_seen_utc", label: "Since", format: "time" },
     { key: "last_seen_utc", label: "Last seen", format: "time" },
   ],

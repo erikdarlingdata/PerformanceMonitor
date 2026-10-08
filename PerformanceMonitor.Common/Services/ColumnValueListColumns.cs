@@ -13,7 +13,7 @@ namespace PerformanceMonitor.Common;
 
 /// <summary>
 /// Which columns get no value list (#5565), decided by the column, not by length alone: query text, statement text,
-/// plan and XML columns, prose (messages, definitions, details), and the display strings that stand in for a number
+/// plan and XML columns, prose (messages, definitions, details, reasons), and the display strings that stand in for a number
 /// or a time (a "...Text" or "...Formatted" cell) keep the text match, because a list of them is a wall of near-unique
 /// strings. The column-name rules read the bound property's name, which every grid's filter button already carries.
 /// </summary>
@@ -24,8 +24,9 @@ public static class ColumnValueListColumns
         "Text", "Formatted", "Display", "Xml", "Plan", "Message", "Definition", "Preview", "Sql", "Detail", "Details",
         "Description", "Statement", "Query", "Command", "Json", "Graph",
         /* A script is statement-class text (index cleanup DDL, a plan-correction call), an error is a collector's
-           message (it can name a login, a host, a path or the query), and an "...Info" cell is free text (#5565). */
-        "Script", "Error", "Info"
+           message (it can name a login, a host, a path or the query), an "...Info" cell is free text, and a "...Reason"
+           cell is prose a person or a collector wrote (a stored caveat, a recommendation reason) (#5565). */
+        "Script", "Error", "Info", "Reason"
     };
 
     private static readonly string[] s_fragments = { "QueryText", "QueryPlan", "SqlText", "StatementText", "BatchText", "PlanXml", "TextData" };

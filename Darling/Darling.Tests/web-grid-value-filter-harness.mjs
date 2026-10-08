@@ -355,11 +355,11 @@ const scenarios = {
     out.listed = pairs.listed.map((p) => [p.web, gvf.noListName(p.web)]);
   },
   /* Which columns get a list by name (the shared no-list rule), with cells short enough to list: the Alerts "Detail"
-     column (key detail_text), job step messages, error and script columns, the opt-out marker, and a plain column. */
+     column (key detail_text), job step messages, error and script columns, "reason" (the name rule alone, no marker), and a plain column. */
   offeredByName() {
     const has = (w, i) => { open(w, i); const r = byClass(w, "grid-filter-values").length > 0; filterBtn(w, i).click(); return r; };
     const names = ["detail_text", "step_message", "error_message", "recommendation_details", "description", "reason", "Script", "ImplementationScript", "LastError", "AdditionalInfo", "login_name", "status"];
-    const mix = names.map((k) => ({ key: k, label: k === "reason" ? "Reason" : "Col " + k, valueList: k === "reason" ? false : undefined }));
+    const mix = names.map((k) => ({ key: k, label: "Col " + k }));
     const row = {};
     for (const k of names) row[k] = "short";
     newRoute();
@@ -380,6 +380,48 @@ const scenarios = {
     out.shown = shownIx0(w);
     tick(blankItem(w), false);
     out.shownNoBlank = shownIx0(w);
+  },
+  /* A column built from other fields (the Alerts Status, Triage and Mute columns): the rows have no field named by its
+     key, so the raw value is undefined and the list is built from the text the cells show. */
+  async derivedColumn() {
+    const { el } = await import(pathToFileURL(root + "/util.js").href);
+    newRoute();
+    const hash = globalThis.location.hash;
+    const mk = () => [
+      { key: "status", label: "Status", render: (r) => (r.muted ? "Muted" : r.send_error ? "Delivery error" : "Delivered") },
+      { key: "triage", label: "Triage", csv: false, render: () => el("a", { href: "#/triage", text: "Open" }) },
+      { key: "mute", label: "Mute", csv: false, render: () => el("a", { href: "#/mute", text: "Mute this alert" }) },
+      { key: "i", label: "Ix", format: "int" },
+    ];
+    const shownAt3 = (x) => tbodyOf(x).children.filter((t) => t.style.display !== "none").map((t) => Number(t.children[3].textContent));
+    const rows = [{ muted: true, i: 0 }, { send_error: "boom", i: 1 }, { i: 2 }, { muted: true, i: 3 }];
+    let w = VIZ.table({ rows }, { rowsKey: "rows", columns: mk(), title: "Derived", tools: false });
+    open(w, 0);
+    out.statusItems = valueItems(w).map(itemText);
+    out.statusHasBlank = !!blankItem(w);
+    tick(findItem(w, "Muted"), false);
+    out.afterUntick = shownAt3(w);
+    await reload();
+    globalThis.location = { hash };
+    w = VIZ.table({ rows }, { rowsKey: "rows", columns: mk(), title: "Derived", tools: false });
+    out.afterReload = shownAt3(w);
+    for (const i of [1, 2]) {
+      open(w, i);
+      out["items" + i] = valueItems(w).map(itemText);
+      out["blank" + i] = !!blankItem(w);
+      filterBtn(w, i).click();
+    }
+    /* A stored value filter that names a shown label matches those rows (a filter kept by an earlier build). */
+    mod.flushGridFilters();
+    const doc = stored();
+    for (const [, cols2] of doc.grids) for (const f of Object.values(cols2)) if (f.values) out.storedSet = f.values.set;
+    /* A no-list column (valueList: false) over the same shape is still not offered a list. */
+    newRoute();
+    const noList = mk();
+    noList[0].valueList = false;
+    w = VIZ.table({ rows }, { rowsKey: "rows", columns: noList, title: "Derived2", tools: false });
+    open(w, 0);
+    out.noListOffered = byClass(w, "grid-filter-values").length > 0;
   },
   /* The search folds case like .NET OrdinalIgnoreCase: a capital sharp s is not a sharp s, "ss" is not a sharp s. */
   searchFold() {

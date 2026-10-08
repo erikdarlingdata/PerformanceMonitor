@@ -258,6 +258,11 @@ public sealed class ColumnFilterPopupTests
             popup.FilterApplied += (_, e) => applied = e;
             Click(ButtonNamed(popup, "Clear the value filter"));
             Assert.Equal(Visibility.Collapsed, panel.Visibility);
+            // The clear takes effect at once, as the web page's does: a click outside the popup afterwards (no Apply) keeps it.
+            Assert.NotNull(applied);
+            Assert.Equal(ColumnValueMode.None, applied!.FilterState.ValueMode);
+            Assert.Empty(applied.FilterState.Values);
+            applied = null;
             Find<TextBox>(popup, t => t.Name == "ValueTextBox").Text = "x";
             Click(ButtonNamed(popup, "Apply"));
 

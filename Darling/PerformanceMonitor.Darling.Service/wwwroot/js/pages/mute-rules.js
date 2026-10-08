@@ -33,7 +33,7 @@ export const TEXT_FIELDS = [
   { key: "wait_type_pattern", label: "Wait type (substring)" },
   { key: "query_text_pattern", label: "Query text (substring)" },
   { key: "job_name_pattern", label: "Job name (substring)" },
-  { key: "reason", label: "Reason", valueList: false },
+  { key: "reason", label: "Reason" },
 ];
 const EXPIRY = "expires_at_utc";
 /* server_id is not a form field: it arrives from an Alert History pre-fill and rides along in the create body, so

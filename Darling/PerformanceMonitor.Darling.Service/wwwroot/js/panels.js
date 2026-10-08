@@ -655,8 +655,14 @@ function gridFilter(desc, cols, head, tbody) {
      raw value is null, empty or whitespace, whatever the cell draws. A text column's raw value is the string the cell
      renders, so for plain text the two are the same; they differ only where a column draws something other than its
      value (a format, a badge), and then the raw value is what the desktop's list reads too. A raw value that is a list
-     or an object has no text of its own, so the rendered text stands for it. */
-  function listCell(raw, text) {
+     or an object has no text of its own, so the rendered text stands for it. A row with no raw field at all
+     (undefined) under a column that draws its cell with `render` or `display` is a column built from other fields
+     (the Alerts Status column): the shown text stands for it, as it did before the list read raw values, so the list
+     holds what the cells show and a stored value that names a shown label still matches. */
+  function listCell(c, raw, text) {
+    if (raw === undefined && (typeof c.display === "function" || typeof c.render === "function")) {
+      return filterCellEmpty(c, raw, text) ? { blank: true, text: "" } : { blank: false, text };
+    }
     if (isEmptyValue(raw) || (typeof raw === "string" && raw.trim() === "") || (Array.isArray(raw) && raw.length === 0)) return { blank: true, text: "" };
     if (typeof raw === "string") return { blank: false, text: raw };
     if (typeof raw === "number" || typeof raw === "boolean" || typeof raw === "bigint") return { blank: false, text: String(raw) };
@@ -682,7 +688,7 @@ function gridFilter(desc, cols, head, tbody) {
         const raw = trRow.has(tr) ? columnValue(trRow.get(tr), cols[i]) : undefined;
         if (textOn && !filterPasses(op, kind, term, cols[i], raw, td.textContent)) return true;
         if (!vals) return false;
-        const cell = listCell(raw, td.textContent);
+        const cell = listCell(cols[i], raw, td.textContent);
         return !valuePasses(vals, cell.blank, cell.text);
       });
       if (out) filteredOut.add(tr);
@@ -773,7 +779,7 @@ function gridFilter(desc, cols, head, tbody) {
     return collectValues(
       Array.from(tbody.children, (tr) => {
         const td = tr.children[i];
-        return listCell(trRow.has(tr) ? columnValue(trRow.get(tr), c) : undefined, td ? td.textContent : "");
+        return listCell(c, trRow.has(tr) ? columnValue(trRow.get(tr), c) : undefined, td ? td.textContent : "");
       })
     );
   }

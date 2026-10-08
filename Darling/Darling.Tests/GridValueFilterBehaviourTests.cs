@@ -184,22 +184,12 @@ public sealed class GridValueFilterBehaviourTests
         var names = Strs(r.GetProperty("names"));
         var offered = r.GetProperty("offered").EnumerateArray().Select(e => e.GetBoolean()).ToArray();
         // The Alerts "Detail" column (detail_text), job step and severe-error messages, recommendation details, descriptions,
-        // scripts, errors and info cells, and a column marked valueList: false (the stored-caveat "reason") get no list;
+        // scripts, errors, info and reason cells get no list, by name alone (the stored-caveat "reason" carries no marker);
         // an ordinary name column does.
         for (var i = 0; i < names.Length; i++)
         {
             Assert.True(offered[i] == (names[i] == "login_name" || names[i] == "status"), names[i] + " offered=" + offered[i]);
         }
-    }
-
-    [Fact]
-    public void TheFreeTextReasonColumns_AreMarkedWithNoList()
-    {
-        // The stored-caveat "reason" (server-tabs.js) and the mute rule's typed "reason" are prose that the name rule does
-        // not catch (a key ending in "reason"), so each column carries the opt-out itself. A source pin: those descriptors
-        // sit inside page modules that cannot be loaded without a server.
-        Assert.Contains("{ key: \"reason\", label: \"Reason\", wrap: true, valueList: false }", ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"), System.StringComparison.Ordinal);
-        Assert.Contains("{ key: \"reason\", label: \"Reason\", valueList: false }", ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "mute-rules.js"), System.StringComparison.Ordinal);
     }
 
     [Fact]
@@ -210,6 +200,25 @@ public sealed class GridValueFilterBehaviourTests
         Assert.True(r.GetProperty("hasBlank").GetBoolean());
         Assert.Equal(new[] { "<<App>>", "<<app>>", "<<none>>", "<<  >>", "<<job>>" }, Strs(r.GetProperty("shown")));
         Assert.Equal(new[] { "<<App>>", "<<app>>", "<<job>>" }, Strs(r.GetProperty("shownNoBlank")));
+    }
+
+    [Fact]
+    public void AColumnBuiltFromOtherFields_ListsTheTextItShows_AsTheAlertsStatusColumnDoes()
+    {
+        // #5565: alert rows have no "status" field, so the Status, Triage and Mute cells have no raw value. The list holds
+        // the shown labels (not just "(Blanks)"), unticking one hides only those rows, a stored "Muted" filter matches the
+        // Muted rows, and a column marked valueList: false still gets no list.
+        var r = Run("derivedColumn");
+        Assert.Equal(new[] { "Delivered", "Delivery error", "Muted" }, Strs(r.GetProperty("statusItems")));
+        Assert.False(r.GetProperty("statusHasBlank").GetBoolean());
+        Assert.Equal(new[] { 1, 2 }, Ints(r.GetProperty("afterUntick")));
+        Assert.Equal(new[] { 1, 2 }, Ints(r.GetProperty("afterReload")));
+        Assert.Equal(new[] { "Muted" }, Strs(r.GetProperty("storedSet")));
+        Assert.Equal(new[] { "Open" }, Strs(r.GetProperty("items1")));
+        Assert.Equal(new[] { "Mute this alert" }, Strs(r.GetProperty("items2")));
+        Assert.False(r.GetProperty("blank1").GetBoolean());
+        Assert.False(r.GetProperty("blank2").GetBoolean());
+        Assert.False(r.GetProperty("noListOffered").GetBoolean());
     }
 
     [Fact]
