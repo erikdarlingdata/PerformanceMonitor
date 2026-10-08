@@ -300,22 +300,22 @@ SUITE_BY_PREFIX = {
 }
 
 
-def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
-    """{suite: {simple class name: {"Key=Value", ...}}} read from the test sources."""
-    out: dict[str, dict[str, set[str]]] = {}
+def _walk_classes(root: str):
+    """Yield (suite, repo-relative file with '/', simple class name, {"Key=Value", ...}) for every class declaration."""
     for suite, rel in SUITE_DIRS.items():
-        classes: dict[str, set[str]] = out.setdefault(suite, {})
         base = os.path.join(root, rel)
         for dp, dn, fn in os.walk(base):
             dn[:] = [d for d in dn if d not in ("bin", "obj")]
             for f in fn:
                 if not f.endswith(".cs"):
                     continue
+                path = os.path.join(dp, f)
                 try:
-                    with open(os.path.join(dp, f), encoding="utf-8-sig") as fh:
+                    with open(path, encoding="utf-8-sig") as fh:
                         lines = fh.read().split("\n")
                 except OSError:
                     continue
+                relfile = os.path.relpath(path, root).replace(os.sep, "/")
                 for n, line in enumerate(lines):
                     m = _CLASS_DECL.match(line)
                     if not m:
@@ -329,7 +329,14 @@ def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
                             j -= 1
                         else:
                             break
-                    classes.setdefault(m.group(1), set()).update(traits)
+                    yield suite, relfile, m.group(1), traits
+
+
+def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
+    """{suite: {simple class name: {"Key=Value", ...}}} read from the test sources."""
+    out: dict[str, dict[str, set[str]]] = {suite: {} for suite in SUITE_DIRS}
+    for suite, _file, name, traits in _walk_classes(root):
+        out[suite].setdefault(name, set()).update(traits)
     return out
 
 
@@ -358,6 +365,139 @@ def class_selected(suite: str, traits: set[str], d: dict) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------------------------------------
+# Slow classes: pull requests skip them unless the change reaches them (#5459, change 5).
+# ---------------------------------------------------------------------------------------------------------
+#
+# A class tagged [Trait("Cost", "Slow")] is slow, has never failed in the corpus, and is covered by the push to dev
+# one merge later. A pull_request run leaves it out unless the change reaches it. Push, merge-queue, nightly and
+# release runs run every class: slow_skip answers nothing for them. This is a separate pass over the classes a leg
+# already chose, not part of darling_scope or lite_scope, so a new scope composes with it.
+#
+# "Reaches it", from the changed file names alone (the same cheap signal the area filters use):
+#   * the file is a source file the class is declared in;
+#   * the file's name (without the extension) appears as a word in the class's source, which is how a test names the
+#     product file, harness script or helper it exercises;
+#   * a .js/.mjs/.css/.html file, and a class whose source names a .js or .mjs file (the Node-driven classes load
+#     scripts through a harness that imports others);
+#   * any non-.cs file inside the class's own test project (a csproj, a fixture, a harness), or a build input
+#     (the workflow, this script, a props/csproj/lock file, global.json).
+# When the changed file list is unknown (the API call failed, or it came back empty) nothing is skipped.
+
+SLOW_TRAIT = "Cost=Slow"
+_BUILD_INPUT_NAMES = {"directory.build.props", "directory.build.targets", "directory.packages.props", "global.json",
+                      "nuget.config", "packages.lock.json"}
+_BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.py", ".github/darling-paths-filter.yml"}
+_BUILD_INPUT_SUFFIXES = (".csproj", ".props", ".targets", ".sln", ".slnx")
+_WEB_SUFFIXES = (".js", ".mjs", ".css", ".html")
+
+
+def scan_slow(root: str = ROOT) -> dict[str, dict[str, list[str]]]:
+    """{suite: {class: [repo-relative source files]}} for every class tagged Cost=Slow (a Guard class never counts:
+    the Guard stage runs on every pull request)."""
+    files: dict[tuple[str, str], list[str]] = {}
+    traits: dict[tuple[str, str], set[str]] = {}
+    for suite, relfile, name, t in _walk_classes(root):
+        files.setdefault((suite, name), [])
+        if relfile not in files[(suite, name)]:
+            files[(suite, name)].append(relfile)
+        traits.setdefault((suite, name), set()).update(t)
+    out: dict[str, dict[str, list[str]]] = {suite: {} for suite in SUITE_DIRS}
+    for (suite, name), t in traits.items():
+        if SLOW_TRAIT in t and "Stage=Guard" not in t:
+            out[suite][name] = sorted(files[(suite, name)])
+    return out
+
+
+class SlowIndex:
+    """The Cost=Slow classes of the tree and what reaches them."""
+
+    def __init__(self, root: str = ROOT) -> None:
+        self.root = root
+        self.slow = scan_slow(root)
+        self._text: dict[tuple[str, str], str] = {}
+        self._words: dict[tuple[str, str], set[str]] = {}
+
+    def text(self, suite: str, name: str) -> str:
+        key = (suite, name)
+        if key not in self._text:
+            parts = []
+            for rel in self.slow[suite][name]:
+                try:
+                    with open(os.path.join(self.root, rel), encoding="utf-8-sig") as fh:
+                        parts.append(fh.read())
+                except OSError:
+                    pass
+            self._text[key] = "\n".join(parts)
+        return self._text[key]
+
+    def words(self, suite: str, name: str) -> set[str]:
+        """The class source's words (letters, digits, underscore, hyphen), the unit a file stem is matched against."""
+        key = (suite, name)
+        if key not in self._words:
+            self._words[key] = set(re.findall(r"[\w-]+", self.text(suite, name)))
+        return self._words[key]
+
+    def skip(self, files: list[str], event: str) -> dict[str, list[str]]:
+        """{suite: [simple class names a leg leaves out]} for one change. Empty for every event but pull_request,
+        and when the changed file list is unknown."""
+        out: dict[str, list[str]] = {suite: [] for suite in SUITE_DIRS}
+        if event != "pull_request" or not files:
+            return out
+        changed = set(files)
+        # Everything about the change is computed once; a class is then a few set lookups.
+        stems: set[str] = set()
+        odd_stems: set[str] = set()
+        exts: set[str] = set()
+        build_input = False
+        for f in changed:
+            low = f.lower()
+            base = f.rsplit("/", 1)[-1]
+            stem, dot, ext = base.rpartition(".")
+            ext = dot + ext.lower() if dot else ""
+            if low in _BUILD_INPUT_PATHS or base.lower() in _BUILD_INPUT_NAMES or low.endswith(_BUILD_INPUT_SUFFIXES):
+                build_input = True
+            if stem:
+                (stems if re.fullmatch(r"[\w-]+", stem) else odd_stems).add(stem)
+            if ext in _WEB_SUFFIXES:
+                exts.add(ext)
+        if build_input:
+            return out
+        for suite, classes in self.slow.items():
+            test_dir = SUITE_DIRS[suite].replace(os.sep, "/") + "/"
+            if any(f.startswith(test_dir) and not f.endswith(".cs") for f in changed):
+                continue
+            for name, own in classes.items():
+                text = self.text(suite, name)
+                reached = bool(changed.intersection(own)) or bool(stems & self.words(suite, name)) \
+                    or any(re.search(r"(?<![\w-])" + re.escape(x) + r"(?![\w-])", text) for x in odd_stems) \
+                    or (bool(exts) and (".mjs" in text or any(e in text for e in exts)))
+                if not reached:
+                    out[suite].append(name)
+            out[suite].sort()
+        return out
+
+
+def changed_files_of_pr(repo: str, pr: str) -> list[str]:
+    """The pull request's changed files (both sides of a rename) through `gh api`; [] when the call fails."""
+    import subprocess
+    try:
+        r = subprocess.run(["gh", "api", f"repos/{repo}/pulls/{pr}/files", "--paginate", "--jq",
+                            '.[] | .filename, (.previous_filename // empty)'],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"slow-skip: could not list the pull request's files ({e}); skipping nothing", file=sys.stderr)
+        return []
+    if r.returncode != 0:
+        print(f"slow-skip: gh api exited {r.returncode}; skipping nothing", file=sys.stderr)
+        return []
+    out = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+    if len(out) >= 3000:  # the API lists at most 3000 files, so a list this long may be cut: do not trust it
+        print("slow-skip: the file list may be truncated; skipping nothing", file=sys.stderr)
+        return []
+    return out
+
+
 def load_accepted(path: str = ACCEPTED) -> set[tuple[str, str]]:
     """The rows today's rules miss for a reason that is not a selection gap. One `<sha prefix> <class>` per line,
     the reason in a `#` comment above the group. A miss that is not listed here fails the replay."""
@@ -377,6 +517,7 @@ def replay(corpus: str = CORPUS, root: str = ROOT, quiet: bool = False) -> int:
     accepted = load_accepted()
     accepted_seen = 0
     tree = scan_classes(root)
+    slow = SlowIndex(root)
     rows = checked = misses = exempt = 0
     gone: set[str] = set()
     missed: list[str] = []
@@ -387,6 +528,7 @@ def replay(corpus: str = CORPUS, root: str = ROOT, quiet: bool = False) -> int:
             row = json.loads(line)
             rows += 1
             d = decide(row["changed_files"], row["event"], rules)
+            skipped = slow.skip(row["changed_files"], row["event"])
             for cls in row["failed_classes"]:
                 prefix, _, simple = cls.rpartition(".")
                 suite = SUITE_BY_PREFIX.get(prefix)
@@ -398,7 +540,7 @@ def replay(corpus: str = CORPUS, root: str = ROOT, quiet: bool = False) -> int:
                     gone.add(cls)
                     continue
                 checked += 1
-                if not class_selected(suite, traits, d):
+                if simple in skipped.get(suite, ()) or not class_selected(suite, traits, d):
                     if (row["head_sha"][:10], cls) in accepted:
                         accepted_seen += 1
                         continue
@@ -718,6 +860,14 @@ def main(argv: list[str]) -> int:
     ts.add_argument("--all-count", type=int, default=0)
     ts.add_argument("--lite-count", type=int, default=0)
 
+    sk = sub.add_parser("slow-skip", help="the Cost=Slow classes a pull request run leaves out (workflow step)")
+    sk.add_argument("--suite", required=True, choices=sorted(SUITE_DIRS))
+    sk.add_argument("--event", required=True)
+    sk.add_argument("--repo", default="")
+    sk.add_argument("--pr", default="")
+    sk.add_argument("--list", action="store_true", help="print every Cost=Slow class of the suite instead")
+    sk.add_argument("files", nargs="*", help="changed files; with --repo and --pr they come from the API instead")
+
     dc = sub.add_parser("decide", help="print every decision for a list of changed files")
     dc.add_argument("--event", default="pull_request")
     dc.add_argument("files", nargs="*")
@@ -773,6 +923,16 @@ def main(argv: list[str]) -> int:
         scope = tree_scope(args.event, args.all_count, args.lite_count)
         print(f"scope={scope}")
         print("filter=" + scope_filter(scope))
+        return 0
+    if args.cmd == "slow-skip":
+        index = SlowIndex()
+        if args.list:
+            print("\n".join(sorted(index.slow[args.suite])))
+            return 0
+        files = args.files
+        if not files and args.repo and args.pr.isdigit() and args.event == "pull_request":
+            files = changed_files_of_pr(args.repo, args.pr)
+        print("\n".join(index.skip(files, args.event)[args.suite]))
         return 0
     if args.cmd == "decide":
         print(json.dumps(decide(args.files, args.event, Rules()), indent=1))

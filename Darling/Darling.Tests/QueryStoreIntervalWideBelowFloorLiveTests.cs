@@ -33,6 +33,7 @@ namespace Darling.Tests;
    to CREATE and DROP its own database through ScratchPostgres and works entirely inside it (the chunk drops and
    the retention delete run against that database), so it cannot race live collection. */
 [Collection("gap-cache-serial")]
+[Trait("Cost", "Slow")]
 public sealed class QueryStoreIntervalWideBelowFloorLiveTests
 {
     internal const int ServerId = -4689001;

@@ -34,6 +34,7 @@ namespace PerformanceMonitorLite.Tests;
 /// late) shows no banner.
 /// </summary>
 [Collection("server-time-helper")]
+[Trait("Cost", "Slow")]
 public sealed class DataStartBannerQueriesTabTests : IDisposable
 {
     private const int ServerId = 4343;

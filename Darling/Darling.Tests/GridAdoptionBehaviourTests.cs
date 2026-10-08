@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// <summary>
 /// Per-column filters on the web dashboard's shared table renderer (#4843), from the shipped <c>panels.js</c> run under Node (<c>web-grid-adoption-harness.mjs</c>). Node is skipped when it is not installed.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class GridAdoptionBehaviourTests
 {
     private static JsonElement Run(string scenario)
