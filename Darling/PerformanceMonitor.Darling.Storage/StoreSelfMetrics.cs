@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// do not exist there);</item>
 /// <item>one row per payload dimension table (<c>object_kind = 'dimension'</c>): total bytes
 /// (<c>pg_total_relation_size</c> — heap + indexes + TOAST, where the plan XML actually lives), the
-/// exact row count and, since V137 (#3783), the TOAST file's own size (<c>toast_bytes</c>) beside a
+/// row count (the planner's <c>reltuples</c> estimate since #5520, not a scan) and, since V137 (#3783), the TOAST file's own size (<c>toast_bytes</c>) beside a
 /// <c>toast_live_bytes</c> that is NULL unless the store happens to carry <c>pg_freespacemap</c> — see
 /// <see cref="DimensionInsertSql"/> and <see cref="ToastLiveBytesUpdateSql"/>. The dims are the store's dominant payloads (measured: query_plan_dim
 /// alone was 101 GB of a 147 GB store, 69%) and invisible to every hypertable-shaped surface because they
@@ -311,10 +311,18 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
     /// <summary>
     /// The payload dimension rows — every store shape (the dims are plain tables everywhere). Table names
     /// are the <see cref="PayloadDimensions"/> compile-time constants, so interpolation is safe (the
-    /// DarlingRetention.DeleteSqlFor reasoning). The exact <c>count(*)</c> is deliberate over
-    /// <c>pg_class.reltuples</c>: it is an hourly index-only scan over the digest PK, and the dim heap is
-    /// small — the bytes live in TOAST, which <c>pg_total_relation_size</c> counts and a scan never
-    /// touches. $1 metric_time.
+    /// DarlingRetention.DeleteSqlFor reasoning). <c>row_count</c> is the planner's
+    /// <c>pg_class.reltuples</c> ESTIMATE, not a <c>count(*)</c> (#5520). This used to be an exact count, chosen
+    /// on the premise of an hourly index-only scan over the digest PK of a small heap, with the bytes in TOAST
+    /// where a scan never goes. The premise does not hold on a large store: 329 calls measured 149,562 blocks and
+    /// 25.9 s each (49.2 M blocks, 8,510 s in all), because the scan reads the index and whatever of the heap it
+    /// must, and a table this size is not read cheaply once an hour for a figure whose job is "roughly how many
+    /// distinct statements and plans are stored". <c>reltuples</c> is refreshed by every autovacuum and ANALYZE
+    /// (the dims churn through row-capped deletes, so that is often), costs one catalog row, and is the same
+    /// estimate <see cref="TableInsertSql"/> already uses, so <c>row_count</c> means one thing across the kinds
+    /// that carry it. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
+    /// rather than a count of minus one, as it does there. Every reader of a dimension row's <c>row_count</c>
+    /// passes it through (<c>get_store_metrics</c> and its daily series); none computes from it. $1 metric_time.
     ///
     /// <para><b><c>toast_bytes</c> and <c>toast_live_bytes</c> (V137, #3783) — the dimension rows are the
     /// only kind that fills them.</b> <c>pg_total_relation_size</c> says how big the dimension is and nothing
@@ -354,7 +362,7 @@ SELECT
     '{PayloadDimensions.QueryTextDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryTextDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryTextDimTable}),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryTextDimTable}'::regclass),
     pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryTextDimTable}'::regclass), 0)),
     NULL::bigint
 UNION ALL
@@ -363,7 +371,7 @@ SELECT
     '{PayloadDimensions.QueryPlanDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryPlanDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryPlanDimTable}),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryPlanDimTable}'::regclass),
     pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryPlanDimTable}'::regclass), 0)),
     NULL::bigint";
 
@@ -660,15 +668,15 @@ FROM pg_stat_bgwriter AS b";
     /// with (<c>DarlingStoreMetricsReader.LargestUnenumeratedSql</c>) names relations
     /// <c>schema.relation</c>, so a table that moves from that list to this one keeps its name.</para>
     ///
-    /// <para><b><c>row_count</c> here is the planner's <c>reltuples</c> ESTIMATE, not a scan, and the two
-    /// kinds differ on purpose.</b> The dimension arm counts exactly because a dim's heap is small — its
-    /// bytes live in TOAST, which a count never reads. <c>query_store_text</c> is the opposite shape: V74
-    /// stores statement text INLINE, most statements fit a heap page, so the heap IS the 15 GiB and an
-    /// exact <c>count(*)</c> would be a 15 GiB read every hour, on the same store the CAGG refresh convoy
-    /// is running on, for a figure whose job is "roughly how many statements have text". <c>reltuples</c>
-    /// is refreshed by every autovacuum and ANALYZE, is exact enough for that job, and costs one catalog
-    /// row. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
-    /// rather than to a count of minus one. The same estimate is used for all three so the kind means one
+    /// <para><b><c>row_count</c> here is the planner's <c>reltuples</c> ESTIMATE, not a scan, and so is the
+    /// dimension kind's (#5520).</b> <c>query_store_text</c> stores statement text INLINE (V74), most statements
+    /// fit a heap page, so the heap IS the 15 GiB and an exact <c>count(*)</c> would be a 15 GiB read every
+    /// hour, on the same store the CAGG refresh convoy is running on, for a figure whose job is "roughly how
+    /// many statements have text". The dimension arm once counted exactly on the premise of a small heap and an
+    /// index-only scan; measured, that was 149,562 blocks and 25.9 s a call (see <see cref="DimensionInsertSql"/>).
+    /// <c>reltuples</c> is refreshed by every autovacuum and ANALYZE, is exact enough for that job, and costs one
+    /// catalog row. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
+    /// rather than to a count of minus one. The same estimate is used for all of them so the column means one
     /// thing. $1 metric_time.</para>
     /// </summary>
     public const string TableInsertSql = $@"

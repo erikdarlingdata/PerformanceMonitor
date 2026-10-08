@@ -189,7 +189,7 @@ public sealed class StoreSelfMetricsTests
     }
 
     [Fact]
-    public void DimensionInsertSql_CoversBothPayloadDims_WithTotalRelationSizeAndExactRowCount()
+    public void DimensionInsertSql_CoversBothPayloadDims_WithTotalRelationSizeAndTheEstimatedRowCount()
     {
         var sql = StoreSelfMetrics.DimensionInsertSql;
 
@@ -201,7 +201,9 @@ public sealed class StoreSelfMetricsTests
         Assert.Contains(PayloadDimensions.QueryPlanDimTable, sql, StringComparison.Ordinal);
         Assert.Contains("pg_total_relation_size", sql, StringComparison.Ordinal);
         Assert.Contains("'dimension'", sql, StringComparison.Ordinal);
-        Assert.Contains("count(*)", sql, StringComparison.Ordinal);
+        /* #5520: the planner's estimate, NULL where it is -1, never a count(*) over a table this size every hour. */
+        Assert.Contains("CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("count(*)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
