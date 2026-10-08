@@ -262,7 +262,11 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
     /// <summary>
     /// A backlog of 60,000 expired rows spanning six days (more than one batch at the 50,000 ceiling) drains
     /// through the real sweep in several batches inside the command timeout, and the rows inside the horizon are
-    /// untouched.
+    /// untouched. This pins the drain's shape (the row count, more than one batch, no failure). It is NOT the
+    /// regression proof for #5569: on a fast scratch database the old whole-day statement also clears this
+    /// backlog without timing out, so no timing-free assertion here can fail on it for a real reason (it fails on
+    /// the old code only because the old call sites logged no drain line). The lock-based test below,
+    /// <c>ATimedOutPass_KeepsItsProgress_...</c>, is the one that fails on the old code for the field's reason.
     /// </summary>
     [Theory]
     [MemberData(nameof(Tables))]
@@ -404,6 +408,25 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
                 Assert.DoesNotContain("Seq Scan", text, StringComparison.Ordinal);
                 Assert.DoesNotContain("Sort", text, StringComparison.Ordinal);
                 Assert.Contains($"idx_{table.Name}_first_exec", text, StringComparison.Ordinal);
+
+                /* The cursor has to be an INDEX bound, not a Filter applied after a scan from the bottom of the
+                   index: that would pass every assert above and bring back the O(n^2) re-read the cursor exists
+                   to prevent (#5569). So the lower bound (">=") must sit on an "Index Cond" line of the ordered
+                   scan, never on a "Filter" line; and the first batch, which has no cursor, has no lower bound. */
+                var planLines = text.Split('\n');
+                var indexCondLines = planLines.Where(l => l.Contains("Index Cond:", StringComparison.Ordinal)).ToArray();
+                Assert.NotEmpty(indexCondLines);
+                Assert.DoesNotContain(planLines, l =>
+                    l.Contains("Filter:", StringComparison.Ordinal) && l.Contains("first_execution_time", StringComparison.Ordinal));
+                if (hasCursor)
+                {
+                    Assert.Contains(indexCondLines, l =>
+                        l.Contains(">=", StringComparison.Ordinal) && l.Contains("first_execution_time", StringComparison.Ordinal));
+                }
+                else
+                {
+                    Assert.DoesNotContain(indexCondLines, l => l.Contains(">=", StringComparison.Ordinal));
+                }
             }
 
             bodySucceeded = true;
@@ -417,7 +440,7 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
     /* ---- live: the timeout ---------------------------------------------------------------------------- */
 
     /// <summary>
-    /// A pass whose batch cannot finish (a second connection holds a row lock on the 1,500th-oldest row, and the
+    /// A pass whose batch cannot finish (a second connection holds a row lock on the 1,200th-oldest row, inside the first day, and the
     /// pass's connections carry a 500 ms <c>statement_timeout</c>, which surfaces as the same SQLSTATE 57014 a
     /// command timeout does): the cap halves from the ceiling down to the floor, the first 1,000 rows (all
     /// before the locked row) are removed and stay removed, the next batch fails at the floor, and the failure
@@ -433,7 +456,11 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
 
         const int expired = 2_000;
         const int inside = 50;
-        const int lockedRow = 1_500;
+        /* Inside the OLDEST DAY (rows 1 to 1,440 at one a minute, the old whole-day statement's first slice) but
+           past the 1,000-row floor batch. The old code's first slice then contains the locked row, times out, rolls
+           back and removes NOTHING on every pass: the #5569 field signature. The new code still commits rows 1 to
+           1,000 (all before the locked row) and fails only at the floor. */
+        const int lockedRow = 1_200;
 
         await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         var bodySucceeded = false;
@@ -458,7 +485,7 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
             await using (var timingOut = NpgsqlDataSource.Create(impatient.ConnectionString))
             {
                 var logger = new CapturingTestLogger();
-                var summary = await DarlingRetention.PurgeAsync(timingOut, timescaleAvailable: false, logger, ct);
+                await DarlingRetention.PurgeAsync(timingOut, timescaleAvailable: false, logger, ct);
 
                 /* The halving is logged, and the failure carries the rows that did land. */
                 Assert.Contains("retrying at", logger.Joined, StringComparison.Ordinal);
@@ -472,7 +499,6 @@ public sealed class QueryStoreIntervalPurgeRowCappedTests
                     connection, table.Qualified, "first_execution_time < now() AT TIME ZONE 'UTC' - " + Days(table.HorizonDays), ct));
                 Assert.Equal(inside, await CountAsync(
                     connection, table.Qualified, "first_execution_time >= now() AT TIME ZONE 'UTC' - " + Days(table.HorizonDays), ct));
-                Assert.True(summary.TablesPurged >= 0);
             }
 
             await transaction.RollbackAsync(ct);

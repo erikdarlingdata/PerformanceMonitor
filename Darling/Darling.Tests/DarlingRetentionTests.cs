@@ -358,6 +358,7 @@ public sealed class DarlingRetentionTests
             },
             cap: 25_000,
             floorCap: 1_000,
+            tableName: "query_plan_dim",
             CancellationToken.None);
 
         Assert.Equal(new[] { 25_000, 12_500 }, attemptCaps);
@@ -387,6 +388,7 @@ public sealed class DarlingRetentionTests
             },
             cap: 1_000,
             floorCap: 100,
+            tableName: "query_plan_dim",
             CancellationToken.None);
 
         Assert.Equal(2, attempts);
@@ -413,6 +415,7 @@ public sealed class DarlingRetentionTests
             },
             cap: 1_000,
             floorCap: 1_000,
+            tableName: "query_plan_dim",
             CancellationToken.None));
 
         Assert.Equal(1, attempts);
@@ -440,6 +443,7 @@ public sealed class DarlingRetentionTests
             },
             cap: 25_000,
             floorCap: 1_000,
+            tableName: "query_plan_dim",
             shutdown.Token));
 
         Assert.Equal(1, attempts);

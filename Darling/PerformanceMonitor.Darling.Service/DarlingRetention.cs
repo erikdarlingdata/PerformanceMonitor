@@ -710,7 +710,7 @@ public static class DarlingRetention
                            once adaptiveRowCapTimeColumn is set below, so this exact string is never the
                            one executed for that table. */
                         isPlanDim
-                            ? RowCappedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn, PlanDimDeleteRowCap)
+                            ? RowCappedDeleteSql("collect." + dimTable, PayloadDimensions.LastSeenColumn, PlanDimDeleteRowCap)
                             : TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
                         ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff),
                         logger,
@@ -783,6 +783,9 @@ public static class DarlingRetention
                its cap on a timeout, and orders by the first_execution_time btree (V153), so progress
                survives a timeout and the next pass resumes at the oldest remaining rows. The table is a
                plain heap, so the ctid cap is safe (the plan dimension's reasoning, RowCappedDeleteSql). */
+            /* The statement below is illustrative: PurgeOneAsync's adaptive path ignores deleteSql and
+               rebuilds the cursored form per attempt (CursoredRowCappedDeleteSql), against this same
+               schema-qualified table. */
             var intervalLatestDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalLatest.TableName,
                 RowCappedDeleteSql(
@@ -817,6 +820,9 @@ public static class DarlingRetention
                above it (L = max(window start, filled_since, table floor + 26 h, the purge-edge margin)). */
             /* #5569: the same row-capped adaptive drain as the latest table above, for the same reason (a
                whole day of the wide table timed out on every pass and removed nothing). */
+            /* The statement below is illustrative: PurgeOneAsync's adaptive path ignores deleteSql and
+               rebuilds the cursored form per attempt (CursoredRowCappedDeleteSql), against this same
+               schema-qualified table. */
             var intervalWideDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalWide.TableName,
                 RowCappedDeleteSql(
@@ -1615,8 +1621,8 @@ public static class DarlingRetention
     /// plan dimension and the two Query Store interval tables (#5569) — runs <paramref name="deleteSql"/> (a <see cref="TimeSlicedDeleteSql"/> or
     /// single-shot statement) unchanged, with the connection and command — a single bound cutoff parameter
     /// — reused across the whole drain. Set (the plan dimension, #4130, and the interval tables, #5569) ignores <paramref name="deleteSql"/>
-    /// and rebuilds each batch from <see cref="RowCappedDeleteSql"/> at whatever cap
-    /// <see cref="NextPlanDimBatchCap"/> has chosen, with <see cref="RunPlanDimBatchAsync"/> retrying a
+    /// and rebuilds each batch from <see cref="CursoredRowCappedDeleteSql"/> (the row-capped form with a
+    /// keyset cursor, #5569) at whatever cap <see cref="NextPlanDimBatchCap"/> has chosen, with <see cref="RunPlanDimBatchAsync"/> retrying a
     /// COMMAND-TIMEOUT batch at half its cap instead of failing the table outright — the field failure this
     /// exists for was one 50k-row batch passing the 300 s command timeout under first-start load, on a
     /// store whose steady-state margin was ~2x rather than the cap's designed 5x.</para>
@@ -1694,10 +1700,18 @@ public static class DarlingRetention
             }
             else
             {
-                /* batchSize doubles as the CEILING here — the call site passes PlanDimDeleteRowCap, same
-                   as always. Each run starts back at the ceiling (#4130): throughput is tonight's load,
-                   not a stored fact about the table, so nothing carries a shrunk cap into tomorrow. */
+                /* batchSize doubles as the CEILING here — the call site passes the table's row cap
+                   (PlanDimDeleteRowCap, or IntervalDeleteRowCap for the interval tables). Each run starts
+                   back at the ceiling (#4130): throughput is tonight's load, not a stored fact about the
+                   table, so nothing carries a shrunk cap into tomorrow. */
                 var cap = batchSize;
+
+                /* #5569: the statement that runs is schema-qualified, the same as the one each call site
+                   passes as deleteSql (which this path ignores), instead of leaning on the connection's
+                   search_path to find the table. A name that already carries a schema is left alone. */
+                var qualifiedTable = tableName.Contains('.', StringComparison.Ordinal)
+                    ? tableName
+                    : "collect." + tableName;
 
                 /* The keyset cursor (#5569, the coordinator's O(n^2) point): the largest time value the previous
                    batch deleted. Without it every batch is "ORDER BY time LIMIT n" from the BOTTOM of the index,
@@ -1721,7 +1735,7 @@ public static class DarlingRetention
                             {
                                 batches++;
                                 var (affected, maxDeleted) = await ExecuteCursoredBatchAsync(
-                                    connection, tableName, adaptiveRowCapTimeColumn, attemptCap, cutoff, cursor,
+                                    connection, qualifiedTable, adaptiveRowCapTimeColumn, attemptCap, cutoff, cursor,
                                     attemptCt);
                                 deleted += affected;
                                 if (maxDeleted is not null)
@@ -1733,9 +1747,9 @@ public static class DarlingRetention
                             },
                             cap,
                             PlanDimDeleteRowFloor,
+                            tableName,
                             ct,
-                            logger,
-                            tableName);
+                            logger);
 
                         var walBytes = await WalSinceAsync(walBefore, ct);
                         cap = NextPlanDimBatchCap(
@@ -1960,12 +1974,14 @@ public static class DarlingRetention
     }
 
     /// <summary>
-    /// One plan-dim purge batch (#4130): runs <paramref name="executeAttempt"/> at <paramref name="cap"/>,
+    /// One row-capped purge batch (#4130; the plan dimension, and since #5569 the two Query Store interval
+    /// tables): runs <paramref name="executeAttempt"/> at <paramref name="cap"/>,
     /// and on a COMMAND TIMEOUT specifically (<see cref="IsPlanDimBatchTimeout"/>) retries the SAME slice at
     /// half the cap, floored at <paramref name="floorCap"/>, instead of failing the whole table for the day
     /// the way every batch did before this fix. A batch that still times out AT the floor is not retried
     /// again — that failure propagates unchanged, and <see cref="PurgeOneAsync"/>'s catch fails the table
-    /// exactly as before.
+    /// exactly as before. <paramref name="tableName"/> is required: it labels the timeout warning, and a
+    /// default would mislabel any caller that forgot it.
     ///
     /// <para>Returns the cap and elapsed time of the SUCCESSFUL attempt, not the batch's total wall time —
     /// a timed-out first attempt's ~300 s is dead time at a cap that just proved too large, and folding it
@@ -1976,9 +1992,9 @@ public static class DarlingRetention
         Func<int, CancellationToken, Task<int>> executeAttempt,
         int cap,
         int floorCap,
+        string tableName,
         CancellationToken cancellationToken,
-        ILogger? logger = null,
-        string? tableName = null)
+        ILogger? logger = null)
     {
         while (true)
         {
@@ -1993,7 +2009,7 @@ public static class DarlingRetention
                 var retryCap = Math.Max(floorCap, cap / 2);
                 logger?.LogWarning(
                     "Purge batch of {Table} at cap {Cap} hit the command timeout after {Elapsed:F0}s ({Failure}); retrying at {RetryCap}",
-                    tableName ?? "query_plan_dim", cap, stopwatch.Elapsed.TotalSeconds, DescribePurgeFailure(ex), retryCap);
+                    tableName, cap, stopwatch.Elapsed.TotalSeconds, DescribePurgeFailure(ex), retryCap);
                 cap = retryCap;
             }
         }

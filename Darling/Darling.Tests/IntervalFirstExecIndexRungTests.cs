@@ -136,10 +136,11 @@ public sealed class IntervalFirstExecIndexRungTests
     }
 
     /// <summary>
-    /// The one-day-slice purge's plan (<see cref="DarlingRetention.TimeSlicedDeleteSql"/>, still the shape of the other tables' purges; the interval tables moved to the row-capped cursor form in #5569) against the migrated schema
-    /// uses the new index for its outer scan and both <c>min()</c> subqueries — no Seq Scan (or the
-    /// equivalent full-index walk a leading-column-less plan would take) on the table. Seeded with rows
-    /// spanning two days so both the "nothing to delete" and the min()-subquery shapes are exercised.
+    /// The production purge's plan (<see cref="DarlingRetention.CursoredRowCappedDeleteSql"/>, the row-capped
+    /// cursor form the interval tables run since #5569; the first batch of a pass has no cursor) against the
+    /// migrated schema uses the new index for its ordered scan: no Seq Scan on the table. Seeded with rows
+    /// spanning two days. The cursored form's own bound is pinned in
+    /// <c>QueryStoreIntervalPurgeRowCappedTests</c>.
     /// </summary>
     [Fact]
     public async Task ThePurgesPlan_UsesTheIndex_NoSeqScan()
@@ -161,7 +162,8 @@ public sealed class IntervalFirstExecIndexRungTests
             await SeedIntervalLatestAsync(connection, ct, rowCount: 2000);
             await ExecAsync(connection, ct, "VACUUM ANALYZE collect.query_store_interval_latest");
 
-            var sql = DarlingRetention.TimeSlicedDeleteSql("collect.query_store_interval_latest", "first_execution_time");
+            var sql = DarlingRetention.CursoredRowCappedDeleteSql(
+                "collect.query_store_interval_latest", "first_execution_time", 500, hasCursor: false);
             var plan = await ExplainAsync(connection, ct, sql, new DateTime(2026, 1, 3, 0, 0, 0, DateTimeKind.Unspecified));
 
             Assert.DoesNotContain("Seq Scan", plan, StringComparison.Ordinal);
