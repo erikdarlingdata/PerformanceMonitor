@@ -535,7 +535,7 @@ WHERE hour < $1;";
     /// wide rows still gets its row in the hours table.
     /// </summary>
     public static async Task<long> BuildHourAsync(
-        NpgsqlConnection connection, DateTime hour, DateTime nowUtc, CancellationToken cancellationToken)
+        NpgsqlConnection connection, DateTime hour, DateTime nowUtc, CancellationToken cancellationToken, Func<Task>? beforeCommit = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
@@ -599,6 +599,12 @@ WHERE hour < $1;";
             hours.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             hours.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
             await hours.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* Test seam: runs with every row lock of the build still held and nothing committed (a late write started here waits on a pair). */
+        if (beforeCommit is not null)
+        {
+            await beforeCommit();
         }
 
         await transaction.CommitAsync(cancellationToken);
