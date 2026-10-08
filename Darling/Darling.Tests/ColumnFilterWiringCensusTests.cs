@@ -22,6 +22,8 @@ namespace Darling.Tests;
 /// the store file is installed at startup in each app. A filtered grid with no Name, or two filtered grids in one scope
 /// with the same Name, would silently go unstored or overwrite each other, so this fails first.
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class ColumnFilterWiringCensusTests
 {
     private static readonly Regex s_manager = new(@"new\s+DataGridFilterManager<[^>]+>\(\s*(?<grid>[^)\s]+)\s*\)", RegexOptions.Compiled);
