@@ -21,6 +21,7 @@ public partial class ColumnFilterPopup : UserControl
     private bool _suppressEvents = false;
     private ColumnFilterState? _existing;
     private ColumnValueListModel? _list;
+    private bool _storedValuesCleared;
 
     public event EventHandler<FilterAppliedEventArgs>? FilterApplied;
     public event EventHandler? FilterCleared;
@@ -62,6 +63,7 @@ public partial class ColumnFilterPopup : UserControl
         _suppressEvents = true;
         _columnName = columnName;
         _existing = existingFilter;
+        _storedValuesCleared = false;
         HeaderText.Text = $"Filter: {columnName}";
 
         if (_list is not null)
@@ -70,6 +72,7 @@ public partial class ColumnFilterPopup : UserControl
         SearchTextBox.Text = string.Empty;
         ValueListPanel.Visibility = _list is null ? Visibility.Collapsed : Visibility.Visible;
         OperatorLabel.Text = _list is null ? "Operator:" : "Text match - operator:";
+        ShowStoredValues();
         ClearAllButton.Visibility = gridHasFilters ? Visibility.Visible : Visibility.Collapsed;
         if (_list is not null)
         {
@@ -140,6 +143,23 @@ public partial class ColumnFilterPopup : UserControl
         SelectAllCheckBox.IsChecked = _list.SelectAllState;
     }
 
+    /// <summary>
+    /// A column that gets no list now (its longest value grew past the limit, say) but holds a stored value filter
+    /// says so, read-only, and offers to clear it: otherwise the filter would stay active with nothing to change it.
+    /// </summary>
+    private void ShowStoredValues()
+    {
+        var show = _list is null && !_storedValuesCleared && _existing is { HasValuePart: true };
+        StoredValuesPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        StoredValuesText.Text = show ? $"Value filter kept on this column: {_existing!.ValueDisplayText}. This column offers no list now, so it can only be cleared." : string.Empty;
+    }
+
+    private void ClearStoredValuesButton_Click(object sender, RoutedEventArgs e)
+    {
+        _storedValuesCleared = true;
+        ShowStoredValues();
+    }
+
     private void ClearAllButton_Click(object sender, RoutedEventArgs e)
     {
         ClearAllRequested?.Invoke(this, EventArgs.Empty);
@@ -205,16 +225,18 @@ public partial class ColumnFilterPopup : UserControl
     }
 
     /// <summary>
-    /// The value part of the filter: the ticks when the column has a list, otherwise whatever the filter already
-    /// held (a column whose list is not offered now, with a value filter stored earlier, keeps it).
+    /// The value part of the filter: the ticks when the column has a list and a tick was changed. Otherwise whatever
+    /// the filter already held (#5565: the mode is chosen when the list changes, so a text-only Apply leaves a value
+    /// filter that today's rows have drifted away from as it was; a column whose list is not offered now, with a value
+    /// filter stored earlier, keeps it unless the reader cleared it).
     /// </summary>
     private void BuildValuePart(ColumnFilterState state)
     {
-        if (_list is not null)
+        if (_list is not null && _list.TicksDirty)
         {
             _list.ApplyTo(state);
         }
-        else if (_existing is not null)
+        else if (_existing is not null && !_storedValuesCleared)
         {
             state.ValueMode = _existing.ValueMode;
             state.Values = new HashSet<string>(_existing.Values, StringComparer.OrdinalIgnoreCase);

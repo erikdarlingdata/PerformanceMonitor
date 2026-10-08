@@ -176,6 +176,99 @@ public sealed class ColumnFilterPopupTests
     }
 
     [Fact]
+    public void A_text_only_apply_keeps_the_stored_value_part_even_when_todays_rows_have_drifted_from_it()
+    {
+        OnStaThread(() =>
+        {
+            /* Scenario A: stored ShowOnly {sa}, but the rows now hold only sa. Re-deriving the mode would find nothing
+               unticked, give None, and drop the filter. */
+            var existing = new ColumnFilterState { ColumnName = "LoginName", ValueMode = ColumnValueMode.ShowOnly };
+            existing.Values.Add("sa");
+            var popup = new ColumnFilterPopup();
+            popup.Initialize("LoginName", existing, Catalog("sa"));
+            Find<TextBox>(popup, t => t.Name == "ValueTextBox").Text = "s";
+
+            FilterAppliedEventArgs? applied = null;
+            popup.FilterApplied += (_, e) => applied = e;
+            Click(ButtonNamed(popup, "Apply"));
+
+            Assert.Equal(ColumnValueMode.ShowOnly, applied!.FilterState.ValueMode);
+            Assert.Equal(new[] { "sa" }, applied.FilterState.Values);
+            Assert.Equal("s", applied.FilterState.Value);
+
+            /* Scenario B: stored ShowOnly {sa, app}; rows now sa, app, job. A text-only Apply stays ShowOnly. */
+            existing.Values.Add("app");
+            popup.Initialize("LoginName", existing, Catalog("sa", "app", "job"));
+            Click(ButtonNamed(popup, "Apply"));
+            Assert.Equal(ColumnValueMode.ShowOnly, applied.FilterState.ValueMode);
+            Assert.True(applied.FilterState.Values.SetEquals(new[] { "sa", "app" }));
+
+            /* Touching a box does rebuild it. */
+            popup.ListModel!.Entries.Single(e => e.Value == "job").IsTicked = true;
+            Click(ButtonNamed(popup, "Apply"));
+            Assert.Equal(ColumnValueMode.None, applied.FilterState.ValueMode);
+            return true;
+        });
+    }
+
+    [Fact]
+    public void Select_All_unticked_shows_the_no_values_note_at_once()
+    {
+        OnStaThread(() =>
+        {
+            var popup = new ColumnFilterPopup();
+            popup.Initialize("LoginName", null, Catalog("a", "b"));
+            var note = Find<TextBlock>(popup, t => t.Name == "NoteText");
+            var selectAll = Find<CheckBox>(popup, c => c.Name == "SelectAllCheckBox");
+
+            selectAll.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); // everything is ticked, so this unticks it
+            Assert.Equal(Visibility.Visible, note.Visibility);
+            Assert.Equal("No values are ticked, so no rows show.", note.Text);
+
+            selectAll.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            Assert.Equal(Visibility.Collapsed, note.Visibility);
+            return true;
+        });
+    }
+
+    [Fact]
+    public void A_stored_value_part_on_a_column_with_no_list_shows_read_only_with_a_way_to_clear_it()
+    {
+        OnStaThread(() =>
+        {
+            var existing = new ColumnFilterState { ColumnName = "LoginName", ValueMode = ColumnValueMode.Hide };
+            existing.Values.Add("a");
+            existing.Values.Add("b");
+            existing.Values.Add("c");
+            var popup = new ColumnFilterPopup();
+            var panel = Find<StackPanel>(popup, p => p.Name == "StoredValuesPanel");
+            var text = Find<TextBlock>(popup, t => t.Name == "StoredValuesText");
+
+            popup.Initialize("LoginName", existing, null);
+            Assert.Equal(Visibility.Visible, panel.Visibility);
+            Assert.Contains("hides 3 values", text.Text, StringComparison.Ordinal);
+
+            popup.Initialize("LoginName", null, null);
+            Assert.Equal(Visibility.Collapsed, panel.Visibility);
+            popup.Initialize("LoginName", existing, Catalog("a", "b", "c", "d"));
+            Assert.Equal(Visibility.Collapsed, panel.Visibility);
+
+            popup.Initialize("LoginName", existing, null);
+            FilterAppliedEventArgs? applied = null;
+            popup.FilterApplied += (_, e) => applied = e;
+            Click(ButtonNamed(popup, "Clear the value filter"));
+            Assert.Equal(Visibility.Collapsed, panel.Visibility);
+            Find<TextBox>(popup, t => t.Name == "ValueTextBox").Text = "x";
+            Click(ButtonNamed(popup, "Apply"));
+
+            Assert.Equal(ColumnValueMode.None, applied!.FilterState.ValueMode);
+            Assert.Empty(applied.FilterState.Values);
+            Assert.Equal("x", applied.FilterState.Value);
+            return true;
+        });
+    }
+
+    [Fact]
     public void Clear_all_filters_shows_only_when_the_grid_has_a_filter_and_raises_its_event()
     {
         OnStaThread(() =>

@@ -79,6 +79,23 @@
                            Margin="0,4,0,0"/>
             </StackPanel>
 
+            <!-- A value filter stored on a column that gets no list now (#5565): shown read-only, with a way to clear it. -->
+            <StackPanel x:Name="StoredValuesPanel" Visibility="Collapsed" Margin="0,0,0,12">
+                <TextBlock x:Name="StoredValuesText"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundDimBrush}"
+                           FontSize="11"
+                           Margin="0,0,0,4"/>
+                <Button x:Name="ClearStoredValuesButton"
+                        Content="Clear the value filter"
+                        Height="28"
+                        Padding="6,0"
+                        HorizontalAlignment="Left"
+                        ToolTip="Remove the value filter kept on this column"
+                        AutomationProperties.Name="Clear the value filter"
+                        Click="ClearStoredValuesButton_Click"/>
+            </StackPanel>
+
             <!-- Text match, kept beside the list -->
             <TextBlock x:Name="OperatorLabel"
                        Text="Operator:"

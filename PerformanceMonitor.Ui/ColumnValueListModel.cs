@@ -136,7 +136,16 @@ public sealed class ColumnValueListModel
         _selection.SetAll(_listing, ticked);
         foreach (var entry in Entries)
             entry.Set(ticked);
+        TicksDirty = true;
+        TicksChanged?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <summary>
+    /// A tick was changed since the popup opened (a box, Select All or TickOnly). Apply rebuilds the value part only
+    /// then; a text-only Apply keeps the stored value part as it was (#5565: the mode is chosen when the list changes,
+    /// not every time the popup closes, so a value filter that rows have since drifted away from is not re-derived).
+    /// </summary>
+    public bool TicksDirty { get; private set; }
 
     /// <summary>Raised after a tick changes, so the popup can refresh Select All and the note.</summary>
     public event EventHandler? TicksChanged;
@@ -150,6 +159,8 @@ public sealed class ColumnValueListModel
         _selection.TickOnly(values, blank);
         foreach (var entry in Entries)
             entry.Set(entry.IsBlank ? _selection.IsBlankTicked : _selection.IsTicked(entry.Value!));
+        TicksDirty = true;
+        TicksChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private ColumnFilterState Preview()
@@ -175,6 +186,7 @@ public sealed class ColumnValueListModel
             _selection.SetBlankTicked(entry.IsTicked);
         else
             _selection.SetTicked(entry.Value!, entry.IsTicked);
+        TicksDirty = true;
         TicksChanged?.Invoke(this, EventArgs.Empty);
     }
 }

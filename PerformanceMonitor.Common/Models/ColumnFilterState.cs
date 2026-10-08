@@ -61,6 +61,18 @@ public class ColumnFilterState
 
     public bool IsActive => HasTextMatch || HasValuePart;
 
+    /// <summary>"hides 3 values" / "shows 2 values" for the value part (the blank entry counts as a value); empty when there is none.</summary>
+    public string ValueDisplayText
+    {
+        get
+        {
+            if (!HasValuePart) return string.Empty;
+            var count = Values.Count + (ValueBlank ? 1 : 0);
+            var noun = count == 1 ? "value" : "values";
+            return ValueMode == ColumnValueMode.Hide ? $"hides {count} {noun}" : $"shows {count} {noun}";
+        }
+    }
+
     public string DisplayText
     {
         get
@@ -69,11 +81,7 @@ public class ColumnFilterState
 
             var parts = new List<string>();
             if (HasValuePart)
-            {
-                var count = Values.Count + (ValueBlank ? 1 : 0);
-                var noun = count == 1 ? "value" : "values";
-                parts.Add(ValueMode == ColumnValueMode.Hide ? $"hides {count} {noun}" : $"shows {count} {noun}");
-            }
+                parts.Add(ValueDisplayText);
             if (HasTextMatch)
                 parts.Add(TextDisplayText);
             return string.Join(", ", parts);

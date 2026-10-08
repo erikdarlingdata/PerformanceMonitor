@@ -131,16 +131,216 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     }
 
     [Fact]
-    public void A_column_naming_more_than_1000_values_is_not_stored_and_1000_is()
+    public void A_column_naming_more_than_1000_values_keeps_its_text_match_and_loses_only_the_value_part()
     {
         var store = NewStore();
         var big = Hide("Big", Enumerable.Range(0, 1001).Select(i => "v" + i).ToArray());
+        big.ValueBlank = true;
+        big.Value = "v1";
+        var bigNoText = Hide("BigNoText", Enumerable.Range(0, 1001).Select(i => "v" + i).ToArray());
         var edge = Hide("Edge", Enumerable.Range(0, 1000).Select(i => "v" + i).ToArray());
-        store.Save("srv", "Grid", new[] { big, edge });
+        store.Save("srv", "Grid", new[] { big, bigNoText, edge });
         store.Flush();
 
         var loaded = NewStore().Load("srv", "Grid");
-        Assert.Equal("Edge", Assert.Single(loaded).ColumnName);
+
+        /* the web page does the same: a cut set would change what it hides, but the text match fits and stays */
+        Assert.Equal(new[] { "Big", "Edge" }, loaded.Select(f => f.ColumnName).OrderBy(n => n));
+        var kept = loaded.Single(f => f.ColumnName == "Big");
+        Assert.Equal(ColumnValueMode.None, kept.ValueMode);
+        Assert.Empty(kept.Values);
+        Assert.False(kept.ValueBlank);
+        Assert.Equal("v1", kept.Value);
+        Assert.Equal(1000, loaded.Single(f => f.ColumnName == "Edge").Values.Count);
+    }
+
+    [Fact]
+    public void A_text_match_on_a_column_that_gets_no_list_is_never_written_but_one_on_a_list_column_is()
+    {
+        var store = NewStore();
+        var statement = new ColumnFilterState { ColumnName = "QueryText", Value = "salary > 90000" };
+        var script = new ColumnFilterState { ColumnName = "ImplementationScript", Value = "force_plan" };
+        var error = new ColumnFilterState { ColumnName = "LastError", Value = "login failed for" };
+        var login = new ColumnFilterState { ColumnName = "LoginName", Value = "svc_" };
+        store.Save("srv", "Grid", new[] { statement, script, error, login });
+        store.Flush();
+
+        var text = File.ReadAllText(FilePath);
+        Assert.DoesNotContain("salary", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("force_plan", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("login failed", text, StringComparison.Ordinal);
+        Assert.Equal("LoginName", Assert.Single(NewStore().Load("srv", "Grid")).ColumnName);
+
+        /* and one planted in the file is not loaded either */
+        File.WriteAllText(FilePath, "{\"Version\":1,\"Grids\":[{\"Server\":\"s\",\"Grid\":\"g\",\"Columns\":[" +
+            "{\"Column\":\"QueryText\",\"Operator\":\"Contains\",\"Value\":\"x\"},{\"Column\":\"LoginName\",\"Operator\":\"Contains\",\"Value\":\"y\"}]}]}");
+        Assert.Equal("LoginName", Assert.Single(NewStore().Load("s", "g")).ColumnName);
+    }
+
+    [Fact]
+    public void The_stored_limits_apply_when_the_file_is_read_too()
+    {
+        var many = string.Join(",", Enumerable.Range(0, 1001).Select(i => "\"v" + i + "\""));
+        var longValue = new string('x', ColumnFilterStore.MaxValueLength + 1);
+        var grids = new List<string>
+        {
+            /* too many values: the value part goes, the text match stays */
+            "{\"Server\":\"s\",\"Grid\":\"many\",\"Columns\":[{\"Column\":\"LoginName\",\"Operator\":\"Contains\",\"Value\":\"t\",\"ValueMode\":\"Hide\",\"Values\":[" + many + "]}]}",
+            /* a value too long: the same */
+            "{\"Server\":\"s\",\"Grid\":\"longvalue\",\"Columns\":[{\"Column\":\"LoginName\",\"Value\":\"t\",\"ValueMode\":\"Hide\",\"Values\":[\"" + longValue + "\"]}]}",
+            /* a text match too long: it goes, the value part stays */
+            "{\"Server\":\"s\",\"Grid\":\"longtext\",\"Columns\":[{\"Column\":\"LoginName\",\"Value\":\"" + longValue + "\",\"ValueMode\":\"Hide\",\"Values\":[\"a\"]}]}",
+            /* a mode and an operator this version does not know: not match-all */
+            "{\"Server\":\"s\",\"Grid\":\"badenum\",\"Columns\":[{\"Column\":\"LoginName\",\"Operator\":\"99\",\"ValueMode\":\"99\",\"Values\":[\"a\"]}]}",
+            /* a column name that is too long */
+            "{\"Server\":\"s\",\"Grid\":\"longcolumn\",\"Columns\":[{\"Column\":\"" + longValue + "\",\"Value\":\"t\"}]}",
+        };
+        File.WriteAllText(FilePath, "{\"Version\":1,\"Grids\":[" + string.Join(",", grids) + "]}");
+        var warnings = new List<string>();
+        var store = NewStore(warnings);
+
+        var many1 = Assert.Single(store.Load("s", "many"));
+        Assert.Equal(ColumnValueMode.None, many1.ValueMode);
+        Assert.Equal("t", many1.Value);
+        var longv = Assert.Single(store.Load("s", "longvalue"));
+        Assert.Equal(ColumnValueMode.None, longv.ValueMode);
+        Assert.Equal("t", longv.Value);
+        var longt = Assert.Single(store.Load("s", "longtext"));
+        Assert.Equal("", longt.Value);
+        Assert.Equal(ColumnValueMode.Hide, longt.ValueMode);
+        Assert.Empty(store.Load("s", "badenum"));
+        Assert.Empty(store.Load("s", "longcolumn"));
+        Assert.Empty(warnings);
+    }
+
+    [Fact]
+    public void A_file_with_more_than_200_grids_or_200_columns_keeps_only_the_newest_grids_and_the_first_columns()
+    {
+        var grids = Enumerable.Range(0, 300).Select(i =>
+            "{\"Server\":\"s\",\"Grid\":\"g" + i + "\",\"Columns\":[{\"Column\":\"LoginName\",\"Value\":\"t\"}]}");
+        File.WriteAllText(FilePath, "{\"Version\":1,\"Grids\":[" + string.Join(",", grids) + "]}");
+        var store = NewStore();
+
+        Assert.Empty(store.Load("s", "g99"));
+        Assert.Single(store.Load("s", "g100"));
+        Assert.Single(store.Load("s", "g299"));
+
+        var columns = string.Join(",", Enumerable.Range(0, 250).Select(i => "{\"Column\":\"C" + i + "\",\"Value\":\"t\"}"));
+        File.WriteAllText(FilePath, "{\"Version\":1,\"Grids\":[{\"Server\":\"s\",\"Grid\":\"wide\",\"Columns\":[" + columns + "]}]}");
+        Assert.Equal(ColumnFilterStore.MaxColumnsPerGrid, NewStore().Load("s", "wide").Count);
+    }
+
+    [Fact]
+    public void A_null_or_wrong_typed_entry_is_skipped_and_the_rest_of_the_file_is_used()
+    {
+        File.WriteAllText(FilePath, "{\"Version\":1,\"Grids\":[null,5,\"x\",[1]," +
+            "{\"Server\":\"s\",\"Grid\":\"g\",\"Columns\":[null,7,\"x\",{\"Column\":5},{\"Column\":\"LoginName\",\"Value\":\"ok\",\"Values\":[null,1]}," +
+            "{\"Column\":\"HostName\",\"Value\":\"h\",\"ValueMode\":\"Hide\",\"Values\":[\"a\",null]}]}," +
+            "{\"Server\":5,\"Grid\":\"g2\",\"Columns\":[]},{\"Server\":\"s\",\"Grid\":\"g3\",\"Columns\":null}]}");
+        var warnings = new List<string>();
+        var store = NewStore(warnings);
+
+        var loaded = store.Load("s", "g");
+        Assert.Equal(new[] { "HostName", "LoginName" }, loaded.Select(f => f.ColumnName).OrderBy(n => n));
+        Assert.Equal("ok", loaded.Single(f => f.ColumnName == "LoginName").Value);
+        /* a null among the values makes that value part unusable, not the column */
+        Assert.Equal(ColumnValueMode.None, loaded.Single(f => f.ColumnName == "HostName").ValueMode);
+        Assert.Empty(store.Load("s", "g2"));
+        Assert.Empty(store.Load("s", "g3"));
+        Assert.Empty(warnings);
+    }
+
+    [Fact]
+    public void A_file_over_the_size_limit_or_nested_too_deep_is_ignored_whole_with_one_warning()
+    {
+        using (var stream = new FileStream(FilePath, FileMode.Create))
+            stream.SetLength(ColumnFilterStore.MaxFileBytes + 1);
+        var warnings = new List<string>();
+        var big = NewStore(warnings);
+        Assert.Empty(big.Load("s", "g"));
+        Assert.Empty(big.Load("s", "g"));
+        Assert.Single(warnings);
+
+        File.WriteAllText(FilePath, "{\"Version\":1,\"Grids\":" + new string('[', 100) + new string(']', 100) + "}");
+        warnings.Clear();
+        var deep = NewStore(warnings);
+        Assert.Empty(deep.Load("s", "g"));
+        Assert.Single(warnings);
+    }
+
+    [Fact]
+    public void A_failed_save_is_retried_on_the_next_tick_and_warned_once_per_run()
+    {
+        var warnings = new List<string>();
+        var store = new ColumnFilterStore(FilePath, warnings.Add, TimeSpan.FromMilliseconds(50));
+        Directory.CreateDirectory(FilePath + ".tmp"); // the temp file cannot be written
+        store.Save("srv", "Grid", new[] { Hide("c", "v") });
+
+        store.Flush();
+        store.Flush();
+        store.Flush();
+        Assert.Single(warnings);
+        Assert.False(File.Exists(FilePath));
+
+        Directory.Delete(FilePath + ".tmp"); // the cause goes away: the debounce timer's own tick writes the file
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!File.Exists(FilePath) && DateTime.UtcNow < deadline)
+            Thread.Sleep(50);
+
+        Assert.True(File.Exists(FilePath), "the failed save was never retried");
+        Assert.Single(warnings);
+        Assert.Single(NewStore().Load("srv", "Grid"));
+        store.Dispose();
+    }
+
+    [Fact]
+    public void A_write_goes_through_a_temp_file_so_a_failed_write_leaves_the_old_file_whole()
+    {
+        var warnings = new List<string>();
+        var store = NewStore(warnings);
+        store.Save("srv", "One", new[] { Hide("c", "v") });
+        store.Flush();
+        var before = File.ReadAllBytes(FilePath);
+
+        /* the temp file cannot be written: a write straight into the real file would change it, replacing the temp file does not */
+        Directory.CreateDirectory(FilePath + ".tmp");
+        store.Save("srv", "Two", new[] { Hide("c", "w") });
+        store.Flush();
+
+        Assert.Single(warnings);
+        Assert.Equal(before, File.ReadAllBytes(FilePath));
+        Assert.Single(NewStore().Load("srv", "One"));
+        Assert.Empty(NewStore().Load("srv", "Two"));
+    }
+
+    [Fact]
+    public void A_file_left_in_the_old_place_is_moved_to_the_new_one_once_and_deleted()
+    {
+        var legacy = Path.Combine(_dir, "roaming", "column-filters.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(legacy)!);
+        var seed = NewStore();
+        seed.Save("srv", "Grid", new[] { Hide("c", "v") });
+        seed.Flush();
+        File.Move(FilePath, legacy);
+
+        var target = Path.Combine(_dir, "local", "column-filters.json");
+        ColumnFilterStore.Install(target, null, legacy);
+        try
+        {
+            Assert.False(File.Exists(legacy));
+            Assert.True(File.Exists(target));
+            Assert.Single(ColumnFilterStore.Current!.Load("srv", "Grid"));
+        }
+        finally
+        {
+            ColumnFilterStore.Current = null;
+        }
+
+        /* when the new place already has a file, the old one is only deleted */
+        File.WriteAllText(legacy, "{\"Version\":1,\"Grids\":[]}");
+        ColumnFilterStore.MigrateLegacyFile(legacy, target);
+        Assert.False(File.Exists(legacy));
+        Assert.True(File.Exists(target));
     }
 
     [Theory]
@@ -262,6 +462,42 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     }
 
     [Fact]
+    public void A_text_match_on_a_query_text_column_lasts_the_session_but_is_not_stored()
+    {
+        var kept = OnStaThread(() =>
+        {
+            var store = NewStore();
+            ColumnFilterStore.Current = store;
+            var grid = NewGrid("QuerySnapshotsGrid", "srv-a");
+            var manager = new DataGridFilterManager<LoginRow>(grid);
+            var rows = new List<LoginRow>
+            {
+                new() { LoginName = "sa", QueryText = "select salary from pay" },
+                new() { LoginName = "app", QueryText = "select 1" },
+            };
+            manager.UpdateData(rows);
+            manager.SetFilter(new ColumnFilterState { ColumnName = "QueryText", Value = "salary" });
+            manager.SetFilter(new ColumnFilterState { ColumnName = "LoginName", Value = "sa" });
+
+            /* a refresh keeps both for the session */
+            manager.UpdateData(rows);
+            var afterRefresh = Shown(grid);
+            store.Flush();
+            store.Dispose();
+
+            var restarted = NewStore();
+            ColumnFilterStore.Current = restarted;
+            var again = new DataGridFilterManager<LoginRow>(NewGrid("QuerySnapshotsGrid", "srv-a"));
+            again.UpdateData(rows);
+            return (afterRefresh, again.Filters.Keys.OrderBy(k => k).ToList());
+        });
+
+        Assert.Equal(new string?[] { "sa" }, kept.afterRefresh);
+        Assert.Equal(new[] { "LoginName" }, kept.Item2);
+        Assert.DoesNotContain("salary", File.ReadAllText(FilePath), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_filter_survives_a_refresh_and_a_value_that_first_appears_later_still_shows()
     {
         OnStaThread(() =>
@@ -368,6 +604,29 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
         });
 
         Assert.Equal(new string?[] { "sa", "app", "newuser" }, shown);
+    }
+
+    [Fact]
+    public void A_cross_server_list_under_the_all_servers_scope_keeps_its_filters_across_a_restart()
+    {
+        var shown = OnStaThread(() =>
+        {
+            var store = NewStore();
+            ColumnFilterStore.Current = store;
+            var manager = new DataGridFilterManager<LoginRow>(NewGrid("AlertsDataGrid", ColumnFilterScope.AllServers));
+            manager.UpdateData(Rows("sa", "app", "job_svc"));
+            Untick(manager, "LoginName", "job_svc");
+            store.Flush();
+            store.Dispose();
+
+            ColumnFilterStore.Current = NewStore();
+            var grid = NewGrid("AlertsDataGrid", ColumnFilterScope.AllServers);
+            new DataGridFilterManager<LoginRow>(grid).UpdateData(Rows("sa", "app", "job_svc"));
+            return Shown(grid);
+        });
+
+        Assert.Equal(new string?[] { "sa", "app" }, shown);
+        Assert.StartsWith("\u0001", ColumnFilterScope.AllServers, StringComparison.Ordinal);
     }
 
     [Fact]

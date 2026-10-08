@@ -175,15 +175,61 @@ public sealed class ColumnValueListTests
     }
 
     [Fact]
-    public void A_stored_filter_naming_a_value_the_rows_no_longer_hold_survives_an_unchanged_apply()
+    public void A_selection_with_every_listed_value_ticked_is_None_even_when_the_stored_filter_names_a_gone_value()
     {
+        /* #5565: the mode is chosen from the listed ticks only, as the web page does, so a gone value never keeps a
+           filter alive when every box is ticked. (The popup does not rebuild the value part at all when no box was
+           touched: see ColumnFilterPopupTests.) */
         var existing = new ColumnFilterState { ColumnName = "c", ValueMode = ColumnValueMode.Hide };
         existing.Values.Add("job_svc");
 
         var state = Apply(new ColumnValueSelection(Catalog("sa", "app"), existing));
 
+        Assert.Equal(ColumnValueMode.None, state.ValueMode);
+        Assert.Empty(state.Values);
+    }
+
+    [Fact]
+    public void Gone_values_do_not_tip_the_mode_and_are_kept_only_on_the_stored_filters_own_side()
+    {
+        var existing = new ColumnFilterState { ColumnName = "c", ValueMode = ColumnValueMode.Hide };
+        existing.Values.Add("x");
+        existing.Values.Add("y");
+        var selection = new ColumnValueSelection(Catalog("a", "b", "c"), existing);
+        selection.SetTicked("c", false);
+
+        var state = Apply(selection);
+
+        /* one unticked of three listed: Hide (the old count, 1 + 2 gone against 2, chose ShowOnly {a, b} and dropped x, y) */
         Assert.Equal(ColumnValueMode.Hide, state.ValueMode);
-        Assert.Equal(new[] { "job_svc" }, state.Values);
+        Assert.True(state.Values.SetEquals(new[] { "c", "x", "y" }));
+
+        selection.TickOnly(new[] { "a" }, false);
+        var showOnly = Apply(selection);
+
+        /* two unticked of three: ShowOnly, which does not carry the Hide filter's gone values over */
+        Assert.Equal(ColumnValueMode.ShowOnly, showOnly.ValueMode);
+        Assert.Equal(new[] { "a" }, showOnly.Values);
+    }
+
+    [Fact]
+    public void The_list_model_knows_whether_a_tick_changed_since_it_opened()
+    {
+        var model = new ColumnValueListModel(Catalog("a", "b"), null);
+        Assert.False(model.TicksDirty);
+
+        model.Entries[0].IsTicked = false;
+        Assert.True(model.TicksDirty);
+
+        foreach (var action in new Action<ColumnValueListModel>[] { m => m.SetAll(false), m => m.ToggleSelectAll(), m => m.TickOnly(new[] { "a" }, false) })
+        {
+            var fresh = new ColumnValueListModel(Catalog("a", "b"), null);
+            var raised = 0;
+            fresh.TicksChanged += (_, _) => raised++;
+            action(fresh);
+            Assert.True(fresh.TicksDirty);
+            Assert.True(raised > 0, "Select All and Tick only raise TicksChanged, so the popup refreshes its note");
+        }
     }
 
     [Fact]

@@ -101,8 +101,10 @@ public sealed class ColumnFilterWiringCensusTests
 
         var viewer = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "App.xaml.cs");
         Assert.Contains("ColumnFilterStore.Install(", viewer, StringComparison.Ordinal);
-        Assert.Contains("Path.GetDirectoryName(ViewerPreferencesStore.DefaultFilePath())", viewer, StringComparison.Ordinal);
-        Assert.Contains("\"column-filters.json\"", viewer, StringComparison.Ordinal);
+        /* The Viewer keeps the file under LOCAL application data like Lite; the roaming place is only the one an earlier
+           build used, named so the file there is moved over once. */
+        Assert.Contains("Environment.SpecialFolder.LocalApplicationData), \"PerformanceMonitorDarling\", \"column-filters.json\"", viewer, StringComparison.Ordinal);
+        Assert.Contains("Path.GetDirectoryName(ViewerPreferencesStore.DefaultFilePath())!, \"column-filters.json\")", viewer, StringComparison.Ordinal);
     }
 
     [Fact]

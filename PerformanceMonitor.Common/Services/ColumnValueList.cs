@@ -217,14 +217,12 @@ public sealed class ColumnValueSelection
         var untickedPresent = _unticked.Count + (blankEntry && !_blankTicked ? 1 : 0);
         var tickedPresent = presentItems - untickedPresent;
 
-        /* A value or blank the stored filter named but the rows no longer hold keeps its side: unticked under Hide
-           (named = hidden), ticked under ShowOnly (named = shown). */
-        var absentCount = _absentNamed.Count + (_absentBlankNamed ? 1 : 0);
-        var absentUnticked = _absentMode == ColumnValueMode.Hide ? absentCount : 0;
-        var absentTicked = _absentMode == ColumnValueMode.ShowOnly ? absentCount : 0;
-
-        var unticked = untickedPresent + absentUnticked;
-        var ticked = tickedPresent + absentTicked;
+        /* The mode is chosen from the ticks on the LISTED entries only (#5565): a value the stored filter names but the
+           rows no longer hold is kept in the state, not listed, so it never tips the count. It is carried over only
+           when the new mode is the stored filter's own mode (hidden stays hidden under Hide, shown stays shown under
+           ShowOnly) and drops when the kind changes. The web's nextValues does exactly this. */
+        var unticked = untickedPresent;
+        var ticked = tickedPresent;
 
         state.Values = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         state.ValueBlank = false;

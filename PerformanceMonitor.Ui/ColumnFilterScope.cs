@@ -24,6 +24,14 @@ public static class ColumnFilterScope
         typeof(ColumnFilterScope),
         new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.Inherits));
 
+    /// <summary>
+    /// The one fixed scope of the cross-server lists (Alert History and Job History, in Lite and in the Viewer): they
+    /// show every server's rows, so their filters are not any one server's. It starts with a control character, which
+    /// no server id or name can, so it never meets a real server's entry. The drill-down windows (three of them name
+    /// their grid "HistoryDataGrid") get no scope at all and keep their filters for the session only.
+    /// </summary>
+    public const string AllServers = "all-servers";
+
     public static string? GetServer(DependencyObject element) => (string?)element.GetValue(ServerProperty);
 
     public static void SetServer(DependencyObject element, string? value) => element.SetValue(ServerProperty, value);

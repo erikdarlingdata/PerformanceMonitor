@@ -27,7 +27,45 @@
       "listCap": 1000,
       "capNote": "Showing 1,000 of {N} values. Search to find the rest.  N is the count of distinct real values the search matches (the Blanks entry is not counted; with no search that is every value) and uses a comma thousands separator. The note shows when the cap cuts the matches off.",
       "noTicksNote": "No values are ticked, so no rows show.",
-      "modeChoice": "All entries ticked: None. Otherwise fewer unticked than ticked: Hide the unticked. Otherwise ShowOnly the ticked. Counts take every distinct value of the rows (and the blank entry when the rows have a blank cell), not just the entries the search shows."
+      "modeChoice": "All entries ticked: None. Otherwise fewer unticked than ticked: Hide the unticked. Otherwise ShowOnly the ticked. Counts take every distinct value of the rows (and the blank entry when the rows have a blank cell), not just the entries the search shows. A value the stored filter names but the rows no longer hold is not counted: the mode comes from the listed entries alone, and such a value is carried over only when the new mode is the stored filter's own (Hide keeps the hidden ones, ShowOnly the shown ones).",
+      "caseFolding": "Values compare like .NET OrdinalIgnoreCase: each character is uppercased on its own (a simple mapping), so 'ss' and the sharp s are different values, and the dotless i and the long s do not fold into 'I' and 'S'.",
+      "noListColumns": "The shared 'no list' name rule: a column whose name matches gets no value list and its text match is kept for the session only. 'excluded' and 'listed' pair the desktop property name with the web column key; both halves must give the answer in the pair.",
+      "noListColumnPairs": {
+      "excluded": [
+        { "desktop": "QueryText", "web": "query_text" },
+        { "desktop": "SqlText", "web": "blocked_sql_text" },
+        { "desktop": "DeadlockGraphXml", "web": "deadlock_graph_xml" },
+        { "desktop": "Message", "web": "message" },
+        { "desktop": "Detail", "web": "detail" },
+        { "desktop": "DetailText", "web": "detail_text" },
+        { "desktop": "Description", "web": "description" },
+        { "desktop": "Statement", "web": "statement" },
+        { "desktop": "Command", "web": "exact_measurement_command" },
+        { "desktop": "Script", "web": "script" },
+        { "desktop": "ImplementationScript", "web": "implementation_script" },
+        { "desktop": "LastError", "web": "last_error" },
+        { "desktop": "AdditionalInfo", "web": "additional_info" },
+        { "desktop": "SendError", "web": "send_error" },
+        { "desktop": "QueryPlan", "web": "query_plan" },
+        { "desktop": "PlanXml", "web": "plan_xml" },
+        { "desktop": "TextData", "web": "text_data" },
+        { "desktop": "Definition", "web": "definition" },
+        { "desktop": "DurationFormatted", "web": "duration_formatted" },
+        { "desktop": "Preview", "web": "sql_preview" }
+      ],
+      "listed": [
+        { "desktop": "LoginName", "web": "login_name" },
+        { "desktop": "HostName", "web": "host_name" },
+        { "desktop": "ProgramName", "web": "program_name" },
+        { "desktop": "DatabaseName", "web": "database_name" },
+        { "desktop": "ObjectName", "web": "object_name" },
+        { "desktop": "WaitType", "web": "wait_type" },
+        { "desktop": "Status", "web": "status" },
+        { "desktop": "JobName", "web": "job_name" },
+        { "desktop": "FileName", "web": "file_name" },
+        { "desktop": "ClientApp", "web": "client_app" }
+      ]
+      }
     }
   },
   "cases": [
@@ -124,7 +162,38 @@
       "steps": [
         { "action": "untick", "values": ["job_svc"], "blank": false, "expect": { "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa", "app"] } },
         { "action": "refresh", "rows": ["sa", "app"], "expect": { "listValues": ["app", "sa"], "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa", "app"] } },
-        { "action": "refresh", "rows": ["sa", "job_svc"], "expect": { "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa"] } }
+                { "action": "refresh", "rows": ["sa", "job_svc"], "expect": { "state": { "mode": "Hide", "values": ["job_svc"], "blank": false }, "shown": ["sa"] } }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "The mode is chosen from the listed ticks only: values gone from the rows never tip it, and are kept only on the same side",
+      "rows": ["a", "b", "c", "x", "y"],
+      "steps": [
+        { "action": "untick", "values": ["x", "y"], "blank": false, "expect": { "state": { "mode": "Hide", "values": ["x", "y"], "blank": false }, "shown": ["a", "b", "c"] } },
+        { "action": "refresh", "rows": ["a", "b", "c"], "expect": { "listValues": ["a", "b", "c"], "state": { "mode": "Hide", "values": ["x", "y"], "blank": false }, "shown": ["a", "b", "c"] } },
+        { "action": "untick", "values": ["c"], "blank": false, "expect": { "state": { "mode": "Hide", "values": ["c", "x", "y"], "blank": false }, "shown": ["a", "b"] } },
+        { "action": "refresh", "addRows": ["d"], "expect": { "shown": ["a", "b", "d"] } },
+        { "action": "tick", "values": ["c"], "blank": false, "expect": { "state": { "mode": "None", "values": [], "blank": false }, "shown": ["a", "b", "c", "d"] } }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "Values compare like .NET OrdinalIgnoreCase: one uppercase per character, so sharp s is not 'ss'",
+      "rows": ["Straße", "STRASSE", "strasse"],
+      "steps": [
+        { "action": "open", "expect": { "listValues": ["STRASSE", "Straße"], "listCount": 2 } },
+        { "action": "search", "text": "ss", "expect": { "listValues": ["STRASSE"], "listCount": 1 } },
+        { "action": "search", "text": "", "expect": { "listCount": 2 } },
+        { "action": "untick", "values": ["Straße"], "blank": false, "expect": { "state": { "mode": "ShowOnly", "values": ["STRASSE"], "blank": false }, "shown": ["STRASSE", "strasse"] } }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "The dotless i and the long s stay themselves: they do not fold into 'I' and 'S'",
+      "rows": ["\u0131", "I", "\u017f", "S"],
+      "steps": [
+        { "action": "open", "expect": { "listValues": ["I", "S", "\u0131", "\u017f"], "listCount": 4 } }
       ]
     }
   ]

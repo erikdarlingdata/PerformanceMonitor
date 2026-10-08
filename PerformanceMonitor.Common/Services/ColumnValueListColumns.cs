@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Common;
 
@@ -21,10 +22,22 @@ public static class ColumnValueListColumns
     private static readonly string[] s_suffixes =
     {
         "Text", "Formatted", "Display", "Xml", "Plan", "Message", "Definition", "Preview", "Sql", "Detail", "Details",
-        "Description", "Statement", "Query", "Command", "Json", "Graph"
+        "Description", "Statement", "Query", "Command", "Json", "Graph",
+        /* A script is statement-class text (index cleanup DDL, a plan-correction call), an error is a collector's
+           message (it can name a login, a host, a path or the query), and an "...Info" cell is free text (#5565). */
+        "Script", "Error", "Info"
     };
 
     private static readonly string[] s_fragments = { "QueryText", "QueryPlan", "SqlText", "StatementText", "BatchText", "PlanXml", "TextData" };
+
+    /// <summary>
+    /// The name suffixes and fragments, for the test that holds the web page's copy of this rule
+    /// (<c>NO_LIST_SUFFIXES</c> and <c>NO_LIST_FRAGMENTS</c> in grid-value-filter.js) to the same list.
+    /// </summary>
+    public static IReadOnlyList<string> NameSuffixes => s_suffixes;
+
+    /// <summary>See <see cref="NameSuffixes"/>.</summary>
+    public static IReadOnlyList<string> NameFragments => s_fragments;
 
     /// <summary>The column's name marks it as one that never gets a value list.</summary>
     public static bool IsExcluded(string propertyName)
