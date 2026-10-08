@@ -625,7 +625,8 @@ jobs:
       # Pinned: a probe whose tool floats cannot be compared run to run.
       ALTCOVER_VERSION: '9.0.145'
       PROBE_BIN: ${{ github.workspace }}\Darling\Darling.Tests\bin\Release\net10.0-windows
-      PROBE_OUT: ${{ runner.temp }}\altcover-probe
+      # PROBE_OUT (the scratch folder under the runner's temp directory) is exported by the install step:
+      # the `runner` context is not available in a job-level env block.
     steps:
       - uses: actions/checkout@v7
         with:
@@ -691,7 +692,9 @@ jobs:
         run: |
           dotnet tool install altcover.global --version $env:ALTCOVER_VERSION --tool-path "$env:RUNNER_TEMP\altcover-tool"
           if ($LASTEXITCODE -ne 0) { throw "altcover install failed ($LASTEXITCODE)" }
-          New-Item -ItemType Directory -Force -Path $env:PROBE_OUT | Out-Null
+          $out = "$env:RUNNER_TEMP\altcover-probe"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          "PROBE_OUT=$out" | Add-Content -Path $env:GITHUB_ENV
 
       # About 100 classes, spread over plain unit classes, TestHost/web classes and live PostgreSQL
       # classes, taken from the built assembly's own class listing (Stage=Guard classes read source text
