@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// form are added beside them with the same names minus the suffix. The frame facts prove the harness itself: the
 /// read-only Servers tab drawn through the real grid, and the fake DOM's focus model. Skipped when Node is not installed.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class AdminServerEditBehaviourTests
 {
     private const string Token = "2026-01-02T03:04:05.1234567Z";

@@ -30,6 +30,7 @@ namespace Lite.Tests;
 /// wide high-entropy text with the memory limit set low, the oracle fails with out of memory and the new statement passes.
 /// PLAN: every parquet scan of <c>query_stats</c> in the new statements carries the window's <c>collection_time</c> filter.</para>
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class QueryStatsTextAfterRankingTests : IDisposable
 {
     private const int ServerId = 5381;

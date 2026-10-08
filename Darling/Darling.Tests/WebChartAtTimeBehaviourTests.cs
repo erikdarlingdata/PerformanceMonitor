@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// (<c>web-chart-at-time-harness.mjs</c>), and read <c>server-tabs.js</c> for the charts that must hand the server over
 /// and name their item, and for the grids the scroll looks for.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class WebChartAtTimeBehaviourTests
 {
     private const long ClickedMs = 1767225900000; // 2026-01-01 00:05:00 UTC, the middle of the harness chart

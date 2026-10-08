@@ -2672,8 +2672,9 @@ LIMIT 1";
            its own connection, its own catch, drained with the other background startup work below. */
         var planForceDetailScrub = RunPlanForceActionDetailScrubAsync(postgres, stoppingToken);
 
-        /* #4605, #4952: the Query Store read indexes - the BRIN on collect.query_store_interval_wide (collection_time)
-           and the btree on its (server_id, first_execution_time) - built in the background
+        /* #4605, #4952, #5507: the Query Store read indexes - the BRIN on collect.query_store_interval_wide
+           (collection_time) and the btrees on (server_id, first_execution_time) of collect.query_store_interval_wide
+           and collect.query_store_interval_latest - built in the background
            QueryStoreBackgroundIndexes.StartDelay after start so their heap reads stay off the post-restart IO burst,
            one after another, each failure-isolated. Launched after migrations confirm the tables exist, never awaited
            on the startup path, one attempt per start, and RunDelayedAsync never throws. Drained with the other
@@ -4168,7 +4169,7 @@ LIMIT 1";
             /* Expected on shutdown. */
         }
 
-        /* And the Query Store read index ensures (#4605, #4952), which absorb their own failures. */
+        /* And the Query Store read index ensures (#4605, #4952, #5507), which absorb their own failures. */
         await queryStoreIndexes;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
