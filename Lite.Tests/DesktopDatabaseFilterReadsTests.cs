@@ -122,20 +122,23 @@ public sealed class DesktopDatabaseFilterReadsTests : IClassFixture<SharedDuckDb
         Assert.Equal(plain.Count, none.Count);
         Assert.Equal(plain.Count, empty.Count);
 
-        /* The empty clause is the statement as it read before #5312: the top-files CTE below is a literal copy of the old text, so this
+        /* The empty clause is the statement as it read before #5312: the ranking CTE below is a literal copy of the unfiltered text, so this
            fails if the empty clause ever leaves residue in the ranking. (FileIoLatencyTrendSql is defined as SqlFor(""), so comparing
-           the two proves nothing.) */
+           the two proves nothing.) The ranking head moved from one reads + writes ranking to a reads ranking and a writes ranking
+           (release walk V9), so the literal is the new head; the empty-clause check is unchanged. */
         const string oldTopFiles = @"
-WITH top_files AS (
-    SELECT database_name, file_name
+WITH file_totals AS (
+    SELECT
+        database_name,
+        file_name,
+        SUM(delta_reads) AS total_reads,
+        SUM(delta_writes) AS total_writes
     FROM v_file_io_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   (delta_reads > 0 OR delta_writes > 0)
     GROUP BY database_name, file_name
-    ORDER BY SUM(delta_reads + delta_writes) DESC
-    LIMIT 10
 ),";
         Assert.StartsWith(oldTopFiles.Replace("\r\n", "\n"), LocalDataService.FileIoLatencyTrendSql.Replace("\r\n", "\n"), StringComparison.Ordinal);
         Assert.NotEqual(LocalDataService.FileIoLatencyTrendSql, LocalDataService.FileIoLatencyTrendSqlFor(" AND database_name IN ($5)"));

@@ -36,9 +36,14 @@ public sealed class ViewerFileIoBlockingSqlTests
     public void FileIoLatencyTrendSql_TopFilesCte_PerFileAverageLatency_WithQueuedCoalesce()
     {
         Assert.Contains("FROM v_file_io_stats", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("WITH top_files AS", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(delta_reads + delta_writes) DESC", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 10", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        /* Release walk V9: the ranking is two top-10 lists, one by reads for the read chart and one by writes for the write chart,
+           not one list by reads + writes (which held only log files on a server whose logs carry the most operations). */
+        Assert.Contains("top_files AS", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY total_reads DESC, total_writes DESC, database_name, file_name) AS read_rank", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY total_writes DESC, total_reads DESC, database_name, file_name) AS write_rank", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("read_rank <= 10 AND total_reads > 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("write_rank <= 10 AND total_writes > 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY SUM(delta_reads + delta_writes) DESC", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
 
         /* #4234: read/write average latency casts the bucket's summed stall to double before dividing by
            the bucket's summed ops — a rated row's deltas only (unrated ones nulled out by the CASE below). */
@@ -265,6 +270,7 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
     private const int BlockedSessionServerId = -971007;
     private const int FileIoBudgetServerId = -971008;
     private const int FileIoSingletonServerId = -971009;
+    private const int FileIoTopFilesServerId = -971010;
 
     private const string ServerName = "viewer-w1c-e2e";
 
@@ -424,6 +430,61 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "file_io_stats", FileIoServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// Release walk V9, Viewer side: twelve log files write far more than any data file and never read, so the old
+    /// reads + writes ranking kept only log files and the read chart (and the Overview I/O Latency lane) was blank. The
+    /// ten busiest files by reads are charted for the read chart and the ten busiest by writes for the write chart.
+    /// </summary>
+    [Fact]
+    public async Task FileIoLatency_LogFilesWithTheLargestTotalsAndNoReads_DoNotCrowdOutTheDataFiles_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live File I/O top-files test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "file_io_stats", FileIoTopFilesServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
+
+            for (var i = 0; i < 12; i++)
+            {
+                await InsertFileIoAsync(connection, FileIoTopFilesServerId, t1, $"Db{i}", $"Db{i}_log",
+                    deltaReads: 0, deltaWrites: 100_000, deltaReadBytes: 0, deltaWriteBytes: 0,
+                    deltaStallReadMs: 0, deltaStallWriteMs: 200_000, deltaStallQueuedReadMs: 0, deltaStallQueuedWriteMs: 0);
+            }
+
+            await InsertFileIoAsync(connection, FileIoTopFilesServerId, t1, "Db0", "Db0_data",
+                deltaReads: 500, deltaWrites: 20, deltaReadBytes: 0, deltaWriteBytes: 0,
+                deltaStallReadMs: 4_000, deltaStallWriteMs: 60, deltaStallQueuedReadMs: 0, deltaStallQueuedWriteMs: 0);
+
+            var rows = await viewer.GetFileIoLatencyTrendAsync(FileIoTopFilesServerId, t1.AddMinutes(-1), t1.AddMinutes(1));
+
+            /* 4,000 ms of stall over 500 reads. */
+            var data = Assert.Single(rows, r => r.FileName == "Db0_data");
+            Assert.Equal(8.0, data.AvgReadLatencyMs, precision: 3);
+
+            /* The write ranking still keeps ten of the twelve log files, at their 2 ms writes. */
+            var logs = rows.Where(r => r.FileName.EndsWith("_log", StringComparison.Ordinal)).ToList();
+            Assert.Equal(10, logs.Count);
+            Assert.All(logs, r => Assert.Equal(2.0, r.AvgWriteLatencyMs, precision: 3));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "file_io_stats", FileIoTopFilesServerId, cleanupCt));
         }
     }
 

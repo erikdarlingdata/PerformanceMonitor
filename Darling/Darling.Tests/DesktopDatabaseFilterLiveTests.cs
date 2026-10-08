@@ -419,11 +419,12 @@ public sealed class DesktopDatabaseFilterSourcePinTests
             Assert.Contains("ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST", sql, StringComparison.Ordinal);
         }
 
-        /* File I/O: the filter sits inside top_files, before the LIMIT, so the ten busiest files are the chosen databases' ten. */
-        foreach (var sql in new[] { ViewerDataService.FileIoLatencyTrendSql, ViewerDataService.FileIoThroughputTrendSql })
+        /* File I/O: the filter sits inside the ranking, before the top ten is cut, so the ten busiest files are the chosen databases' ten.
+           The latency read ranks in file_totals and cuts in top_files (release walk V9); the throughput read cuts with LIMIT 10. */
+        foreach (var (sql, cut) in new[] { (ViewerDataService.FileIoLatencyTrendSql, "top_files AS"), (ViewerDataService.FileIoThroughputTrendSql, "LIMIT 10") })
         {
             var filter = sql.IndexOf("$5::text[] " + P + " database_name = ANY($5)", StringComparison.Ordinal);
-            Assert.True(filter > 0 && filter < sql.IndexOf("LIMIT 10", StringComparison.Ordinal));
+            Assert.True(filter > 0 && filter < sql.IndexOf(cut, StringComparison.Ordinal));
         }
     }
 }
