@@ -2951,7 +2951,8 @@ LIMIT 1";
                are launched fire-and-track, so neither can delay a collector. */
             /* NOT a convergence-list step (#3817): the table ensure is a cheap idempotent DDL, and the map's data
                refresh is not a store object at all. */
-            await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken);        }
+            await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken);
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("Composer performance tuning failed — queries fall back to un-indexed scans: {Message}", ex.Message);
