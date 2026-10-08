@@ -504,9 +504,7 @@
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
                             <TextBlock Text="Database Resource Usage" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
-                            <ComboBox x:Name="FinOpsResourceUsageTimeRangeCombo" SelectedIndex="3" Width="120" Margin="0,0,8,0" SelectionChanged="FinOpsResourceUsageTimeRange_Changed">
-                                <ComboBoxItem Content="Last 1 hour"/><ComboBoxItem Content="Last 4 hours"/><ComboBoxItem Content="Last 12 hours"/><ComboBoxItem Content="Last 24 hours"/><ComboBoxItem Content="Last 7 days"/>
-                            </ComboBox>
+                            <ui:TimeRangePicker x:Name="FinOpsResourceUsageTimeRangeCombo" Compact="True" VerticalAlignment="Center" RangeChanged="FinOpsResourceUsageTimeRange_Changed"/>
                             <Button Content="Refresh" Click="FinOpsRefreshDatabaseResources_Click" Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
                             <TextBlock x:Name="FinOpsDbResourcesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                         </StackPanel>
@@ -541,9 +539,7 @@
                             <Button Content="Refresh" Click="FinOpsRefreshStorageGrowth_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                             <TextBlock x:Name="FinOpsStorageGrowthCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                             <TextBlock Text="Window:" VerticalAlignment="Center" Margin="16,0,6,0" FontSize="11" x:Name="FinOpsObjectHeatmapWindowLabel" Visibility="Collapsed" Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                            <ComboBox x:Name="FinOpsObjectHeatmapWindowCombo" Visibility="Collapsed" SelectedIndex="1" Width="120" FontSize="11" Padding="4,2" SelectionChanged="FinOpsObjectHeatmapWindow_Changed">
-                                <ComboBoxItem Content="Last 7 days"/><ComboBoxItem Content="Last 30 days"/><ComboBoxItem Content="Last 90 days"/>
-                            </ComboBox>
+                            <ui:TimeRangePicker x:Name="FinOpsObjectHeatmapWindowCombo" Compact="True" Visibility="Collapsed" VerticalAlignment="Center" RangeChanged="FinOpsObjectHeatmapWindow_Changed"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="10,0,10,10">
                             <Grid x:Name="FinOpsStorageParentView">
@@ -797,9 +793,7 @@
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="Wait Stats Summary" VerticalAlignment="Center"/>
                                             <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
-                                            <ComboBox x:Name="FinOpsWaitStatsTimeRangeCombo" SelectedIndex="3" Width="120" FontSize="11" SelectionChanged="FinOpsWaitStatsTimeRange_Changed">
-                                                <ComboBoxItem Content="Last 1 hour"/><ComboBoxItem Content="Last 4 hours"/><ComboBoxItem Content="Last 12 hours"/><ComboBoxItem Content="Last 24 hours"/><ComboBoxItem Content="Last 7 days"/>
-                                            </ComboBox>
+                                            <ui:TimeRangePicker x:Name="FinOpsWaitStatsTimeRangeCombo" Compact="True" VerticalAlignment="Center" RangeChanged="FinOpsWaitStatsTimeRange_Changed"/>
                                         </StackPanel>
                                     </Expander.Header>
                                     <StackPanel>
@@ -824,9 +818,7 @@
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="Expensive Queries (Top 20 by CPU)" VerticalAlignment="Center"/>
                                             <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
-                                            <ComboBox x:Name="FinOpsExpensiveQueriesTimeRangeCombo" SelectedIndex="3" Width="120" FontSize="11" SelectionChanged="FinOpsExpensiveQueriesTimeRange_Changed">
-                                                <ComboBoxItem Content="Last 1 hour"/><ComboBoxItem Content="Last 4 hours"/><ComboBoxItem Content="Last 12 hours"/><ComboBoxItem Content="Last 24 hours"/><ComboBoxItem Content="Last 7 days"/>
-                                            </ComboBox>
+                                            <ui:TimeRangePicker x:Name="FinOpsExpensiveQueriesTimeRangeCombo" Compact="True" VerticalAlignment="Center" RangeChanged="FinOpsExpensiveQueriesTimeRange_Changed"/>
                                         </StackPanel>
                                     </Expander.Header>
                                     <StackPanel>
@@ -880,9 +872,7 @@
                             <TextBlock Text="High Impact Queries" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsRefreshHighImpact_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                             <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="16,0,4,0" FontSize="11" Foreground="{DynamicResource ForegroundBrush}"/>
-                            <ComboBox x:Name="FinOpsHighImpactTimeRangeCombo" SelectedIndex="3" Width="120" FontSize="11" SelectionChanged="FinOpsHighImpactTimeRange_Changed">
-                                <ComboBoxItem Content="Last 1 hour"/><ComboBoxItem Content="Last 4 hours"/><ComboBoxItem Content="Last 12 hours"/><ComboBoxItem Content="Last 24 hours"/><ComboBoxItem Content="Last 7 days"/>
-                            </ComboBox>
+                            <ui:TimeRangePicker x:Name="FinOpsHighImpactTimeRangeCombo" Compact="True" VerticalAlignment="Center" RangeChanged="FinOpsHighImpactTimeRange_Changed"/>
                             <TextBlock x:Name="FinOpsHighImpactCountIndicator" VerticalAlignment="Center" Margin="12,0,0,0" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                         </StackPanel>
                         <TextBlock x:Name="FinOpsHighImpactNoDataMessage" Grid.Row="1" Text="No high-impact queries found for this time range." Margin="10,0" Visibility="Collapsed" Foreground="{DynamicResource ForegroundMutedBrush}" FontStyle="Italic"/>

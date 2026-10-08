@@ -1360,17 +1360,17 @@ public partial class MainWindow : Window
     private void OnServerTabStatusChanged(string message) => StatusText.Text = message;
 
     /// <summary>
-    /// "Apply to All" from one server tab's toolbar: copy its selected range (and, for a custom range, the
-    /// held From/To as naive-UTC instants, which each tab draws in its own server's zone) to every OTHER open
-    /// server tab so they window on the same period. The source tab is skipped — it already holds the range.
+    /// "Apply to All" from one server tab's toolbar: copy its held range (a rolling length as it is; a fixed range
+    /// or calendar period as the naive-UTC instants it names, which each tab draws in its own server's zone) to every
+    /// OTHER open server tab so they window on the same period. The source tab is skipped — it already holds the range.
     /// </summary>
-    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, int index, DateTime? customFromUtc, DateTime? customToUtc)
+    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, PerformanceMonitor.Ui.TimeRangeSpec range)
     {
         foreach (var tab in _openServerTabs.Values)
         {
             if (tab.Content is ViewerServerTab serverTab && !ReferenceEquals(serverTab, source))
             {
-                serverTab.ApplyExternalTimeRange(index, customFromUtc, customToUtc);
+                serverTab.ApplyExternalTimeRange(range);
             }
         }
     }

@@ -234,7 +234,7 @@ public partial class ViewerServerTab
                 var blocked = await blockedTask;
                 RenderCurrentWaitsDurationChart(duration);
                 RenderCurrentWaitsBlockedChart(blocked);
-                UpdateTruncationBanner(CurrentWaitsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Current Waits"), startUtc);
+                UpdateTruncationBanner(CurrentWaitsTruncationBanner, await PrimaryDataStartAsync(dataStartTask, "Current Waits"), startUtc);
                 break;
             }
             case BlockedProcessReportsSubTabIndex:

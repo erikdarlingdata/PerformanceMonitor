@@ -165,26 +165,51 @@ public sealed partial class ViewerDataService
     a.context_json,
     a.server_name AS stored_server_name";
 
-    /// <summary>Per-server read. $1 window start, $2 server_id, $3 limit (naive UTC / int / int).</summary>
+    /// <summary>Per-server read. $1 window start, $2 server_id, $3 limit, $4 window end, exclusive (naive UTC / int / int / naive UTC).
+    /// The end (#5562) is what a finished calendar period or a typed range needs; a live window passes a far-future instant.</summary>
     public const string AlertHistorySql = @"
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log a
 LEFT JOIN servers s ON s.server_id = a.server_id
 WHERE a.alert_time >= $1
 AND   a.server_id = $2
+AND   a.alert_time < $4
 AND   a.dismissed = FALSE
 ORDER BY a.alert_time DESC
 LIMIT $3";
 
-    /// <summary>All-servers read (the Alert History default). $1 window start, $2 limit (naive UTC / int).</summary>
+    /// <summary>All-servers read (the Alert History default). $1 window start, $2 limit, $3 window end, exclusive (naive UTC / int / naive UTC).</summary>
     public const string AlertHistoryAllServersSql = @"
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log a
 LEFT JOIN servers s ON s.server_id = a.server_id
 WHERE a.alert_time >= $1
+AND   a.alert_time < $3
 AND   a.dismissed = FALSE
 ORDER BY a.alert_time DESC
 LIMIT $2";
+
+    /// <summary>The "no end" instant a live window passes: far past any alert, inside the timestamp type's range.</summary>
+    internal static readonly DateTime AlertWindowOpenEnd = new(9999, 12, 31, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>Window dismiss with an end (#5562), per server: $1 window start, $2 server_id, $3 window end (exclusive).
+    /// The shared dismiss-all statement has no end, which is right for a window that runs to now; a finished period must
+    /// dismiss only the rows it shows.</summary>
+    internal const string DismissWindowForServerSql = @"
+UPDATE config_alert_log
+SET    dismissed = TRUE
+WHERE  alert_time >= $1
+AND    server_id = $2
+AND    alert_time < $3
+AND    dismissed = FALSE";
+
+    /// <summary>Window dismiss with an end (#5562), every server: $1 window start, $2 window end (exclusive).</summary>
+    internal const string DismissWindowAllServersSql = @"
+UPDATE config_alert_log
+SET    dismissed = TRUE
+WHERE  alert_time >= $1
+AND    alert_time < $2
+AND    dismissed = FALSE";
 
     /// <summary>How long the alert-history reads serve the fleet's server clocks before reading them again
     /// (#4766). The shell polls the history on every refresh tick (30s by default, 10s at the fastest), and a
@@ -198,8 +223,14 @@ LIMIT $2";
     /// <paramref name="serverId"/> it aggregates ALL servers (the tab's default); with one it scopes to
     /// that server (the Server filter combo). Mirrors Lite's optional-serverId GetAlertHistoryAsync.
     /// </summary>
-    public async Task<List<ViewerAlertRow>> GetAlertHistoryAsync(
+    public Task<List<ViewerAlertRow>> GetAlertHistoryAsync(
         DateTime sinceUtc, int? serverId = null, int limit = 500, CancellationToken cancellationToken = default)
+        => GetAlertHistoryWindowAsync(sinceUtc, null, serverId, limit, cancellationToken);
+
+    /// <summary><see cref="GetAlertHistoryAsync"/> over a window that may END before now (#5562): <paramref name="untilUtc"/> is
+    /// exclusive, and null means the window runs to now.</summary>
+    public async Task<List<ViewerAlertRow>> GetAlertHistoryWindowAsync(
+        DateTime sinceUtc, DateTime? untilUtc, int? serverId = null, int limit = 500, CancellationToken cancellationToken = default)
     {
         var rows = new List<ViewerAlertRow>();
 
@@ -222,6 +253,10 @@ LIMIT $2";
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
         }
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(untilUtc ?? AlertWindowOpenEnd, DateTimeKind.Unspecified),
+        });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -299,9 +334,30 @@ LIMIT $2";
     /// <paramref name="serverId"/> is set, otherwise across all servers (matching the current filter).
     /// Returns the number of rows changed.
     /// </summary>
-    public async Task<int> DismissAllVisibleAlertsAsync(
+    public Task<int> DismissAllVisibleAlertsAsync(
         DateTime sinceUtc, int? serverId = null, CancellationToken cancellationToken = default)
+        => DismissAllVisibleAlertsWindowAsync(sinceUtc, null, serverId, cancellationToken);
+
+    /// <summary><see cref="DismissAllVisibleAlertsAsync"/> over a window that may END before now (#5562): only the rows the
+    /// grid shows for that window. <paramref name="untilUtc"/> is exclusive; null means the window runs to now.</summary>
+    public async Task<int> DismissAllVisibleAlertsWindowAsync(
+        DateTime sinceUtc, DateTime? untilUtc, int? serverId = null, CancellationToken cancellationToken = default)
     {
+        if (untilUtc is { } until)
+        {
+            /* #5562: a window that ended in the past dismisses only the rows it shows. */
+            await using var bounded = _dataSource.CreateCommand(serverId.HasValue ? DismissWindowForServerSql : DismissWindowAllServersSql);
+            bounded.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            bounded.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
+            if (serverId.HasValue)
+            {
+                bounded.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
+            }
+
+            bounded.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(until, DateTimeKind.Unspecified) });
+            return await ExecuteWriteAsync(bounded, cancellationToken);
+        }
+
         await using var command = AlertDismissStore.CreateDismissAllCommand(
             _dataSource, sinceUtc, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
 

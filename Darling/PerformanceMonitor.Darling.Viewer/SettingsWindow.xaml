@@ -179,14 +179,10 @@
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                     <TextBlock Text="Default time range:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                    <ComboBox x:Name="DefaultTimeRangeCombo" Width="140" VerticalAlignment="Center"
-                              ToolTip="Time window each newly-opened server tab starts on">
-                        <ComboBoxItem Content="Last 1 hour"/>
-                        <ComboBoxItem Content="Last 4 hours"/>
-                        <ComboBoxItem Content="Last 12 hours"/>
-                        <ComboBoxItem Content="Last 24 hours"/>
-                        <ComboBoxItem Content="Last 7 days"/>
-                    </ComboBox>
+                    <!-- #5562: the shared picker. A fixed range is not kept as a default (it names concrete dates). -->
+                    <ui:TimeRangePicker x:Name="DefaultTimeRangeCombo" VerticalAlignment="Center"
+                                        ToolTip="Time window each newly-opened server tab starts on"
+                                        RangeChanged="DefaultTimeRange_RangeChanged"/>
                 </StackPanel>
                 <!-- Folded in from #1401: the auto-refresh defaults for newly-opened server tabs. -->
                 <CheckBox x:Name="AutoRefreshCheckBox" Content="Auto-refresh newly-opened server tabs"

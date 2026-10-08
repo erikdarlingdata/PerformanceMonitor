@@ -57,6 +57,18 @@ public partial class FinOpsTab : UserControl
     {
         InitializeComponent();
 
+        /* #5562: the shared time range pickers. The old combos opened on 24 hours (the heatmap on 30 days); the pickers
+           open on the same, drawn in the display zone in force. */
+        foreach (var picker in new[] { FinOpsResourceUsageTimeRangeCombo, FinOpsWaitStatsTimeRangeCombo,
+                     FinOpsExpensiveQueriesTimeRangeCombo, FinOpsHighImpactTimeRangeCombo })
+        {
+            picker.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+            picker.Value = TimeRangePresets.Find("1d")!;
+        }
+
+        FinOpsObjectHeatmapWindowCombo.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        FinOpsObjectHeatmapWindowCombo.Value = TimeRangePresets.Find("1mo")!;
+
         /* Register the FinOps grids' column-filter managers into _filterManagers (defined below), after
            InitializeComponent so the named grids exist. Body lives in FinOpsTab.Loaders.cs. */
         InitializeFinOpsTab();

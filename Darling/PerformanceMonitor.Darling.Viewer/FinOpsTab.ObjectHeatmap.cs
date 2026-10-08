@@ -44,13 +44,19 @@ public partial class FinOpsTab
     private TextBlock? _finopsObjHeatmapPopupText;
     private DateTime _finopsLastObjHeatmapHover;
 
-    private int GetFinOpsObjectHeatmapDaysBack() => FinOpsObjectHeatmapWindowCombo?.SelectedIndex switch
+    /// <summary>Whole days back for the object heatmap (#5562): the picker's range start to now, rounded up, at least one day.
+    /// The old combo offered 7, 30 and 90 days; the picker's "1mo" is 30, and any other length is typed.</summary>
+    private int GetFinOpsObjectHeatmapDaysBack()
     {
-        0 => 7,
-        1 => 30,
-        2 => 90,
-        _ => 30
-    };
+        if (FinOpsObjectHeatmapWindowCombo is null)
+        {
+            return 30;
+        }
+
+        var now = DateTime.UtcNow;
+        var (startUtc, _, _) = ViewerTimeRangeWindow.Window(FinOpsObjectHeatmapWindowCombo.Value, now, ViewerTimeHelper.CurrentDisplayZone());
+        return Math.Max(1, (int)Math.Ceiling((now - startUtc).TotalDays));
+    }
 
     /// <summary>Refresh-aware load: reloads whichever drill level is currently showing (server tab timer / Refresh).</summary>
     private async Task LoadFinOpsStorageGrowthActiveAsync()
@@ -131,7 +137,7 @@ public partial class FinOpsTab
             ShowFinOpsStorageView(FinOpsStorageDrillLevel.Parent);
     }
 
-    private async void FinOpsObjectHeatmapWindow_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsObjectHeatmapWindow_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         if (_finopsStorageLevel != FinOpsStorageDrillLevel.Objects || string.IsNullOrEmpty(_finopsObjDrillDb)) return;

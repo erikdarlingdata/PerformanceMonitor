@@ -191,7 +191,7 @@ public partial class ViewerServerTab
         readFanOut.Release();
 
         PgCpuGrid.ItemsSource = rows;
-        UpdateTruncationBanner(PgCpuDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL CPU"), startUtc);
+        UpdateTruncationBanner(PgCpuDataStartBanner, await PrimaryDataStartAsync(dataStartTask, "PostgreSQL CPU"), startUtc);
         PgCpuNote.Text = PanelNote("pg_cpu_utilization", rows.Count,
             "This collector samples AWS Performance Insights on a 5-minute cadence, so a server added "
             + "recently may have nothing here yet.");
