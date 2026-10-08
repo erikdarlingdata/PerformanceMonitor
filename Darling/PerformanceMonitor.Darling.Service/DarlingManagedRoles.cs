@@ -384,32 +384,254 @@ public static class DarlingManagedRoles
     internal const long ProvisioningLockKey = 0x4441524C_524F4C45;
 
     /// <summary>
+    /// How long a provisioning write waits for <see cref="ProvisioningLockKey"/> before it stops waiting and runs
+    /// without it (#5560). A real sibling's batch takes well under this, so the wait only runs out when something
+    /// else is holding the key, and the write must not stall behind that.
+    /// </summary>
+    internal const int ProvisioningLockWaitSeconds = 12;
+
+    /// <summary>How often the wait for <see cref="ProvisioningLockKey"/> asks again.</summary>
+    internal const int ProvisioningLockPollMilliseconds = 1000;
+
+    /// <summary>
+    /// How many times a write that fails with XX000 "tuple concurrently updated" is run again, each time in a fresh
+    /// transaction (#5560). Three runs in all.
+    /// </summary>
+    internal const int ProvisioningConcurrentUpdateRetries = 2;
+
+    /// <summary>The savepoint a read inside the locked transaction takes, so a read that fails and is answered with a
+    /// default does not leave the transaction aborted for the batch that follows it.</summary>
+    private const string ReadSavepoint = "darling_provisioning_read";
+
+    /// <summary>
     /// Runs a role-provisioning batch in ONE transaction that first takes <see cref="ProvisioningLockKey"/>
-    /// (#5560). Roles, database privileges and default privileges are rows in shared catalogs, and PostgreSQL does
-    /// not lock the row a GRANT, DROP OWNED or ALTER ROLE rewrites: two sessions rewriting the same row at once
-    /// make the second fail with XX000 "tuple concurrently updated" once the first commits. The service adopts a
-    /// postmaster that is already running, so two services can start against one cluster at once, each running the
-    /// same batch against the same <c>CONNECT</c> ACL and the same roles. The batch is idempotent, so the loser
-    /// has only to wait for the winner: a transaction-scoped lock is released by the commit (or the rollback, or
-    /// the connection dropping), so it can never outlive the pooled connection it was taken on.
+    /// (#5560), for a caller that has the command already built. The callback overload below has the whole contract.
     /// </summary>
     /// <remarks>
     /// Takes the CALLER's command rather than SQL text, so each call site keeps spelling its own
-    /// <c>CommandTimeout</c> (the startup-deadline census reads it there); the lock wait runs under the same bound.
+    /// <c>CommandTimeout</c> (the startup-deadline census reads it there). The wait for the key has its own budget
+    /// (<see cref="ProvisioningLockWaitSeconds"/>); the batch keeps the call site's <c>CommandTimeout</c>.
     /// </remarks>
-    internal static async Task ExecuteSerializedAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    internal static Task ExecuteSerializedAsync(
+        NpgsqlCommand command, ILogger logger, CancellationToken cancellationToken, TimeSpan? lockWait = null)
     {
+        ArgumentNullException.ThrowIfNull(command);
         var connection = command.Connection ?? throw new ArgumentException("The command has no connection.", nameof(command));
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        await using (var acquire = new NpgsqlCommand(
-            $"SELECT pg_advisory_xact_lock({ProvisioningLockKey})", connection, transaction) { CommandTimeout = command.CommandTimeout })
+        return ExecuteSerializedCoreAsync(
+            connection,
+            (transaction, _) =>
+            {
+                command.Transaction = transaction;
+                return Task.FromResult<NpgsqlCommand?>(command);
+            },
+            disposeCommand: false, logger, lockWait, cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs a role-provisioning write in ONE transaction that first takes <see cref="ProvisioningLockKey"/>, and
+    /// lets the caller read and plan INSIDE that transaction (#5560). Roles, database privileges and default
+    /// privileges are rows in shared catalogs, and PostgreSQL does not lock the row a GRANT, DROP OWNED or ALTER
+    /// ROLE rewrites: two sessions rewriting the same row at once make the second fail with XX000 "tuple
+    /// concurrently updated" once the first commits. The service adopts a postmaster that is already running, so
+    /// two services can start against one cluster at once, each running the same batch against the same
+    /// <c>CONNECT</c> ACL and the same roles. The batch is idempotent, so the loser has only to wait for the
+    /// winner, and what it read before the wait would be stale after it: <paramref name="prepare"/> runs after the
+    /// lock is taken (READ COMMITTED gives each of its reads a snapshot taken then) and returns the command to run,
+    /// or <see langword="null"/> when there is nothing to run. A transaction-scoped lock is released by the commit
+    /// (or the rollback, or the connection dropping), so it can never outlive the pooled connection it was taken on.
+    ///
+    /// <para><b>The lock never fails or stalls the write.</b> Any login with a session in the store's database can
+    /// take an advisory lock, so the key is polled with <c>pg_try_advisory_xact_lock</c> about once a second for
+    /// <see cref="ProvisioningLockWaitSeconds"/> rather than waited on without end. When that budget runs out one
+    /// warning names the key and the session holding it (pid, user, application name), and the write runs WITHOUT
+    /// the lock, in a fresh transaction, in the same order (<paramref name="prepare"/>, then the command). A write
+    /// that fails XX000 is run again, up to <see cref="ProvisioningConcurrentUpdateRetries"/> more times, each in a
+    /// fresh transaction, <paramref name="prepare"/> included. Npgsql closes the connection on an XX-class error, so a
+    /// retry opens it again first (a new session from the same pool). That is safe because every write here is
+    /// idempotent (the live tests run the real batch twice).</para>
+    ///
+    /// <para><b>What the lock covers.</b> An advisory lock belongs to the database the session is connected to, so
+    /// it serializes only the sessions connected to the STORE's database, although the catalog rows it protects
+    /// (<c>pg_authid</c>, <c>pg_db_role_setting</c>, <c>pg_database</c>) are cluster-wide. That is enough because
+    /// every writer connects to that one database: the managed store always uses the fixed database
+    /// <c>darling</c>, and the compose path refuses a cluster that holds any other non-template database
+    /// (<c>RefuseComposeStore</c>), so a second database with a provisioning writer cannot exist. If either rule is
+    /// ever relaxed, the lock stops serializing and only the XX000 retry is left;
+    /// <c>ProvisioningSerializationTests</c> pins both rules.</para>
+    /// </summary>
+    /// <param name="connection">An open connection with no transaction on it.</param>
+    /// <param name="prepare">Runs inside the transaction, after the lock, and returns the command to run (the helper
+    /// disposes it) or <see langword="null"/>. It runs again on a retry, so it must not keep state between runs.
+    /// A read in it that fails and is answered with a default must take the transaction's read savepoint first and
+    /// roll back to it, or the transaction stays aborted.</param>
+    /// <param name="lockWait">The wait for the key; defaults to <see cref="ProvisioningLockWaitSeconds"/>.</param>
+    internal static Task ExecuteSerializedAsync(
+        NpgsqlConnection connection, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
+        ILogger logger, CancellationToken cancellationToken, TimeSpan? lockWait = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(prepare);
+        return ExecuteSerializedCoreAsync(connection, prepare, disposeCommand: true, logger, lockWait, cancellationToken);
+    }
+
+    private static async Task ExecuteSerializedCoreAsync(
+        NpgsqlConnection connection, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
+        bool disposeCommand, ILogger logger, TimeSpan? lockWait, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+        var wait = lockWait ?? TimeSpan.FromSeconds(ProvisioningLockWaitSeconds);
+        var lockGivenUp = false;
+
+        for (var retries = 0; ; retries++)
         {
-            await acquire.ExecuteNonQueryAsync(cancellationToken);
+            try
+            {
+                if (!lockGivenUp)
+                {
+                    if (await RunUnderLockAsync(connection, prepare, disposeCommand, wait, logger, cancellationToken))
+                    {
+                        return;
+                    }
+
+                    lockGivenUp = true;
+                }
+
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                await RunInTransactionAsync(transaction, prepare, disposeCommand, cancellationToken);
+                return;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InternalError && retries < ProvisioningConcurrentUpdateRetries)
+            {
+                logger.LogInformation(
+                    "Role provisioning hit {SqlState} ({Message}) while another session was rewriting the same catalog rows; running it again in a new transaction (retry {Retry} of {Retries})",
+                    ex.SqlState, ex.MessageText, retries + 1, ProvisioningConcurrentUpdateRetries);
+
+                /* Npgsql breaks the connection on an XX-class error (it closes it, and the server rolls the transaction
+                   back), so the retry needs it opened again: the same object draws a new session from the pool. */
+                if (connection.State != System.Data.ConnectionState.Open)
+                {
+                    await connection.OpenAsync(cancellationToken);
+                }
+            }
+        }
+    }
+
+    /// <summary>One run with the key taken. False when the wait for the key ran out (after the one warning), in which
+    /// case nothing ran.</summary>
+    private static async Task<bool> RunUnderLockAsync(
+        NpgsqlConnection connection, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
+        bool disposeCommand, TimeSpan wait, ILogger logger, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            await using (var poll = new NpgsqlCommand(
+                $"SELECT pg_try_advisory_xact_lock({ProvisioningLockKey})", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
+            {
+                if ((bool)(await poll.ExecuteScalarAsync(cancellationToken))!)
+                {
+                    break;
+                }
+            }
+
+            var remaining = wait - clock.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                await WarnLockHeldAsync(connection, transaction, wait, logger, cancellationToken);
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+
+            var pause = TimeSpan.FromMilliseconds(ProvisioningLockPollMilliseconds);
+            await Task.Delay(remaining < pause ? remaining : pause, cancellationToken);
         }
 
-        command.Transaction = transaction;
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        await RunInTransactionAsync(transaction, prepare, disposeCommand, cancellationToken);
+        return true;
+    }
+
+    private static async Task RunInTransactionAsync(
+        NpgsqlTransaction transaction, Func<NpgsqlTransaction, CancellationToken, Task<NpgsqlCommand?>> prepare,
+        bool disposeCommand, CancellationToken cancellationToken)
+    {
+        var command = await prepare(transaction, cancellationToken);
+        try
+        {
+            if (command is not null)
+            {
+                command.Transaction = transaction;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (disposeCommand && command is not null)
+            {
+                await command.DisposeAsync();
+            }
+        }
+
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>The one warning for a wait that ran out: the key and the session that holds it, read from
+    /// <c>pg_locks</c> joined to <c>pg_stat_activity</c> in the current database. A login that cannot read other
+    /// roles' sessions sees no user or application name for them.</summary>
+    private static async Task WarnLockHeldAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, TimeSpan wait, ILogger logger, CancellationToken cancellationToken)
+    {
+        var holder = "no holder found (it may have just let go)";
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                $@"SELECT a.pid, a.usename, a.application_name
+FROM pg_catalog.pg_locks AS l
+JOIN pg_catalog.pg_stat_activity AS a ON a.pid = l.pid
+WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+  AND l.classid::bigint = {ProvisioningLockKey >> 32} AND l.objid::bigint = {ProvisioningLockKey & 0xFFFFFFFFL}
+  AND l.database = (SELECT d.oid FROM pg_catalog.pg_database AS d WHERE d.datname = current_database())
+LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                holder = string.Format(
+                    CultureInfo.InvariantCulture, "pid {0}, user '{1}', application '{2}'",
+                    reader.GetInt32(0), reader.IsDBNull(1) ? "(not visible)" : reader.GetString(1), reader.IsDBNull(2) ? "(not visible)" : reader.GetString(2));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            holder = "the holder could not be read (" + ex.Message + ")";
+        }
+
+        logger.LogWarning(
+            "Role provisioning could not take its advisory lock 0x{Key} within {Seconds}s; it is held by {Holder}. Running the provisioning write without it. Releasing the lock from that session (or ending the session) restores the serialization.",
+            ProvisioningLockKey.ToString("X16", CultureInfo.InvariantCulture), (int)wait.TotalSeconds, holder);
+    }
+
+    /// <summary>Takes the read savepoint before a read inside the locked transaction (nothing without one).</summary>
+    private static Task TakeReadSavepointAsync(NpgsqlTransaction? transaction, CancellationToken cancellationToken) =>
+        transaction is null ? Task.CompletedTask : transaction.SaveAsync(ReadSavepoint, cancellationToken);
+
+    /// <summary>Rolls the transaction back to the read savepoint after a read that failed and was answered with a
+    /// default, so the batch after it does not meet "current transaction is aborted". Never throws: a connection that is
+    /// gone fails the batch with its own error.</summary>
+    private static async Task RecoverFromReadAsync(NpgsqlTransaction? transaction)
+    {
+        if (transaction is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await transaction.RollbackAsync(ReadSavepoint, CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            /* The connection is unusable; the next command on it reports that. */
+        }
     }
 
     /// <summary>
@@ -423,31 +645,38 @@ public static class DarlingManagedRoles
         ProvisioningTarget target, ILogger logger, CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-        /* #2357: read the live knob rather than a constant. Ordering is what makes this safe -- migrations
-           run before provisioning at startup, so the column exists by now -- and because this DDL is re-run
-           on every managed start, a changed value reaches an existing install on its next restart without
-           any new machinery. A store whose config row is not seeded yet answers with the default. */
-        var composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, logger, cancellationToken);
 
-        /* #3910: the batch carries SCRAM-SHA-256 VERIFIERS, never a password, so no surface that records
-           statement text (the server log's STATEMENT lines, log_statement, auto_explain, pg_stat_statements
-           with utility tracking on) can capture a credential. And a role whose stored verifier already accepts
-           its credential file's password is not re-asserted at all: a steady-state start sends no PASSWORD
-           clause. The CREATE branch still carries a fresh verifier, for a role that does not exist yet. */
-        var stored = await ReadStoredRoleSecretsAsync(connection, logger, cancellationToken);
-        var reassert = PlanPasswordReassert(stored, adminPassword, viewerPassword, mcpPassword);
+        /* #5560: the two reads, the plan and the batch all run inside the provisioning lock's transaction, so a sibling
+           service's batch cannot rewrite the same catalog rows at once and what this one planned from is read after
+           the wait rather than before it. The callback runs again on a retry, so it only assigns these. */
+        int? composeTimeoutSeconds = null;
+        var reassert = PasswordReassert.None;
+        await ExecuteSerializedAsync(connection, async (transaction, token) =>
+        {
+            /* #2357: read the live knob rather than a constant. Ordering is what makes this safe -- migrations
+               run before provisioning at startup, so the column exists by now -- and because this DDL is re-run
+               on every managed start, a changed value reaches an existing install on its next restart without
+               any new machinery. A store whose config row is not seeded yet answers with the default. */
+            composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, transaction, logger, token);
 
-        /* #5560: under the provisioning lock, so a sibling service's batch cannot rewrite the same catalog rows at once. */
-        await using var command = new NpgsqlCommand(
-            BuildProvisioningSql(
-                ScramSha256Verifier.Create(adminPassword),
-                ScramSha256Verifier.Create(viewerPassword),
-                ScramSha256Verifier.Create(mcpPassword),
-                composeTimeoutSeconds,
-                reassert,
-                target),
-            connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
-        await ExecuteSerializedAsync(command, cancellationToken);
+            /* #3910: the batch carries SCRAM-SHA-256 VERIFIERS, never a password, so no surface that records
+               statement text (the server log's STATEMENT lines, log_statement, auto_explain, pg_stat_statements
+               with utility tracking on) can capture a credential. And a role whose stored verifier already accepts
+               its credential file's password is not re-asserted at all: a steady-state start sends no PASSWORD
+               clause. The CREATE branch still carries a fresh verifier, for a role that does not exist yet. */
+            var stored = await ReadStoredRoleSecretsAsync(connection, transaction, logger, token);
+            reassert = PlanPasswordReassert(stored, adminPassword, viewerPassword, mcpPassword);
+
+            return new NpgsqlCommand(
+                BuildProvisioningSql(
+                    ScramSha256Verifier.Create(adminPassword),
+                    ScramSha256Verifier.Create(viewerPassword),
+                    ScramSha256Verifier.Create(mcpPassword),
+                    composeTimeoutSeconds,
+                    reassert,
+                    target),
+                connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+        }, logger, cancellationToken);
 
         logger.LogInformation(
             "Role passwords: {Reasserted} (sent as SCRAM-SHA-256 verifiers, never as the password)",
@@ -629,11 +858,13 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         try
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-            /* #5560: the same lock as provisioning, so a reload cannot rewrite a role row a starting sibling is rewriting. */
+            /* #5560: the same lock as provisioning, so a reload cannot rewrite a role row a starting sibling is
+               rewriting, and the same bound on the wait for it: a key something else is holding delays the reload by
+               ProvisioningLockWaitSeconds at most, then the lines run without it. */
             await using var command = new NpgsqlCommand(
                 BuildComposeStatementTimeoutSql(composeStatementTimeoutSeconds) + "\n" + BuildComposeTempFileLimitSql(),
                 connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
-            await ExecuteSerializedAsync(command, cancellationToken);
+            await ExecuteSerializedAsync(command, logger, cancellationToken);
 
             logger.LogInformation(
                 "Compose statement_timeout re-asserted on the viewer/mcp roles at {Seconds}s, with slow-statement logging at {SlowMs} ms and a temp_file_limit of {TempFileLimit} — takes effect on each role's next session (an already-connected viewer keeps the old ceiling until it reconnects)",
@@ -759,13 +990,14 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
     /// be reported as "the store said 15". That is the <c>ex is not OperationCanceledException</c> filter
     /// this file's own callers already use.</para>
     /// </summary>
-    private static async Task<int?> ReadComposeStatementTimeoutAsync(
-        NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    internal static async Task<int?> ReadComposeStatementTimeoutAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, ILogger logger, CancellationToken cancellationToken)
     {
         try
         {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
             await using var command = new NpgsqlCommand(
-                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+                "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var value = await command.ExecuteScalarAsync(cancellationToken);
 
             /* No row, or a NULL column: the store has not been seeded yet. The shipped default is the
@@ -777,6 +1009,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         {
             /* A store older than the column or the table. Also "no opinion", and expected on a first start
                against a pre-#2357 store, so it is not a warning. */
+            await RecoverFromReadAsync(transaction);
             logger.LogDebug(
                 "config_service.compose_statement_timeout_seconds is not present on this store ({SqlState}) — provisioning the roles with the shipped {Seconds}s default",
                 ex.SqlState, McpCommandDeadlines.ComposedQueryFallbackSeconds);
@@ -785,6 +1018,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            await RecoverFromReadAsync(transaction);
             logger.LogWarning(
                 "Could not read config_service.compose_statement_timeout_seconds ({Message}) — leaving the viewer/mcp roles' statement_timeout at whatever the last successful provisioning set, rather than overwriting it with a default the operator did not choose. #2931's client-side composed-query deadline reads the same column, so writing a guess here would desync the two halves of that backstop.",
                 ex.Message);
@@ -1712,7 +1946,9 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
     /// names <c>provision-roles.sql</c>. Rules that are already in place are left alone: when the trigger exists, is
     /// enabled and its function has the built text and search path (a function another role created from the script
     /// included, which this connection could not replace), nothing is run and nothing is warned, and no lock is taken on
-    /// the table. Returns whether the rules are in place.
+    /// the table. The check and the command run under the provisioning advisory lock (#5560,
+    /// <see cref="ProvisioningLockKey"/>), so two services starting against one store do not both replace the function
+    /// at once. Returns whether the rules are in place.
     /// </summary>
     public static async Task<bool> EnsureServerPasswordRulesAsync(
         NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
@@ -1723,18 +1959,27 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
         try
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-            if (await ServerPasswordRulesAreInPlaceAsync(connection, cancellationToken))
-            {
-                logger.LogInformation("The store's password rules are already in place on config.config_monitored_servers");
-                return true;
-            }
 
-            await using var command = new NpgsqlCommand(BuildServerPasswordRulesSql("config"), connection)
+            /* #5560: the check and the CREATE OR REPLACE run under the provisioning lock, like the provisioning batch.
+               Two services on one self-managed store would otherwise both find the function stale and both replace
+               the same pg_proc row at once, and the second would fail "tuple concurrently updated". The check runs
+               inside the lock, so the one that waited finds the function the other wrote and runs nothing. */
+            var alreadyInPlace = false;
+            await ExecuteSerializedAsync(connection, async (transaction, token) =>
             {
-                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
-            };
-            await command.ExecuteNonQueryAsync(cancellationToken);
-            logger.LogInformation("The store's password rules are in place on config.config_monitored_servers");
+                alreadyInPlace = await ServerPasswordRulesAreInPlaceAsync(connection, transaction, token);
+                return alreadyInPlace
+                    ? null
+                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config"), connection, transaction)
+                    {
+                        CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+                    };
+            }, logger, cancellationToken);
+
+            logger.LogInformation(
+                alreadyInPlace
+                    ? "The store's password rules are already in place on config.config_monitored_servers"
+                    : "The store's password rules are in place on config.config_monitored_servers");
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1751,10 +1996,12 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
     /// function has the text <see cref="BuildServerPasswordRulesSql"/> builds (full-line comments and spacing set aside) and
     /// the pinned search path. A read that fails answers false, so the caller falls back to creating them.
     /// </summary>
-    private static async Task<bool> ServerPasswordRulesAreInPlaceAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    internal static async Task<bool> ServerPasswordRulesAreInPlaceAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
     {
         try
         {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
             await using var read = new NpgsqlCommand(@"
 SELECT p.prosrc, p.proconfig
 FROM pg_catalog.pg_trigger AS t
@@ -1764,7 +2011,7 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
   AND t.tgenabled = 'O'
   AND t.tgtype = 23
   AND p.proname = 'monitored_server_password_rules'
-  AND p.pronamespace = 'config'::regnamespace", connection)
+  AND p.pronamespace = 'config'::regnamespace", connection, transaction)
             {
                 CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
             };
@@ -1797,6 +2044,7 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            await RecoverFromReadAsync(transaction);
             return false;
         }
     }
@@ -1828,14 +2076,15 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
     /// exist yet is absent. Needs a superuser, which the managed owner is. A read this role is refused
     /// returns nothing, so every role is re-asserted: the safe direction, and the pre-#3910 behaviour.
     /// </summary>
-    private static async Task<Dictionary<string, string?>> ReadStoredRoleSecretsAsync(
-        NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    internal static async Task<Dictionary<string, string?>> ReadStoredRoleSecretsAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, ILogger logger, CancellationToken cancellationToken)
     {
         var stored = new Dictionary<string, string?>(StringComparer.Ordinal);
         try
         {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
             await using var command = new NpgsqlCommand(
-                "SELECT rolname::text, rolpassword FROM pg_catalog.pg_authid WHERE rolname = ANY($1)", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+                "SELECT rolname::text, rolpassword FROM pg_catalog.pg_authid WHERE rolname = ANY($1)", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             command.Parameters.AddWithValue(new[] { DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -1845,6 +2094,7 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
+            await RecoverFromReadAsync(transaction);
             logger.LogDebug("Could not read the managed roles' stored verifiers ({Message}); re-asserting every role's password.", ex.Message);
             stored.Clear();
         }
