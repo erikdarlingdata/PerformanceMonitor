@@ -56,9 +56,15 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
             Success: true, MajorVersion: 15, EngineEdition: 3, EngineEditionDescription: "Enterprise",
             IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null));
 
+    /// <summary>The scratch database a connection string names (#5560): what a replayed database-level GRANT is aimed at,
+    /// so no replay rewrites the shared cluster's own <c>darling</c> database.</summary>
+    private static string DatabaseOf(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString).Database!;
+
     /// <summary>Every GRANT / REVOKE in the managed batch that names <c>viewer</c> (alone or in a list), in order,
-    /// retargeted at <paramref name="roleName"/>. <paramref name="skip"/> drops statements by exact text.</summary>
-    internal static List<string> ViewerStatements(string roleName, string? skip)
+    /// retargeted at <paramref name="roleName"/> and aimed at <paramref name="database"/>.
+    /// <paramref name="skip"/> drops statements by exact text.</summary>
+    internal static List<string> ViewerStatements(string roleName, string database, string? skip)
     {
         var provisioning = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
@@ -92,7 +98,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
                 continue;
             }
 
-            statements.Add(statement[..at] + marker + roleName);
+            statements.Add(ViewerGrantReplay.OnDatabase(statement[..at], database) + marker + roleName);
         }
 
         return statements;
@@ -119,7 +125,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         NpgsqlDataSource owner, string ownerString, string roleName, string? skip, CancellationToken ct)
     {
         await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-        foreach (var statement in ViewerStatements(roleName, skip))
+        foreach (var statement in ViewerStatements(roleName, DatabaseOf(ownerString), skip))
         {
             await ExecAsync(owner, statement, ct);
         }
@@ -148,7 +154,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         await using var _ = scratch;
         await using var __ = owner;
 
-        Assert.Contains(ServerGrant.Replace(" TO viewer;", " TO " + roleName, StringComparison.Ordinal), ViewerStatements(roleName, null));
+        Assert.Contains(ServerGrant.Replace(" TO viewer;", " TO " + roleName, StringComparison.Ordinal), ViewerStatements(roleName, DatabaseOf(ownerString), null));
         await using var asViewer = await ProvisionAsync(owner, ownerString, roleName, null, ct);
         var bodySucceeded = false;
         try
@@ -488,7 +494,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
 
     private static async Task RunViewerStatementsAsync(NpgsqlDataSource owner, string roleName, CancellationToken ct)
     {
-        foreach (var statement in ViewerStatements(roleName, null))
+        foreach (var statement in ViewerStatements(roleName, DatabaseOf(owner.ConnectionString), null))
         {
             await ExecAsync(owner, statement, ct);
         }

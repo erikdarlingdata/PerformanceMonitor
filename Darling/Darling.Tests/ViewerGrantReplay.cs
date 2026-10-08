@@ -17,10 +17,15 @@ namespace Darling.Tests;
 /// The viewer role's provisioned grants, taken from the product's <see cref="DarlingManagedRoles.BuildProvisioningSql"/>
 /// and retargeted at a scratch role (#5137 review L3, shared with #5239): every GRANT / REVOKE that names
 /// <c>viewer</c>, in order, so a live test runs as a role holding exactly what a deployment's viewer holds.
+/// <para>The provisioning batch names the store's database (<c>darling</c> on a managed store), and a replay that kept
+/// that name would rewrite the CONNECT ACL of the shared cluster's <c>darling</c> database from every test that
+/// replays: two sessions rewriting one catalog row at once make the second fail with XX000 "tuple concurrently
+/// updated" (#5560). So every replay is pointed at the test's own scratch database, through
+/// <see cref="OnDatabase"/>.</para>
 /// </summary>
 internal static class ViewerGrantReplay
 {
-    public static List<string> StatementsFor(string roleName)
+    public static List<string> StatementsFor(string roleName, string scratchDatabase)
     {
         var provisioning = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
@@ -49,9 +54,22 @@ internal static class ViewerGrantReplay
                 continue;
             }
 
-            viewerStatements.Add(statement[..at] + marker + roleName);
+            viewerStatements.Add(OnDatabase(statement[..at], scratchDatabase) + marker + roleName);
         }
 
         return viewerStatements;
+    }
+
+    /// <summary>
+    /// A replayed GRANT / REVOKE head (everything before <c>TO</c> / <c>FROM</c>), with the managed store's database
+    /// name swapped for <paramref name="scratchDatabase"/> when it is a database-level privilege. Other statements
+    /// come back unchanged: they name schemas and tables, which live in the scratch database already.
+    /// </summary>
+    internal static string OnDatabase(string statementHead, string scratchDatabase)
+    {
+        var shared = ProvisioningTarget.Managed.DatabaseIdentifier;
+        return statementHead.EndsWith(" ON DATABASE " + shared, StringComparison.Ordinal)
+            ? statementHead[..^shared.Length] + "\"" + scratchDatabase.Replace("\"", "\"\"", StringComparison.Ordinal) + "\""
+            : statementHead;
     }
 }

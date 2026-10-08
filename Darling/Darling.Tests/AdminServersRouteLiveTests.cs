@@ -72,7 +72,7 @@ public sealed class AdminServersRouteLiveTests
         {
             /* Every viewer GRANT / REVOKE the product provisions, retargeted at the scratch role, so a future
                narrowing of the viewer's grants shows up here. */
-            var viewerStatements = ViewerGrantReplay.StatementsFor(RoleName);
+            var viewerStatements = ViewerGrantReplay.StatementsFor(RoleName, scratch.DatabaseName);
             Assert.Contains(viewerStatements, x => x.StartsWith("GRANT SELECT (", StringComparison.Ordinal) && x.Contains("config_monitored_servers", StringComparison.Ordinal));
             foreach (var statement in viewerStatements)
             {
