@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// one server and starting fresh for another, a failed series and the one read per checked wait. Node is skipped when it
 /// is not installed.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class WebWaitStatsMultiSelectBehaviourTests
 {
     private static readonly string[] FirstTen =

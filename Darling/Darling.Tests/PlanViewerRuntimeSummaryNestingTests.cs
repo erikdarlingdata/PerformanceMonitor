@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// product surface; <see cref="PlanViewerControl.LoadPlan"/> is not used because it awaits <c>Task.Run</c>
 /// and nothing here pumps a dispatcher.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class PlanViewerRuntimeSummaryNestingTests
 {
     private static PlanStatement StatementWith(string? optimizationLevel, string? earlyAbortReason) => new()

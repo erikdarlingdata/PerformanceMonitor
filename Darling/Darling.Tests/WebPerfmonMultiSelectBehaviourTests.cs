@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// surviving the 60 s rebuild per server, a failed series and the one read per checked counter. Node is skipped when it
 /// is not installed.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class WebPerfmonMultiSelectBehaviourTests
 {
     private static readonly string[] Defaults =

@@ -884,11 +884,22 @@ jobs:
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         env:
           DARLING_SCOPE_FILTER: ${{ steps.darling-scope.outputs.filter }}
+          # #5459 change 5: the slow-skip lookup reads the pull request's file list through the API.
+          GH_TOKEN: ${{ github.token }}
+          SLOW_EVENT: ${{ github.event_name }}
+          SLOW_PR: ${{ github.event.pull_request.number }}
+          SLOW_REPO: ${{ github.repository }}
         shell: pwsh
         run: |
           # An empty filter is the whole suite; `-trait Stage=Guard` is the Guard stage alone.
           $scopeArgs = @($env:DARLING_SCOPE_FILTER -split ' ' | Where-Object { $_ })
-          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @scopeArgs
+          # #5459 change 5: the whole-suite pass on a pull request leaves out the Cost=Slow classes the change does
+          # not reach (ci-select.py slow_skip). The Guard-only pass has none of them (a Guard class is never Slow).
+          $slowArgs = @()
+          if ($env:SLOW_EVENT -eq 'pull_request' -and $scopeArgs.Count -eq 0) {
+              $slowArgs = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ } | ForEach-Object { '-class-'; "*.$_" })
+          }
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @scopeArgs @slowArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease fails
@@ -1764,6 +1775,11 @@ jobs:
           DARLING_TEST_PG_LOGROTATE_JSON: "Host=127.0.0.1;Port=5548;Username=darling;Database=darling"
           # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
           GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
+          # #5459 change 5: the slow-skip lookup below reads the pull request's file list through the API.
+          GH_TOKEN: ${{ github.token }}
+          SLOW_EVENT: ${{ github.event_name }}
+          SLOW_PR: ${{ github.event.pull_request.number }}
+          SLOW_REPO: ${{ github.repository }}
         run: |
           $ErrorActionPreference = 'Stop'
           # The cut and the run must agree (#5459): the listing every shard cuts from leaves the Guard classes out exactly
@@ -1784,6 +1800,19 @@ jobs:
           })
           Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
+
+          # #5459 change 5: a pull request leaves out the Cost=Slow classes its change does not reach (the rule is
+          # ci-select.py's slow_skip; a push, a merge-queue run, the nightly and a release run every class). The
+          # cut above is untouched, so every shard still agrees on which shard owns which class, and a shard that
+          # cannot list the pull request's files skips nothing. The skip happens AFTER the cut and the zero check,
+          # and an emptied shard ends here rather than reaching a runner with no -class arguments.
+          if ($env:SLOW_EVENT -eq 'pull_request') {
+              $skip = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ })
+              $kept = @($mine | Where-Object { $skip -notcontains ($_ -split '\.')[-1] })
+              Write-Host "shard ${{ matrix.shard }}: $($mine.Count - $kept.Count) Cost=Slow classes left out on this pull request, $($kept.Count) to run"
+              $mine = $kept
+              if ($mine.Count -eq 0) { Write-Host "shard ${{ matrix.shard }}: every class of this shard is a skipped Cost=Slow class, so nothing runs"; exit 0 }
+          }
 
           # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
           # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660
@@ -2316,6 +2345,8 @@ jobs:
           GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
         run: |
           $guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })
+          # The whole suite, unchanged by #5459 change 5: CrossAppGuardCiGateTests pins this invocation line whole,
+          # because the exemptions in DarlingTestsBackstopped rest on this job running every class.
           dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter
 
   # The Lite suite on pull requests and pushes: four shards cut over CLASS NAMES (#3887), balanced
@@ -2577,6 +2608,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}
+          # #5459 change 5: the slow-skip lookup reads the pull request's file list through the API (GH_TOKEN above).
+          SLOW_EVENT: ${{ github.event_name }}
+          SLOW_PR: ${{ github.event.pull_request.number }}
+          SLOW_REPO: ${{ github.repository }}
           # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
           GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
         run: |
@@ -2677,6 +2712,19 @@ jobs:
               Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
           }
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
+
+          # #5459 change 5: a pull request leaves out the Cost=Slow classes its change does not reach (the rule is
+          # ci-select.py's slow_skip; a push, a merge-queue run, the nightly and a release run every class). The
+          # cut above is untouched, so every shard still agrees on which shard owns which class, and a shard that
+          # cannot list the pull request's files skips nothing. The skip happens AFTER the cut and the zero check,
+          # and an emptied shard ends here rather than reaching a runner with no -class arguments.
+          if ($env:SLOW_EVENT -eq 'pull_request') {
+              $skip = @(python .github/scripts/ci-select.py slow-skip --suite lite --event $env:SLOW_EVENT --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ })
+              $kept = @($mine | Where-Object { $skip -notcontains ($_ -split '\.')[-1] })
+              Write-Host "shard ${{ matrix.shard }}: $($mine.Count - $kept.Count) Cost=Slow classes left out on this pull request, $($kept.Count) to run"
+              $mine = $kept
+              if ($mine.Count -eq 0) { Write-Host "shard ${{ matrix.shard }}: every class of this shard is a skipped Cost=Slow class, so nothing runs"; exit 0 }
+          }
 
           # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
           # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660

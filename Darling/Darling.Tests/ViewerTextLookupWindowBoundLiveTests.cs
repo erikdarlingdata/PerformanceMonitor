@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every live fact here reaches DARLING_TEST_PG only to
    CREATE and DROP its own database through ScratchPostgres and then works entirely inside it, so it cannot race live
    collection. */
+[Trait("Cost", "Slow")]
 public sealed class ViewerTextLookupWindowBoundLiveTests
 {
     private const string SkipText = "Set DARLING_TEST_PG to a Postgres connection string to run the #5420 text-lookup window-bound live pins (each mints its own scratch database).";
