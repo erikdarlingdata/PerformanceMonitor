@@ -322,12 +322,12 @@ public sealed class DarlingWorker : BackgroundService
     /// both already coverage-gated so they no-op once caught up. The issue asks for exactly this exclusion: a
     /// periodic pass must not launch a second one over a first that is still running, and a re-run's cost
     /// scales with history rather than with the catalog.</description></item>
-    /// <item><description><see cref="DarlingModuleMap"/>'s table ensure and refresh — the refresh is a DATA
-    /// upsert rather than a store object and it ALREADY has periodic homes (the daily purge tick, and the
-    /// hourly tick's own incremental tenant), and the
-    /// table ensure is inseparable from it here because the refresh is gated on the bool it returns. A
-    /// module_map table that failed to create is also the one item on this list whose absence is not silent:
-    /// the daily refresh warns about it every day.</description></item>
+    /// <item><description><see cref="DarlingModuleMap"/>'s table ensure — a cheap DDL that the start path runs
+    /// for readers. The map's refresh is a DATA upsert rather than a store object, and since #5578 it no longer
+    /// runs on the start path at all: it has periodic homes that fire in the sweep loop's first pass, after the
+    /// collectors start (the daily purge tick, and the hourly tick's own incremental tenant). A module_map table
+    /// that failed to create is also the one item on this list whose absence is not silent: the table ensure
+    /// warns when it fails, and the refreshes warn about it every run.</description></item>
     /// </list>
     ///
     /// <para><b>Every step here was read for idempotence rather than assumed idempotent</b>, and the verdicts
@@ -2972,17 +2972,17 @@ LIMIT 1";
             await RunStoreObjectConvergenceSegmentAsync(
                 tuningConnection, StoreObjectConvergenceStage.Tuning, startupConvergence, stoppingToken);
             // The retained sql_handle->module map (#1568 object_name for OLD query_stats windows the CAGG serves,
-            // after procedure_stats raw drops at 4d): create it, then seed it from recent procedure_stats.
-            /* #5519: at start the refresh reads from the watermark, like the hourly path, instead of re-reading two
-               days of procedure_stats on every restart (88 to 103 s of store time per call); the two-day read
-               stays for an empty map or one with no watermark. */
-            /* NOT a convergence-list step (#3817): the refresh is a DATA upsert that already has a periodic
-               home on the daily purge tick, and the table ensure is inseparable from it here because the
-               refresh is gated on the bool it returns. */
-            if (await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken))
-            {
-                await DarlingModuleMap.RefreshAtStartAsync(tuningConnection, _logger, stoppingToken);
-            }
+            // after procedure_stats raw drops at 4d): create the table here, because readers need it to exist.
+            /* #5578: ONLY the cheap table DDL runs on this path. The refresh that fills the map reads procedure_stats
+               (55.6 s at start on a large store, and a flat two days when there is no watermark) and used to be
+               awaited here, which held every collector back by that much on every restart. No collector reads the
+               map, and the map keeps every name it has, so a map a little behind costs nothing. The refresh runs
+               AFTER the collectors start, from the sweep loop's first pass: the hourly store-maintenance tick
+               (RefreshModuleMapRecentAsync) and the daily purge (RefreshAsync) both fire in that first pass and both
+               are launched fire-and-track, so neither can delay a collector. */
+            /* NOT a convergence-list step (#3817): the table ensure is a cheap idempotent DDL, and the map's data
+               refresh is not a store object at all. */
+            await DarlingModuleMap.EnsureTableAsync(tuningConnection, _logger, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
