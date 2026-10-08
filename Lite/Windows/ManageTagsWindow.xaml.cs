@@ -117,8 +117,10 @@ public partial class ManageTagsWindow : Window
     {
         try
         {
-            _tags = await _dataService.GetServerTagsAsync();
-            var assignments = await _dataService.GetServerTagAssignmentsAsync();
+            /* #5457: both reads run on the pool, not the dispatcher: each takes the store read lock, which an archive or
+               compaction pass can hold, and the window would stop pumping input for as long. */
+            _tags = await Task.Run(() => _dataService.GetServerTagsAsync());
+            var assignments = await Task.Run(() => _dataService.GetServerTagAssignmentsAsync());
 
             _assignedServersByTag = new Dictionary<int, HashSet<int>>();
             foreach (var a in assignments)
@@ -291,11 +293,11 @@ public partial class ManageTagsWindow : Window
         {
             if (assign)
             {
-                await _dataService.AssignServerTagAsync(new[] { serverId }, tagId);
+                await Task.Run(() => _dataService.AssignServerTagAsync(new[] { serverId }, tagId));
             }
             else
             {
-                await _dataService.UnassignServerTagAsync(new[] { serverId }, tagId);
+                await Task.Run(() => _dataService.UnassignServerTagAsync(new[] { serverId }, tagId));
             }
 
             if (!_assignedServersByTag.TryGetValue(tagId, out var set))
@@ -346,11 +348,11 @@ public partial class ManageTagsWindow : Window
         {
             if (assign)
             {
-                await _dataService.AssignServerTagAsync(ids, tagId);
+                await Task.Run(() => _dataService.AssignServerTagAsync(ids, tagId));
             }
             else
             {
-                await _dataService.UnassignServerTagAsync(ids, tagId);
+                await Task.Run(() => _dataService.UnassignServerTagAsync(ids, tagId));
             }
 
             if (!_assignedServersByTag.TryGetValue(tagId, out var set))
@@ -423,7 +425,7 @@ public partial class ManageTagsWindow : Window
     {
         try
         {
-            await _dataService.CreateServerTagAsync(name, parentId);
+            await Task.Run(() => _dataService.CreateServerTagAsync(name, parentId));
             ChangedAny = true;
             await ReloadTagsAsync();
         }
@@ -450,7 +452,8 @@ public partial class ManageTagsWindow : Window
 
         try
         {
-            await _dataService.RenameServerTagAsync(_selectedNode.Tag.Id, name);
+            var renamedId = _selectedNode.Tag.Id;
+            await Task.Run(() => _dataService.RenameServerTagAsync(renamedId, name));
             ChangedAny = true;
             await ReloadTagsAsync();
         }
@@ -477,7 +480,9 @@ public partial class ManageTagsWindow : Window
 
         try
         {
-            await _dataService.SetServerTagColorAsync(_selectedNode.Tag.Id, dialog.SelectedColour);
+            var recolouredId = _selectedNode.Tag.Id;
+            var colour = dialog.SelectedColour;
+            await Task.Run(() => _dataService.SetServerTagColorAsync(recolouredId, colour));
             ChangedAny = true;
             await ReloadTagsAsync();
         }
@@ -511,7 +516,8 @@ public partial class ManageTagsWindow : Window
 
         try
         {
-            await _dataService.DeleteServerTagAsync(_selectedNode.Tag.Id);
+            var deletedId = _selectedNode.Tag.Id;
+            await Task.Run(() => _dataService.DeleteServerTagAsync(deletedId));
             _selectedNode = null;
             ChangedAny = true;
             await ReloadTagsAsync();

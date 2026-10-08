@@ -18,7 +18,11 @@ namespace PerformanceMonitorLite.Tests;
 /// saw a tab hang without "Not Responding". <c>ReaderWriterLockSlim</c> is thread-affine, so the call also has to
 /// enter and leave the lock on one pool thread: <c>Task.Run(() =&gt; _dataService.XAsync())</c> does, because the
 /// lambda's thread runs the read to its end. Job History, Alerts and every ServerTab refresh already read this way;
-/// this census holds the rest of <c>Lite/Controls</c>, and the main window's Overview tag read, to it.
+/// this census holds the rest of <c>Lite/Controls</c>, the main window's Overview tag read, and every window under
+/// <c>Lite/Windows</c> to it. A window's click handlers are the same case as a tab's: Manage Tags, the Database State
+/// Overrides editor and the history and drill-down windows each awaited the store from the dispatcher. Their WRITES go
+/// through <c>Task.Run</c> too (the budgeted-write exemption below is for the main window only): a write waits up to 5 s
+/// for the store write lock, and a window that waited that long on the UI thread looked hung for the whole wait.
 /// </summary>
 public class TabLoadsOffUiThreadTests
 {
@@ -31,17 +35,20 @@ public class TabLoadsOffUiThreadTests
         ("Lite/Controls/ServerTab.Refresh.cs", "GetBaselineDiscontinuitiesAsync", "SafeDiscontinuitiesAsync"),
     };
 
-    /* The tag writes the window itself starts (a click). They take OpenWriteConnectionAsync, which waits for the write lock
-       for WriteLockBudget (5 s in the shipped app) and then throws, so they cannot park the dispatcher behind the store lock
-       the way the untimed read lock can. */
+    /* The tag clear the main window starts when a server is removed. It takes OpenWriteConnectionAsync, which waits for the write
+       lock for WriteLockBudget (5 s in the shipped app) and then throws, so it cannot park the dispatcher behind the store lock
+       the way the untimed read lock can. The exemption is the main window's only: a window under Lite/Windows moves its writes
+       into Task.Run as well, so a click never holds the dispatcher for the budget. */
     private static readonly HashSet<string> BudgetedWrites = new(StringComparer.Ordinal)
     {
         "CreateServerTagAsync", "RenameServerTagAsync", "DeleteServerTagAsync",
         "AssignServerTagAsync", "UnassignServerTagAsync", "ClearServerTagsForServerAsync",
     };
 
+    /* A call on the data service, or the one static helper that reads on the caller's thread (McpEngineCapability.EngineEditionAsync(_dataService, id)),
+       which reads the store there. Other helpers handed the service (ReadCardClockAsync, ReadDrillAsync) wrap their own reads. */
     private static readonly Regex DataServiceCall = new(
-        @"\b_?dataService\s*\.\s*(?<method>[A-Za-z]+Async)\s*\(", RegexOptions.Compiled);
+        @"\b_?dataService\s*\.\s*(?<method>[A-Za-z]+Async)\s*\(|\b(?<method>EngineEditionAsync)\s*\(\s*_?dataService\b", RegexOptions.Compiled);
 
     [Fact]
     public void EveryTabDataCallRunsInsideTaskRun()
@@ -52,6 +59,7 @@ public class TabLoadsOffUiThreadTests
 
         var litePath = Path.Combine(root, "Lite");
         foreach (var path in Directory.EnumerateFiles(Path.Combine(litePath, "Controls"), "*.cs", SearchOption.AllDirectories)
+                     .Concat(Directory.EnumerateFiles(Path.Combine(litePath, "Windows"), "*.cs", SearchOption.AllDirectories))
                      .Concat(Directory.EnumerateFiles(litePath, "MainWindow*.cs", SearchOption.TopDirectoryOnly))
                      .Where(p => !IsBuildOutput(p))
                      .OrderBy(p => p, StringComparer.Ordinal))
@@ -60,7 +68,7 @@ public class TabLoadsOffUiThreadTests
             var code = Strip(File.ReadAllText(path));
             foreach (var violation in FindCallsOutsideTaskRun(code))
             {
-                if (BudgetedWrites.Contains(violation.Method))
+                if (BudgetedWrites.Contains(violation.Method) && !relative.StartsWith("Lite/Windows/", StringComparison.Ordinal))
                 {
                     continue;
                 }
@@ -76,7 +84,7 @@ public class TabLoadsOffUiThreadTests
         }
 
         Assert.True(violations.Count == 0,
-            "These Lite/Controls and MainWindow data calls are awaited on the UI thread, where they wait on the store read lock (and "
+            "These Lite/Controls, Lite/Windows and MainWindow data calls are awaited on the UI thread, where they wait on the store read lock (and "
             + "run the whole synchronous DuckDB query) on the dispatcher (#5457). Wrap each in Task.Run(() => ...), "
             + "reading any control value first on the UI thread:\n" + string.Join("\n", violations));
 
@@ -125,6 +133,11 @@ public class TabLoadsOffUiThreadTests
         /* The paren that closes a Task.Run must not cover a call written after it. */
         var after = Strip("var a = await Task.Run(() => Other());\nvar b = await _dataService.GetFooAsync(1);");
         Assert.Single(FindCallsOutsideTaskRun(after));
+
+        /* A helper handed the data service reads the store on the caller's thread too. */
+        var helper = Strip("var e = await McpEngineCapability.EngineEditionAsync(_dataService, serverId);");
+        Assert.Single(FindCallsOutsideTaskRun(helper));
+        Assert.Empty(FindCallsOutsideTaskRun(Strip("var e = await Task.Run(() => McpEngineCapability.EngineEditionAsync(_dataService, serverId));")));
     }
 
     private static IEnumerable<(string Method, int Index)> FindCallsOutsideTaskRun(string strippedCode)
