@@ -209,7 +209,8 @@ public partial class RecommendationsTab : UserControl
                    selected tab's), and with no tab open the machine's, not UTC. */
                 var serverClock = await ReadCardClockAsync(_dataService, serverId, _openTabClock);
 
-                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
+                var replicaNote = await ReadReplicaNoteAsync(serverId);
+                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock).WithReplicaNote(replicaNote));
             }
             while (_reloadRequested);
         }
@@ -322,7 +323,8 @@ public partial class RecommendationsTab : UserControl
             /* #4766: the selected server's own clock, by the serverId the analysis ran for (see RefreshDataAsync). */
             var serverClock = await ReadCardClockAsync(_dataService, serverId, _openTabClock);
 
-            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
+            var replicaNote = await ReadReplicaNoteAsync(serverId);
+            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock).WithReplicaNote(replicaNote));
         }
         catch (Exception ex)
         {
@@ -400,12 +402,33 @@ public partial class RecommendationsTab : UserControl
         }
     }
 
+    /// <summary>#5558: the shared note when this node holds a secondary copy of any database in an availability group
+    /// (the findings for those databases are the primary's), else null. A failed read shows no note.</summary>
+    private async Task<string?> ReadReplicaNoteAsync(int serverId)
+    {
+        if (_duckDb is null) return null;
+        try
+        {
+            return await Task.Run(() => PerformanceMonitorLite.Analysis.SecondaryReplicaScope.NoteAsync(_duckDb, serverId));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("Recommendations", $"Availability group note read failed, showing none: {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>
     /// Swaps the visible region to match the view-model's state and binds the sections. Mirrors the
     /// Dashboard control's ApplyViewModel.
     /// </summary>
     private void ApplyViewModel(LiteRecommendationsViewModel vm)
     {
+        /* #5558: the availability group note rides with the list or the all-clear, never with a state that replaces them. */
+        var replicaNote = vm.State is LiteRecommendationsState.Loaded or LiteRecommendationsState.Empty ? vm.ReplicaNote : null;
+        ReplicaNoteText.Text = replicaNote ?? string.Empty;
+        ReplicaNoteText.Visibility = replicaNote is null ? Visibility.Collapsed : Visibility.Visible;
+
         switch (vm.State)
         {
             case LiteRecommendationsState.Loading:

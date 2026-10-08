@@ -356,9 +356,17 @@ ORDER BY database_name";
     /// empty tab. <paramref name="monthlyCost"/> is the per-server budget (0 → findings emit with no savings
     /// estimate, mirroring Lite's <c>monthlyCost &gt; 0 ? … : null</c>).
     /// </summary>
+    /// <param name="secondaryDatabases">Optional (#5558). The databases this node holds only as a secondary copy in an
+    /// Availability Group, as <c>PgSecondaryReplicaScope.ReadAsync</c> resolves them (that class lives in the Analysis project,
+    /// which depends on this one, so the caller resolves the set). The idle, dev/test, TDE-blocker and compression rules drop
+    /// them, because the primary reports the same finding for the same replicated database; the low IO latency rule keeps them,
+    /// since a replica's own storage is that replica's own cost. Null or empty skips nothing, which is how a stale snapshot, a
+    /// standalone server and Azure SQL Database arrive. The edition note still follows the instance-level collected role
+    /// (<c>server_properties.ag_replica_role</c>): an edition is one decision for the whole group, not a finding about a database.</param>
     /// <param name="onCheckFailed">Optional. Invoked once per failed check with that check's label and the exception.
     /// It is not invoked for the VM check's inner CPU fallback, which degrades to the 24-hour window and still emits.</param>
-    public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, Action<string, Exception>? onCheckFailed = null, CancellationToken cancellationToken = default)
+    public static async Task<List<FinOpsRecommendation>> GetRecommendationsAsync(NpgsqlDataSource dataSource, int serverId, decimal monthlyCost, int commandTimeoutSeconds, Action<string, Exception>? onCheckFailed = null,
+        IReadOnlyCollection<string>? secondaryDatabases = null, CancellationToken cancellationToken = default)
     {
         var recommendations = new List<FinOpsRecommendation>();
         var memoryCutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
@@ -373,15 +381,23 @@ ORDER BY database_name";
 
                 // TDE is only the deciding factor on pre-2019 Enterprise — read the config snapshot just then.
                 var tdeDbNames = new List<string>();
+                var tdeSecondaryOnly = false;
                 if (isEnterprise && f.MajorVersion < 15)
                 {
-                    tdeDbNames = FinOpsRecommendationFigures.SelectTdeDatabaseNames(
+                    var tdeAllNames = FinOpsRecommendationFigures.SelectTdeDatabaseNames(
                         await GetDatabaseEncryptionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken));
+                    /* #5558: a secondary copy's TDE is the primary's to report. When every TDE database here is a secondary copy,
+                       "no Enterprise-only features" would be false and the blocker is the primary's, so the audit says nothing
+                       (a secondary-role instance keeps its own edition note, which never reads this list). */
+                    tdeDbNames = AgReplicaScope.WithoutSecondaries(tdeAllNames, secondaryDatabases);
+                    tdeSecondaryOnly = tdeAllNames.Count > 0 && tdeDbNames.Count == 0
+                        && !string.Equals(f.AgReplicaRole.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
                 }
 
-                recommendations.AddRange(
-                    FinOpsRecommendationFigures.EditionAudit(
-                        f.Edition, f.MajorVersion, f.CpuCount, tdeDbNames, monthlyCost, f.AgReplicaRole, f.IsHadrEnabled));
+                if (!tdeSecondaryOnly)
+                    recommendations.AddRange(
+                        FinOpsRecommendationFigures.EditionAudit(
+                            f.Edition, f.MajorVersion, f.CpuCount, tdeDbNames, monthlyCost, f.AgReplicaRole, f.IsHadrEnabled));
             }
         }
         catch (Exception ex)
@@ -458,7 +474,8 @@ ORDER BY database_name";
         try
         {
             var indexes = await DarlingFinOpsIndexAnalysisReader.GetIndexCleanupInputsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
-            var rec = FinOpsRecommendationFigures.Compression(indexes);
+            var rec = FinOpsRecommendationFigures.Compression(
+                indexes.Where(i => !AgReplicaScope.IsSkipped(secondaryDatabases, i.DatabaseName)));
             if (rec != null)
             {
                 recommendations.Add(rec);
@@ -477,7 +494,8 @@ ORDER BY database_name";
                enrolled hours ago, or one that was not collected for a stretch, has not been watched long enough to call any
                database idle. */
             var idleDbs = (await DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(
-                dataSource, serverId, DateTime.UtcNow.AddDays(-7), commandTimeoutSeconds, cancellationToken)).Rows;
+                dataSource, serverId, DateTime.UtcNow.AddDays(-7), commandTimeoutSeconds, cancellationToken)).Rows
+                .Where(d => !AgReplicaScope.IsSkipped(secondaryDatabases, d.DatabaseName)).ToList();
             if (idleDbs.Count > 0)
             {
                 var allocatedTotalMb = 0m;
@@ -504,7 +522,8 @@ ORDER BY database_name";
         try
         {
             var devDbs = FinOpsRecommendationFigures.MatchDevTestDatabases(
-                (await GetDatabaseEncryptionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken)).Select(r => r.DatabaseName));
+                (await GetDatabaseEncryptionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken))
+                    .Select(r => r.DatabaseName).Where(name => !AgReplicaScope.IsSkipped(secondaryDatabases, name)));
             var devTestRecommendation = FinOpsRecommendationFigures.DevTest(devDbs);
             if (devTestRecommendation != null)
                 recommendations.Add(devTestRecommendation);

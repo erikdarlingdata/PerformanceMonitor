@@ -1564,6 +1564,10 @@ public sealed class TsqlConventionGuardTests
            on dev's 291e15f8 run); the buffer drill-down's `Round` LEFT on the same run — #3799 reshaped it into a
            block the walk reads whole — so its #3804 line comes off here. */
         "Darling/PerformanceMonitor.Darling.Analysis/PgTargetFactCollector.Plans.cs Ratio",
+        /* #5558: the secondary-replica rule's expression-bodied `IsFresh` (`snapshotUtc is { } at && at <= windowEndUtc && ...`),
+           the same expression-shaped member as the lines above. What its range strands is the pattern variable and the
+           comparison, no T-SQL, no tempdb label and no SQL literal a census reads. ARRIVED with #5558. */
+        "PerformanceMonitor.Common/AgReplicaScope.cs IsFresh",
     ];
 
     /* ───────────────────────── the resolver, pinned on arranged source ───────────────────────── */

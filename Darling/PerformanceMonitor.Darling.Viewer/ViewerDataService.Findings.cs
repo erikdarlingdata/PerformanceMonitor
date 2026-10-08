@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
@@ -125,6 +126,14 @@ WHERE server_id = $1";
             return null;
         }
     }
+
+    /// <summary>
+    /// #5558: the shared one-sentence note when the monitored node holds only a secondary copy of any database in an
+    /// availability group right now (their per-database findings are the primary's), else null. Read from the store's own
+    /// AG snapshots; any read failure is "no note", never an error on the tab.
+    /// </summary>
+    public Task<string?> GetSecondaryReplicaNoteAsync(int serverId, CancellationToken cancellationToken = default) =>
+        PgSecondaryReplicaScope.NoteAsync(_dataSource, serverId, logger: null, cancellationToken);
 
     /// <summary>
     /// The latest analysis run's findings for one server, mapped to display rows. Reads
