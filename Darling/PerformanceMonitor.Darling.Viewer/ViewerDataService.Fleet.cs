@@ -69,9 +69,9 @@ public sealed partial class ViewerDataService
     ///
     /// <para>The PostgreSQL arm orders only the pairs that moved (#5526): the service's
     /// <c>DarlingFleetReader.FleetPgDeadlockSql</c> carries the reasoning and the measurement, and this is the
-    /// same shape keeping only the total. One <c>LAG</c> window over every server's rows was 26.9 s for 30 days
-    /// on a 50-server store in the rig, most of it the sort and the window; the one caller here asks for the
-    /// last hour, so that figure is the service reader's concern and this arm just keeps the same shape. A <c>(server_id, database_name)</c> pair whose
+    /// same shape keeping only the total. On a store with 50 PostgreSQL targets one <c>LAG</c> window over every
+    /// server's rows took 6.7 to 6.8 s for 7 days and this form 0.64 to 0.80 s; the one caller here asks for the
+    /// last hour. A <c>(server_id, database_name)</c> pair whose
     /// counter never takes two different values inside the window adds nothing to the sum of positive
     /// differences: every difference between two present samples is 0, and one touching a NULL is NULL. So one
     /// unordered aggregate keeps only the pairs with <c>min(deadlocks) &lt;&gt; max(deadlocks)</c> (a NULL

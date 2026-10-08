@@ -441,11 +441,11 @@ GROUP BY server_id";
     ///
     /// <para><b>Only the pairs that moved are ordered (#5526).</b> The read used to be one <c>LAG</c> window,
     /// <c>PARTITION BY server_id, database_name</c>, over every server's rows, so one sort and one window pass
-    /// covered the whole fleet's window. The rig measured 26.9 s for 30 days on a 50-server store (17.1 M rows,
-    /// 29 of 31 chunks decompressed), most of it the sort and the window rather than I/O; no caller can ask
-    /// for that window (<c>get_fleet_overview</c> and <c>/api/fleet</c> cap it at 7 days, 168 hours), and the
-    /// issue's own 1-day figure on that store was about 1.1 to 1.25 s. A
-    /// <c>(server_id, database_name)</c> pair that never changes its counter inside a window needs no ordering: with every sample equal, every difference is 0. So <c>pairs</c> first takes ONE
+    /// covered the whole fleet's window. On a store with 50 PostgreSQL targets that took 6.8 s for 7 days (168
+    /// hours, the most <c>get_fleet_overview</c> and <c>/api/fleet</c> accept), most of it the sort and the window
+    /// rather than I/O; this form took 0.68 to 0.77 s there, with 433 of 443 pairs flat. A
+    /// <c>(server_id, database_name)</c> pair that never changes its counter inside a window needs no ordering:
+    /// with every sample equal, every difference is 0. So <c>pairs</c> first takes ONE
     /// unordered aggregate over the window (rows, rows with a counter, min, max) and marks a pair <c>flat</c>
     /// when it has a counter in every row (<c>count(deadlocks) = count(*)</c>) and the counter never moves
     /// (<c>min = max</c>). A flat pair of <c>n</c> samples has <c>n - 1</c> differences, all 0, so it adds 0 to
