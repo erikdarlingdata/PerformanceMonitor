@@ -63,13 +63,106 @@ internal static class McpHelpers
     public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
     /// <summary>
-    /// Truncates a string to the specified maximum length, adding a truncation suffix.
+    /// Truncates a string to the specified maximum length, adding a truncation suffix. The cut lands on a whole
+    /// text element at or before <paramref name="maxLength"/> (<see cref="TextElementCutLength"/>), so it never
+    /// splits an emoji's surrogate pair or a letter from its accent. A split pair would reach the caller as U+FFFD,
+    /// because System.Text.Json writes that in place of a lone surrogate.
     /// </summary>
     public static string? Truncate(string? value, int maxLength)
     {
         if (value == null || value.Length <= maxLength) return value;
-        return value[..maxLength] + "... (truncated)";
+        return value[..TextElementCutLength(value, maxLength)] + "... (truncated)";
     }
+
+    /// <summary>
+    /// <see cref="Truncate"/> for statement text (#5320): the WHOLE text is judged first
+    /// (<see cref="SensitiveStatements.Text"/>), then cut. A value can sit early in a batch with the text that
+    /// names it past the cut (a URI's <c>user:secret@</c> trigger is its closing at-sign), so a prefix can be
+    /// judged clean while it holds part of a secret. A statement judged named is the placeholder, so no cut text
+    /// can hold half of one.
+    /// </summary>
+    public static string? TruncateStatement(string? value, int maxLength) =>
+        Truncate(SensitiveStatements.Text(value), maxLength);
+
+    /// <summary>
+    /// The same filter-then-cut as <see cref="TruncateStatement"/> for a preview that carries no "... (truncated)"
+    /// marker because its row has its own truncated flag (the Query Heatmap cell, the FinOps query preview).
+    /// </summary>
+    public static string? StatementPreview(string? value, int maxLength)
+    {
+        var filtered = SensitiveStatements.Text(value);
+        if (filtered == null || filtered.Length <= maxLength) return filtered;
+        return filtered[..TextElementCutLength(filtered, maxLength)];
+    }
+
+    /// <summary>
+    /// How many UTF-16 units of <paramref name="text"/> to keep so the cut lands on a text-element boundary (an
+    /// extended grapheme cluster: an emoji with its modifiers, a letter with its combining accent, a CR LF pair) at
+    /// or before <paramref name="limit"/>. The rule and the walk are the #3625 cut in
+    /// <c>WebhookAlertService.SlackCutLength</c>, which this matches on every input. That project does not reference
+    /// this one, so it keeps its own copy.
+    ///
+    /// <para>When no whole element fits (one element wider than the whole limit, such as a long run of combining
+    /// marks), the cut falls back to a code-point boundary: one unit before a surrogate pair, else the limit.</para>
+    ///
+    /// <para>The walk starts at the last position at or before the limit whose two neighbours are both ASCII and are
+    /// not CR then LF. No ASCII character extends, joins or prefixes the character next to it, so such a position is a
+    /// text-element boundary however the text before it segments. Most values are ASCII at the cut, so most calls
+    /// return without segmenting anything, and when the text is ASCII at the cut a 512,000-unit limit costs no more
+    /// than a 40-unit one. When it is not (a non-ASCII character or a CR LF pair at the cut), the walk goes back toward
+    /// the start of the text and segments forward from there, so the cost then grows with the limit.</para>
+    /// </summary>
+    internal static int TextElementCutLength(ReadOnlySpan<char> text, int limit)
+    {
+        if (text.Length <= limit)
+        {
+            return text.Length;
+        }
+
+        if (limit <= 0)
+        {
+            return 0;
+        }
+
+        var start = limit;
+        while (start > 0 && !IsAsciiBoundary(text, start))
+        {
+            start--;
+        }
+
+        if (start == limit)
+        {
+            return limit;
+        }
+
+        /* The window handed to the segmenter ends two units past the limit, as in SlackCutLength: two units hold any
+           scalar that straddles the limit whole, and every boundary decision is made from the left, so each one at or
+           before the limit is the one the full text would make. */
+        var cut = start;
+        while (true)
+        {
+            var window = text.Slice(cut, Math.Min(text.Length - cut, limit - cut + 2));
+            var element = StringInfo.GetNextTextElementLength(window);
+            if (cut + element > limit)
+            {
+                break;
+            }
+
+            cut += element;
+        }
+
+        if (cut > 0)
+        {
+            return cut;
+        }
+
+        return char.IsHighSurrogate(text[limit - 1]) && char.IsLowSurrogate(text[limit]) ? limit - 1 : limit;
+    }
+
+    private static bool IsAsciiBoundary(ReadOnlySpan<char> text, int index) =>
+        char.IsAscii(text[index - 1])
+        && char.IsAscii(text[index])
+        && !(text[index - 1] == '\r' && text[index] == '\n');
 
     /// <summary>
     /// Validates hours_back parameter. Returns null if valid, the <see cref="Refusal"/> envelope if invalid.
@@ -216,15 +309,21 @@ internal static class McpHelpers
     /// Exception filter, and it is a measured zero: Query Store is collecting and the window has rows, just none
     /// with that outcome. Without it the read fell through to the "Query Store may not be enabled" guess, which
     /// is the one thing the unfiltered rows prove false. Shared so both SKUs say it in the same words.
+    ///
+    /// <para><paramref name="scopeText"/> (#5245) is for a read over SEVERAL databases, which has no one name to put in
+    /// the sentence: the caller hands the whole phrase (" for the chosen databases") and it replaces the
+    /// <c>in database 'X'</c> text. Left null, the text is exactly what it was, so Lite's answers and every one-name
+    /// answer are byte-identical.</para>
     /// </summary>
-    public static string QueryStoreExecutionTypeEmpty(string executionType, int hoursBack, string? databaseName)
+    public static string QueryStoreExecutionTypeEmpty(string executionType, int hoursBack, string? databaseName, object? hints = null, string? scopeText = null)
     {
-        var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
+        var scope = scopeText ?? (string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'");
         return Status(
             "empty",
             $"No {executionType} executions{scope} in the {hoursBack}-hour window searched. The same read without "
             + "execution_type returns rows, so Query Store is collecting and this is a measured zero, not missing "
-            + "data. Omit execution_type to see the other outcomes.");
+            + "data. Omit execution_type to see the other outcomes.",
+            hints);
     }
 
     /// <summary>
@@ -234,14 +333,15 @@ internal static class McpHelpers
     /// filter too when one rode along, since either can be why nothing matched. Shared so both SKUs say it in the
     /// same words. Both SKUs pass their window floor (<paramref name="windowTruncated"/> and the served window as
     /// <paramref name="hints"/>), because the raw tier can stop short of the window asked for (#2364 on Darling,
-    /// #4231 on Lite).
+    /// #4231 on Lite). <paramref name="scopeText"/> (#5245) is the several-databases phrase, as on
+    /// <see cref="QueryStoreExecutionTypeEmpty"/>; null keeps today's text.
     /// </summary>
     public static string QueryStoreModuleEmpty(
         string moduleName, string? executionType, int hoursBack, string? databaseName,
-        bool windowTruncated = false, object? hints = null)
+        bool windowTruncated = false, object? hints = null, string? scopeText = null)
     {
         var outcome = executionType is null ? "" : $" with execution_type {executionType}";
-        var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
+        var scope = scopeText ?? (string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'");
         return Status(
             "empty",
             $"No Query Store rows matched module_name '{moduleName}'{outcome}{scope} in the {hoursBack}-hour window "
@@ -350,6 +450,28 @@ internal static class McpHelpers
         " window_truncated is true when the store did not hold the start of the window; effective_start / " +
         "effective_hours_back say where the answer begins. That is the window floor, not a page cut: no limit " +
         "changes it. WIRE CHANGE: formerly named truncated.";
+
+    /// <summary>
+    /// #4966: <c>effective_start</c> as every window-floor payload prints it, always as UTC with the trailing Z, on
+    /// both SKUs. The served start is either the start that was asked for (already UTC, so a plain "o" printed the Z)
+    /// or the floor read off the store (a naive instant, so a plain "o" printed none), and the zone marker used to
+    /// come and go with <c>window_truncated</c>, on the one value a reader most needs to read right. Only the kind is
+    /// set: the instant is the value's own and is never shifted (no <c>ToUniversalTime</c>, which would take a naive
+    /// floor for local time). A payload that keeps the store's naive form on every path, so that
+    /// <c>effective_start</c> prints like its first point's <c>time</c> beside it (the Performance-Trends
+    /// disclosure), does not call this.
+    /// </summary>
+    public static string FormatEffectiveStart(DateTime effectiveStart) =>
+        DateTime.SpecifyKind(effectiveStart, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// #5015: <see cref="FormatEffectiveStart(DateTime)"/> for an instant that may be absent (the oldest or newest of a page
+    /// of events whose time column is nullable, which is null for a page that holds none). Every
+    /// <c>oldest_returned_*</c> and <c>newest_returned_*</c> bound goes through the one formatter, so each prints UTC with
+    /// the Z whatever the column's own kind.
+    /// </summary>
+    public static string? FormatEffectiveStart(DateTime? effectiveStart) =>
+        effectiveStart is DateTime instant ? FormatEffectiveStart(instant) : null;
 
     /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.
@@ -786,4 +908,77 @@ internal static class McpHelpers
             ? JsonSerializer.Serialize(new { status, message }, JsonOptions)
             : JsonSerializer.Serialize(new { status, message, hints }, JsonOptions);
     }
+
+    /// <summary>
+    /// <see cref="Status"/> for a read that takes <c>database_name</c> (#5244 review L2): the same <c>status</c>,
+    /// <c>message</c> and optional <c>hints</c>, with the database echo beside them, so an empty answer says which
+    /// databases it was limited to the way the answer with rows does. <paramref name="databaseName"/> is the name for one
+    /// database, "the chosen databases" for two or more and null for every database (Darling's
+    /// <c>DatabaseFilter.Describe()</c>, Lite's <c>McpDatabaseSelection.Describe</c>); the key is always written, null
+    /// included, so a client reads it without first checking whether it got data.
+    /// </summary>
+    public static string StatusForDatabase(string status, string message, string? databaseName, object? hints = null)
+    {
+        return hints is null
+            ? JsonSerializer.Serialize(new { status, message, database_name = databaseName }, JsonOptions)
+            : JsonSerializer.Serialize(new { status, message, database_name = databaseName, hints }, JsonOptions);
+    }
+
+    /// <summary>
+    /// <paramref name="statusJson"/> (a <c>not_collected</c> or <c>precondition</c> envelope another helper built) with
+    /// the <c>database_name</c> echo added, so every answer shape of a tool that takes <c>database_name</c> says which
+    /// databases the call was limited to (#5244 PR4 review round 2, L2). The echo is the name for one database, "the chosen
+    /// databases" for two or more and null for every database (Darling's <c>DatabaseFilter.Describe()</c>, Lite's single
+    /// name); the key is written even when null. Null in, null out, so it wraps a <c>??</c> ladder's rungs. An envelope that
+    /// already carries the key is returned unchanged.
+    /// </summary>
+    public static string? WithDatabase(string? statusJson, string? databaseName)
+    {
+        if (statusJson is null)
+        {
+            return null;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(statusJson) as System.Text.Json.Nodes.JsonObject;
+        if (node is null || node.ContainsKey("database_name"))
+        {
+            return statusJson;
+        }
+
+        node["database_name"] = databaseName;
+        return node.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
+    /// #4966: the claim an empty answer carries INSTEAD of its "quiet" or "all-clear" clause when its window notice says the
+    /// window is cut (<c>hints.window_truncated</c> true) and names where the store's data starts
+    /// (<c>hints.effective_start</c> set). Both apps use this one constant, so a client reads the same words from either;
+    /// <c>McpMissMessageParityPinTests</c> holds the literal.
+    /// </summary>
+    public const string CutWindowNothingMessage = "Nothing in the part of the window the store covers; the store's data for this read starts at effective_start (see hints), so the stretch before it is not a report that nothing happened.";
+
+    /// <summary>
+    /// #4966: the cut-window claim for an empty answer whose notice has NO <c>effective_start</c>: the store holds no data for
+    /// the read in the window at all, so there is no start to point at and the sentence points at the note instead.
+    /// </summary>
+    public const string CutWindowNothingReadMessage = "Nothing was read: the store holds no data for this read in the window (see hints.truncation_note), so this empty answer is not a report that nothing happened.";
+
+    /// <summary>The cut-window claim for a notice: <see cref="CutWindowNothingMessage"/> when it names a start, else <see cref="CutWindowNothingReadMessage"/>.</summary>
+    public static string CutWindowClaim(string? effectiveStart) =>
+        string.IsNullOrEmpty(effectiveStart) ? CutWindowNothingReadMessage : CutWindowNothingMessage;
+
+    /// <summary>
+    /// #4966: builds the message of an empty answer at run time, replacing only the CLAIM clause. The
+    /// <paramref name="factual"/> first sentence (counts, thresholds, filter echoes), written without its closing period,
+    /// is kept either way. A covered window then reads <paramref name="factual"/> + <paramref name="coveredClaim"/> exactly
+    /// (the claim carries its own leading separator, so the covered text is what it was before #4966); a cut window
+    /// (<paramref name="windowTruncated"/>) reads <paramref name="factual"/> + ". " + <see cref="CutWindowClaim"/> for
+    /// <paramref name="effectiveStart"/>. <paramref name="tail"/> is more text, after the claim, that is not a claim and
+    /// is kept on both branches. A failed probe leaves the notice uncut, so the covered text is kept.
+    /// </summary>
+    public static string QuietUnlessCut(
+        bool windowTruncated, string? effectiveStart, string factual, string coveredClaim, string tail = "") =>
+        windowTruncated
+            ? factual + ". " + CutWindowClaim(effectiveStart) + tail
+            : factual + coveredClaim + tail;
 }

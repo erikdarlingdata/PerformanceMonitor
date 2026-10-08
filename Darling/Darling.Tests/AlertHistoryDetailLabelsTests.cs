@@ -45,7 +45,7 @@ public sealed class AlertHistoryDetailLabelsTests
         "const parse = new Function(src.slice(start, end) + '\\nreturn parseDetailFields;')();" +
         "console.log(JSON.stringify(parse(JSON.parse(process.argv[2]).join('\\n'))));";
 
-    /// <summary>Runs the shipped parser over the lines, or returns false when Node is not installed.</summary>
+    /// <summary>Runs the shipped parser over the lines. When Node is not installed, the test is reported as skipped.</summary>
     private static bool TryParse(string[] lines, out List<(string? Label, string Value)> fields)
     {
         fields = new List<(string?, string)>();
@@ -68,6 +68,7 @@ public sealed class AlertHistoryDetailLabelsTests
         }
         catch (Win32Exception)
         {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             return false;
         }
 

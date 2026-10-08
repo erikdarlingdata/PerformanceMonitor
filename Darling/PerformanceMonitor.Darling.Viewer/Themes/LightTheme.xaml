@@ -244,7 +244,7 @@
 
     <!-- No Data Message Style (for empty DataGrids) -->
     <Style x:Key="NoDataMessage" TargetType="TextBlock">
-        <Setter Property="Text" Value="No data for selected time range"/>
+        <Setter Property="Text" Value="No data for the selected time range."/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
         <Setter Property="FontSize" Value="14"/>
         <Setter Property="HorizontalAlignment" Value="Center"/>
@@ -675,6 +675,37 @@
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="0"/>
+        <!-- F18 (Lite click-through): the stock template lays the tabs out in a TabPanel, which moves the row holding the
+             selected tab to the bottom, so clicking a tab in an upper row swaps the rows and every tab under the cursor changes.
+             A WrapPanel wraps the same way and never reorders its rows. Same parts as the stock template (the tab strip
+             on top, the selected content below). -->
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabControl">
+                    <Grid KeyboardNavigation.TabNavigation="Local" SnapsToDevicePixels="True" ClipToBounds="True">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <WrapPanel x:Name="HeaderPanel" Grid.Row="0" IsItemsHost="True" Panel.ZIndex="1"
+                                   KeyboardNavigation.TabIndex="1"
+                                   KeyboardNavigation.TabNavigation="Once"
+                                   KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                        <Border x:Name="ContentPanel" Grid.Row="1"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                KeyboardNavigation.DirectionalNavigation="Contained"
+                                KeyboardNavigation.TabIndex="2"
+                                KeyboardNavigation.TabNavigation="Local">
+                            <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"
+                                              Margin="{TemplateBinding Padding}"
+                                              SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style TargetType="TabItem">

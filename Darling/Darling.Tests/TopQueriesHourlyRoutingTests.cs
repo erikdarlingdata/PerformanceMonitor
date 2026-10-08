@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -36,7 +37,9 @@ public sealed class TopQueriesHourlyRoutingTests
 
         Assert.Contains("GROUP BY database_name, query_hash", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("host_object_name", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(worker_time_sum) DESC", sql, StringComparison.Ordinal);
+        /* The ranking is the const's anchor; the CPU read is the const expanded to the worker-time sum (#5226). */
+        Assert.Contains("ORDER BY rank_metric DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(worker_time_sum) AS rank_metric", TopRankings.Apply(sql, TopRanking.Cpu, hourly: true), StringComparison.Ordinal);
         Assert.Contains(DarlingDataReader.TopQueriesHourlyFromPlaceholder, sql, StringComparison.Ordinal);
     }
 
@@ -80,12 +83,17 @@ public sealed class TopQueriesHourlyRoutingTests
     public void TopQueriesHourlySql_LooksUpTextInStatement_AndSelectsNoDeltaExtremes()
     {
         var sql = DarlingDataReader.TopQueriesHourlySql;
-        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        /* #5309: one text lookup, probed once per key by index, not one per row and not a read of the window's raw rows. It has two
+           stages, each one lateral: latest_in_window for the ranked keys, then (#5299 round 2, N1) latest_any for the keys the
+           window had no text for. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "LATERAL").Count);
+        Assert.Contains("latest_in_window AS (", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(sql_handle)", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);   /* #5313: the candidate limit; the ceiling moved to $7 */
+        Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("worker_time_min", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$6", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);   /* the ceiling is a $CEIL$ placeholder, bound only when known */
         Assert.Null(typeof(DarlingDataReader).GetField("TopQueriesHourlyTextLookupSql",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
 
@@ -102,7 +110,7 @@ public sealed class TopQueriesHourlyRoutingTests
     [Fact]
     public void HourlyFirstBucketSql_IsLeastOfTwoOrderedFirstRowProbes_WithNoUnion()
     {
-        var sql = DarlingDataReader.HourlyFirstBucketSql;
+        var sql = RollupCoverage.HourlyFirstBucketSql;
         Assert.Contains("least(", sql, StringComparison.Ordinal);
         Assert.Contains("$LEGACY$", sql, StringComparison.Ordinal);
         Assert.Contains("$SUCCESSOR$", sql, StringComparison.Ordinal);
@@ -115,27 +123,39 @@ public sealed class TopQueriesHourlyRoutingTests
     [Fact]
     public void HourlyFirstBucketSingleRelationSql_ReadsThePlaceholderRelation_OrderedWithLimitOne()
     {
-        var sql = DarlingDataReader.HourlyFirstBucketSingleRelationSql;
+        var sql = RollupCoverage.HourlyFirstBucketSingleRelationSql;
         Assert.Contains(DarlingDataReader.TopQueriesHourlyFromPlaceholder, sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY f.bucket LIMIT 1", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("UNION", sql, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>The seam splits at the same floor the stitch uses, and both hourly readers go through it.</summary>
+    /// <summary>The seam splits at the same floor the stitch uses, and the service's readers and the Viewer's grids go through
+    /// the ONE copy in Storage (#5329).</summary>
     [Fact]
     public void GetHourlyFirstBucketAsync_SplitsAtStitchFloor_AndBothReadersUseIt()
     {
-        var source = File.ReadAllText(FindReaderSourcePath());
-        var start = source.IndexOf("private static async Task<DateTime?> GetHourlyFirstBucketAsync(", StringComparison.Ordinal);
+        var storage = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs"));
+        var start = storage.IndexOf("public async Task<DateTime?> GetHourlyFirstBucketAsync(", StringComparison.Ordinal);
         Assert.True(start >= 0);
-        var end = source.IndexOf("return value is DateTime bucket", start, StringComparison.Ordinal);
-        var body = source[start..end];
-        Assert.Contains(".StitchFloor(", body, StringComparison.Ordinal);
+        var end = storage.IndexOf("return value is DateTime bucket", start, StringComparison.Ordinal);
+        var body = storage[start..end];
+        var source = File.ReadAllText(FindReaderSourcePath());
+        Assert.DoesNotContain("HourlyFirstBucketSql =", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Task<DateTime?> GetHourlyFirstBucketAsync(", source, StringComparison.Ordinal);
+        foreach (var viewerFile in new[] { "ViewerDataService.QueryStats.cs", "ViewerDataService.ProcedureStats.cs" })
+        {
+            Assert.Contains("coverage.GetHourlyFirstBucketAsync(",
+                File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", viewerFile)), StringComparison.Ordinal);
+        }
+
+        Assert.Contains("StitchFloor(", body, StringComparison.Ordinal);
         Assert.Contains("SuccessorOf(", body, StringComparison.Ordinal);
         Assert.Contains("HourlyFirstBucketSingleRelationSql", body, StringComparison.Ordinal);
         Assert.Contains("\"UNION\"", body, StringComparison.Ordinal);
-        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView,", source, StringComparison.Ordinal);
-        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView,", source, StringComparison.Ordinal);
+        Assert.Contains("coverage.GetHourlyFirstBucketAsync(", source, StringComparison.Ordinal);
+        Assert.Contains("postgres, io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,", source, StringComparison.Ordinal);
+        /* #5329: the procedures arm picks its relation (io or the stitched legacy view) inside the call. */
+        Assert.Contains("postgres, io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,", source, StringComparison.Ordinal);
     }
 
     private static string FindReaderSourcePath()
@@ -143,4 +163,33 @@ public sealed class TopQueriesHourlyRoutingTests
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
+
+    /// <summary>
+    /// #5329 source pin: the routed read takes the io route through <c>ChooseQueriesHourlyRoute</c>, the hourly arm names
+    /// <c>query_stats_io_hourly</c> (and projects its three sums) only on that route, a reads ranking carries the raw
+    /// retention notice only when it does not read io, and the queries tool no longer says only raw carries reads.
+    /// </summary>
+    [Fact]
+    public void TheIoRoute_IsChosenInTheRoutedRead_NamedInTheHourlyArm_AndDisclosedByTheTool()
+    {
+        var source = File.ReadAllText(FindReaderSourcePath());
+        var routed = source.Substring(source.IndexOf("public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync", StringComparison.Ordinal));
+        routed = routed[..routed.IndexOf("GetTopQueriesByCpuHourlyAsync(postgres, coverage", StringComparison.Ordinal)];
+        Assert.Contains("ChooseQueriesHourlyRoute(rollups, coverage, ranking, startUtc)", routed, StringComparison.Ordinal);
+        Assert.Contains("ranking != TopRanking.Reads || ioRoute", routed, StringComparison.Ordinal);
+        Assert.DoesNotContain("!TopRankings.HourlyCarries(ranking)", routed, StringComparison.Ordinal);
+
+        var arm = source.Substring(source.IndexOf("private static async Task<(List<TopQueryRow> Rows, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync", StringComparison.Ordinal));
+        arm = arm[..arm.IndexOf("/* ─────────────────────────── top procedures", StringComparison.Ordinal)];
+        /* #5329: the io FROM goes through StitchedRelationSql like every other hourly relation (no literal relation name). */
+        Assert.Contains("coverage.StitchedRelationSql(\n            io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,", arm.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.DoesNotContain("collect.{TimescaleSupport.QueryStatsIoHourlyView} AS f", arm, StringComparison.Ordinal);
+        Assert.Contains("io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,", arm, StringComparison.Ordinal);
+        Assert.Contains("coverage.GetHourlyFirstBucketAsync(", arm, StringComparison.Ordinal);
+        Assert.Contains("TopRankings.HourlyIoSums", arm, StringComparison.Ordinal);
+
+        var tool = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));
+        Assert.DoesNotContain("which only raw query_stats carries (the hourly rollup keeps CPU", tool, StringComparison.Ordinal);
+        Assert.Contains("query_stats_io_hourly", tool, StringComparison.Ordinal);
+    }
 }

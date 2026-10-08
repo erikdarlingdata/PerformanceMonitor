@@ -95,7 +95,11 @@ public partial class QueryStoreHistoryWindow : Window
 
             if (_historyData.Count > 0)
             {
-                var totalExec = _historyData.Sum(r => r.ExecutionCount);
+                /* #5306: each Query Store interval counts once, at its latest snapshot. The grid lists every snapshot
+                   (an interval collected N times is N rows with a growing count), so adding the column up counted it
+                   about N times. The samples count, the first and last times and the plan count below are not totals
+                   of the counts: they read the rows as they are. */
+                var totalExec = QueryStoreHistoryRow.TotalExecutions(_historyData);
                 var planCount = _historyData.Select(r => r.PlanId).Distinct().Count();
                 var zone = _displayZone();
                 var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
@@ -202,12 +206,15 @@ public partial class QueryStoreHistoryWindow : Window
         btn.Content = "...";
         try
         {
-            var plan = await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, rowPlanId);
+            var plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, rowPlanId));
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show("No query plan found in Query Store for this plan ID.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
+            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
+            if (WithheldPlanGuard.RefuseSave(plan)) return;
 
             var dialog = new SaveFileDialog
             {
@@ -301,7 +308,7 @@ public partial class QueryStoreHistoryWindow : Window
     private async System.Threading.Tasks.Task<string?> FetchPlanAsync(long planId)
     {
         if (string.IsNullOrEmpty(_connectionString) || planId == 0) return null;
-        return await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, planId);
+        return LivePlanDisplay.Filter(await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, planId));
     }
 
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)

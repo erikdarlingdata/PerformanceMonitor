@@ -227,7 +227,7 @@ public sealed partial class ViewerDataService
     /// <summary>Everything from <c>ranked</c> down, shared by <see cref="QueryStoreTopSql"/> and
     /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every
     /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
-    /// identically. References only $1 and $4 (the prefixes alone bind $2/$3/$5), so both share it unchanged.</summary>
+    /// identically. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text fallback's window bound, the same $2/$3 both prefixes bind), so both share it unchanged.</summary>
     private const string QueryStoreTopSuffix = """
         ranked AS (
             SELECT
@@ -296,9 +296,10 @@ public sealed partial class ViewerDataService
             FROM deduped
             WHERE rn = 1
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
-            LIMIT $4 + 5
-        )
+            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            LIMIT $6
+        ),
+        page AS (
         SELECT
             r.database_name,
             r.query_id,
@@ -352,7 +353,8 @@ public sealed partial class ViewerDataService
             r.avg_num_physical_io_reads,
             r.min_num_physical_io_reads,
             r.max_num_physical_io_reads,
-            r.replica_role
+            r.replica_role,
+            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
         FROM ranked AS r
         /* #2150: resolve the text ONCE, inside the lateral, so everything downstream still reads a single
            t.query_text — the projection above and the WAITFOR self-exclusion below both get the resolved
@@ -376,15 +378,30 @@ public sealed partial class ViewerDataService
                            WHERE s.server_id = $1
                            AND   s.query_id = r.query_id
                            AND   s.database_name = r.database_name
+                           /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
+                              above were read with). Without it a query with no inline text anywhere walked every
+                              retained chunk of query_store_stats on the time index looking for one. A query whose
+                              only inline text is older than the window now shows none, as a query with no text
+                              at all already did. Twins the other copy of this tail; keep them matching. */
+                           AND   s.collection_time >= $2
+                           AND   ($3::timestamp IS NULL OR s.collection_time <= $3)
                            AND   s.query_text IS NOT NULL
-                           ORDER BY s.collection_time DESC
+                           ORDER BY s.collection_time DESC, s.collection_id DESC
                            LIMIT 1
                        )
                    ) AS query_text
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_executions * r.avg_duration_ms DESC
+        ORDER BY page_ord
         LIMIT $4
+        )
+        /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
+           exhausted. page_ord is NULL on that row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
         """;
 
     /// <summary>
@@ -443,18 +460,19 @@ public sealed partial class ViewerDataService
             }
         }
 
-        var rows = new List<ViewerQueryStoreRow>();
-
-        await using var command = _dataSource.CreateCommand(QueryStoreTopSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        AddServerWindowParameters(command, serverId, startUtc, endUtc);
-        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
-        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
+           while more candidates exist, under its bound. */
+        var rows = await TopFill.RunAsync(top, async candidates =>
         {
-            rows.Add(ReadQueryStoreTopRow(reader));
-        }
+            await using var command = _dataSource.CreateCommand(QueryStoreTopSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            AddServerWindowParameters(command, serverId, startUtc, endUtc);
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = candidates });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+        });
 
         return (rows, null);
     }
@@ -492,22 +510,23 @@ public sealed partial class ViewerDataService
                 return null;
             }
 
-            var rows = new List<ViewerQueryStoreRow>();
-            await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter
+            /* #5313: the same fill rounds as the raw read, on this transaction's snapshot ($6 is the candidate limit). */
+            var rows = await TopFill.RunAsync(top, async candidates =>
             {
-                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
-                Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
+                await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
+                command.Parameters.Add(new Npgsql.NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                    Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
+                });
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+                command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = candidates });
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
-            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                rows.Add(ReadQueryStoreTopRow(reader));
-            }
 
             return (rows, plan);
         }
@@ -519,6 +538,10 @@ public sealed partial class ViewerDataService
             return null;
         }
     }
+
+    /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
+    /// follows it. <see cref="TopFill.ReadPageAsync{T}"/> reads both.</summary>
+    private const int QueryStorePageOrdinal = 53;
 
     /// <summary>Shared by <see cref="GetQueryStoreTopQueriesAsync"/>'s raw and table paths: both
     /// <see cref="QueryStoreTopSql"/> and <see cref="QueryStoreTopTableSql"/> project the same
@@ -587,18 +610,30 @@ public sealed partial class ViewerDataService
     /// beside <see cref="GetQueryStoreTopQueriesAsync"/> so the grid header can disclose a window the raw tier
     /// no longer fully holds, the same fact <c>get_query_store_top</c> reports over MCP (#2364). The same
     /// window backs <see cref="GetQueryStoreSlicerDataAsync"/>'s initial (unsliced) read, so one floor read
-    /// covers both rather than a second round trip for the identical [start, end].
+    /// covers both rather than a second round trip for the identical [start, end]. A window no longer than
+    /// <see cref="DurationTrendRouting.TruncationSlack"/> answers null without a store read (#4966): no banner can show for one.
     /// </summary>
     public Task<DateTime?> GetQueryStoreWindowFloorAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc,
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        /* #4966: a window no longer than the truncation slack can never get a coverage note, so the probe starts no query for it, as
+           DataWindowFloor.GetForServerAsync's does not (GetQueryStatsWindowFloorAsync says why). The skip is here, in the viewer's
+           methods, and not in RawWindowFloor.GetAsync: Darling's MCP tools share that probe and read its null as "nothing was read". */
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+        {
+            return Task.FromResult<DateTime?>(null);
+        }
+
+        return RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
 
     /// <summary>
     /// Query-Store comparison — Lite's <c>GetQueryStoreComparisonAsync</c> ported. Uses execution-count
     /// weighted averages (<c>SUM(execution_count * avg_metric) / SUM(execution_count)</c>) so periods with
     /// uneven interval counts aggregate correctly, top-100-union + FULL OUTER JOIN keyed on
-    /// (database, query_hash). Returns the shared <see cref="QueryStatsComparisonItem"/>.
+    /// (database, query_hash), each key joined as <c>COALESCE(key,'') = COALESCE(key,'')</c> plus an <c>IS NULL</c> pair so
+    /// a NULL key and an empty-string key stay apart (#5420). Returns the shared <see cref="QueryStatsComparisonItem"/>.
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string QueryStoreComparisonSql = """
@@ -683,52 +718,68 @@ public sealed partial class ViewerDataService
                 SELECT * FROM top_baseline
             ) AS combined
         ),
+        /* #5420: each period aggregates its deduped rows ONCE (the derived table w) and the top list joins to that, on the
+           null-safe pair COALESCE(x,'') = COALESCE(y,'') AND (x IS NULL) = (y IS NULL). The old form joined the top list
+           (at most 200 hashes) to the window's rows with IS NOT DISTINCT FROM, which PostgreSQL can only run as a
+           nested loop that filters every window row against every hash: seconds on a 24 hour window, 18 to 24 s on 7 days. */
         current_period AS (
             SELECT th.database_name, th.query_hash,
-                   SUM(qs.execution_count) AS exec_count,
-                   SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-                   /* #2150: this comparison groups by query_hash, but text is stored per query_id, so the
-                      side table is joined on the finer key and MAX still picks one member's text for the
-                      group — the same arbitrary-but-deterministic choice MAX(qs.query_text) made before.
-                      The join cannot fan out (query_store_text is one row per server/database/query_id, by
-                      primary key), so the execution-count SUMs above are unaffected. The COALESCE keeps
-                      pre-cutover rows, whose text is still inline, reading exactly as they used to. */
-                   MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.query_text
             FROM top_hashes th
-            INNER JOIN deduped_current qs
-              ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
-              AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            LEFT JOIN query_store_text AS x
-              ON  x.server_id = $1
-              AND x.database_name = qs.database_name
-              AND x.query_id = qs.query_id
-            WHERE qs.rn = 1
-            AND   qs.execution_count > 0
-            GROUP BY th.database_name, th.query_hash
+            INNER JOIN (
+                SELECT qs.database_name, qs.query_hash,
+                       SUM(qs.execution_count) AS exec_count,
+                       SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
+                       /* #2150: this comparison groups by query_hash, but text is stored per query_id, so the
+                          side table is joined on the finer key and MAX still picks one member's text for the
+                          group — the same arbitrary-but-deterministic choice MAX(qs.query_text) made before.
+                          The join cannot fan out (query_store_text is one row per server/database/query_id, by
+                          primary key), so the execution-count SUMs above are unaffected. The COALESCE keeps
+                          pre-cutover rows, whose text is still inline, reading exactly as they used to. */
+                       MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                FROM deduped_current qs
+                LEFT JOIN query_store_text AS x
+                  ON  x.server_id = $1
+                  AND x.database_name = qs.database_name
+                  AND x.query_id = qs.query_id
+                WHERE qs.rn = 1
+                AND   qs.execution_count > 0
+                GROUP BY qs.database_name, qs.query_hash
+            ) w
+              ON  COALESCE(w.query_hash, '') = COALESCE(th.query_hash, '')
+              AND (w.query_hash IS NULL) = (th.query_hash IS NULL)
+              AND COALESCE(w.database_name, '') = COALESCE(th.database_name, '')
+              AND (w.database_name IS NULL) = (th.database_name IS NULL)
         ),
         baseline_period AS (
             SELECT th.database_name, th.query_hash,
-                   SUM(qs.execution_count) AS exec_count,
-                   SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-                   /* #2150 — same resolution as current_period above. Both arms need it because the final
-                      projection takes COALESCE(c.query_text, b.query_text): converting only one arm would
-                      leave a GONE row (present in baseline only) with no text to fall back to. */
-                   MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.query_text
             FROM top_hashes th
-            INNER JOIN deduped_baseline qs
-              ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
-              AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            LEFT JOIN query_store_text AS x
-              ON  x.server_id = $1
-              AND x.database_name = qs.database_name
-              AND x.query_id = qs.query_id
-            WHERE qs.rn = 1
-            AND   qs.execution_count > 0
-            GROUP BY th.database_name, th.query_hash
+            INNER JOIN (
+                SELECT qs.database_name, qs.query_hash,
+                       SUM(qs.execution_count) AS exec_count,
+                       SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
+                       /* #2150 — same resolution as current_period above. Both arms need it because the final
+                          projection takes COALESCE(c.query_text, b.query_text): converting only one arm would
+                          leave a GONE row (present in baseline only) with no text to fall back to. */
+                       MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                FROM deduped_baseline qs
+                LEFT JOIN query_store_text AS x
+                  ON  x.server_id = $1
+                  AND x.database_name = qs.database_name
+                  AND x.query_id = qs.query_id
+                WHERE qs.rn = 1
+                AND   qs.execution_count > 0
+                GROUP BY qs.database_name, qs.query_hash
+            ) w
+              ON  COALESCE(w.query_hash, '') = COALESCE(th.query_hash, '')
+              AND (w.query_hash IS NULL) = (th.query_hash IS NULL)
+              AND COALESCE(w.database_name, '') = COALESCE(th.database_name, '')
+              AND (w.database_name IS NULL) = (th.database_name IS NULL)
         )
         SELECT COALESCE(c.database_name, b.database_name) AS database_name,
                COALESCE(c.query_hash, b.query_hash) AS query_hash,
@@ -742,6 +793,8 @@ public sealed partial class ViewerDataService
         FULL OUTER JOIN baseline_period b
           ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
           AND COALESCE(c.query_hash, '') = COALESCE(b.query_hash, '')
+          AND (c.database_name IS NULL) = (b.database_name IS NULL)
+          AND (c.query_hash IS NULL) = (b.query_hash IS NULL)
         """;
 
     /// <summary>Query-Store current-vs-baseline comparison rows (shared .Ui item; delta % + NEW/GONE badges).</summary>

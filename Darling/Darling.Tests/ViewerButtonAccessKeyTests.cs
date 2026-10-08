@@ -77,6 +77,8 @@ namespace Darling.Tests;
 /// shared reader keeps it out of <c>RepoFileAdoptionTests</c>' rosters — which are shared censuses under
 /// concurrent edit, and a roster entry is a merge conflict this rule does not need.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class ViewerButtonAccessKeyTests
 {
     /// <summary>

@@ -88,19 +88,37 @@ public sealed class McpServerInfoTools
     public static async Task<string> GetDatabaseSizes(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var rows = await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId);
+            /* #5244: database_name appended LAST (H1). A blank is "no filter"; any other value is kept exactly (no trim) and matches
+               exactly, as on Darling. The filter is on the newest snapshot's ROWS, so captured_at is the server's whatever the filter. */
+            var names = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var rows = await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId, names);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_size_stats")
-                    ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
+            {
+                /* A filter that matches no database in a snapshot that exists is an answer about the chosen database, not about
+                   collection: the probe is the same newest-snapshot read, unfiltered (Darling's twin words it the same). */
+                if (names != null && await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId) is { Count: > 0 } snapshot)
+                    return McpHelpers.StatusForDatabase("empty",
+                        $"No database size rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} in the snapshot captured at "
+                        + $"{snapshot[0].CollectionTime:o}. Check the database name against the server's unfiltered get_database_sizes: the filter "
+                        + "matches exactly, and an excluded or renamed database looks identical to one with no files.",
+                        McpDatabaseSelection.Describe(names));
 
-            return DatabaseSizesPayload(resolved.ServerName, rows);
+                /* #5244: every answer shape says which database it was limited to (null for every database). */
+                return McpHelpers.WithDatabase(
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_size_stats"),
+                           McpDatabaseSelection.Describe(names))
+                    ?? McpHelpers.StatusForDatabase("unavailable", "No database size data available. The size collector may not have run yet.", McpDatabaseSelection.Describe(names));
+            }
+
+            return DatabaseSizesPayload(resolved.ServerName, rows, McpDatabaseSelection.Describe(names));
         }
         catch (Exception ex)
         {
@@ -116,8 +134,9 @@ public sealed class McpServerInfoTools
     /// gets holds its data size only, and the server reports no log size for it: that row, and its database's
     /// entry, carry <see cref="AzureSiblingDatabaseSize.LogNote"/> under <see cref="AzureSiblingDatabaseSize.RowNoteKey"/>,
     /// and the top-level note says it too. No other row has the key. Darling's twin gives the same words and shape.
+    /// <paramref name="databaseEcho"/> (#5244) is the <c>database_name</c> echo (the name, or null for every database); the key is always written.
     /// </summary>
-    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DatabaseSizeStatsRow> rows)
+    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DatabaseSizeStatsRow> rows, string? databaseEcho = null)
     {
         var databases = rows
             .GroupBy(r => r.DatabaseName)
@@ -150,6 +169,7 @@ public sealed class McpServerInfoTools
             return JsonSerializer.Serialize(new
             {
                 server = serverName,
+                database_name = databaseEcho,
                 /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
                 captured_at = rows[0].CollectionTime.ToString("o"),
                 file_count = rows.Count,
@@ -161,6 +181,7 @@ public sealed class McpServerInfoTools
         return JsonSerializer.Serialize(new
         {
             server = serverName,
+            database_name = databaseEcho,
             /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
             captured_at = rows[0].CollectionTime.ToString("o"),
             file_count = rows.Count,

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -18,6 +19,8 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public sealed class StoredEventCopiesReaderTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private const int ServerId = 5301;
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
 
@@ -25,6 +28,11 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -51,6 +59,7 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
     {
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
         var initializer = new DuckDbInitializer(dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeAsync();
         var eventTime = firstStored.AddMinutes(-2);
 
@@ -102,7 +111,7 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
         var now = DateTime.UtcNow;
         var bound = now.AddMinutes(-10);
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        var initializer = new DuckDbInitializer(dbPath);
+        using var initializer = new DuckDbInitializer(dbPath);
         await initializer.InitializeAsync();
         using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
         {

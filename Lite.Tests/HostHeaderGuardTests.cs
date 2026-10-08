@@ -27,6 +27,7 @@ namespace PerformanceMonitorLite.Tests;
 /// source pinning that the middleware is actually installed first — the defect was a wiring omission, so the
 /// decision test alone would have passed on the vulnerable build.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class HostHeaderGuardTests
 {
     /* ---------------- the pure decision (Lite is always loopback-only: no listen IP) ---------------- */

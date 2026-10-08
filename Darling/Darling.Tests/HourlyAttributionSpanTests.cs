@@ -31,6 +31,20 @@ public sealed class HourlyAttributionSpanTests
         Assert.Contains("served span", note, StringComparison.Ordinal);
     }
 
+    /// <summary>#4966: the served span's two instants print as UTC with the Z, though the first bucket and the ceiling come off the store naive.</summary>
+    [Fact]
+    public void Hourly_TheServedSpanNote_NamesBothInstantsInUtc_WithTheZ()
+    {
+        var start = Day.AddHours(10).AddMinutes(37);
+        var asOf = Day.AddHours(20).AddMinutes(20);
+        var firstBucket = DateTime.SpecifyKind(Day.AddHours(13), DateTimeKind.Unspecified);
+        var ceiling = DateTime.SpecifyKind(Day.AddHours(18), DateTimeKind.Unspecified);
+
+        var (_, _, note) = DarlingMcpDataTools.HourlyAttributionSpan(true, start, asOf, firstBucket, ceiling);
+
+        Assert.Contains("the served span 2026-01-05T13:00:00.0000000Z to 2026-01-05T18:00:00.0000000Z.", note, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Hourly_ShareDividesByTheServedSpan_NotTheRequestedWindow()
     {

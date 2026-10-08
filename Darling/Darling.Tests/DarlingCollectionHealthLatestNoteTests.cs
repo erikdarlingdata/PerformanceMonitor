@@ -39,15 +39,15 @@ public sealed class DarlingCollectionHealthLatestNoteTests
     private const string ServerName = "health-latest-note";
 
     /// <summary>
-    /// The fleet read rolls up EVERY enabled server and its rows carry no server_id, so the fleet assertions
-    /// scope themselves by a collector name no real install has — the sentinel-server discipline
-    /// <c>DarlingFleetReaderLivePostgresTests</c> uses, applied to the only key this projection exposes.
+    /// The fleet read rolls up EVERY server in the store, so the fleet assertions scope themselves by this
+    /// sentinel server's rows and by a collector name no real install has — the sentinel-server discipline
+    /// <c>DarlingFleetReaderLivePostgresTests</c> uses.
     /// </summary>
     private const string FleetProbeCollector = "note_rank_fleet_probe";
 
     /// <summary>#4748: the collector the partial-database-failure band cases seed, named apart from
     /// <see cref="FleetProbeCollector"/> so the two families of cases cannot read each other's rows. Like it,
-    /// a name no real install has, because the fleet rows carry no server_id.</summary>
+    /// a name no real install has.</summary>
     private const string PartialFailureProbeCollector = "partial_failure_band_probe";
 
     /// <summary>123,456 microseconds in ticks (10 ticks to the microsecond): the fractional second the
@@ -184,26 +184,24 @@ public sealed class DarlingCollectionHealthLatestNoteTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            /* The fleet read is scoped to the CONFIG registry, not the collector-side servers table. */
-            await DarlingMcpTestData.ExecAsync(connection, ct, @"
-INSERT INTO config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE)
-ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
 
             await SeedAsync(connection, ct, FleetProbeCollector, MinutesAgo(30), "SUCCESS", ProbeNote(9));
             await SeedAsync(connection, ct, FleetProbeCollector, MinutesAgo(20), "SUCCESS", ProbeNote(12));
 
+            /* The fleet read the Overview cards and the status bar use: one row per server and collector (#4226),
+               keyed by server, scoped by server_id rather than the config registry. */
             await using var viewer = new ViewerDataService(cs!);
-            var fleet = await viewer.GetFleetCollectionHealthAsync(ct);
-            var row = fleet.Single(h => h.CollectorName == FleetProbeCollector);
+            var fleet = await viewer.GetFleetCollectionHealthByServerAsync(ct);
+            var row = fleet[ServerId].Single(h => h.CollectorName == FleetProbeCollector);
 
-            /* The fleet rollup answers "how many collectors, how many failing" for the status bar and
-               nothing else, so it carries the BAND inputs and the cheap note COUNT but not the exemplar
-               text: ranking a message per group turns a parallel hash aggregate into a serial sort of
-               every row in the window. Blank, deliberately — never the pre-#1855 lexicographic MAX, which
+            /* The fleet rollup answers "how many collectors, how many failing" for the status bar and the
+               Overview cards and nothing else, so it carries the BAND inputs but not the exemplar text, nor
+               the note count: ranking a message per group turns a parallel hash aggregate into a serial sort
+               of every row in the window. Blank, deliberately — never the pre-#1855 lexicographic MAX, which
                would have been the older run's "9 item(s)" on data where the truth is 12. */
             Assert.Null(row.LastNote);
             Assert.Null(row.LastError);
-            Assert.Equal(2, row.NoteCount);
+            Assert.Equal(0, row.NoteCount);
             Assert.Equal(2, row.TotalRuns);
 
             /* And the banding — the thing this read exists for — still works off the counts. */
@@ -221,11 +219,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
     /// <summary>
     /// #4748: a SUCCESS run whose note says half or more of its databases failed bands Warning, read back
     /// through the three Postgres reads that band a collector: the Viewer's per-server grid, the MCP
-    /// service's <c>get_collection_health</c>, and the Viewer's fleet rollup. The classifier's own tests hand
+    /// service's <c>get_collection_health</c>, and the Viewer's fleet rollup (the by-server read the Overview cards
+    /// and the status bar take their counts from). The classifier's own tests hand
     /// it a note; none of them runs the SQL that has to deliver the note, and each read delivers it a
     /// different way (two window-function ranks, and on the fleet side a plain-aggregate CASE that compares
     /// two instants and strips a fixed-width timestamp prefix). All three cases seed one collector name no
-    /// real install has, because the fleet rows carry no server_id.
+    /// real install has, on one sentinel server.
     ///
     /// <para>Here the newest run is the partial-failure cycle (9 of 10 databases) with an older clean run
     /// behind it, so each read has to choose the newest run rather than find the only one. Its
@@ -434,10 +433,6 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            /* The fleet read is scoped to the CONFIG registry, not the collector-side servers table. */
-            await DarlingMcpTestData.ExecAsync(connection, ct, @"
-INSERT INTO config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE)
-ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
 
             await seed(connection, ct);
 
@@ -460,8 +455,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
             AssertRead("the service read", "latest_run_note", expectedLatestRunNote, service.LatestRunNote);
             AssertRead("the service read", "last_note", expectedLastNote, service.LastNote);
 
-            /* ── the Viewer's fleet read (the status bar's rollup) ── */
-            var fleet = (await viewer.GetFleetCollectionHealthAsync(ct))
+            /* ── the Viewer's fleet read (the rollup the Overview cards and the status bar band) ── */
+            var fleet = (await viewer.GetFleetCollectionHealthByServerAsync(ct))[ServerId]
                 .Single(h => h.CollectorName == PartialFailureProbeCollector);
             Assert.Equal(2, fleet.TotalRuns);
             AssertRead("the fleet read", "band", expectedBand, fleet.HealthStatus);

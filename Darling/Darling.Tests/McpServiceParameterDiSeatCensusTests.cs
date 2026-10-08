@@ -36,6 +36,7 @@ namespace Darling.Tests;
 /// <c>AddSingleton(config.Postgres)</c> line did not name <c>PostgresConfig</c> anywhere in source text, so this
 /// test only starts passing once item 3 lands.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpServiceParameterDiSeatCensusTests
 {
     [Fact]

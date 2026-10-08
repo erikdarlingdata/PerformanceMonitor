@@ -5950,6 +5950,55 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>
+    /// A fresh store, built the way the service starts one (a real first-run cluster, the migrations, then
+    /// <see cref="DarlingWorker.StoreObjectConvergence"/>), ends up with every continuous aggregate the product
+    /// declares. Nothing else checks the outcome: <see cref="StoreObjectConvergenceTests"/> pins the order of the
+    /// list and the aggregate step only warns when one CREATE fails, so a store can finish its start-up one
+    /// rollup short and look healthy.
+    ///
+    /// <para>The second half is the proof the check can fail. The same walk on a second fresh database, with the
+    /// <c>collection_log hypertable</c> step left out, ends without <c>collection_health_hourly</c>: that
+    /// aggregate sits on <c>collect.collection_log</c>, and its CREATE is refused with 0A000 ("invalid continuous
+    /// aggregate view") until the table is a hypertable (#3893). The failure has to name it.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFreshStore_EndsTheRealWalkWithEveryDeclaredAggregate_AndWithoutTheCollectionLogStep_LacksCollectionHealthHourly()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-fresh-aggregates-");
+        var store = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+
+        try
+        {
+            var owner = await store.EnsureRunningAsync(timeout.Token);
+
+            /* GREEN: the real list. The walk's own closing assertion is the check. */
+            await BuildProductStoreObjectsAsync(owner, timeout.Token);
+
+            /* RED: a second fresh database on the same cluster, the same walk minus the collection_log step. */
+            await ExecuteOnAsync(owner, "CREATE DATABASE walk_without_collection_log", timeout.Token);
+            var without = new NpgsqlConnectionStringBuilder(owner) { Database = "walk_without_collection_log" }.ConnectionString;
+            var failure = await Assert.ThrowsAnyAsync<Xunit.Sdk.XunitException>(
+                () => BuildProductStoreObjectsAsync(without, timeout.Token, leaveOutStep: "collection_log hypertable"));
+            Assert.Contains("collection_health_hourly", failure.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await store.StopIfStartedByThisProcessAsync();
+            TryDeleteTree(root.FullName);
+        }
+    }
+
     /* ---------------- fixture construction ---------------- */
 
     /// <summary>
@@ -6086,9 +6135,13 @@ public sealed class DarlingStoreUpgradeTests
     /// The product's own store objects, built the way the worker's start path builds them (#3908): the migrations,
     /// TimescaleDB enabled where the product enables it, then <see cref="DarlingWorker.StoreObjectConvergence"/>
     /// in its order. Every step has to succeed: a fixture missing a policy would let an upgrade that breaks it
-    /// pass.
+    /// pass. The walk ends on the outcome the list exists for, <see cref="AssertEveryDeclaredAggregateExistsAsync"/>,
+    /// because the aggregate step isolates its failures per aggregate (a warning, never a throw) and the loop
+    /// would otherwise carry on to a store that looks healthy minus one rollup. <paramref name="leaveOutStep"/>
+    /// names one step of the list to skip, so a test can show that assertion failing on a list that is short of it.
     /// </summary>
-    private static async Task BuildProductStoreObjectsAsync(string ownerConnectionString, CancellationToken cancellationToken)
+    private static async Task BuildProductStoreObjectsAsync(
+        string ownerConnectionString, CancellationToken cancellationToken, string? leaveOutStep = null)
     {
         var connectionString = new NpgsqlConnectionStringBuilder(ownerConnectionString)
         {
@@ -6108,10 +6161,60 @@ public sealed class DarlingStoreUpgradeTests
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, NullLogger.Instance, cancellationToken),
             "TimescaleDB could not be enabled on the fixture store.");
 
-        foreach (var step in DarlingWorker.StoreObjectConvergence)
+        /* Found by name, so a renamed step fails here with the reason instead of being quietly left in. */
+        var steps = DarlingWorker.StoreObjectConvergence.Where(step => step.Name != leaveOutStep).ToList();
+        Assert.True(
+            DarlingWorker.StoreObjectConvergence.Count - steps.Count == (leaveOutStep is null ? 0 : 1),
+            $"The convergence list has no one step named '{leaveOutStep}'.");
+
+        var aggregatesReady = -1;
+        foreach (var step in steps)
         {
-            await step.EnsureAsync(connection, NullLogger.Instance, cancellationToken);
+            var count = await step.EnsureAsync(connection, NullLogger.Instance, cancellationToken);
+            if (step.Name == AggregateStepName)
+            {
+                aggregatesReady = count;
+            }
         }
+
+        await AssertEveryDeclaredAggregateExistsAsync(connection, aggregatesReady, cancellationToken);
+    }
+
+    /// <summary>The convergence step that returns how many continuous aggregates it built.</summary>
+    private const string AggregateStepName = "continuous aggregates";
+
+    /// <summary>
+    /// Every continuous aggregate the product declares is in <c>timescaledb_information.continuous_aggregates</c>,
+    /// and the aggregate step's own count says it built all of them. The expected set is the lists
+    /// <see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/> concatenates, never a number written here,
+    /// so an aggregate is covered the day it is declared; a sixth list added to that sweep and not here moves its
+    /// count off this one and fails the second check. The names come first, because "collection_health_hourly is
+    /// missing" is the failure a reader can act on.
+    /// </summary>
+    private static async Task AssertEveryDeclaredAggregateExistsAsync(
+        NpgsqlConnection connection, int aggregatesReady, CancellationToken cancellationToken)
+    {
+        var declared = TimescaleSupport.HourlyAggregates.Select(a => a.View)
+            .Concat(TimescaleSupport.DailyAggregates.Select(a => a.View))
+            .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
+            .Concat(TimescaleSupport.OffGridAggregates.Select(a => a.View))
+            .Concat(TimescaleSupport.FrozenRollupAggregates.Select(a => a.View))
+            .ToList();
+
+        var listed = await ScalarAsync<string>(
+            connection,
+            "SELECT COALESCE(string_agg(view_name, ',' ORDER BY view_name), '') FROM timescaledb_information.continuous_aggregates " +
+            $"WHERE view_schema = '{PgSchemaGenerator.CollectSchema}'",
+            cancellationToken);
+        var present = (listed ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+
+        var missing = declared.Where(view => !present.Contains(view)).ToList();
+        Assert.True(
+            missing.Count == 0,
+            $"{missing.Count} of the {declared.Count} declared continuous aggregates are missing after the store-object walk: {string.Join(", ", missing)}.");
+        Assert.True(
+            aggregatesReady == declared.Count,
+            $"The '{AggregateStepName}' step reported {aggregatesReady} ready (-1 means the list has no such step); the declared lists hold {declared.Count}.");
     }
 
     /* ---------------- measurement ---------------- */

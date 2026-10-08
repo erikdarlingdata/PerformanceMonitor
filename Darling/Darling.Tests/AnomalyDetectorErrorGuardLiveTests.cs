@@ -223,7 +223,7 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
     private static async Task<bool> RunBothWindowsAsync(IAnomalyDetector detector, int serverId, string serverName)
     {
         var now = DateTime.SpecifyKind(
-            new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)),
+            new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond),
             DateTimeKind.Unspecified);
 
         foreach (var window in new[] { TimeSpan.FromHours(4), TimeSpan.FromHours(24) })
@@ -257,7 +257,7 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
     private static async Task SeedSqlServerFamilyTablesAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         var now = DateTime.SpecifyKind(
-            new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)),
+            new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond),
             DateTimeKind.Unspecified);
 
         // Inside every 24h window this class runs.
@@ -353,7 +353,7 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
     private static async Task SeedPgTargetFamilyTablesAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         var now = DateTime.SpecifyKind(
-            new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)),
+            new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond),
             DateTimeKind.Unspecified);
         var t = now.AddHours(-1);
         var priorMinute = t.AddMinutes(-1);

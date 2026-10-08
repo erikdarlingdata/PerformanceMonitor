@@ -69,7 +69,7 @@ INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major
 VALUES ($1, $2, $2, TRUE, 16, now()::timestamp, now()::timestamp)
 ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerName);
 
-            var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Unspecified).AddMinutes(-1);
+            var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute, DateTimeKind.Unspecified).AddMinutes(-1);
             var start = end.AddHours(-4);
             await Exec(connection, "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms) VALUES ($1,$2,$3,$4,'OLD',1,1,0)",
                 ct, CollectionIdGenerator.Next(), end.AddDays(-3), ServerId, ServerName);
@@ -231,7 +231,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
 VALUES ($1, $2, $2, TRUE, 16, now()::timestamp, now()::timestamp)
 ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerName);
-            var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Unspecified).AddMinutes(-1);
+            var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute, DateTimeKind.Unspecified).AddMinutes(-1);
             var start = end.AddHours(-4);
             for (var m = 0; m <= 240; m += 15)
                 await Exec(connection, "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms) VALUES ($1,$2,$3,$4,'CXPACKET',1,10,0)",

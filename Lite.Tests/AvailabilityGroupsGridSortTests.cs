@@ -26,6 +26,7 @@ namespace Lite.Tests;
 /// this pins both files rather than one — the exact drift shape <see cref="MainWindowAccessKeyTests"/>'
 /// remarks describe for this same pair of files.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class AvailabilityGroupsGridSortTests
 {
     private const string LiteGrid = "Lite/Controls/AvailabilityGroupsTab.xaml";

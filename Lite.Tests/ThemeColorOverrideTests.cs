@@ -38,6 +38,7 @@ namespace Lite.Tests;
 /// <para>The regeneration tests parse WPF XAML and so run on an STA thread, the same shape as
 /// <c>MainWindowAccessKeyTests</c>. Nothing here shows a window.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class ThemeColorOverrideTests
 {
     private static readonly string[][] ThemeFiles =

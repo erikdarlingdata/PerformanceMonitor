@@ -48,6 +48,7 @@ public sealed class DatabaseStateSweepAfterArchiveTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         CollectionResetGate.ResetForTests();
         try
         {

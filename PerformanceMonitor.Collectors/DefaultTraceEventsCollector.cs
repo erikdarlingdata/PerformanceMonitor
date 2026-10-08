@@ -217,13 +217,13 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 DECLARE
     @current_trace_path nvarchar(260);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     @current_trace_path = t.path
 FROM sys.traces AS t
 WHERE t.is_default = 1
 AND   t.status = 1;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     event_time = ft.StartTime,
     event_name = te.name,
     event_class = ft.EventClass,
@@ -318,7 +318,7 @@ ORDER BY
     ft.StartTime DESC
 OPTION(RECOMPILE);
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     current_trace_path = @current_trace_path;";
 
     public override string Name => "default_trace_events";
@@ -453,6 +453,8 @@ SELECT
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        /* #4348: the statement text goes through the statement filter where it first enters a row. */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -471,7 +473,7 @@ SELECT
                 Filename = reader.IsDBNull(10) ? null : reader.GetString(10),
                 IntegerData = reader.IsDBNull(11) ? null : Convert.ToInt64(reader.GetValue(11), CultureInfo.InvariantCulture),
                 IntegerData2 = reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12), CultureInfo.InvariantCulture),
-                TextData = reader.IsDBNull(13) ? null : reader.GetString(13),
+                TextData = reader.IsDBNull(13) ? null : scrub.Text(reader.GetString(13)),
                 SessionLoginName = reader.IsDBNull(14) ? null : reader.GetString(14),
                 ErrorNumber = reader.IsDBNull(15) ? null : Convert.ToInt32(reader.GetValue(15), CultureInfo.InvariantCulture),
                 Severity = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16), CultureInfo.InvariantCulture),

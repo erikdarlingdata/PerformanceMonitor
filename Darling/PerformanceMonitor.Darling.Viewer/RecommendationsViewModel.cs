@@ -246,12 +246,7 @@ public sealed class RecommendationCardViewModel
     /// are deliberately NOT structured config fixes — their target lists are empty here — so they remain
     /// incidents, matching the Dashboard (where MISSING_INDEX keeps the incident affordances).
     /// </summary>
-    private bool HasStructuredFixAction =>
-        Item.Remediation is { } r &&
-        ((r.DbConfigTargets is { Count: > 0 }) ||
-         (r.RcsiTargets is { Count: > 0 }) ||
-         (r.FileGrowthTargets is { Count: > 0 }) ||
-         (r.ServerConfigTargets is { Count: > 0 }));
+    private bool HasStructuredFixAction => FactRemediation.IsConfigFix(Item.Remediation);
 
     /// <summary>
     /// Whether this is a standing CONFIG-FIX finding (a structured config action) rather than a time-bound

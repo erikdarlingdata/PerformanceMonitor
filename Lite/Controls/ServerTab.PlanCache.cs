@@ -126,6 +126,7 @@ public partial class ServerTab : UserControl
             PlanCacheBloatLevelText.Text = "--";
             PlanCacheBloatLevelText.Foreground = System.Windows.Media.Brushes.Gray;
             PlanCacheRecommendationText.Text = "";
+            PlanCacheCollectedText.Text = "--";
             return;
         }
 
@@ -137,6 +138,8 @@ public partial class ServerTab : UserControl
         PlanCacheRecommendationText.Text = bloat.Recommendation;
 
         PlanCacheTotalPlansText.Text = summary.TotalPlans.ToString("N0");
+        /* #4966: the summary totals are one snapshot (the newest in the range); say when it was collected. */
+        PlanCacheCollectedText.Text = SnapshotCollectedText(summary.CollectionTime, GetPickerZone(), "--");
 
         /* oldest_plan_create_time comes from a DMV (sys.dm_exec_query_stats.creation_time) in the monitored
            server's local clock, which the viewer — having no per-server offset for this DMV column —

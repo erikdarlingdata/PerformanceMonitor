@@ -39,7 +39,10 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
        nobody changed. Two months back is always inside a three-month horizon and always a finished month,
        so the still-forming-day clamp never applies; the day-number comments below ("07-10") read as
        "day 10 of the fixture month". */
-    private static readonly DateTime MonthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-2);
+    private static readonly DateTime MonthStart = FirstOfMonth(DateTime.UtcNow).AddMonths(-2);
+
+    // Year and month from one clock read: two reads could straddle a month boundary.
+    private static DateTime FirstOfMonth(DateTime now) => new(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime MonthEnd = MonthStart.AddMonths(1);
 
     public PerformanceCalendarDataTests(SharedDuckDbFixture fixture)
@@ -121,6 +124,11 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
     [Fact]
     public async Task GetDailySummaryRange_BucketsEachDay_AndBandsViaSharedCalculator()
     {
+        // One transaction for the whole seed (#5208): ~700 single-row INSERTs were ~700 WAL commits. It is committed
+        // before the read below, which opens its own connection and sees only committed rows.
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+
         // 07-02 Healthy despite one deadlock (#3525): deadlocks band as a RATE over the 24-hour day
         // through the card band's tiers, and 1/day is 0.04/hr — far under the 5/hr Warning tier. The
         // count still lands in the row (the drill and tooltip keep it); waits decide the top-wait ranking
@@ -196,6 +204,8 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
         // 07-22 Warning via an alert alone (no collection-log run that day) -- the day must still appear
         // (alerts are part of the day spine), banded Warning, not dropped as No-Data.
         await SeedAlertAsync(Day(22), "Blocking Detected", dismissed: false);
+
+        batch.Commit();
 
         var rows = await _dataService.GetDailySummaryRangeAsync(ServerId, MonthStart, MonthEnd);
         var byDate = rows.ToDictionary(r => r.SummaryDate.Date);

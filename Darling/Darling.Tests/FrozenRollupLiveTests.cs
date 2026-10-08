@@ -2068,6 +2068,139 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
+    /// PIN (#4981): the stitch's fallback horizon is the service's UTC clock minus
+    /// <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>, BOUND as a parameter, so
+    /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> answers the same on a store session in any time
+    /// zone. Written as <c>now()::timestamp</c> in the SQL it moved by the session's UTC offset against buckets
+    /// that are naive UTC: a session west of UTC ended the scan early and missed a hole, one east of it ran the
+    /// scan late into hours the successor's own first refresh has not reached. The legacy holds its oldest hour
+    /// and the successor nothing; raw's oldest row is that hour. First a raw row 27 hours back (a real hole,
+    /// inside the scan on a UTC clock, outside it seven hours west) must read <c>false</c> in a UTC, a
+    /// UTC-7 and a UTC+9 session alike; then that row gone and one 20 hours back (inside the successor's first
+    /// refresh, outside the scan on a UTC clock, inside it nine hours east) must read <c>true</c> in all three.
+    /// RED at <c>9441f6b6c</c>: the UTC-7 session read <c>true</c> for the first row and the UTC+9 session
+    /// <c>false</c> for the second.
+    /// </summary>
+    [Fact]
+    public async Task Upgrade_FallbackHorizon_GivesTheSameVerdictInAnySessionTimeZone()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+
+            /* Raw's oldest row, and the one hour the legacy materialized: the floor the stitch compares is
+               covered, so only a hole in the probe's range can make the verdict false. */
+            await InsertProcedureStatsAsync(connection, h.AddHours(-72), "zone_floor_proc", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, h.AddHours(-72), h.AddHours(-71), ct);
+            Assert.Equal(0L, await CountRowsAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, ct));
+
+            /* No DST in any of the three, so the offsets hold on every day the test runs. */
+            var zones = new (string Zone, TimeSpan Offset)[]
+            {
+                ("UTC", TimeSpan.Zero),
+                ("America/Phoenix", TimeSpan.FromHours(-7)),
+                ("Asia/Tokyo", TimeSpan.FromHours(9)),
+            };
+
+            /* A real hole, 27 hours back: neither side materialized it and raw holds a row in it. */
+            await InsertProcedureStatsAsync(connection, h.AddHours(-27), "zone_hole_proc", 900, 9, 3600, ct);
+            foreach (var (zone, offset) in zones)
+            {
+                await using var session = await OpenSessionInZoneAsync(scratch.ConnectionString, zone, offset, ct);
+                Assert.False(
+                    await TimescaleSupport.IsRawTierDropSafeAsync(session, "procedure_stats", ct),
+                    $"a hole 27 hours back was missed in a {zone} session");
+            }
+
+            /* No hole: the row is 20 hours back, inside the window the successor's first refresh will reach. */
+            await using (var delete = new NpgsqlCommand("DELETE FROM collect.procedure_stats WHERE object_name = 'zone_hole_proc'", connection))
+            {
+                Assert.Equal(1, await delete.ExecuteNonQueryAsync(ct));
+            }
+
+            await InsertProcedureStatsAsync(connection, h.AddHours(-20), "zone_fresh_proc", 900, 9, 3600, ct);
+            foreach (var (zone, offset) in zones)
+            {
+                await using var session = await OpenSessionInZoneAsync(scratch.ConnectionString, zone, offset, ct);
+                Assert.True(
+                    await TimescaleSupport.IsRawTierDropSafeAsync(session, "procedure_stats", ct),
+                    $"a row 20 hours back was called a hole in a {zone} session");
+            }
+
+            /* A relation with no stitched slot builds a statement that never names the horizon, and must still run:
+               a failed measure reads Unknown, which reads false here. Its source is empty, so it is Covered. */
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_store_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// A second session on the same store, set to <paramref name="zone"/>, with the zone proven in force: the
+    /// session's clock as a naive timestamp must sit <paramref name="expectedOffset"/> away from the UTC one, or
+    /// the test that asked for it would prove nothing.
+    /// </summary>
+    private static async Task<NpgsqlConnection> OpenSessionInZoneAsync(
+        string connectionString, string zone, TimeSpan expectedOffset, CancellationToken ct)
+    {
+        var session = new NpgsqlConnection(connectionString);
+        try
+        {
+            await session.OpenAsync(ct);
+            await using (var set = new NpgsqlCommand($"SET TIME ZONE '{zone}'", session))
+            {
+                await set.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var read = new NpgsqlCommand("SELECT now()::timestamp - (now() AT TIME ZONE 'UTC')", session);
+            Assert.Equal(expectedOffset, (TimeSpan)(await read.ExecuteScalarAsync(ct))!);
+            return session;
+        }
+        catch
+        {
+            await session.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// #4301, PIN A (interior hole -&gt; false): the legacy's OWN interior has a gap (hour H2 refreshed by
     /// neither side, despite raw admitting a row there) below its last bucket (H5), and the successor holds a
     /// bucket ABOVE the legacy's last (H6, its own ordinary advance). <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/>

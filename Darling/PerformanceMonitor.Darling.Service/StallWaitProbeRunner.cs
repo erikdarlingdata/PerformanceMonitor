@@ -191,10 +191,14 @@ DELETE FROM collect.collector_stall_probes WHERE probe_time < $1;";
         {
             logger?.LogWarning(
                 "Stall probe for {Collector} on '{Server}': {WaitingTasks} waiting task(s) across {WaitTypes} type(s), "
-                + "top {TopWait} ({TopWaitMs}ms), {Runnable} runnable / {PendingIo} pending IO across {Schedulers} scheduler(s) "
+                + "top user-task wait {TopWait} ({TopWaitMs}ms), {Background} background task(s) excluded from the ranking, "
+                + "our session {OurWait} ({OurWaitMs}ms), "
+                + "{Runnable} runnable / {PendingIo} pending IO across {Schedulers} scheduler(s) "
                 + "— sampled {Elapsed}ms into a {Budget}s budget (#2880)",
                 collectorName, server.Config.DisplayName, sample.WaitingTaskCount, sample.DistinctWaitTypes,
-                sample.TopWaitType ?? "(nothing waiting)", sample.TopWaitTotalMs, sample.RunnableTasks,
+                sample.TopWaitType ?? "(nothing waiting)", sample.TopWaitTotalMs, sample.BackgroundWaitingTasks,
+                sample.CollectorSessions <= 0 ? "(not visible)" : sample.CollectorWaitType ?? "running",
+                sample.CollectorWaitMs ?? 0, sample.RunnableTasks,
                 sample.PendingDiskIo, sample.SchedulerCount, observation.ElapsedMs,
                 (int)wallClockBudget.TotalSeconds);
         }

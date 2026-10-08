@@ -21,6 +21,7 @@ namespace Lite.Tests;
 /// last load of each grid produced no rows (empty, failed or superseded) and re-runs just that load when the
 /// tab is shown again. WPF cannot run here, so this is a source pin anchored on the method declarations.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FinOpsSizeGridReloadPinTests
 {
     private static string ReadFinOpsTab([CallerFilePath] string thisFile = "")

@@ -509,9 +509,16 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
             DarlingSelfAlertEvaluator.DiskPressureMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric,
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
+            /* #5288: the MCP endpoint's twin of the web certificate alert, fired through the descriptor's
+               ExpiryMetric (tls.ExpiryMetric), which the FireAsync literal scan below cannot see. */
+            DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric,
             DarlingSelfAlertEvaluator.StoreSettingsMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+            /* #5450: fired through the constant, so the FireAsync literal scan below cannot see it. */
+            DarlingSelfAlertEvaluator.CollectionGapAtStartMetric,
+            /* #5450: fired through the constant too. */
+            DarlingSelfAlertEvaluator.CollectionGapsInHistoryMetric,
             /* #4299: fired through the constant (FireAsync(..., RawPurgeOverHorizonMetric, ...)), not a quoted
                literal, so the FireAsync regex scan below cannot see it — listed here like StoreSettingsMetric. */
             DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric,
@@ -519,6 +526,9 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.NotificationChannelFailingMetric,
             /* #4732: fired through the constant, so the FireAsync literal scan below cannot see it. */
             DarlingSelfAlertEvaluator.FleetGateMetric,
+            /* #5493: fired through the constants (DecideStateAlert / FireAsync with CaptureDownMetric and
+               AgentDownMetric), so the FireAsync literal scan below cannot see them. */
+            DarlingSelfAlertEvaluator.CaptureDownMetric, DarlingSelfAlertEvaluator.AgentDownMetric,
             /* #3816: the policy-job self-heal's two new per-family names and its total_failures arm. Listed
                here rather than found by the FireAsync literal scan below because all three fire through a
                band record's field (band.Metric) rather than a quoted string at the call site — the scan

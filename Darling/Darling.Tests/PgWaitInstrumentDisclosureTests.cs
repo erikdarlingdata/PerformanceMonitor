@@ -88,6 +88,20 @@ public sealed class PgWaitInstrumentDisclosureTests
     }
 
     [Fact]
+    public void TheEmptyArm_OnACutWindow_StandsAloneWithoutThePhraseOfTheDroppedClaim()
+    {
+        var state = new DarlingPgWaitSamplingReader.WaitInstrumentState(PgWaitInstrument.ServiceSampled, T0);
+        var cut = DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(state, windowTruncated: true);
+        var covered = DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(state, windowTruncated: false);
+
+        Assert.DoesNotContain("none to sample", cut, StringComparison.Ordinal);
+        Assert.Contains("one-second polls in a 30-second window each cycle", cut, StringComparison.Ordinal);
+        Assert.Contains(PgWaitInstrument.ServiceSampledCaveat, cut, StringComparison.Ordinal);
+        Assert.Contains("\"none to sample\" was measured", covered, StringComparison.Ordinal);
+        Assert.Equal(covered, DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(state));
+    }
+
+    [Fact]
     public void TheEmptyArm_StatesTheFloorOnlyOnTheServiceTier()
     {
         Assert.Contains(PgWaitInstrument.ServiceSampledCaveat,

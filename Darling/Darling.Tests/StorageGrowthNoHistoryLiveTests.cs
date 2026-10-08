@@ -48,16 +48,18 @@ public sealed class StorageGrowthNoHistoryLiveTests
             var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* fresh: only the newest snapshot. weekold: also a snapshot 8 days back. full: snapshots 31 and 8 days back. */
+            /* fresh: only the newest snapshot. weekold: also a snapshot 7.5 days back. full: snapshots 30.5 and 7.5 days back. A baseline is
+               the snapshot nearest its 7 or 30 day mark within one day, so 7.5 and 30.5 sit inside the tolerance, and the daily rate
+               divides by the real span (7.5 and 30.5 days): a fixed 7 or 30 divisor would give a different figure. */
             await SeedAsync(connection, "fresh", now, 500m, ct);
             await SeedAsync(connection, "weekold", now, 500m, ct);
-            await SeedAsync(connection, "weekold", now.AddDays(-8), 400m, ct);
+            await SeedAsync(connection, "weekold", now.AddDays(-7.5), 400m, ct);
             await SeedAsync(connection, "full", now, 500m, ct);
-            await SeedAsync(connection, "full", now.AddDays(-8), 450m, ct);
-            await SeedAsync(connection, "full", now.AddDays(-31), 300m, ct);
+            await SeedAsync(connection, "full", now.AddDays(-7.5), 450m, ct);
+            await SeedAsync(connection, "full", now.AddDays(-30.5), 300m, ct);
 
             await using var viewer = new ViewerDataService(cs!);
-            var rows = await viewer.GetStorageGrowthAsync(ServerId, ct);
+            var rows = await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct);
 
             var fresh = Assert.Single(rows, r => r.DatabaseName == "fresh");
             Assert.Equal(500m, fresh.CurrentSizeMb);
@@ -69,13 +71,13 @@ public sealed class StorageGrowthNoHistoryLiveTests
             var weekOld = Assert.Single(rows, r => r.DatabaseName == "weekold");
             Assert.Equal(100m, (decimal?)weekOld.Growth7dMb);
             Assert.Null((object?)weekOld.Growth30dMb);
-            Assert.Equal(100m / 8m, weekOld.DailyGrowthRateMb!.Value, 4);
+            Assert.Equal(100m / 7.5m, weekOld.DailyGrowthRateMb!.Value, 4);
             Assert.Null((object?)weekOld.GrowthPct30d);
 
             var full = Assert.Single(rows, r => r.DatabaseName == "full");
             Assert.Equal(50m, (decimal?)full.Growth7dMb);
             Assert.Equal(200m, (decimal?)full.Growth30dMb);
-            Assert.Equal(200m / 31m, full.DailyGrowthRateMb!.Value, 4);
+            Assert.Equal(200m / 30.5m, full.DailyGrowthRateMb!.Value, 4);
             Assert.Equal(200m * 100m / 300m, full.GrowthPct30d!.Value, 4);
 
             /* Largest 30-day growth first; a database with no 30-day figure sorts after, by its 7-day growth. */
@@ -111,21 +113,32 @@ public sealed class StorageGrowthNoHistoryLiveTests
 
             /* Collection stopped 20 days ago: "at or before 7 days ago" is the latest snapshot itself, which is no comparison. */
             await SeedAsync(connection, "stale", now.AddDays(-20), 500m, ct);
-            var stale = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, ct));
+            var stale = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct));
             Assert.Null(stale.Size7dAgoMb);
             Assert.Null(stale.Growth7dMb);
             Assert.Null(stale.Growth30dMb);
             Assert.Null(stale.DailyGrowthRateMb);
             Assert.Null(stale.GrowthPct30d);
 
-            /* The "7-day" past is really 12 days old after a collection gap: the rate is over those 12 days. */
+            /* The "7-day" past is really 12 days old after a collection gap: that is not within a day of the 7-day mark, so there is no
+               7-day baseline at all (unknown, never a 12-day figure labelled 7 days). */
             await DeleteRowsAsync(connection, ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             await SeedAsync(connection, "gap", now, 500m, ct);
             await SeedAsync(connection, "gap", now.AddDays(-12), 380m, ct);
-            var gap = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, ct));
-            Assert.Equal(120m, gap.Growth7dMb!.Value);
-            Assert.Equal(120m / 12m, gap.DailyGrowthRateMb!.Value, 4);
+            var gap = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct));
+            Assert.Null(gap.Size7dAgoMb);
+            Assert.Null(gap.Growth7dMb);
+            Assert.Null(gap.DailyGrowthRateMb);
+
+            /* A past 7.5 days old (inside the tolerance) is the 7-day baseline, and the rate is over its real 7.5 days. */
+            await DeleteRowsAsync(connection, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await SeedAsync(connection, "near", now, 500m, ct);
+            await SeedAsync(connection, "near", now.AddDays(-7.5), 380m, ct);
+            var near = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct));
+            Assert.Equal(120m, near.Growth7dMb!.Value);
+            Assert.Equal(120m / 7.5m, near.DailyGrowthRateMb!.Value, 4);
 
             bodySucceeded = true;
         }
@@ -136,7 +149,7 @@ public sealed class StorageGrowthNoHistoryLiveTests
     }
 
     [Fact]
-    public async Task TheTableDrillReadsGrowthAsUnknown_ForATableWithNoEarlierSample()
+    public async Task TheTableDrillCountsATableCreatedInTheWindowByItsWholeSize_AndReadsOneSnapshotAsUnknown()
     {
         var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live storage growth test.");
@@ -163,7 +176,7 @@ public sealed class StorageGrowthNoHistoryLiveTests
             Assert.Null(only.DailyGrowthRateMb);
             Assert.Null(only.GrowthPct30d);
 
-            /* Two snapshots: a table in both has growth, a table added since has none. */
+            /* Two snapshots: a table in both has growth, a table added since counts its whole size. */
             await SeedTableAsync(connection, "Old", now.AddDays(-10), 100m, ct);
             await SeedTableAsync(connection, "Old", now, 150m, ct);
             await SeedTableAsync(connection, "NewTable", now, 30m, ct);
@@ -173,9 +186,11 @@ public sealed class StorageGrowthNoHistoryLiveTests
             Assert.Equal(50m / 30m, old.DailyGrowthRateMb!.Value, 4);
             Assert.Equal(50m * 100m / 100m, old.GrowthPct30d!.Value, 4);
             var added = Assert.Single(objects, o => o.TableName == "NewTable");
-            Assert.Null(added.Growth30dMb);
+            Assert.Equal(30m, added.Growth30dMb!.Value);
+            Assert.Equal(30m / 30m, added.DailyGrowthRateMb!.Value, 4);
             Assert.Null(added.GrowthPct30d);
-            Assert.Equal("Old", objects[0].TableName);
+            /* OnlyNow (100 MB) is absent from the earlier snapshot too, so it counts its whole size and ranks first. */
+            Assert.Equal(new[] { "OnlyNow", "Old", "NewTable" }, objects.Select(x => x.TableName).ToArray());
 
             bodySucceeded = true;
         }

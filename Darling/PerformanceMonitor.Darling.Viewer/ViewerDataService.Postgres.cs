@@ -369,13 +369,32 @@ public sealed partial class ViewerDataService
             .ToList();
     }
 
+    /// <summary>The newest-first row cap of the Activity tab's deadlocks grid (#4966): <see cref="GetPgDeadlocksAsync"/>'s default.</summary>
+    public const int PgDeadlocksRowCap = 100;
+
+    /// <summary>The newest-first row cap of the Activity tab's log-events grid (#4966): <see cref="GetPgLogEventsAsync"/>'s default.</summary>
+    public const int PgLogEventsRowCap = 200;
+
+    /// <summary>
+    /// Where <paramref name="table"/>'s coverage starts for the window (#4966), through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of this server's first collection and the table's retention edge, or null when
+    /// the table holds nothing in the window. A window no longer than the probe's slack starts no query. A table the probe
+    /// refuses (<see cref="DataWindowFloor.Source.TryForCollectorTable"/>) answers null, so its grid shows no note.
+    /// </summary>
+    public Task<DateTime?> GetPgDataStartAsync(
+        string table, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.Source.TryForCollectorTable(table, out var source)
+            ? DataWindowFloor.GetForServerAsync(_dataSource, source, serverId, startUtc, endUtc,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            : Task.FromResult<DateTime?>(null);
+
     /// <summary>Activity tab - PostgreSQL deadlocks reported in the window (#2661), one row per distinct
     /// report. Windowed on when the deadlock HAPPENED rather than when it was collected: a report is
     /// always found some minutes after the fact, and on the <c>pg_read_file</c> route it is found again
     /// for as long as it stays in the re-read tail, so filtering on collection time would place it
     /// wrongly and move it every cycle.</summary>
     public Task<List<DarlingPgDeadlockReader.PgDeadlockRow>> GetPgDeadlocksAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int limit = 100,
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = PgDeadlocksRowCap,
         CancellationToken cancellationToken = default) =>
         DarlingPgDeadlockReader.GetDeadlocksAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
@@ -384,7 +403,7 @@ public sealed partial class ViewerDataService
     /// filters. Windowed on when the line was WRITTEN for the deadlock read's reason. 200 is the grid's cap,
     /// stated on the note beside the window's distinct count so a full grid is not read as the window.</summary>
     public Task<DarlingPgLogEventReader.PgLogEventsPage> GetPgLogEventsAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int limit = 200,
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = PgLogEventsRowCap,
         CancellationToken cancellationToken = default) =>
         DarlingPgLogEventReader.GetEventsAsync(
             _dataSource, serverId, startUtc, endUtc, family: null, minSeverityRank: 0, limit, cancellationToken);

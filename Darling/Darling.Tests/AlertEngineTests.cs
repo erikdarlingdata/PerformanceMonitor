@@ -33,7 +33,7 @@ public sealed class AlertEngineTests
 
     /* ---------------- fakes ---------------- */
 
-    private sealed class FakeSettings : IAlertEngineSettings
+    internal sealed class FakeSettings : IAlertEngineSettings
     {
         /* Lite's App.xaml.cs defaults for thresholds; per-alert enables default OFF here so each
            test switches on exactly the check it pins (a disabled check must not even fetch). */
@@ -99,7 +99,7 @@ public sealed class AlertEngineTests
         public CpuAlertMode CpuAlertMode { get; set; } = CpuAlertMode.TotalServer;
     }
 
-    private sealed class FakeReadAdapter : IAlertReadAdapter
+    internal sealed class FakeReadAdapter : IAlertReadAdapter
     {
         public List<BlockedProcessAlertRow> Blocking { get; } = new();
         public List<DeadlockAlertRow> Deadlocks { get; } = new();
@@ -272,7 +272,7 @@ public sealed class AlertEngineTests
         }
     }
 
-    private sealed class FakeStateStore : IAlertStateStore
+    internal sealed class FakeStateStore : IAlertStateStore
     {
         public Dictionary<(string Key, string Metric), int> EdgeWatermarks { get; } = new();
         public Dictionary<string, DateTime> FailedJobWatermarks { get; } = new();
@@ -366,7 +366,7 @@ public sealed class AlertEngineTests
         }
     }
 
-    private sealed class RecordingDeliverer : IAlertDeliverer
+    internal sealed class RecordingDeliverer : IAlertDeliverer
     {
         public List<AlertOutcome> Outcomes { get; } = new();
 
@@ -392,7 +392,7 @@ public sealed class AlertEngineTests
     }
 
     /// <summary>One engine + fakes + a controllable clock per test.</summary>
-    private sealed class Harness
+    internal sealed class Harness
     {
         public FakeSettings Settings { get; } = new();
         public FakeReadAdapter Adapter { get; } = new();
@@ -467,7 +467,7 @@ public sealed class AlertEngineTests
         public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
     }
 
-    private static BlockedProcessAlertRow BlockingRow(
+    internal static BlockedProcessAlertRow BlockingRow(
         int blockedSpid, string source = BlockedProcessAlertRow.XeReportSource, string database = "StackOverflow") => new()
     {
         EventTime = new DateTime(2026, 7, 1, 11, 55, 0),

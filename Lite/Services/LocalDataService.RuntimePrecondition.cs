@@ -25,7 +25,7 @@ public partial class LocalDataService
     /// SESSION_MISSING from three days ago on a collector that has succeeded since describes something
     /// somebody already fixed. Deliberately takes no <c>asOfUtc</c> — a precondition is a property of the
     /// server now, not of the window the caller asked about, and accepting an anchor here would invite a
-    /// caller to believe otherwise. Mirrors Darling's <c>DarlingRuntimePrecondition</c> read.</para>
+    /// caller to believe otherwise. Darling's <c>DarlingRuntimePrecondition</c> read orders by time first (#4974); Lite keeps the id order because it stamps <c>collection_time</c> with the run's START time but takes the id when the run is logged, so here the id order is the completion order.</para>
     /// </summary>
     public async Task<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)> GetLatestCollectorOutcomeAsync(
         int serverId, string collectorName)

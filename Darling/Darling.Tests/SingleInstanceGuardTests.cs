@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// are Windows-gated because named-mutex namespace semantics are Windows-specific. The production name and the
 /// release-on-dispose (SCM stop→start) contract are pinned too.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SingleInstanceGuardTests
 {
     private static string UniqueName() => @"Local\Darling-Test-" + Guid.NewGuid().ToString("N");

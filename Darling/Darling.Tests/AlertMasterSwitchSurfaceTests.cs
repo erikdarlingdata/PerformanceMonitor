@@ -42,6 +42,8 @@ namespace Darling.Tests;
 /// "track always, deliver conditionally" split, which predates this issue and is the idiom precedent the
 /// AND'd gates follow.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class AlertMasterSwitchSurfaceTests
 {
     /* ---------------- the delivery-call census ---------------- */

@@ -51,6 +51,8 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("CollectionResetGate")]
 public sealed class ArchiveCompactionSwapLockTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     /* 5 hot rows, plus 10 per archive file across four files. */
     private const long TotalRows = 45;
 
@@ -74,6 +76,11 @@ public sealed class ArchiveCompactionSwapLockTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -109,6 +116,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     private async Task<(DuckDbInitializer Initializer, ArchiveService Service)> SetUpAsync(ILogger<ArchiveService>? logger = null)
     {
         var initializer = new DuckDbInitializer(_dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeAsync();
 
         await ArchiveRowsAsync("20260801_0000_collection_log.parquet", 0, 10);

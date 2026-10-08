@@ -112,7 +112,7 @@ WHERE server_id = $1";
     /// is the KIND that carries the fact. A NULL kind is a row no connect has stamped since V82 landed, which
     /// makes no claim on that axis and leaves the edition axis answering exactly as it did before (#2530).</para>
     /// </summary>
-    private static async Task<(int EngineEdition, string? EngineKind)> ReadServerEngineAsync(
+    internal static async Task<(int EngineEdition, string? EngineKind)> ReadServerEngineAsync(
         NpgsqlDataSource postgres,
         int serverId,
         CancellationToken cancellationToken)

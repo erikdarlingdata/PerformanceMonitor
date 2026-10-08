@@ -171,6 +171,96 @@ That was not always true: through 3.5.0 the ZIP was a portable build with no run
 
 Darling runs this same shared collector set across a fleet of servers (latch stats, spinlock stats, CPU scheduler, plan cache, and system_health parsing are now part of the shared catalog above, collected by Lite too) — see the [Darling collector reference](Darling/README.md).
 
+### The Extended Events Sessions Lite Creates
+
+Each Lite install has an eight-character id. Lite makes it at the first start and keeps it in `install-id.json`, in the data folder `%LOCALAPPDATA%\PerformanceMonitorLite-Data\`. The id appears in the name of each session that belongs to this install alone. Two installs that monitor one server never share such a session, so one install cannot drop or stop the other's.
+
+If Lite cannot read `install-id.json` (another program holds it open, or the read fails), it leaves the file as it is and uses no id until it can read it. If it cannot save a new id, it does not use that id either. With no id, Lite creates, starts and drops no session of its own, and the long-query trace records why as a fault. The next collection cycle tries again, at most once a minute. The log says it once as a Warning with the error, then at Debug until the id is read. A file that holds something other than an id record still gets a new id.
+
+#### The sessions
+
+- `PerformanceMonitor_Lite_<id>_LongQueryCompletions` is this install's long-query trace. Lite creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
+- `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess` keep their shared names, because Darling and other installs read them too. Lite never drops them. It checks each one whenever its collector runs. It creates a missing one and starts a stopped one, so a deliberate stop does not last.
+- On Azure SQL Database, a shared session can stay unusable after a start. Lite then creates `PerformanceMonitor_Lite_<id>_Deadlock` or `PerformanceMonitor_Lite_<id>_BlockedProcess` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, Lite switches back and drops its own fallback.
+
+#### The old shared session
+
+Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, between all installs. An upgraded install drops it once for each registration and database. It then records that drop and never touches the session again. If an older install creates it again later, Lite logs one Information line per start and leaves the session alone. To remove it, run the statements under "Cleaning up by hand" below.
+
+#### Removing a server
+
+Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock and blocked-process fallbacks. Lite makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
+
+Lite leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. Lite logs the reason. The two shared sessions stay on the server.
+
+#### Registrations that share an instance
+
+On premises, a registration with the trace off leaves the long-query session in place when another registration of this install has the trace on. Both registrations must point at the same instance. Lite compares the last known `@@SERVERNAME` of each one.
+
+#### Read-only intent on Azure SQL Database
+
+A session cannot be created over a read-only connection. For a registration with read-only intent, Lite creates the session definition over a connection without the intent. The definition replicates to the read-only replica. Lite then starts the session over the registration's own connection. A drop stops the session on the replica first, then drops it on the primary. Microsoft describes the method in [Monitor read-only replicas with Extended Events](https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out). On Hyperscale with several high-availability replicas, a read-only connection lands on one replica that the app cannot choose, so the stop reaches only that one. Microsoft Learn describes no way to address a single high-availability replica; it says the read-intent workload is distributed arbitrarily across them ([Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica)).
+
+A Managed Instance registration with read-only intent needs the trace started on the primary first. Lite does not do that, so the registration gets the read-only message (error 3906). A registration without the intent can land on a read-only database, such as a geo-secondary. It gets one clear message, and Lite retries the create every hour.
+
+#### Azure SQL Database limits
+
+Microsoft Learn lists these caps under "Resource governance" on [Extended Events in Azure SQL](https://learn.microsoft.com/en-us/azure/azure-sql/database/xevent-db-diff-from-svr). A database holds at most 100 started sessions. An elastic pool holds at most 100 database-scoped sessions. Session memory is capped at 128 MB per database and 512 MB per pool. In a dense pool, a start can fail below 100 sessions.
+
+Each install uses one long-query session per database while the trace is on. It adds up to two fallbacks while a shared session is unusable. A failed create or start on Azure SQL Database carries a sentence that names these caps.
+
+#### Known limits
+
+- An older Darling with the trace on loses capture once for each upgraded install, until it reconnects.
+- An older Lite creates the old session again within one collection cycle.
+- Two registrations of one instance in one install drop the old session twice.
+- A lost record costs one more drop. This happens when you recreate the Lite data folder.
+- On RDS Multi-AZ, the drop reaches the primary only. The copy on the standby stays stopped after a failover, unless an older install starts it.
+- On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: [Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica).
+- On Azure SQL Database, two registrations of one database with different logins share one session name, as before.
+
+#### Clones
+
+A clone of the whole machine, such as a VM snapshot, keeps the machine name and the Windows user. It also keeps the install id. The clone and the original then use the same session names on every server both monitor.
+
+To give the clone its own id, delete `install-id.json` and restart Lite. Lite makes a new id at start. A data folder that you copy to another machine gets a new id on its own. So does a data folder that another Windows user opens. Import Settings does not carry the file.
+
+#### Cleaning up by hand
+
+Lite has no command that drops sessions, so run the statements below yourself. Replace `<id>` with the `id` value in `install-id.json`. Each statement checks that the session exists first, so a run that finds nothing changes nothing.
+
+The login needs the permission that [Microsoft Learn's `DROP EVENT SESSION` page](https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-event-session-transact-sql) requires. On SQL Server and Azure SQL Managed Instance that is `DROP ANY EVENT SESSION` (SQL Server 2022 and later) or `ALTER ANY EVENT SESSION`. On Azure SQL Database it is `DROP ANY DATABASE EVENT SESSION`, in each database.
+
+Server scope (SQL Server, Azure SQL Managed Instance and AWS RDS). The first statement drops the old shared session. The second drops this install's own session. Lite makes the deadlock and blocked-process fallbacks in Azure SQL Database only, so a server has none to drop.
+
+```sql
+IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_LongQueryCompletions')
+    DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;
+
+IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_Lite_<id>_LongQueryCompletions')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_LongQueryCompletions] ON SERVER;
+```
+
+Database scope (Azure SQL Database). Run these four statements in each monitored database.
+
+```sql
+IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_LongQueryCompletions')
+    DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON DATABASE;
+
+IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_Lite_<id>_LongQueryCompletions')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_LongQueryCompletions] ON DATABASE;
+
+IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_Lite_<id>_Deadlock')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_Deadlock] ON DATABASE;
+
+IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_Lite_<id>_BlockedProcess')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_BlockedProcess] ON DATABASE;
+```
+
+If the registration used read-only intent, first stop the session over a read-only connection with `ALTER EVENT SESSION [name] ON DATABASE STATE = STOP;`. Then run the drop over a connection without the intent, which reaches the primary. On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: [Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica).
+
+The shared `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess` sessions need the same statements with those names. Run them only when no other install monitors the server, because every install that monitors it uses them.
+
 ### Lite Data Storage
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
@@ -186,7 +276,7 @@ All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a differ
 |---|---|---|
 | `servers.json` | `%ProgramData%\PerformanceMonitorLite\config\` (machine-wide) | Server connections, shared across all Windows users on the machine. Passwords stay per-user in Windows Credential Manager. Optional **Utility Database** per server for community procs installed outside master. |
 | `settings.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Retention, MCP server, startup behavior, alert thresholds, SMTP configuration |
-| `collection_schedule.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Per-collector enable/disable and frequency |
+| `collection_schedule.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Per-collector enable/disable and frequency. A collector that runs once a day or less often can also have a `run_at` time, so it runs in a quiet hour. That time is 24-hour `HH:MM` on the monitored server's clock, and you set it in the schedule editor. Each server starts at that time plus its own spread of under 60 minutes, and a run can start up to 60 minutes after that slot, so a run can start nearly 2 hours after `run_at`. It runs only while Lite is open. A day is skipped only when Lite was closed from the slot until 60 minutes after it. |
 | `ignored_wait_types.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | 126 benign wait types excluded by default |
 
 When a second Windows user on the same machine launches Lite, they see the shared `servers.json` immediately. SQL Auth and Entra MFA passwords are scoped to each user's own Credential Manager, so they'll be prompted once per server; Windows Auth works without any prompt.
@@ -227,7 +317,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
-| MCP server (LLM integration) | Built-in (89 tools) | On request (161 tools) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (89 tools) | On request (181 tools) | Built into Dashboard (66 tools) |
 
 ---
 
@@ -365,7 +455,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 89 tools; **Darling** exposes 161 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 89 tools; **Darling** exposes 181 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|
@@ -374,7 +464,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules` |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
-| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_query_duration_trend`, `get_query_trend` |
+| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_query_store_query_history`, `get_query_duration_trend`, `get_query_trend` |
 | Active Queries | `get_active_queries` |
 | CPU | `get_cpu_utilization` |
 | Memory | `get_memory_stats`, `get_memory_trend`, `get_memory_clerks`, `get_memory_grants`, `get_resource_semaphore` |
@@ -394,7 +484,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 | Default Trace | `get_default_trace_events` |
 | Config Changes | `get_server_config_changes`, `get_database_config_changes`, `get_trace_flag_changes` |
 | Health Parser | `get_health_parser_system_health`, `get_health_parser_severe_errors`, `get_health_parser_io_issues`, `get_health_parser_scheduler_issues`, `get_health_parser_memory_conditions`, `get_health_parser_cpu_tasks`, `get_health_parser_memory_broker`, `get_health_parser_memory_node_oom` |
-| Plan Analysis | `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan`, `analyze_plan_xml`, `get_plan_xml` |
+| Plan Analysis | `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan`, `analyze_plan_xml`, `get_plan_xml`, `get_query_store_plan_xml`, `get_procedure_plan_xml`, `get_active_query_plan_xml`, `get_blocking_plan_xml`, `get_deadlock_plan_xml` |
 | Diagnostic Analysis | `analyze_server`, `get_analysis_facts`, `compare_analysis`, `audit_config`, `get_analysis_findings`, `mute_analysis_finding` |
 
 Most tools accept optional `server_name` and `hours_back` parameters. If only one server is configured, `server_name` is auto-resolved. Every tool that takes `hours_back` also takes an optional `as_of` — an ISO-8601 UTC instant that moves the END of the window off "now", so a past incident is one call (`as_of` its end, `hours_back` its length) rather than a very wide window filtered by hand. The MCP server binds to `localhost` only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see [Darling/README.md](Darling/README.md).)

@@ -45,13 +45,13 @@ public sealed class QueryStoreIntervalWideBrinIndexLiveTests
         return connection;
     }
 
-    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    internal static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         return await command.ExecuteScalarAsync(ct);
     }
 
-    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    internal static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 300 };
         await command.ExecuteNonQueryAsync(ct);
@@ -79,7 +79,7 @@ ORDER BY g;"), ct);
         "collection_time = collection_time + interval '1 minute', last_execution_time = last_execution_time + interval '1 minute', "
         + "execution_count = execution_count + 1, avg_duration_us = avg_duration_us + 1";
 
-    private static async Task<(long Updated, long Hot)> UpdateAndReadHotAsync(
+    internal static async Task<(long Updated, long Hot)> UpdateAndReadHotAsync(
         NpgsqlConnection connection, string setList, string where, CancellationToken ct)
     {
         /* The pg_stat_xact_* counters are the session's still-pending counts, so an earlier measurement on this
@@ -165,7 +165,7 @@ ORDER BY g;"), ct);
     }
 
     /// <summary>The column names the product's upsert sets in <c>DO UPDATE SET</c>, parsed from its own SQL.</summary>
-    private static HashSet<string> UpsertSetColumns()
+    internal static HashSet<string> UpsertSetColumns()
     {
         var sql = QueryStoreIntervalWide.UpsertSql;
         var start = sql.IndexOf("DO UPDATE SET", StringComparison.Ordinal);
@@ -230,7 +230,16 @@ WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
-        await EnsureAsync(connection, ct);
+
+        /* Every background index the service builds, not the BRIN alone: the census reads the catalog after the product's
+           own list has been ensured, so the next member of QueryStoreBackgroundIndexes.All is scanned without an edit here. */
+        await QueryStoreBackgroundIndexesLiveTests.EnsureAllAsync(connection, ct);
+        foreach (var spec in QueryStoreBackgroundIndexes.All)
+        {
+            Assert.True(
+                (bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{spec.IndexName}'::regclass", ct))!,
+                $"{spec.IndexName} must be built and valid before the census reads the catalog");
+        }
 
         /* Data-independent: the catalog, not a seeded update. The scan must see the identity index and the
            first_execution_time index, or it reads nothing. */

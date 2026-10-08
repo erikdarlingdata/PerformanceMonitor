@@ -44,6 +44,7 @@ namespace Lite.Tests;
 /// leaning on "these two tabs are mutually exclusive" would make the letters correct only for as long as
 /// nobody moves a control, and D is free.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class MainWindowAccessKeyTests
 {
     /// <summary>

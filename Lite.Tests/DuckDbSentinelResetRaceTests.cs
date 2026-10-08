@@ -84,7 +84,7 @@ public class DuckDbSentinelResetRaceTests : IDisposable
     [Fact]
     public async Task ResetDatabaseAsync_StartingWhileACollectionCycleWriteHoldsItsConnection_WaitsAndTheNextWriteLandsInTheNewFile()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         var writer = new CollectorStateAccess(initializer);
 
@@ -138,14 +138,14 @@ public class DuckDbSentinelResetRaceTests : IDisposable
     [Fact]
     public async Task InitializeAsync_TransientSharingViolationOnThreadPoolThread_RetriesAndReleasesTheWriteLock()
     {
-        var seed = new DuckDbInitializer(_dbPath);
+        using var seed = new DuckDbInitializer(_dbPath);
         await seed.InitializeAsync();
         seed.Dispose();
 
         var blocker = File.Open(_dbPath, FileMode.Open, FileAccess.Read, FileShare.None);
         try
         {
-            var initializer = new DuckDbInitializer(_dbPath);
+            using var initializer = new DuckDbInitializer(_dbPath);
 
             /* Task.Run: no SynchronizationContext, exactly the shape the Thread.Sleep-not-Task.Delay
                comment on OpenDatabaseAsync is about. */

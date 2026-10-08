@@ -12,8 +12,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service;
+using System.Linq;
 using Xunit;
 
 namespace Darling.Tests;
@@ -114,7 +117,11 @@ public sealed class DarlingCollectionLogReadTests
 
             /* Same row count as case 1 -- zero -- and it must NOT reach for the same word. */
             Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);
-            Assert.Contains("widen", quietText, StringComparison.OrdinalIgnoreCase);
+            /* #4966: the only run is 48 hours old, so the one-hour window holds none of the log: it is NOT covered, and the
+               answer says so instead of "genuinely quiet". */
+            Assert.True(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, quietDoc.RootElement.GetProperty("hints").GetProperty("effective_start").ValueKind);
+            Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour(s). {McpHelpers.CutWindowNothingReadMessage}", quietText);
 
             /* ── 3. rows in the window: the data path, and the split that makes the log worth reading ── */
             await SeedAsync(connection, ct, "query_store", MinutesAgo(10));
@@ -304,6 +311,10 @@ public sealed class DarlingCollectionLogReadTests
             */
             Assert.Equal(t30, reachRoot.GetProperty("oldest_returned_collection_time").GetDateTime());
             Assert.Equal(t10, reachRoot.GetProperty("newest_returned_collection_time").GetDateTime());
+            /* #4966, #5015: both bounds describe the window the page covers, so each names its instant as UTC, with the Z; a row's own time keeps its form. */
+            Assert.EndsWith("Z", reachRoot.GetProperty("oldest_returned_collection_time").GetString(), StringComparison.Ordinal);
+            Assert.EndsWith("Z", reachRoot.GetProperty("newest_returned_collection_time").GetString(), StringComparison.Ordinal);
+            Assert.False(reachRoot.GetProperty("runs")[0].GetProperty("collection_time").GetString()!.EndsWith('Z'));
 
             /* The last row really is neither, so the two assertions above cannot be passing by coincidence. */
             var last = reachRoot.GetProperty("runs")[2].GetProperty("collection_time").GetDateTime();
@@ -317,7 +328,7 @@ public sealed class DarlingCollectionLogReadTests
             var noMatchText = noMatchRoot.GetProperty("message").GetString()!;
 
             /* The filter is named back, so a typo is diagnosable from the answer. */
-            Assert.Contains("plan_corection", noMatchText, StringComparison.Ordinal);
+            AssertFilteredEmptyNamesItsFilter(noMatchRoot, "plan_corection");
 
             /*
                 And the two sentences this read already had must NOT be reachable here. Six rows sit in this
@@ -481,7 +492,7 @@ public sealed class DarlingCollectionLogReadTests
             /* The filter is named back — through the shared describe helper, so the sentence says WHICH
                filter produced the nothing — and the window is not called quiet, because eight rows sit in
                it and a filtered read has not looked at the window at all. */
-            Assert.Contains("status SESSION_MISSING", noSuchText, StringComparison.Ordinal);
+            AssertFilteredEmptyNamesItsFilter(noSuchRoot, "status SESSION_MISSING");
             Assert.DoesNotContain("genuinely quiet", noSuchText, StringComparison.Ordinal);
 
             /* ── 12. #3869: no status filter is unchanged behavior ── */
@@ -510,9 +521,8 @@ public sealed class DarlingCollectionLogReadTests
             Assert.Equal("empty", combinedRoot.GetProperty("status").GetString());
 
             /* Both filters named, so the caller can tell which half missed. */
-            var combinedText = combinedRoot.GetProperty("message").GetString()!;
-            Assert.Contains("collector_name 'query_store'", combinedText, StringComparison.Ordinal);
-            Assert.Contains("status ERROR", combinedText, StringComparison.Ordinal);
+            AssertFilteredEmptyNamesItsFilter(combinedRoot, "collector_name 'query_store'");
+            AssertFilteredEmptyNamesItsFilter(combinedRoot, "status ERROR");
 
             bodySucceeded = true;
         }
@@ -582,10 +592,144 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
     }
 
+    /// <summary>
+    /// #4966: a filtered nothing says nothing about the window as a whole, so it keeps its filter echo and its advice whether
+    /// or not the window is cut. This fixture's rows are minutes old against a 24-hour window, so the window IS cut: asserting
+    /// both makes the one branch it produces the branch under test, and the cut sentence must not replace the filtered one.
+    /// </summary>
+    private static void AssertFilteredEmptyNamesItsFilter(JsonElement root, string filterText)
+    {
+        var message = root.GetProperty("message").GetString()!;
+        Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        Assert.Contains(filterText, message, StringComparison.Ordinal);
+        Assert.Contains("says nothing about the window as a whole", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Nothing in the part of the window", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Nothing was read", message, StringComparison.Ordinal);
+    }
+
     private static async Task DeleteFilterRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", FilterServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", FilterServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", FilterServerId);
     }
+
+    /* #4966: the window-floor notice on the one-server form. The probe reads the log's own coverage and ignores the collector,
+       status and duration filters on purpose: it says where the LOG starts, not where one filter's matches do. */
+    private const string WindowCollector = "wait_stats";
+
+    private static string WindowName(string window) => "collection-log-window-" + window;
+
+    private static Task<string> CallWindowAsync(NpgsqlDataSource ds, string window, int hours, DateTime end, int? limit = null, string? collector = null) =>
+        DarlingMcpDataTools.GetCollectionLog(ds, WindowName(window), hours, limit, as_of: WebDataStartNote.FormatWindowEnd(end), collector_name: collector);
+
+    private static Task RunWindowAsync(string window, Func<NpgsqlConnection, NpgsqlDataSource, DateTime, Task> body) =>
+        WindowFloorLiveHarness.RunAsync(ConnectionString, [WindowCollector], [WindowName(window)], [], body);
+
+    private static Task SeedWindowAsync(NpgsqlConnection c, string window, DateTime created, DateTime? runsFrom, int step, DateTime end) =>
+        WindowFloorLiveHarness.SeedServerAsync(c, WindowName(window), created, WindowCollector, runsFrom, step, end, [], TestContext.Current.CancellationToken);
+
+    [Fact]
+    public async Task ARunsAnswer_ForAServerAddedTwoDaysAgo_NamesWhereCoverageStarts_AndAPagedPageKeepsTheTwoFlagsApart_AgainstDevPostgres() =>
+        await RunWindowAsync("added", async (c, ds, end) =>
+        {
+            var added = end.AddDays(-2);
+            await SeedWindowAsync(c, "added", added, added, 30, end);
+
+            /* limit 5 pages the answer: truncated is the PAGE's, window_truncated the store's, and neither moves the other. */
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "added", 168, end, limit: 5));
+
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(added), root.GetProperty("effective_start").GetString());
+            Assert.EndsWith("Z", root.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(DarlingMcpWindowNotice.Build(added, end.AddHours(-168), "collection_log").TruncationNote, root.GetProperty("truncation_note").GetString());
+            Assert.False(root.TryGetProperty("effective_hours_back", out _));
+
+            var names = root.EnumerateObject().Select(p => p.Name).ToList();
+            Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));
+        });
+
+    [Fact]
+    public async Task ARunsAnswer_WhoseFirstRunComesLate_IsCovered_AgainstDevPostgres() =>
+        await RunWindowAsync("quiet", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "quiet", end.AddDays(-30), end.AddDays(-8), 60, end);
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "quiet", 168, end, limit: 5));
+
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+            var effective = DateTime.Parse(root.GetProperty("effective_start").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+            Assert.InRange((effective - end.AddHours(-168)).TotalSeconds, 0, 120);
+        });
+
+    [Fact]
+    public async Task AnEmptyWindow_PastCoverage_CarriesHints_AndTheProbeIgnoresTheFilters_AgainstDevPostgres() =>
+        await RunWindowAsync("empty", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "empty", end.AddDays(-2), end.AddDays(-2), 30, end);
+
+            /* A quiet hour before the server was registered: the server has collected, but not in this window. */
+            var past = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "empty", 1, end.AddDays(-5)));
+            Assert.Equal("empty", past.GetProperty("status").GetString());
+            var hints = past.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+            Assert.Contains("no collection of collection_log", hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+
+            /* A filter that matches nothing: the probe does not apply it, so the hour the log covers is covered. */
+            var filtered = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "empty", 1, end, collector: "no_such_collector"));
+            Assert.Equal("empty", filtered.GetProperty("status").GetString());
+            Assert.False(filtered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-1)), filtered.GetProperty("hints").GetProperty("effective_start").GetString());
+            /* #4966: covered, so the filtered sentence keeps its own words instead of the cut sentence. */
+            Assert.Contains("says nothing about the window as a whole", filtered.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+
+    [Fact]
+    public async Task AServerThatNeverCollected_StaysBare_AgainstDevPostgres() =>
+        await RunWindowAsync("never", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "never", end.AddDays(-2), null, 30, end);
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "never", 168, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            Assert.False(root.TryGetProperty("hints", out _));
+        });
+
+    [Fact]
+    public async Task AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() =>
+        await RunWindowAsync("short", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "short", end.AddDays(-30), end.AddDays(-2), 30, end);
+            var calls = 0;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => { calls++; return Task.FromResult<DateTime?>(null); };
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "short", 1, end, limit: 5));
+
+            Assert.Equal(0, calls);
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.True(root.GetProperty("run_count").GetInt32() > 0);
+        });
+
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() =>
+        await RunWindowAsync("probefail", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "probefail", end.AddDays(-2), end.AddDays(-2), 30, end);
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "probefail", 168, end, limit: 5));
+            Assert.False(root.TryGetProperty("status", out _));
+            Assert.True(root.GetProperty("run_count").GetInt32() > 0);
+            Assert.False(root.TryGetProperty("effective_start", out _));
+            Assert.False(root.TryGetProperty("window_truncated", out _));
+            Assert.False(root.TryGetProperty("truncation_note", out _));
+
+            var empty = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "probefail", 1, end.AddDays(-5)));
+            Assert.Equal("empty", empty.GetProperty("status").GetString());
+            Assert.False(empty.TryGetProperty("hints", out _));
+        });
 }

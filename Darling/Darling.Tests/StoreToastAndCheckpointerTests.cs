@@ -1343,19 +1343,28 @@ public sealed class StoreToastAndCheckpointerTests
             .Replace("\r\n", "\n", StringComparison.Ordinal);
 
         var tick = worker.IndexOf("if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))", StringComparison.Ordinal);
-        var window = worker.IndexOf("var checkpointWindow = _checkpointSyncSampler.TakeWindowMax();", tick, StringComparison.Ordinal);
-        var sweep = worker.IndexOf("await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);", tick, StringComparison.Ordinal);
-        var toast = worker.IndexOf("await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);", sweep, StringComparison.Ordinal);
-        var checkpointer = worker.IndexOf("await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);", toast, StringComparison.Ordinal);
         var nextTick = worker.IndexOf("await Task.Delay(s_sweepInterval, stoppingToken);", tick, StringComparison.Ordinal);
 
-        Assert.True(tick >= 0 && sweep > tick && toast > sweep && checkpointer > toast && checkpointer < nextTick,
+        /* #4970: the loop only launches the tick; the window is taken inside the launcher, ahead of the launch, and
+           the sweep and its evaluators run in the tick body, the sweep first. */
+        var launch = worker.IndexOf("TryStartStoreMetricsTick(DateTime.UtcNow, _checkpointSyncSampler.TakeWindowMax,", tick, StringComparison.Ordinal);
+        Assert.True(tick >= 0 && launch > tick && launch < nextTick, "the loop must launch the store self-metrics tick");
+
+        var launcher = worker.IndexOf("internal bool TryStartStoreMetricsTick(", StringComparison.Ordinal);
+        var window = worker.IndexOf("var checkpointWindow = takeWindow();", launcher, StringComparison.Ordinal);
+        var run = worker.IndexOf("RunTrackedTickAsync(\"hourly store self-metrics tick\"", window, StringComparison.Ordinal);
+        Assert.True(launcher > 0 && window > launcher && run > window, "the launcher must take the sampler's window before the tick that stores it");
+
+        var body = worker.IndexOf("private async Task RunStoreMetricsTickAsync(", run, StringComparison.Ordinal);
+        var sweep = worker.IndexOf("await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);", body, StringComparison.Ordinal);
+        var toast = worker.IndexOf("await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);", sweep, StringComparison.Ordinal);
+        var checkpointer = worker.IndexOf("await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);", toast, StringComparison.Ordinal);
+        Assert.True(body > 0 && sweep > body && toast > sweep && checkpointer > toast,
             "the two #3783 conditions must be evaluated on the store self-metrics tick, after the sweep that writes their evidence");
 
-        /* #4834: the window is taken ONCE, at the top of the tick and ahead of the sweep, and handed to the sweep
-           that stores it. The evaluator reads it back from the stored row, so it is never handed a window. */
-        Assert.True(window > tick && window < sweep, "the tick must take the sampler's window before the sweep that stores it");
-        Assert.Single(Regex.Matches(worker, @"TakeWindowMax\("));
+        /* #4834: the window is taken ONCE, ahead of the sweep, and handed to the sweep that stores it. The
+           evaluator reads it back from the stored row, so it is never handed a window. */
+        Assert.Single(Regex.Matches(worker, @"TakeWindowMax\b"));
         Assert.Contains("checkpointLongestSync?.SyncMs, checkpointLongestSync?.SampledUtc", worker, StringComparison.Ordinal);
 
         /* Exactly one call site each — the census in DarlingSelfAlertTests asserts they exist; this asserts where. */

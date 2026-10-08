@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// line on the Dependabot pull request itself. Otherwise the gap would surface later, when the next Darling
 /// change or the nightly image build fails with exit code 155.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DockerfileSdkPinTests
 {
     private static readonly Regex s_buildStage = new(

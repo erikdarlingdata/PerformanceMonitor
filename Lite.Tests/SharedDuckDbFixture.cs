@@ -123,6 +123,9 @@ AND   table_name NOT IN ('schema_version', 'analysis_schema_version', 'store_ide
 
     public ValueTask DisposeAsync()
     {
+        /* Close the sentinel first (#5208): deleting the folder alone leaves the database open for the life of the test
+           process, one set of threads and handles per class. */
+        DuckDb.Dispose();
         try
         {
             if (Directory.Exists(_tempDir))
@@ -130,5 +133,120 @@ AND   table_name NOT IN ('schema_version', 'analysis_schema_version', 'store_ide
         }
         catch { /* Best-effort cleanup */ }
         return default;
+    }
+}
+
+/// <summary>
+/// One explicit transaction around a test's per-row seed loop (#5208). DuckDB commits every auto-commit
+/// statement to the WAL, and on a hosted CI disk a commit costs on the order of 0.2 s, so a few hundred
+/// single-row INSERTs turned into minutes. Inside this batch they share one commit.
+///
+/// <para>The batch changes WHEN the rows commit, nothing else: the seeding code keeps taking the read lock
+/// around each statement exactly as before, and so do BEGIN and COMMIT here. The batch must be committed
+/// (<see cref="Commit"/> or dispose) BEFORE the code under test reads, because the code under test opens its
+/// own connection and sees only committed rows. Commit on dispose is best-effort for the same reason
+/// <c>TestDataSeeder</c>'s own batch is: if the seed threw, the test is already failing, and a commit error
+/// must not mask that exception.</para>
+/// </summary>
+internal sealed class SeedBatch : IDisposable
+{
+    private readonly DuckDbInitializer _duckDb;
+    private readonly DuckDB.NET.Data.DuckDBConnection _connection;
+    private bool _open;
+
+    public SeedBatch(DuckDbInitializer duckDb, DuckDB.NET.Data.DuckDBConnection connection)
+    {
+        _duckDb = duckDb;
+        _connection = connection;
+        Run("BEGIN TRANSACTION");
+        _open = true;
+    }
+
+    /// <summary>Commits now, so the rows are visible to the code under test. Safe to call twice.</summary>
+    public void Commit()
+    {
+        if (!_open) return;
+        _open = false;
+        Run("COMMIT");
+    }
+
+    public void Dispose()
+    {
+        try { Commit(); }
+        catch { /* the test is already failing; don't mask its exception */ }
+    }
+
+    private void Run(string sql)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+}
+
+/// <summary>
+/// Seeding for tests that call a one-statement helper many times between reads (#5208). Each helper call used to open
+/// its own connection and auto-commit one INSERT, which is one WAL commit (about 0.2 s on a hosted CI disk) per call.
+/// Here every <see cref="ExecuteAsync"/> joins one open <see cref="SeedBatch"/>, and <see cref="Flush"/> commits it.
+///
+/// <para>The owner must call <see cref="Flush"/> BEFORE anything reads: the code under test opens its own connection
+/// and sees only committed rows. The tests do that by building every <c>LocalDataService</c> through a method that
+/// flushes first, so a seed that follows an act (seed, act, seed again) still commits before the next act reads.</para>
+/// </summary>
+internal sealed class PendingSeedSession : IDisposable
+{
+    private readonly DuckDbInitializer _duckDb;
+    private DuckDB.NET.Data.DuckDBConnection? _connection;
+    private SeedBatch? _batch;
+
+    public PendingSeedSession(DuckDbInitializer duckDb) => _duckDb = duckDb;
+
+    /// <summary>The session's one open connection, inside its open transaction. Callers must not dispose it.</summary>
+    public async Task<DuckDB.NET.Data.DuckDBConnection> ConnectionAsync()
+    {
+        if (_connection == null)
+        {
+            var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+            _connection = connection;
+            _batch = new SeedBatch(_duckDb, connection);
+        }
+
+        return _connection;
+    }
+
+    public async Task ExecuteAsync(string sql, params object?[] values)
+    {
+        var connection = await ConnectionAsync();
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var value in values)
+        {
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = value ?? DBNull.Value });
+        }
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Commits what has been seeded and closes the connection. Safe to call when nothing is pending.</summary>
+    public void Flush()
+    {
+        if (_connection == null) return;
+        try { _batch?.Commit(); }
+        finally
+        {
+            _batch?.Dispose();
+            _batch = null;
+            _connection.Dispose();
+            _connection = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        try { Flush(); }
+        catch { /* the test is already failing; don't mask its exception */ }
     }
 }

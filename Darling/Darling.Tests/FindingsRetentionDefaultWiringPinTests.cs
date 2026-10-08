@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// moved — in which case move <see cref="AnalysisRetentionDefaults.FindingsRetentionDays"/> and let both
 /// defaults follow — or the wiring was undone and belongs back.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FindingsRetentionDefaultWiringPinTests
 {
     /// <summary>

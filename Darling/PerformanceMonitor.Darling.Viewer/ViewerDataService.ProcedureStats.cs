@@ -33,23 +33,25 @@ public sealed class ViewerProcedureStatsRow
     public long TotalExecutions { get; set; }
     public long TotalCpuUs { get; set; }
     public long TotalElapsedUs { get; set; }
-    public long TotalLogicalReads { get; set; }
-    public long TotalLogicalWrites { get; set; }
-    public long TotalPhysicalReads { get; set; }
-    public long MinWorkerTimeUs { get; set; }
-    public long MaxWorkerTimeUs { get; set; }
-    public long MinElapsedTimeUs { get; set; }
-    public long MaxElapsedTimeUs { get; set; }
-    public long MinLogicalReads { get; set; }
-    public long MaxLogicalReads { get; set; }
-    public long MinPhysicalReads { get; set; }
-    public long MaxPhysicalReads { get; set; }
-    public long MinLogicalWrites { get; set; }
-    public long MaxLogicalWrites { get; set; }
-    public long TotalSpills { get; set; }
-    public double AvgSpills { get; set; }
-    public long MinSpills { get; set; }
-    public long MaxSpills { get; set; }
+    public long? TotalLogicalReads { get; set; }
+    public long? TotalLogicalWrites { get; set; }
+    public long? TotalPhysicalReads { get; set; }
+    /* #5329: null on the hourly route. The rollup keeps min/max of per-collection deltas (sums over many
+       executions), not the per-execution extremes the raw route reads, so showing them would be a wrong number. */
+    public long? MinWorkerTimeUs { get; set; }
+    public long? MaxWorkerTimeUs { get; set; }
+    public long? MinElapsedTimeUs { get; set; }
+    public long? MaxElapsedTimeUs { get; set; }
+    public long? MinLogicalReads { get; set; }
+    public long? MaxLogicalReads { get; set; }
+    public long? MinPhysicalReads { get; set; }
+    public long? MaxPhysicalReads { get; set; }
+    public long? MinLogicalWrites { get; set; }
+    public long? MaxLogicalWrites { get; set; }
+    public long? TotalSpills { get; set; }
+    public double? AvgSpills { get; set; }
+    public long? MinSpills { get; set; }
+    public long? MaxSpills { get; set; }
     public DateTime? CachedTime { get; set; }
     public DateTime? LastExecutionTime { get; set; }
     public string SqlHandle { get; set; } = "";
@@ -65,11 +67,11 @@ public sealed class ViewerProcedureStatsRow
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public double AvgCpuMs => TotalExecutions > 0 ? TotalCpuMs / TotalExecutions : 0;
     public double AvgElapsedMs => TotalExecutions > 0 ? TotalElapsedMs / TotalExecutions : 0;
-    public double AvgReads => TotalExecutions > 0 ? (double)TotalLogicalReads / TotalExecutions : 0;
-    public double MinCpuMs => MinWorkerTimeUs / 1000.0;
-    public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
-    public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
-    public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
+    public double? AvgReads => TotalLogicalReads is null ? null : TotalExecutions > 0 ? (double)TotalLogicalReads.Value / TotalExecutions : 0;
+    public double? MinCpuMs => MinWorkerTimeUs is null ? null : MinWorkerTimeUs / 1000.0;
+    public double? MaxCpuMs => MaxWorkerTimeUs is null ? null : MaxWorkerTimeUs / 1000.0;
+    public double? MinElapsedMs => MinElapsedTimeUs is null ? null : MinElapsedTimeUs / 1000.0;
+    public double? MaxElapsedMs => MaxElapsedTimeUs is null ? null : MaxElapsedTimeUs / 1000.0;
     public string CachedTimeFormatted => ViewerDataService.FormatServerClock(CachedTime);
     public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
 }
@@ -146,8 +148,9 @@ public sealed partial class ViewerDataService
     /// <c>DarlingDataReader.GetTopProceduresByCpuRoutedAsync</c> does — the tier decided over
     /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (#4231).
     /// An hourly-routed page carries only what the rollup has: <c>object_type</c>/<c>sql_handle</c>/
-    /// <c>plan_handle</c>/reads/writes/spills columns are unavailable and read as their defaults, exactly the
-    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. An hourly-routed page
+    /// <c>plan_handle</c> are empty, and the reads/writes/physical-reads/spills columns the rollup keeps no copy of are
+    /// NULL on the row (#5329), so the grid shows them blank instead of a false 0 — the same disclosure the MCP
+    /// payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). When the io hourly rollup (<see cref="IoHourlyCoversWindow"/>) reaches the window's start, the page reads it instead and fills logical reads, physical reads and logical writes from its sums (#5329). An hourly-routed page
     /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
     /// does not add the hour that begins there). Use
     /// <see cref="GetTopProceduresByCpuTierAsync"/> to also learn which tier answered.</para>
@@ -164,6 +167,15 @@ public sealed partial class ViewerDataService
     public async Task<(List<ViewerProcedureStatsRow> Rows, string Tier)> GetTopProceduresByCpuTierAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
+        var read = await GetTopProceduresByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        return (read.Rows, read.Tier);
+    }
+
+    /// <summary>#5329: <see cref="GetTopProceduresByCpuTierAsync"/> with the window's real edges (see
+    /// <see cref="GetTopQueriesByCpuRoutedAsync"/>).</summary>
+    public async Task<ViewerRoutedRead<ViewerProcedureStatsRow>> GetTopProceduresByCpuRoutedAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, startUtc, rollups.ProcedureGrainHourly, dailyAvailable: false,
@@ -175,11 +187,10 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            var hourlyRows = await GetTopProceduresByCpuHourlyAsync(coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
-            return (hourlyRows, "hourly");
+            return await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
         }
 
-        return (await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw");
+        return new ViewerRoutedRead<ViewerProcedureStatsRow>(await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
     }
 
     /// <summary>#4231 stage 3b: the hourly-rollup arm — builds its FROM clause ONLY through
@@ -187,41 +198,61 @@ public sealed partial class ViewerDataService
     /// <c>(database_name, schema_name, object_name)</c> (the rollup has no object_type), and leaves
     /// <c>object_type</c>/<c>sql_handle</c>/<c>plan_handle</c>/reads/writes/spills at their defaults — the
     /// rollup has none of those columns.</summary>
-    private async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuHourlyAsync(
-        RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
+    private async Task<ViewerRoutedRead<ViewerProcedureStatsRow>> GetTopProceduresByCpuHourlyAsync(
+        RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
         IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
-        var fromClause = coverage.StitchedRelationSql(
-            TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = BuildTopProceduresHourlySql(fromClause);
+        /* #5329: the io hourly rollup, when it reaches the window's start, in place of the interval rollup (same
+           columns plus the three I/O sums); otherwise today's route and blank columns. See the queries arm. */
+        var useIo = IoHourlyCoversWindow(rollups, coverage, TimescaleSupport.ProcedureStatsIoHourlyView, startUtc);
+        var answeringView = useIo ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView;
+        var fromClause = coverage.StitchedRelationSql(answeringView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        /* #5329: the materialization-ceiling bound and the window's real edges, as the queries arm and the service do. */
+        var ceiling = coverage.HourlyEndCeiling(answeringView, startUtc);
+        var sql = BuildTopProceduresHourlySql(fromClause, withIo: useIo, ceiling: ceiling);
+        /* #5329: this server's own first bucket in the window, from the shared per-server probe, beside the grid read. */
+        var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
+            _dataSource, answeringView, serverId, startUtc, endUtc, ceiling, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
         var rows = new List<ViewerProcedureStatsRow>();
-        await using var command = _dataSource.CreateCommand(sql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        AddServerWindowParameters(command, serverId, startUtc, endUtc);
-        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
-        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        try
         {
-            rows.Add(new ViewerProcedureStatsRow
+            await using var command = _dataSource.CreateCommand(sql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            AddServerWindowParameters(command, serverId, startUtc, endUtc);
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            AddHourlyCeilingParameter(command, ceiling);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                ObjectName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                /* #4231 stage 3b: the rollup has no object_type column. */
-                ObjectType = "",
-                TotalExecutions = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                TotalCpuUs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                TotalElapsedUs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                MinWorkerTimeUs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                MaxWorkerTimeUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                MinElapsedTimeUs = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                MaxElapsedTimeUs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-            });
+                rows.Add(new ViewerProcedureStatsRow
+                {
+                    DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    ObjectName = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    /* #4231 stage 3b: the rollup has no object_type column. */
+                    ObjectType = "",
+                    TotalExecutions = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    TotalCpuUs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                    TotalElapsedUs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                    /* #5329: from the io rollup's sums when it covers the window, else null (blank, never 0). */
+                    TotalLogicalReads = useIo && !reader.IsDBNull(6) ? reader.GetInt64(6) : null,
+                    TotalPhysicalReads = useIo && !reader.IsDBNull(7) ? reader.GetInt64(7) : null,
+                    TotalLogicalWrites = useIo && !reader.IsDBNull(8) ? reader.GetInt64(8) : null,
+                    /* #5329: the four min/max time fields stay null here. */
+                });
+            }
+        }
+        catch
+        {
+            /* #5329: the probe is no longer wanted, so observe its fault (never throw it over this one): otherwise one failure logs twice. */
+            await ObserveAsync(firstBucketTask);
+            throw;
         }
 
-        return rows;
+        var firstBucket = await firstBucketTask;
+        return new ViewerRoutedRead<ViewerProcedureStatsRow>(rows, "hourly", HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling), useIo, firstBucket);
     }
 
     /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
@@ -229,22 +260,18 @@ public sealed partial class ViewerDataService
     /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
     /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
     /// test can read the text.</summary>
-    internal static string BuildTopProceduresHourlySql(string fromClause) => $"""
+    internal static string BuildTopProceduresHourlySql(string fromClause, bool withIo = false, DateTime? ceiling = null) => $"""
         SELECT
             database_name,
             schema_name,
             object_name,
             CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
             CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
-            MIN(worker_time_min) AS min_worker_time,
-            MAX(worker_time_max) AS max_worker_time,
-            MIN(elapsed_time_min) AS min_elapsed_time,
-            MAX(elapsed_time_max) AS max_elapsed_time
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us{(withIo ? IoSumsSelectSql : "")}
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
-        AND   bucket < $3
+        AND   bucket < $3{HourlyCeilingSql(ceiling)}
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         GROUP BY database_name, schema_name, object_name
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -309,17 +336,30 @@ public sealed partial class ViewerDataService
     /// <paramref name="endUtc"/>] — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied
     /// floor query. The Queries tab's <c>LoadTopProceduresAsync</c> reads
     /// this beside <see cref="GetTopProceduresByCpuAsync"/> so the grid header can disclose a window the raw
-    /// tier no longer fully holds, the same fact <c>get_top_procedures_by_cpu</c> reports over MCP.
+    /// tier no longer fully holds, the same fact <c>get_top_procedures_by_cpu</c> reports over MCP. A window no longer than
+    /// <see cref="DurationTrendRouting.TruncationSlack"/> answers null without a store read (#4966): no banner can show for one.
     /// </summary>
     public Task<DateTime?> GetProcedureStatsWindowFloorAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.ProcedureStats, serverId, startUtc, endUtc,
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        /* #4966: a window no longer than the truncation slack can never get a coverage note, so the probe starts no query for it, as
+           DataWindowFloor.GetForServerAsync's does not (GetQueryStatsWindowFloorAsync says why). The skip is here, in the viewer's
+           methods, and not in RawWindowFloor.GetAsync: Darling's MCP tools share that probe and read its null as "nothing was read". */
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+        {
+            return Task.FromResult<DateTime?>(null);
+        }
+
+        return RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.ProcedureStats, serverId, startUtc, endUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
 
     /// <summary>
     /// Top-Procedures comparison — Lite's <c>GetProcedureStatsComparisonAsync</c> ported. Same
     /// top-100-union / FULL OUTER JOIN shape as the query-stats comparison, keyed on
-    /// (database, schema, object). Returns the shared <see cref="ProcedureStatsComparisonItem"/>.
+    /// (database, schema, object). All three key columns are nullable in <c>procedure_stats</c>, so the period joins and
+    /// the outer FULL JOIN each pair <c>COALESCE(key,'') = COALESCE(key,'')</c> with an <c>IS NULL</c> pair, keeping a
+    /// NULL key and an empty-string key apart (#5420). Returns the shared <see cref="ProcedureStatsComparisonItem"/>.
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string ProcedureStatsComparisonSql = """
@@ -355,37 +395,76 @@ public sealed partial class ViewerDataService
         ),
         current_period AS (
             SELECT tp.database_name, tp.schema_name, tp.object_name,
-                   SUM(ps.delta_execution_count) AS exec_count,
-                   SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
-                   MAX(ps.sql_handle) AS sql_handle
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.sql_handle
             FROM top_procs tp
-            INNER JOIN procedure_stats ps
-              ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
-              AND ps.schema_name IS NOT DISTINCT FROM tp.schema_name
-              AND ps.object_name IS NOT DISTINCT FROM tp.object_name
-            WHERE ps.server_id = $1
-            AND   ps.collection_time >= $2 AND ps.collection_time <= $3
-            AND   ps.delta_execution_count > 0
-            GROUP BY tp.database_name, tp.schema_name, tp.object_name
+            INNER JOIN (
+                SELECT ps.database_name, ps.schema_name, ps.object_name,
+                       SUM(ps.delta_execution_count) AS exec_count,
+                       SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
+                       MAX(ps.sql_handle) AS sql_handle
+                FROM procedure_stats ps
+                WHERE ps.server_id = $1
+                AND   ps.collection_time >= $2 AND ps.collection_time <= $3
+                AND   ($6::text[] IS NULL OR ps.database_name = ANY($6))
+                AND   ps.delta_execution_count > 0
+                GROUP BY ps.database_name, ps.schema_name, ps.object_name
+            ) w
+              ON  COALESCE(w.database_name, '') = COALESCE(tp.database_name, '')
+              AND (w.database_name IS NULL) = (tp.database_name IS NULL)
+              AND COALESCE(w.schema_name, '') = COALESCE(tp.schema_name, '')
+              AND (w.schema_name IS NULL) = (tp.schema_name IS NULL)
+              AND COALESCE(w.object_name, '') = COALESCE(tp.object_name, '')
+              AND (w.object_name IS NULL) = (tp.object_name IS NULL)
         ),
         baseline_period AS (
             SELECT tp.database_name, tp.schema_name, tp.object_name,
-                   SUM(ps.delta_execution_count) AS exec_count,
-                   SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
-                   MAX(ps.sql_handle) AS sql_handle
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.sql_handle
             FROM top_procs tp
-            INNER JOIN procedure_stats ps
-              ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
-              AND ps.schema_name IS NOT DISTINCT FROM tp.schema_name
-              AND ps.object_name IS NOT DISTINCT FROM tp.object_name
-            WHERE ps.server_id = $1
-            AND   ps.collection_time >= $4 AND ps.collection_time <= $5
-            AND   ps.delta_execution_count > 0
-            GROUP BY tp.database_name, tp.schema_name, tp.object_name
+            INNER JOIN (
+                SELECT ps.database_name, ps.schema_name, ps.object_name,
+                       SUM(ps.delta_execution_count) AS exec_count,
+                       SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
+                       MAX(ps.sql_handle) AS sql_handle
+                FROM procedure_stats ps
+                WHERE ps.server_id = $1
+                AND   ps.collection_time >= $4 AND ps.collection_time <= $5
+                AND   ($6::text[] IS NULL OR ps.database_name = ANY($6))
+                AND   ps.delta_execution_count > 0
+                GROUP BY ps.database_name, ps.schema_name, ps.object_name
+            ) w
+              ON  COALESCE(w.database_name, '') = COALESCE(tp.database_name, '')
+              AND (w.database_name IS NULL) = (tp.database_name IS NULL)
+              AND COALESCE(w.schema_name, '') = COALESCE(tp.schema_name, '')
+              AND (w.schema_name IS NULL) = (tp.schema_name IS NULL)
+              AND COALESCE(w.object_name, '') = COALESCE(tp.object_name, '')
+              AND (w.object_name IS NULL) = (tp.object_name IS NULL)
+        ),
+        /* #5420: the representative text, found ONCE for every compared handle, from this read's own two windows
+           (the current range and the baseline range, not the span between them: a "Last week" baseline with a short
+           window would otherwise read every chunk in the gap, and Lite's #5381 pick uses the two ranges too). It was a LEFT JOIN LATERAL per procedure ("newest query_stats
+           row with this sql_handle"): no index covers sql_handle, so each lookup walked the time index newest
+           first until a row matched, and a procedure with no text anywhere (about 1 in 5 on a large store) walked
+           every retained chunk. On a large store that was 105 lookups at 167 ms, 17.6 s of a 25.7 s read, and a
+           bound on the lateral alone still scanned the whole window once per such procedure (the rig's 7-day read
+           stayed at 12 s). One window scan, narrowed to the compared handles by a hash semi-join, with DISTINCT
+           ON picking the newest row that carries a text, costs the same however many procedures have none.
+           The pick is the lateral's, ORDER BY collection_time DESC, with the row collected last winning a tie on
+           the time (collection_id DESC, as the Query Store tail and Lite do; the lateral left the tie arbitrary,
+           and one procedure's statements normally share an instant). Difference, on purpose: a procedure whose text exists only before the window now shows no
+           text, as a procedure with no text at all already did. Twins Lite's #5381 text pick. */
+        texts AS (
+            SELECT DISTINCT ON (qs.sql_handle) qs.sql_handle, qs.query_text
+            FROM v_query_stats qs
+            WHERE qs.server_id = $1
+            AND   ((qs.collection_time >= $2 AND qs.collection_time <= $3)
+               OR  (qs.collection_time >= $4 AND qs.collection_time <= $5))
+            AND   qs.sql_handle IN (SELECT sql_handle FROM current_period UNION SELECT sql_handle FROM baseline_period)
+            AND   qs.query_text IS NOT NULL
+            ORDER BY qs.sql_handle, qs.collection_time DESC, qs.collection_id DESC
         )
         SELECT COALESCE(c.database_name, b.database_name) AS database_name,
                COALESCE(c.schema_name, b.schema_name) AS schema_name,
@@ -401,21 +480,18 @@ public sealed partial class ViewerDataService
           ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
           AND COALESCE(c.schema_name, '') = COALESCE(b.schema_name, '')
           AND COALESCE(c.object_name, '') = COALESCE(b.object_name, '')
+          AND (c.database_name IS NULL) = (b.database_name IS NULL)
+          AND (c.schema_name IS NULL) = (b.schema_name IS NULL)
+          AND (c.object_name IS NULL) = (b.object_name IS NULL)
         /* #1981: a REPRESENTATIVE statement of the procedure via the same normalized sql_handle
            join #1568's module attribution relies on (both stores persist the identical
            CONVERT(varchar(130), ..., 1) text). procedure_stats captures no text of its own, so
            this is the latest captured statement from inside the module — parity with the other
-           two comparison grids, labeled a statement rather than the definition. v_query_stats
-           resolves the #1767 payload dimension. */
-        LEFT JOIN LATERAL (
-            SELECT qs.query_text
-            FROM v_query_stats qs
-            WHERE qs.server_id = $1
-            AND   qs.sql_handle = COALESCE(c.sql_handle, b.sql_handle)
-            AND   qs.query_text IS NOT NULL
-            ORDER BY qs.collection_time DESC
-            LIMIT 1
-        ) t ON TRUE
+           two comparison grids, labeled a statement rather than the definition. texts reads
+           v_query_stats, which resolves the #1767 payload dimension (COALESCE(f.query_text,
+           qtd.query_text) through query_text_dim). */
+        LEFT JOIN texts t
+          ON t.sql_handle = COALESCE(c.sql_handle, b.sql_handle)
         """;
 
     /// <summary>Top-Procedures current-vs-baseline comparison rows (shared .Ui item; delta % + NEW/GONE badges).</summary>
@@ -464,7 +540,9 @@ public sealed partial class ViewerDataService
     public const string ProcStatsSlicerSql = """
         SELECT
             date_trunc('hour', collection_time) AS bucket,
-            COUNT(DISTINCT object_name) AS proc_count,
+            /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row),
+               so the count is of procedures WITH work: the same number on both. */
+            COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
             COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
             COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
             COALESCE(SUM(delta_logical_reads), 0) AS total_reads,

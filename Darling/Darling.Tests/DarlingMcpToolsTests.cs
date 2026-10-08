@@ -438,7 +438,7 @@ public sealed class DarlingMcpToolsTests
                     "finding_id", "analysis_time", "severity", "confidence", "confidence_basis", "category",
                     "root_fact", "leaf_fact", "story_path", "story_path_hash", "fact_count",
                     "incident_id", "occurrences", "first_seen", "last_seen", "peak_severity",
-                    "co_fired", "time_range", "advice", "remediation_command", "structured_remediation"
+                    "co_fired", "time_range", "advice", "remediation_command", "structured_remediation", "is_config_fix"
                 })
                 {
                     Assert.True(finding.TryGetProperty(field, out _), $"envelope field '{field}' missing");

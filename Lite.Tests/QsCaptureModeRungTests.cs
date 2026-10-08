@@ -118,7 +118,7 @@ public sealed class QsCaptureModeRungTests : IDisposable
     {
         var dbPath = Path.Combine(_tempDir, "lite-v63.duckdb");
 
-        var initializer = new DuckDbInitializer(dbPath);
+        using var initializer = new DuckDbInitializer(dbPath);
         await initializer.InitializeAsync();
 
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
@@ -158,7 +158,7 @@ public sealed class QsCaptureModeRungTests : IDisposable
             await ExecAsync(conn, "INSERT INTO schema_version (version) VALUES (63)");
         }
 
-        var upgraded = new DuckDbInitializer(dbPath);
+        using var upgraded = new DuckDbInitializer(dbPath);
         await upgraded.InitializeAsync();
         await upgraded.CreateArchiveViewsAsync();
 

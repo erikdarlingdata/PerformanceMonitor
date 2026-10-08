@@ -356,6 +356,156 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
     /// batch's own <c>collection_time</c>, so it locks one chunk, never all of them, and can never queue behind raw's
     /// <c>drop_chunks</c>. The two wider reads run before the transaction and bind their bounds bare (#2387).
     /// </summary>
+    /* ---- #5448: the plan-regression late-row trigger, through the real write path ------------------------- */
+
+    private const int OtherServerId = -3953002;
+
+    private static ServerRuntime OtherServer() => new()
+    {
+        Config = new MonitoredServer { Name = "qsil-3953-other", Host = "qsil-3953-other-host" },
+        ConnectionString = "Server=qsil-3953-other-host",
+        Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+        StorageName = "qsil-3953-other-host",
+        ServerId = OtherServerId,
+        EngineEdition = 3,
+    };
+
+    private static CollectorContext OtherContext() => new()
+    {
+        ServerId = OtherServerId,
+        ServerName = "qsil-3953-other-host",
+        CollectionTime = DateTime.UtcNow,
+        Deltas = new CollectorDeltaCalculator(),
+    };
+
+    private static async Task WriteOtherAsync(
+        DarlingCollectorRunner runner, DateTime collectionTime, CollectorContext context, CancellationToken ct,
+        params QueryStoreCollector.Row[] rows)
+    {
+        foreach (var batch in rows.GroupBy(r => r.DatabaseName))
+        {
+            await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, batch.ToList(), OtherServer(), collectionTime, context, ct);
+        }
+    }
+
+    /// <summary>The built table's marks for a server: day to late_seq.</summary>
+    private static async Task<Dictionary<DateTime, long>> BuiltDaysAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
+    {
+        var result = new Dictionary<DateTime, long>();
+        await using var command = new NpgsqlCommand(
+            "SELECT day, late_seq FROM collect.plan_regression_daily_built WHERE server_id = " + serverId.ToString(System.Globalization.CultureInfo.InvariantCulture), connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result[reader.GetDateTime(0)] = reader.GetInt64(1);
+        }
+
+        return result;
+    }
+
+    [Fact]
+    public async Task APlanRegressionLateBatch_ThroughTheRealWritePath_MarksItsDays_AndSteadyBatchesLeaveTheBuiltTableEmpty()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 writer test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var context = NewContext();
+
+        var now = TruncateToSeconds(DateTime.UtcNow);
+        var late = now.Date.AddDays(-5).AddHours(2);
+        var dayBefore = now.Date.AddDays(-5);
+
+        /* Steady, then a refresh of the same intervals: the trigger's WHEN is false, so nothing is marked. */
+        await WriteAsync(runner, now.AddSeconds(-60), context, ct,
+            Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-2), 10, 500),
+            Row("qsA", 2, 21, 100, now.AddHours(-3), now.AddMinutes(-2), 4, 700));
+        await WriteAsync(runner, now.AddSeconds(-30), context, ct,
+            Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-1), 15, 510));
+        Assert.Empty(await BuiltDaysAsync(connection, ServerId, ct));
+
+        /* A late batch (COPY into raw, then the apply's upsert, one transaction): two rows, one per interval, mark
+           day(first) and the next day, once per (server, day) per transaction, not once per row (#5448 lane 6). */
+        await WriteAsync(runner, now, context, ct,
+            Row("qsA", 7, 71, 90, late, late.AddMinutes(30), 3, 900),
+            Row("qsA", 8, 81, 91, late.AddMinutes(5), late.AddMinutes(35), 2, 800));
+        Assert.Equal(0, context.QueryStoreIntervalMisses);
+        var built = await BuiltDaysAsync(connection, ServerId, ct);
+        Assert.Equal(2, built.Count);
+        Assert.Equal(1L, built[dayBefore]);
+        Assert.Equal(1L, built[dayBefore.AddDays(1)]);
+
+        /* A newer snapshot of one interval wins its ON CONFLICT, in a transaction of its own, and marks once more. */
+        await WriteAsync(runner, now.AddSeconds(5), context, ct, Row("qsA", 7, 71, 90, late, late.AddMinutes(40), 6, 900));
+        Assert.Equal(2L, (await BuiltDaysAsync(connection, ServerId, ct))[dayBefore]);
+        await AssertTableEqualsRawDedupAsync(connection, ct);
+    }
+
+    /// <summary>
+    /// The fault arm (#5448): a trigger failure inside the apply's savepoint takes the existing #3953 path. Raw commits,
+    /// the late batch is recorded as pending for ITS server only, and a steady batch of another server (whose rows never
+    /// run the trigger) applies normally. Restoring the built table lets the next apply replay the pending batch, which
+    /// marks the day then.
+    /// </summary>
+    [Fact]
+    public async Task ATriggerFault_RecordsTheLateBatchPending_ForThatServerOnly_AndTheReplayMarksTheDay()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 writer test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var context = NewContext();
+        var otherContext = OtherContext();
+
+        var now = TruncateToSeconds(DateTime.UtcNow);
+        var late = now.Date.AddDays(-4).AddHours(5);
+
+        await WriteAsync(runner, now.AddSeconds(-60), context, ct, Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-2), 10, 500));
+        await WriteOtherAsync(runner, now.AddSeconds(-60), otherContext, ct, Row("qsB", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-2), 10, 500));
+
+        await ExecAsync(connection, "DROP TABLE collect.plan_regression_daily_built", ct);
+
+        /* The late batch of the first server faults (42P01 from the trigger function); a steady batch of the other
+           server, written after it, does not. */
+        await WriteAsync(runner, now, context, ct, Row("qsA", 7, 71, 90, late, late.AddMinutes(30), 3, 900));
+        await WriteOtherAsync(runner, now.AddSeconds(1), otherContext, ct, Row("qsB", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-1), 12, 520));
+
+        Assert.Equal(1, context.QueryStoreIntervalMisses);
+        Assert.Equal(0, otherContext.QueryStoreIntervalMisses);
+        Assert.Equal(1, await ScalarLongAsync(connection,
+            "SELECT COUNT(*) FROM collect.query_store_interval_latest_pending WHERE server_id = @server_id AND failure LIKE '42P01%'", ct));
+        Assert.Equal(0, await ScalarLongAsync(connection,
+            "SELECT COUNT(*) FROM collect.query_store_interval_latest_pending WHERE server_id = " + OtherServerId.ToString(System.Globalization.CultureInfo.InvariantCulture), ct));
+
+        /* Raw kept the late row; the table did not get it (the savepoint rolled the upsert back with the trigger). The
+           other server's refresh applied. */
+        Assert.Equal(2, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_stats WHERE server_id = @server_id", ct));
+        Assert.Equal(1, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest WHERE server_id = @server_id", ct));
+        Assert.Equal(12, await ScalarLongAsync(connection,
+            "SELECT execution_count FROM collect.query_store_interval_latest WHERE server_id = " + OtherServerId.ToString(System.Globalization.CultureInfo.InvariantCulture), ct));
+
+        /* Recreate the table the rung's way (idempotent DDL, the V168 rung), then a later steady batch drains the pending row, and the
+           replayed late row marks its day. */
+        await ExecAsync(connection, PgMigrations.Scripts.Single(m => m.Version == 168).Sql, ct);
+        await WriteAsync(runner, now.AddSeconds(10), context, ct, Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-1), 14, 510));
+
+        Assert.Equal(0, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest_pending", ct));
+        Assert.Equal(1, context.QueryStoreIntervalMisses);
+        var built = await BuiltDaysAsync(connection, ServerId, ct);
+        Assert.Equal(1L, built[late.Date]);
+        Assert.Equal(1L, built[late.Date.AddDays(1)]);
+        Assert.Empty(await BuiltDaysAsync(connection, OtherServerId, ct));
+        Assert.Equal(2, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest WHERE server_id = @server_id", ct));
+    }
+
     [Fact]
     public void InsideTheBatchTransaction_RawIsReadOnlyByTheBatchsOwnCollectionTime()
     {

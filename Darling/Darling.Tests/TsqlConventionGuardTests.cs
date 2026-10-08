@@ -94,6 +94,8 @@ namespace Darling.Tests;
 /// which is how the gap was found rather than assumed. The injected path has to EXIST — that guard drops
 /// references which do not resolve on disk, so a made-up filename is a red-proof that proves nothing.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class TsqlConventionGuardTests
 {
     /* Rule identifiers. Covered ones are what Findings can emit; uncovered ones exist so the disposition map
@@ -1457,6 +1459,19 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingWebFailureLog.cs IsStatementTimeout",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs ToSettings",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs IsConfigured",
+        /* #5452: two expression-bodied members that open with a property pattern (`is { IsConfiguration: true } found`,
+           `role is { } key`) before a ternary, the shape of ListLongQueryTraceDatabasesAsync below. The walk's brace match
+           closes each range at the pattern's own closing brace, stranding the ternary's arms (`found : null`,
+           `key.CredentialScope : string.Empty`). Neither arm holds a string literal, so no census reads a site of that
+           kind here; the stranded text is not T-SQL and not a tempdb label. */
+        "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs AwsRoleConfigurationFault",
+        "Darling/PerformanceMonitor.Darling.Service/Targets/AwsRoleKey.cs ScopeOf",
+        /* The long-query trace's database listing: an expression-bodied member whose body opens with a property
+           pattern (`LongQueryTraceListOverrideForTests is { } listOverride`) before its ternary. The walk's brace
+           match closes the range at the pattern's own closing brace, stranding the ternary's arms, which are calls
+           to the test hook and to GetAzureDatabaseListAsync. They hold no string literal, so no census reads a site
+           of that kind here. The Lite twin (RemoteCollectorService.LongQueryCompletions.cs, below) has the same shape. */
+        "Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs ListLongQueryTraceDatabasesAsync",
         /* #4253: an expression-bodied member whose body opens with a property pattern
            (`marker is { State: ... }`) before the rest of the expression. The walk's brace match closes the
            range at the pattern's own closing brace, stranding the trailing `&& !cancellationToken.
@@ -1467,6 +1482,12 @@ public sealed class TsqlConventionGuardTests
         /* #4214: an expression-bodied one-liner, same shape as the pairs elsewhere in this list — it strands
            only its own ternary, not T-SQL or a tempdb label, so no census reads a site of that kind here. */
         "Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs ComputeEffectiveMemoryLimitBytes",
+        /* #5329: ARRIVED, the walk now stops short here. IoHourlyCoversWindow is an expression-bodied member
+           whose body opens with a property pattern (`coverage.FloorOf(ioView) is { } floor && floor <= startUtc`),
+           the same shape as the property-pattern members above. The brace match closes the range at the
+           pattern's own `{ }`, stranding `floor <= startUtc`. That is a comparison of two locals: no string
+           literal, no T-SQL and no tempdb label, so no census reads a site of that kind there. */
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.RollupAvailability.cs IoHourlyCoversWindow",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs OutputFinding",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TriggerMbPerSecond",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TerminalSilenceMs",
@@ -1475,6 +1496,12 @@ public sealed class TsqlConventionGuardTests
            Neither is T-SQL and neither is a tempdb label, so no census reads a site of that kind here. */
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Stamp",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Window",
+        /* #4938: get_collection_health's compact row is an expression-bodied `runTime is null ? new { … } : new { … }`,
+           so the walk stops at the first anonymous object's closing brace and strands the second shape. What falls
+           outside the range is that shape's own KEY NAMES and the "o" round-trip format on last_success: not T-SQL, not
+           a tempdb label, and read by the payload censuses from the serialized payload and the tool's description rather
+           than from a member-scoped literal sweep. The Lite twin (McpHealthTools.cs, below) has the same shape. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs CompactCollectionHealthRow",
         /* #3691 line 70: audit_config's PostgreSQL projection row serializes through an expression-bodied
            `ObjectName is null ? new { … } : new { … }` — the two anonymous-object initializers are where the
            walk stops, the same shape as the property-pattern derivations below. What falls outside the range
@@ -1496,7 +1523,6 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Service/Targets/SqlServerTargetProvider.cs WithDatabase",
         "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.ServerManagement.cs SelectedTabCollectorScope",
         "Darling/PerformanceMonitor.Darling.Viewer/ManageServersWindow.xaml.cs LastCollectedDisplay",
-        "Darling/PerformanceMonitor.Darling.Viewer/RecommendationsViewModel.cs HasStructuredFixAction",
         "Darling/PerformanceMonitor.Darling.Viewer/SettingsWindow.xaml.cs BuildViewerPreferences",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Blocking.cs EventTimeLocal",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Deadlock.cs DeadlockTimeLocal",
@@ -1507,6 +1533,9 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs Local",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs Local",
         "Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs Timestamp",
+        /* #4938: the Lite twin of DarlingMcpDataTools' CompactCollectionHealthRow above: the same
+           `runTime is null ? new { … } : new { … }` shape, stranding the same key names and "o" format. */
+        "Lite/Mcp/McpHealthTools.cs CompactCollectionHealthRow",
         "Lite/Services/LocalDataService.CollectionHealth.cs OutputFinding",
         /* #4917: an expression-bodied property whose body opens with a property pattern
            (`Newest is { } newest`) before the rest of the expression. The walk's brace match closes the
@@ -1520,6 +1549,9 @@ public sealed class TsqlConventionGuardTests
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth30dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs Growth7dMb",
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs GrowthOverAvailableHistoryMb",
+        /* The Lite twin of DarlingCollectorRunner's ListLongQueryTraceDatabasesAsync above: the same
+           `is { } listOverride ? … : …` shape, and the same absence of any string literal. */
+        "Lite/Services/RemoteCollectorService.LongQueryCompletions.cs ListLongQueryTraceDatabasesAsync",
         /* #4766: the history rows' expression-bodied formatter, `naiveUtc is not { } instant ? "" : ...`. The
            property pattern's braces are where the walk stops. What it strands is the "yyyy-MM-dd HH:mm:ss" grid
            format and nothing else: not T-SQL and not a tempdb label, so no census reads a site of that kind here. */

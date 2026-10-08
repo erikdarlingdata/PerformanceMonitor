@@ -7,10 +7,8 @@
  */
 
 using System;
-using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
@@ -148,141 +146,49 @@ public static class DarlingLogHashKeyFile
     /// <summary>
     /// Loads the key from <paramref name="directory"/>, generating it when no file exists at its path, which includes a
     /// key the directory check has just removed (the class's one exception). Never throws for anything the file system
-    /// or the file can do; the result says what happened.
+    /// or the file can do; the result says what happened. The trust checks, the read and the write are the shared
+    /// loader's (<see cref="DarlingServiceKeyFile"/>); this class keeps the key's own wording.
     /// </summary>
     public static DarlingLogHashKeyLoad Load(string directory, ILogger logger)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
         ArgumentNullException.ThrowIfNull(logger);
 
-        var path = Path.Combine(directory, FileName);
-        try
+        var result = DarlingServiceKeyFile.Load(directory, Spec, NewKey, createDirectory: true, logger);
+        switch (result.State)
         {
-            var trust = DarlingManagedRoles.PrepareComposeCredentialDirectory(directory, create: true, logger);
-            var exists = AnythingAt(path);
+            case ServiceKeyFileState.Loaded:
+                logger.LogInformation("Loaded the store's log-hash key from {Path} (#4004)", result.Path);
+                return new DarlingLogHashKeyLoad(result.Key, result.Path, Generated: false, Refusal: null);
 
-            /* Taken whichever way this load goes, so it describes this process's discard only once (#4004 review,
-               round 3): the check that removed the key may have been another caller's, earlier this start. */
-            var discarded = ComposeCredentialDirectoryGuard.Current.TakeDiscardedKey(directory);
+            case ServiceKeyFileState.Generated:
+                logger.LogInformation(
+                    "Generated the store's log-hash key {Path} (#4004). Log events stored from now on are identified by hashes keyed with it; keep it with the store's other credentials, because a new key gives every stored log event a new identity.",
+                    result.Path);
+                return new DarlingLogHashKeyLoad(result.Key, result.Path, Generated: true, Refusal: null, Replaced: result.Discarded);
 
-            /* A directory other users could write to until now has already lost every file the service reads from it,
-               this key included, inside the check itself (#4004 review): whichever caller found it open (role
-               provisioning, a host's earlier-credential read, or this load) removed them before returning. So a key
-               found past the check is one written while only the service could reach the directory, and a directory
-               that is not trusted is one nothing is read from or written to. */
-            if (trust.Distrust is { } distrust)
-            {
-                return RefuseForDirectory(path, directory, distrust);
-            }
+            case ServiceKeyFileState.DirectoryRefused:
+                return RefuseForDirectory(result.Path, result.Reason!);
 
-            if (exists)
-            {
-                var untrusted = DarlingManagedRoles.UntrustedComposeCredentialReason(new FileInfo(path));
-                if (untrusted is not null)
-                {
-                    return Refuse(path, untrusted);
-                }
-
-                if (!OperatingSystem.IsWindows())
-                {
-                    return Read(path, held: null, logger);
-                }
-
-                /* #4028: the shared check above only refuses a key Users, Authenticated Users or Everyone can read,
-                   since the credential files it also judges were built against that denylist. The key is read by
-                   the service alone, so on Windows it is held to an allowlist: an account beyond SYSTEM,
-                   Administrators and the service account (INTERACTIVE, Domain Users, one named user) that can read it
-                   has the key, and with it the literals the keyed hashes hide; one that can write it or re-permission
-                   it can make that so (#4044 review). Judged and read through ONE handle that nobody can rename,
-                   replace or write while it is open, so the key read is the key judged, whoever controls the
-                   directory. */
-                using var held = DarlingFileSecurity.OpenForServiceOnlyRead(path, out var refusal);
-                return held is null ? Refuse(path, refusal ?? "it could not be checked") : Read(path, held, logger);
-            }
-
-            var generated = Generate(path, logger);
-            return generated.Key is not null && discarded is not null ? generated with { Replaced = discarded } : generated;
+            default:
+                return Refuse(result.Path, result.Reason ?? "it could not be checked");
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return Refuse(path, $"it could not be checked ({ex.Message})");
-        }
-    }
-
-    /// <summary>Whether ANY entry is at the path, a dangling symbolic link or a directory included: generating a key is
-    /// only for a path that holds nothing at all.</summary>
-    private static bool AnythingAt(string path)
-    {
-        var info = new FileInfo(path);
-        return info.LinkTarget is not null || info.Exists || Directory.Exists(path);
     }
 
     /// <summary>The most a key file's bytes may run to. A key this service writes is about 350 on Windows (a DPAPI blob
     /// of the base64 key, in base64) and 44 elsewhere.</summary>
     private const int MaxKeyFileBytes = 1024;
 
-    /// <summary>Reads the key from <paramref name="held"/>, the stream <see cref="Load"/> judged the file through, or
-    /// from the path when there is none (Unix, where mode and owner are the shared check's).</summary>
-    private static DarlingLogHashKeyLoad Read(string path, FileStream? held, ILogger logger)
+    private static readonly ServiceKeyFileSpec<PgLogHashKey> Spec = new(FileName, MaxKeyFileBytes, ParseKey, TakesDiscardRecord: true);
+
+    private static ServiceKeyParse<PgLogHashKey> ParseKey(string encoded)
     {
-        string text;
-        try
-        {
-            if (held is null)
-            {
-                text = File.ReadAllText(path).Trim();
-            }
-            else
-            {
-                var buffer = new byte[MaxKeyFileBytes + 1];
-                var length = 0;
-                int read;
-                while (length < buffer.Length && (read = held.Read(buffer, length, buffer.Length - length)) > 0)
-                {
-                    length += read;
-                }
-
-                if (length > MaxKeyFileBytes)
-                {
-                    return Refuse(path, $"it is larger than {MaxKeyFileBytes.ToString(CultureInfo.InvariantCulture)} bytes, which no key this service writes is");
-                }
-
-                using var reader = new StreamReader(new MemoryStream(buffer, 0, length), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-                text = reader.ReadToEnd().Trim();
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return Refuse(path, $"it could not be read ({ex.Message})");
-        }
-
-        string encoded;
-        if (OperatingSystem.IsWindows())
-        {
-            try
-            {
-                encoded = DarlingSecrets.Unprotect(text);
-            }
-            catch (Exception ex) when (ex is CryptographicException or FormatException or ArgumentException)
-            {
-                return Refuse(path, $"it could not be DPAPI-decrypted on this machine ({ex.Message}); a key file is readable only on the machine that wrote it");
-            }
-        }
-        else
-        {
-            encoded = text;
-        }
-
         var material = new byte[PgLogHashKey.KeyLength];
         try
         {
-            if (!Convert.TryFromBase64String(encoded.Trim(), material, out var written) || written != PgLogHashKey.KeyLength)
-            {
-                return Refuse(path, $"it does not hold a {PgLogHashKey.KeyLength}-byte key");
-            }
-
-            logger.LogInformation("Loaded the store's log-hash key from {Path} (#4004)", path);
-            return new DarlingLogHashKeyLoad(new PgLogHashKey(material), path, Generated: false, Refusal: null);
+            return !Convert.TryFromBase64String(encoded.Trim(), material, out var written) || written != PgLogHashKey.KeyLength
+                ? new ServiceKeyParse<PgLogHashKey>(null, $"it does not hold a {PgLogHashKey.KeyLength}-byte key")
+                : new ServiceKeyParse<PgLogHashKey>(new PgLogHashKey(material), null);
         }
         finally
         {
@@ -290,112 +196,10 @@ public static class DarlingLogHashKeyFile
         }
     }
 
-    /// <summary>
-    /// Writes a new key owner-only from the moment it exists, the way #3983 writes a compose role password: 0600 at
-    /// creation on Unix, the hardened ACL at creation on Windows (checked, then hardened once more if ordinary users can
-    /// still read it), flushed to disk (<see cref="DarlingManagedRoles.FlushToDisk"/>, so a power loss cannot leave a
-    /// zero-length key that every later start refuses), then moved into place WITHOUT overwrite, so a file that
-    /// appeared meanwhile is never replaced.
-    /// </summary>
-    private static DarlingLogHashKeyLoad Generate(string path, ILogger logger)
+    private static ServiceKeyGeneration<PgLogHashKey> NewKey()
     {
-        var temporary = path + ".tmp";
-        if (ClearStaleTemporary(temporary) is { } stale)
-        {
-            return Refuse(path, stale);
-        }
-
         var material = RandomNumberGenerator.GetBytes(PgLogHashKey.KeyLength);
-        try
-        {
-            var encoded = Convert.ToBase64String(material);
-            File.Delete(temporary);
-            if (OperatingSystem.IsWindows())
-            {
-                using (var stream = DarlingFileSecurity.CreateHardenedFile(temporary, allowInteractiveRead: false))
-                using (var writer = new StreamWriter(stream))
-                {
-                    writer.Write(DarlingSecrets.Protect(encoded));
-                    DarlingManagedRoles.FlushToDisk(writer, stream);
-                }
-
-                /* The same allowlist a key is loaded under (#4028), so a key is never written that its next start
-                   would refuse. */
-                if (DarlingFileSecurity.AccessBeyondTrusted(temporary) is not null)
-                {
-                    DarlingFileSecurity.HardenFile(temporary, allowInteractiveRead: false);
-                    if (DarlingFileSecurity.AccessBeyondTrusted(temporary) is { } accounts)
-                    {
-                        throw new InvalidOperationException(
-                            $"accounts beyond SYSTEM, Administrators and the service account had access to it even after it was created owner-only and hardened again: {accounts}"
-                            + DarlingFileSecurity.DescribeOwnerAndExposure(temporary));
-                    }
-                }
-            }
-            else
-            {
-                using var stream = new FileStream(temporary, new FileStreamOptions
-                {
-                    Mode = FileMode.CreateNew,
-                    Access = FileAccess.Write,
-                    UnixCreateMode = DarlingManagedRoles.OwnerOnlyFile,
-                });
-                using var writer = new StreamWriter(stream);
-                writer.Write(encoded);
-                DarlingManagedRoles.FlushToDisk(writer, stream);
-            }
-
-            File.Move(temporary, path, overwrite: false);
-            logger.LogInformation(
-                "Generated the store's log-hash key {Path} (#4004). Log events stored from now on are identified by hashes keyed with it; keep it with the store's other credentials, because a new key gives every stored log event a new identity.",
-                path);
-            return new DarlingLogHashKeyLoad(new PgLogHashKey(material), path, Generated: true, Refusal: null);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            TryDelete(temporary, logger);
-            return Refuse(path, $"there was no key, and a new one could not be written ({ex.Message})");
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(material);
-        }
-    }
-
-    /// <summary>
-    /// A directory where the new key's temporary file goes (#4004 review): File.Delete cannot remove it, so the write
-    /// failed on every start with a reason that named only the key ("it did not exist"). An empty one is removed, which
-    /// is safe (a non-recursive delete removes nothing inside, and a symbolic link is not a directory here); one with
-    /// anything in it is someone's tree, left alone, and named as the reason. Null when the path is clear.
-    /// </summary>
-    private static string? ClearStaleTemporary(string temporary)
-    {
-        if (new FileInfo(temporary).LinkTarget is not null || !Directory.Exists(temporary))
-        {
-            return null;
-        }
-
-        try
-        {
-            Directory.Delete(temporary, recursive: false);
-            return null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return $"{temporary}, the file a new key is written through before it is moved into place, is a directory the service could not remove ({ex.Message}); remove it and restart";
-        }
-    }
-
-    private static void TryDelete(string path, ILogger logger)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            logger.LogDebug("Could not remove {File}: {Message}", path, ex.Message);
-        }
+        return new ServiceKeyGeneration<PgLogHashKey>(new PgLogHashKey(material), material);
     }
 
     private static DarlingLogHashKeyLoad Refuse(string path, string reason) => new(
@@ -412,11 +216,11 @@ public static class DarlingLogHashKeyFile
     /// Round 2 gave this case the file's text, whose "restrict it" read as "set the directory 0700" to the operator
     /// the round-3 attack walks through.
     /// </summary>
-    private static DarlingLogHashKeyLoad RefuseForDirectory(string path, string directory, string distrust) => new(
+    private static DarlingLogHashKeyLoad RefuseForDirectory(string path, string reason) => new(
         Key: null,
         Path: path,
         Generated: false,
-        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because its directory {directory} is not trusted ({distrust}) (#4004). "
+        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason} (#4004). "
             + "Nothing in that directory is read or written while it is not trusted; fix what the reason names and restart.");
 }
 

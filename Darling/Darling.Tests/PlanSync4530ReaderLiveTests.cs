@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// <para>#1776 own-store: this uses <c>ScratchPostgres</c>, not the shared <c>live-postgres</c>
 /// collection, and never touches another test's rows.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class PlanSync4530ReaderLiveTests
 {
     private const int TestServerId = -453_000;

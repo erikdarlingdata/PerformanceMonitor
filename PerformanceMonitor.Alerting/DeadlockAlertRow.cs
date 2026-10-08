@@ -274,11 +274,11 @@ public static class DeadlockGraphSummary
         if (statement.Length > 0)
         {
             /* Last, so the truncation can only ever cut the statement and never a fact behind it.
-               TruncateText also collapses newlines to spaces, which is what keeps an inputbuf carrying a
-               multi-statement batch from emitting body lines that the mute pre-fill's label matcher would
+               TruncateStatement judges the whole statement first (#5320), then collapses newlines to
+               spaces, which is what keeps an inputbuf carrying a multi-statement batch from emitting body lines that the mute pre-fill's label matcher would
                read as fields of their own. */
             value.Append(SegmentSeparator).Append(HasProcName(proc) ? "proc: " : "sql: ")
-                 .Append(AlertContextBuilders.TruncateText(statement, StatementMaxLength));
+                 .Append(AlertContextBuilders.TruncateStatement(statement, StatementMaxLength));
         }
 
         return value.ToString();

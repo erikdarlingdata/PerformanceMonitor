@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+    # `ready_for_review` is here because the `gate` job below skips every PR job while the PR is a
+    # draft: marking it ready is the event that starts the real run.
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main, dev]
   release:
     types: [published]
@@ -26,12 +29,23 @@ permissions:
 # serializes everyone's CI (#1697 sat queued behind two dev builds; on 2026-07-26 a
 # ~20-merge train left 13 of the day's 30 dev-push runs finishing SHAs a newer merge had
 # already replaced — ~60 reclaimable runner-minutes in one evening). Cancelling a
-# superseded PUSH run is safe because a push run produces nothing any other run consumes:
-# every upload-artifact step in this workflow is gated to the release event (the SignPath
-# signing path) or to failure() (darling-pg diagnostics), nothing in the repo downloads
-# cross-run artifacts (no download-artifact, gh run download, or workflow_run consumer
-# exists), nightly.yml builds its own tree from its own checkout, and a release compiles
-# fresh on the release event. The accepted trade: push builds are diff-scoped, so a
+# superseded PUSH run is safe because no run's RESULT depends on another run's output: every
+# upload-artifact step in this workflow is gated to the release event (the SignPath signing
+# path) or to failure() (darling-pg diagnostics), except the per-run Lite timing uploads
+# (#5208) and the Guard job's two test-build uploads (#5459), which only jobs of the SAME run
+# download (no run-id; a cancelled run's build is never read by another run), and exactly ONE
+# thing reads a previous run's artifacts: the Lite shard packer (#5208). The gate job picks, once per run, the newest successful push run on dev (of the 30
+# newest successful dev runs) whose lite-tests-timing artifacts ALL have more than two days of
+# retention left, and pins that run and its exact artifact set; every Lite shard downloads that
+# set and fails if it gets anything else. A cancelled run is not a successful run, so a
+# cancelled push run is never read. With no such run the cut is the plain class-name hash, and
+# timings the packer cannot use (none readable, all zero, or covering under 80% of this commit's
+# classes) send every shard to that same hash. So cancelling can cost shard balance but never a
+# test class or a verdict. No other cross-run consumer (a download-artifact with run-id, a gh
+# run download, or a workflow_run trigger) exists (CrossAppGuardCiGateTests pins both halves),
+# nightly.yml builds its own tree from its own checkout, and a release compiles fresh on the
+# release event. The accepted
+# trade: push builds are diff-scoped, so a
 # cancelled run's areas are not re-verified until the next change touches them — the
 # nightly and the all-areas dev->main release PR are the backstops. Release and
 # merge-queue runs deliberately keep a UNIQUE group per run (run_id) and are NEVER
@@ -42,8 +56,383 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
-  build:
+  # THE ONE DECISION about whether this run does any work. Every PR job below `needs: gate` and runs
+  # only while `run` is true, so the rule lives in one place instead of being repeated on each job.
+  #
+  # Runs, in order:
+  #   - any event that is not a pull request (push, release, merge_group): always.
+  #   - a pull request from a `train/` branch: always, draft or not. A merge-train pull request exists
+  #     only to run CI, so skipping it would defeat it.
+  #   - a pull request carrying the `merge-train` label: never. The train's own run already covered the
+  #     member, which is then marked ready and merged straight away, so a second run is wasted. The label
+  #     is read from the event payload, so it has to be on the pull request BEFORE it is marked ready.
+  #   - a draft pull request: never. Marking it ready starts the run (`ready_for_review`).
+  #   - any other pull request: yes.
+  #
+  # A skipped job reports as skipped, and GitHub counts skipped as passing for a required check. A run
+  # the gate declined therefore must not read as green, so three jobs turn it into a FAILURE on a pull
+  # request: `build` (its first step), `Darling PostgreSQL tests` and `Lite tests (result)`. Those are the
+  # required checks, and each keeps its own name. The failure is the intended outcome: a draft or
+  # merge-train pull request shows red until it is marked ready (or, for a merge-train member, until an
+  # admin merges it after the train covered it). Branch protection does not bind admins, so
+  # `gh pr merge --admin` still works.
+  gate:
+    name: Decide whether CI runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # actions: read is for the timing-source step below and nothing else: it lists runs and artifacts.
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      lite_timing_run: ${{ steps.timing.outputs.run_id }}
+      lite_timing_artifacts: ${{ steps.timing.outputs.artifacts }}
+    steps:
+      - name: Decide
+        id: decide
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HAS_MERGE_TRAIN_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'merge-train') }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            run=true; why="a ${EVENT_NAME} event always runs."
+          elif [[ "${HEAD_REF}" == train/* ]]; then
+            run=true; why="a merge-train pull request exists to run CI."
+          elif [ "${HAS_MERGE_TRAIN_LABEL}" = "true" ]; then
+            run=false; why="the pull request carries the merge-train label, so its train run already covered it."
+          elif [ "${IS_DRAFT}" = "true" ]; then
+            run=false; why="the pull request is a draft. Marking it ready for review starts the run."
+          else
+            run=true; why="a pull request that is ready for review runs."
+          fi
+
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+          if [ "${run}" = "true" ]; then
+            echo "::notice title=CI runs::${why}"
+          else
+            echo "::notice title=CI skipped::${why}"
+          fi
+
+      # #5208: the ONE timing source every Lite shard of this run balances its cut from. It is picked
+      # here, once, because the four shards start minutes apart and a pick made inside each shard would
+      # race a dev run finishing in between: two shards would then cut the suite from different timings,
+      # and a class could land in two shards or none, which no check inside a single shard can see.
+      # Only SUCCESSFUL push runs on dev qualify (a cancelled run is never read, and a push to dev is
+      # code that already merged), and ALL of its timing artifacts must outlive this run by two days, so
+      # they cannot expire while the shards are queued or being re-run. The exact artifact names are
+      # pinned too (the artifacts output), and each shard checks that it downloaded exactly that set.
+      # Every failure here means "no source", which the shards all read the same way: the plain
+      # class-name hash cut. The step cannot fail the gate.
+      - name: Pin the Lite timing source
+        id: timing
+        if: github.event_name != 'release' && steps.decide.outputs.run == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          export KEEP_UNTIL FRESH_AFTER
+          tries=3
+          stale_days=5
+          KEEP_UNTIL=$(date -u -d '+2 days' +%Y-%m-%dT%H:%M:%SZ)
+          FRESH_AFTER=$(date -u -d "-${stale_days} days" +%Y-%m-%dT%H:%M:%SZ)
+          source_run=""
+          source_artifacts=""
+          runs=""
+          stale_tries=0
+          failed_tries=0
+          # Filtered on the event here, not in the query: the API's branch+event+status combination
+          # returns a stale page of old runs. Branch+status can return one TOO, now and then: 30 rows
+          # from weeks ago, whose artifacts have long expired, where the current rows should be, and then
+          # every Lite shard cuts by hash although a qualifying run exists (#5208). So the listing is
+          # tried up to three times (tries), five seconds apart, and a page is taken only when a push run
+          # on it FINISHED in the last five days (stale_days), judged on updated_at and not on created_at:
+          # artifacts expire seven days after their UPLOAD, a run uploads before it finishes, and a re-run
+          # uploads again, so the two days of margin the check below wants can only be met by a run that
+          # finished within five days, however long ago it was created. A page whose latest finish is older
+          # cannot hold a usable source anyway. A failed call counts as a try too. When no try gets a
+          # current page the cut is the hash, and the notice below says what the tries saw. (A pull request
+          # FROM dev carries head_branch dev too, hence the event test.)
+          for attempt in $(seq 1 "${tries}"); do
+            if [ "${attempt}" -gt 1 ]; then
+              sleep 5
+            fi
+            if page=$(gh api "repos/${GH_REPO}/actions/workflows/build.yml/runs?branch=dev&status=success&per_page=30" --jq '[.workflow_runs[] | select(.event == "push")] | (map(.updated_at) | max) as $newest | if $newest > env.FRESH_AFTER then .[].id else "stale \($newest // "none")" end'); then
+              case "${page}" in
+                stale*)
+                  stale_tries=$((stale_tries + 1))
+                  echo "Try ${attempt} of ${tries}: no push run on the listing finished in the last ${stale_days} days (latest: ${page#stale }), so the page counts as stale."
+                  ;;
+                *)
+                  runs="${page}"
+                  break
+                  ;;
+              esac
+            else
+              failed_tries=$((failed_tries + 1))
+              echo "Try ${attempt} of ${tries}: the run listing call failed."
+            fi
+          done
+          for id in ${runs}; do
+            # EVERY timing artifact of the run must outlive this run by two days, not just one, and the exact set is
+            # pinned so each shard can prove it downloaded the same files as the others.
+            names=$(gh api "repos/${GH_REPO}/actions/runs/${id}/artifacts?per_page=100" --jq '[.artifacts[] | select(.name | test("^lite-tests-timing-[0-9]+$"))] | if length > 0 and all(.[]; (.expired | not) and (.expires_at > env.KEEP_UNTIL)) then (map(.name) | unique | join(",")) else "" end') || names=""
+            if [ -n "${names}" ]; then
+              source_run="${id}"
+              source_artifacts="${names}"
+              break
+            fi
+          done
+
+          echo "run_id=${source_run}" >> "$GITHUB_OUTPUT"
+          echo "artifacts=${source_artifacts}" >> "$GITHUB_OUTPUT"
+          # Each notice says what the tries saw: a run was pinned; every call failed; no try got a current
+          # page (stale, empty or push-less pages, with failed calls among them); or a current page was read
+          # and no run on it qualified. Empty runs means no page was taken, so no run was tested at all.
+          if [ -n "${source_run}" ]; then
+            echo "::notice title=Lite timing source::The Lite shards balance their cut from the timings of run ${source_run}, the newest successful push run on dev that still has them."
+          elif [ "${failed_tries}" -eq "${tries}" ]; then
+            echo "::notice title=Lite timing source::The run listing call failed on all ${tries} tries, so every Lite shard cuts by class-name hash."
+          elif [ -z "${runs}" ]; then
+            echo "::notice title=Lite timing source::The run listing gave no current page in ${tries} tries (${stale_tries} returned no push run that finished in the last ${stale_days} days, a stale API page or no push run that recent, and ${failed_tries} failed), so every Lite shard cuts by class-name hash."
+          else
+            echo "::notice title=Lite timing source::No successful dev push run has unexpired Lite timings (or the lookup failed), so every Lite shard cuts by class-name hash."
+          fi
+
+  # #5459: the guard classes of BOTH test suites, first, so a source pin, a census or a hygiene scan that a
+  # pull request breaks fails in about ten minutes with every shard skipped, instead of after the whole run.
+  # Before this job, 6 PostgreSQL shards, 4 Lite shards, the build job's own suites and the Linux image all
+  # ran to the end on a pull request one stacked doc comment had already broken. The guard classes carry
+  # [Trait("Stage", "Guard")]; GuardStageCensusTests (one per suite) fails a class whose name says it is a
+  # guard, or that walks the whole repository, and carries no trait, and fails a tagged class that needs a
+  # store, because this job has no PostgreSQL (and no DARLING_TEST_* variable).
+  #
+  # NOT a required check. The four required checks (`build`, `Darling PostgreSQL tests`, `Lite tests (result)`
+  # and the Claude review guard) keep their names; the first three read this job's result and go red when it
+  # is not success, so a guard failure is visible on each of them and nothing waits on a check that never
+  # reports. Pull requests only: a push, a merge-queue run and a release run every shard whatever the guards
+  # say (dev pushes are the safety net and the source of the Lite timings), so the shards' `if:` below read
+  # this job's result only on a pull request. Skipped on release, where `build` runs the suites whole.
+  #
+  # The build is shared (#5459 change 2). Right after the Release build, and before any test runs (so a guard
+  # failure still leaves it), this job uploads the two test projects' bin/Release trees plus the few obj files
+  # `dotnet run --no-build` reads (project.assets.json, the nuget props/targets, the cache file), and a small
+  # origin file recording the producer's github.workspace and sha. The consumers (the six PostgreSQL shards, the
+  # four Lite shards, the whole-tree guards job) download it into the same relative paths and skip their own
+  # restore and build. The obj/Release intermediates and every other project's obj are not needed, and not
+  # uploaded: `dotnet run --no-build` was proven locally with exactly this set and an empty NuGet package folder.
+  # Two tests read ANOTHER project's build output through the repo layout, so those are uploaded too: the Darling
+  # service's bin/Release (DarlingEncryptPasswordStreamTests starts its exe) and the Lite app's runtimeconfig
+  # (LiteRuntimePrerequisiteDocsTests reads Lite/bin/**). A first version without them failed both on the shards.
+  # The workspace path is recorded because many tests find the repo root through [CallerFilePath], so a binary
+  # built in one workspace path reads its source from that path; a consumer whose workspace or sha differs fails
+  # loudly instead of testing the wrong tree. Only a consumer that USED the artifact leaves out Stage=Guard (this
+  # job ran those classes on the same binaries in this run); one that built for itself runs every class.
+  #
+  # Docs-only changes: the filter below holds ONLY the build job's `docs` and `all` entries (a byte copy,
+  # pinned by GuardStageWorkflowTests), and a change whose every file is on the documentation allowlist
+  # reports a notice and succeeds without building anything, exactly as the build job's docs fast path does.
+  #
+  # The two suites are built once here (Release), and the class lists come off the built assemblies, so the
+  # set is whatever carries the trait on THIS commit: no roster. An empty list is a hard error (a runner given
+  # no class filter would run nothing or everything, and neither is a guard). Both suites run even when the
+  # first fails, so one red run names everything that is broken.
+  guard-tests:
+    name: Guard tests
+    needs: gate
+    if: ${{ needs.gate.outputs.run == 'true' && github.event_name != 'release' }}
     runs-on: windows-latest
+    # Measured locally at ~1 minute of tests per suite (Debug); a hosted runner adds setup, restore and two
+    # Release builds (~6 minutes). 20 minutes is a hang guard, as on the other Windows jobs.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    # One artifact per suite, so a Darling consumer does not download the Lite tree and the other way round. Each
+    # output holds the artifact name, set only when its upload step succeeded (empty on a docs-only change, a failed
+    # build, or a failed upload). The consumers download only when it is set; a job output is still published when
+    # a later step of this job fails, which is the case that matters (the guards failed after the upload).
+    outputs:
+      darling_build_artifact: ${{ steps.upload-darling-build.outcome == 'success' && 'guard-test-build-darling' || '' }}
+      lite_build_artifact: ${{ steps.upload-lite-build.outcome == 'success' && 'guard-test-build-lite' || '' }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            # Byte copy of the build job's `docs` and `all` entries (GuardStageWorkflowTests pins the patterns
+            # equal): the documentation allowlist, and the catch-all counter that is equal to it exactly when
+            # every changed file is documentation.
+            docs:
+              - '**/*.md'
+              - 'LICENSE'
+              - 'CITATION.cff'
+              - '.gitignore'
+              - '.gitattributes'
+              - 'llms.txt'
+              - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
+              - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
+            all:
+              - '**'
+
+      - name: Decide whether the guard classes run
+        id: decide
+        shell: bash
+        env:
+          ALL_COUNT: ${{ steps.filter.outputs.all_count }}
+          DOCS_COUNT: ${{ steps.filter.outputs.docs_count }}
+        run: |
+          set -euo pipefail
+
+          if [ "${ALL_COUNT:-0}" -gt 0 ] && [ "${ALL_COUNT:-0}" -eq "${DOCS_COUNT:-0}" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Guard tests skipped::All ${ALL_COUNT} changed files are on the documentation allowlist, so there is no code for the guard classes to catch. This job still reports success."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Guard tests running::${DOCS_COUNT:-0} of ${ALL_COUNT:-0} changed files are on the documentation allowlist."
+          fi
+
+      - name: Setup .NET 10.0
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      # Locked mode and `set -euo pipefail` for the reason the build job's restore step gives (and
+      # LockedModeRestoreCoverageTests enforces): a multi-line run block under the default shell reports only
+      # its last command's exit code, so the first restore could fail unseen.
+      - name: Restore both test projects
+        if: steps.decide.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build both test projects
+        if: steps.decide.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+          dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # Written by the producer for the consumers' check (see the header above): where this build was made and from
+      # what. Plain key=value lines, no dot-prefix (upload-artifact skips hidden files).
+      - name: Record where this build was made
+        if: steps.decide.outputs.run == 'true'
+        shell: pwsh
+        env:
+          PRODUCER_WORKSPACE: ${{ github.workspace }}
+          PRODUCER_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Content -Path guard-build-origin.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
+
+      # Before the tests, so a guard failure still leaves the artifacts. One day of retention: they are read only by
+      # the jobs of this run. overwrite: a re-run of this job in a later attempt uploads the same names again.
+      - name: Upload the built Darling.Tests for the shards
+        id: upload-darling-build
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: guard-test-build-darling
+          path: |
+            guard-build-origin.txt
+            Darling/Darling.Tests/bin/Release
+            Darling/PerformanceMonitor.Darling.Service/bin/Release
+            Darling/Darling.Tests/obj/project.assets.json
+            Darling/Darling.Tests/obj/project.nuget.cache
+            Darling/Darling.Tests/obj/*.nuget.g.props
+            Darling/Darling.Tests/obj/*.nuget.g.targets
+            Darling/Darling.Tests/obj/*.nuget.dgspec.json
+          retention-days: 1
+          compression-level: 1
+          overwrite: true
+          if-no-files-found: error
+
+      - name: Upload the built Lite.Tests for the shards
+        id: upload-lite-build
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: guard-test-build-lite
+          path: |
+            guard-build-origin.txt
+            Lite.Tests/bin/Release
+            Lite/bin/**/PerformanceMonitorLite.runtimeconfig.json
+            Lite.Tests/obj/project.assets.json
+            Lite.Tests/obj/project.nuget.cache
+            Lite.Tests/obj/*.nuget.g.props
+            Lite.Tests/obj/*.nuget.g.targets
+            Lite.Tests/obj/*.nuget.dgspec.json
+          retention-days: 1
+          compression-level: 1
+          overwrite: true
+          if-no-files-found: error
+
+      - name: Run the Stage=Guard classes of both suites
+        if: steps.decide.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Both suites must run even when the first fails, so a failing native command has to set $LASTEXITCODE
+          # and not throw (#5471 review L1). The default is already $false; the three loops below that need the
+          # same say it out loud, so this one does too.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failed = @()
+          $suites = @(
+              @{ Name = 'Darling.Tests'; Project = 'Darling/Darling.Tests/Darling.Tests.csproj' },
+              @{ Name = 'Lite.Tests'; Project = 'Lite.Tests/Lite.Tests.csproj' }
+          )
+
+          foreach ($suite in $suites) {
+              $lines = @(dotnet run --project $suite.Project -c Release --no-build -- -list classes/json -trait Stage=Guard)
+              if ($LASTEXITCODE -ne 0) { throw "$($suite.Name): the class listing failed with exit code $LASTEXITCODE" }
+              # Only the runner's one-line JSON array is parsed; a CLI notice can share stdout.
+              $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+              if ($json.Count -ne 1) { throw "$($suite.Name): expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+              $classes = @($json[0] | ConvertFrom-Json)
+              if ($classes.Count -eq 0) { throw "$($suite.Name): no class carries Stage=Guard, so this job would run nothing" }
+              Write-Host "$($suite.Name): $($classes.Count) Stage=Guard classes"
+
+              # -failSkips: this job has no PostgreSQL, so a tagged test that needs a store would SKIP, and a skip
+              # exits 0. Failing skips turns that into a red job (#5471 review M1). Both suites skip none today.
+              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard -failSkips
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Host "::error title=Guard tests failed::$($suite.Name) failed its Stage=Guard classes (exit $LASTEXITCODE). The shards were skipped on this pull request."
+                  $failed += $suite.Name
+              }
+          }
+
+          if ($failed.Count -gt 0) { throw "Guard classes failed in: $($failed -join ', ')" }
+
+  build:
+    needs: [gate, guard-tests]
+    # `build` is a required check, so it has to run to report anything but "skipped" (which counts as
+    # passing). When the gate declines the run the job still starts, on a cheap Linux runner, and its
+    # first step fails; no later step has an `always()`/`failure()` condition, so the rest are skipped.
+    if: ${{ !cancelled() }}
+    # A pull request whose guard classes failed fails fast on the cheap Linux runner too (#5459): the step
+    # below reports it, and no Windows runner starts for a run that cannot pass. Push, merge_group and
+    # release keep the Windows runner whatever the guards said.
+    runs-on: ${{ needs.gate.outputs.run == 'true' && (github.event_name != 'pull_request' || needs.guard-tests.result == 'success') && 'windows-latest' || 'ubuntu-latest' }}
 
     # Whether THIS job ran Darling.Tests, taken from the step's own outcome rather than restated as
     # a copy of the step's path gate. The darling-tree-guards job at the bottom of this file runs
@@ -60,6 +449,32 @@ jobs:
       docs-fastpath: ${{ steps.fastpath.outputs.engaged }}
 
     steps:
+      - name: Fail when CI did not run
+        if: ${{ needs.gate.outputs.run != 'true' }}
+        shell: bash
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: |
+          if [ "${GATE_RESULT}" != "success" ]; then
+            echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
+            exit 1
+          fi
+          echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it. (gate result: ${GATE_RESULT})"
+          exit 1
+
+      # #5459: the Guard tests job runs first on a pull request. When it did not succeed, this required check
+      # fails at once, before checkout, instead of building and running the suites for a run that is already
+      # lost; the shards were skipped for the same reason. Pull requests only: a push, a merge-queue run and a
+      # release carry on whatever the guards said (a release skips the guard job, so its result is `skipped`).
+      - name: Fail when the guard tests failed
+        if: ${{ github.event_name == 'pull_request' && needs.gate.outputs.run == 'true' && needs.guard-tests.result != 'success' }}
+        shell: bash
+        env:
+          GUARD_RESULT: ${{ needs.guard-tests.result }}
+        run: |
+          echo "::error title=Guard tests failed::The Guard tests job did not succeed (result: ${GUARD_RESULT}), so the rest of CI was skipped. Read that job's log for the failing class; it runs first and fails in about ten minutes."
+          exit 1
+
       - uses: actions/checkout@v7
 
       - name: Detect changed paths
@@ -171,8 +586,8 @@ jobs:
               # WatermarkPolicy.MaxCatchup. Three of the twelve sites it was written for live here, so a
               # Darling-only PR reintroducing one would fire `darling` but not `lite` and skip the step
               # that runs the guard — caught a day later by the nightly, which is exactly the silent
-              # drift the pin exists to close. The cost is that Darling service PRs now also run the Lite
-              # suite; that is the same trade the `darling` filter already takes for Lite/**/*.xaml.
+              # drift the pin exists to close. A diff that reaches only these three Darling trees runs just
+              # the Lite.Tests classes tagged Reads=Darling, in one shard (the lite-tests job's scope step).
               - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
             installer:
               - 'deprecated/Installer/**/!(*.md)'
@@ -215,6 +630,16 @@ jobs:
               # version property back to it must run the Darling guard that would catch it. Derived
               # rather than the one path, for the reason the two entries above are derived.
               - 'Lite/**/*.csproj'
+              # #4966: Darling.Tests' CommentFilterAdoptionTests reads this Lite.Tests file, so an edit to it has to reach the Darling suite.
+              - 'Lite.Tests/DataStartBannerQueriesTabTests.cs'
+            # #5459 cut 3a: the part of `darling` that is NOT a Lite file. A diff that reaches `darling` through
+            # these (or core, root, a release) runs the whole Darling suite; a diff that reaches it only through the
+            # Lite entries above runs the Stage=Guard classes and the classes tagged Reads=Lite, which are the ones
+            # that read a Lite file (LiteReadsTraitGuardTests derives the tag from the source, and pins that
+            # `darling` minus this filter is Lite paths only). The decision lives in .github/scripts/ci-select.py.
+            darling_full:
+              - 'Darling/**/!(*.md)'
+              - '.github/workflows/nightly.yml'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
@@ -395,20 +820,40 @@ jobs:
           dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release --no-restore
 
       # RELEASE-ONLY here since #3887; on pull requests and pushes the suite runs in the lite-tests
-      # matrix job below, four shards cut by CLASS-NAME HASH, because this one step had grown to
-      # ~9½ of the build job's ~15 minutes — 62% of the PR wall's critical path. The hash cut is the
+      # matrix job below, four shards cut over CLASS NAMES (balanced by recorded duration since #5208,
+      # the class-name hash otherwise), because this one step had grown to
+      # ~9½ of the build job's ~15 minutes — 62% of the PR wall's critical path. The name cut is the
       # deliberate opposite of the SEMANTIC split this step's history retired: it was split into
       # fast / analysis-heavy halves when the seven analysis classes rebuilt the full DuckDB schema
       # inside every test and their subset alone cost ~9 minutes; after the shared class fixtures
       # (#1693, #1698) and batched seeding (#1694) that subset ran in ~1 minute, so the split — and
       # the narrower lite_analysis path gate that let non-analysis Lite changes skip it — stopped
-      # earning its second test-host spin-up and its FILTER-DRIFT RISK. A hash over the class name
-      # cannot drift: every class lands in exactly one shard by arithmetic, a class added tomorrow
-      # included, and no list anywhere has to be maintained. Releases keep this single unsharded
+      # earning its second test-host spin-up and its FILTER-DRIFT RISK. A cut over class names
+      # cannot drift: every class lands in exactly one shard (by arithmetic for the hash, by a
+      # proof for the duration cut), a class added tomorrow included, and no list anywhere has
+      # to be maintained. Releases keep this single unsharded
       # pass so the artifact-producing run still executes the suite whole, in one log.
       - name: Run Lite tests
         if: github.event_name == 'release'
-        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build
+        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -xml TestResults/lite-timing-release.xml
+
+      # #5208: per-test timings of the unsharded release pass, same shape as the lite-tests shards.
+      - name: Lite test timing summary
+        if: always() && github.event_name == 'release'
+        continue-on-error: true
+        run: python .github/scripts/lite-timing-top.py TestResults
+
+      - name: Upload Lite test timings
+        if: always() && github.event_name == 'release'
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-tests-timing-release
+          path: |
+            TestResults/lite-timing-*.xml
+            TestResults/lite-timing-*.xml.cpu.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Run Installer tests
         if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -418,10 +863,68 @@ jobs:
         if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
+      # #5459 cut 3b: the PostgreSQL shards run EVERY Darling.Tests class, with a live store, whenever the Darling
+      # gate matches (the same .github/darling-paths-filter.yml the darling-pg job reads). This no-store pass would
+      # repeat their non-live classes, so while the shards run it keeps only the Stage=Guard classes. Where the gate
+      # does not match (a Lite-only change, a root build file) and on a release it still runs the whole suite.
+      # .github/scripts/ci-select.py holds the rule (darling_scope); the replay of the failure corpus checks it.
+      - name: Detect the Darling PostgreSQL gate
+        id: darling-gate
+        if: github.event_name != 'release' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true')
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: .github/darling-paths-filter.yml
+
+      - name: Decide the Darling test scope
+        id: darling-scope
+        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GATE: ${{ steps.darling-gate.outputs.darling }}
+          FULL: ${{ steps.filter.outputs.darling_full }}
+          CORE: ${{ steps.filter.outputs.core }}
+          ROOT: ${{ steps.filter.outputs.root }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/ci-select.py darling-scope --event "${EVENT_NAME}" --gate "${GATE:-false}"             --full "${FULL:-false}" --core "${CORE:-false}" --root "${ROOT:-false}" | tee -a "$GITHUB_OUTPUT"
+
       - name: Run Darling tests
         id: darling-tests
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
+        env:
+          DARLING_SCOPE_FILTER: ${{ steps.darling-scope.outputs.filter }}
+        shell: pwsh
+        run: |
+          # An empty filter is the whole suite; `-trait Stage=Guard` is the Guard stage alone.
+          $scopeArgs = @($env:DARLING_SCOPE_FILTER -split ' ' | Where-Object { $_ })
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @scopeArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease fails
+      # while any statement-column census entry or watched writer is pending, in every normal Darling
+      # test run (the step above), so a pull request that adds an unjudged column fails on its own.
+      # This step stays as the release-time backstop: it sets DARLING_RELEASE_CUT=1 and runs the one
+      # test by name, ahead of every publish and package step below, and only on the release event,
+      # so a release cannot ship an unhooked column even if the step above was skipped.
+      # ReleaseStatementGateWorkflowTests pins both halves, and that no other workflow sets the
+      # variable. Darling.Tests is already built (Release) by the build step above, so this runs
+      # the one test by name and nothing else.
+      - name: Statement filter release gate
+        if: github.event_name == 'release'
+        env:
+          DARLING_RELEASE_CUT: '1'
+        shell: pwsh
+        run: |
+          # A -method filter that matches nothing exits 0 with "Total: 0", so a renamed test would pass this gate
+          # without running. Fail unless the runner's own summary shows exactly the one test, with nothing failed,
+          # errored, skipped or not run. ReleaseStatementGateWorkflowTests binds the name to the test with nameof.
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -method "*StatementCensus_PendingEntries_BlockARelease*" 2>&1 | Tee-Object -FilePath statement-gate.log
+          if ($LASTEXITCODE -ne 0) { throw "The statement filter release gate failed (exit $LASTEXITCODE)." }
+          if (-not (Select-String -Path statement-gate.log -Pattern 'Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0' -SimpleMatch -Quiet)) {
+            throw "The statement filter release gate did not run exactly one passing test; the summary above is not 'Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0'."
+          }
 
       - name: Get version
         if: steps.fastpath.outputs.engaged != 'true'
@@ -816,6 +1319,11 @@ jobs:
   # the one live-SQL-Server E2E stays skipped (DARLING_TEST_SQL unset — no SQL Server on the runner).
   darling-pg:
     name: Darling PG tests
+    # Fail fast (#5459): on a pull request the shards start only after the Guard tests job succeeded; every
+    # other event runs them whatever the guards said. `!cancelled()` is what lets a job whose `needs` includes
+    # a failed one decide for itself, and the result job below turns the skip into the failure it should be.
+    needs: [gate, guard-tests]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: windows-latest
     # Max observed on a warm cache is ~3m40s; a cold pg-runtime cache adds a ~340MB fetch.
     # 30 minutes is 3x headroom over the cold path — past that, something is hung (pg_ctl -w
@@ -824,12 +1332,25 @@ jobs:
     # has NO timeout: on release it waits on SignPath's manual approval gate, which can
     # legitimately take hours.
     timeout-minutes: 30
-    # THREE shards cut by CLASS-NAME HASH (#3890), the machinery #3887 proved on the Lite suite.
-    # Measured on this job's own step timings: ~190s fixed (of which Build Darling.Tests is 132s)
-    # plus 266s of tests, so only the 266s shards and the fixed floor decides where the returns
-    # stop - 2 shards land ~5m23s, 3 ~4m39s, 4 ~4m17s. Three is the stop: it puts this job under
-    # the build job's 6m16s, which is what actually bounds the PR wall, and a fourth Windows runner
-    # from the shared pool buys twenty seconds of a number nothing reads.
+    # SIX shards cut by CLASS-NAME HASH (#3890 made it three, #5433 six), the machinery #3887 proved on
+    # the Lite suite. #3890 measured ~190s fixed plus 266s of tests; the suite has since grown to
+    # about 2,060 classes and 27,000 tests, and the three shards of eight merge-train and dev runs on
+    # 2026-10-06 took 13 to 21 minutes each. Per shard that was ~5m fixed (checkout and .NET setup ~1m,
+    # restore ~15s, Build Darling.Tests 2m20s to 3m30s, the PostgreSQL clusters ~30s) plus 10 to 17
+    # minutes in the one step that runs the tests (two runner invocations, because the class list is
+    # chunked under the command-line cap), ~39 minutes of tests in all. The cut was
+    # also uneven: shard 1 ran 14 to 17 minutes of tests every time against 10 to 13 for shards 0
+    # and 2, with about the same number of tests (time per test 0.10s against 0.065s), so a few slow
+    # classes decide a shard. A hash cut ignores that, and no per-class times are recorded for this
+    # job, so the model is the spread of the three observed shards (a relative standard deviation of
+    # ~9% of a shard's tests, which grows with the square root of N-1 for the same slow classes) and the
+    # expected longest shard of N: 3 shards ~19.5m (observed 19 to 21), 4 ~16m, 5 ~14m, 6 ~13m,
+    # 8 ~11m, 10 ~10m. Six is the stop: the longest shard drops under the build job (13 to 14 min) and
+    # the slowest Lite shard (15 to 16 min), which is what bounds the run, and 8 would buy about two
+    # more minutes of a number those two jobs already hide, for two more runners that each pay the ~5
+    # minutes of fixed cost. Check the first merge trains: if the longest shard is over ~14 minutes,
+    # the cut is unlucky and eight is the next step. The cut divides by the matrix size
+    # (strategy.job-total), so changing the shard list below cannot leave a class in no shard.
     #
     # The prebuilt-ladder image this was filed alongside is dead on measurement: the migration
     # ladder replays in ~1s (timed by running one live class twice against one store) and the whole
@@ -837,7 +1358,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3, 4, 5]
     permissions:
       contents: read
 
@@ -913,12 +1434,60 @@ jobs:
             echo "Changed files, none of them in the gate: ${ALL_FILES:-[]}"
           fi
 
+      # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
+      # it before running its tests (see the header on that job). Fetch it instead of restoring and building again.
+      # continue-on-error: no artifact (a release, a docs-only change, a Guard build that failed) is the normal
+      # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
+      - name: Fetch the Guard job's build of the test project
+        id: guard-build
+        if: steps.filter.outputs.darling == 'true' && needs.guard-tests.outputs.darling_build_artifact != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ needs.guard-tests.outputs.darling_build_artifact }}
+          path: .
+
+      # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
+      # find the repo root through [CallerFilePath], so a binary built in another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        id: guard-build-check
+        if: steps.filter.outputs.darling == 'true'
+        shell: pwsh
+        env:
+          FETCH_OUTCOME: ${{ steps.guard-build.outcome }}
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:FETCH_OUTCOME -ne 'success') {
+            Write-Host "::notice title=Building the test project here::No Guard job build was fetched for this run (fetch outcome '$env:FETCH_OUTCOME'; skipped means the Guard job published none), so this job restores and builds for itself and runs every class, Stage=Guard included."
+            'used=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Guard build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Guard build is incomplete::The fetched build has no $file."
+              exit 1
+            }
+          }
+          Write-Host "::notice title=Using the Guard job's build::The test project was built by the Guard job of this run at the same workspace and commit, so this job skips its restore and build and leaves out the Stage=Guard classes that job ran."
+          'used=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Setup .NET 10.0
         if: steps.filter.outputs.darling == 'true'
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
-          cache: true
+          cache: ${{ steps.guard-build-check.outputs.used != 'true' }}
           cache-dependency-path: '**/packages.lock.json'
 
       # Same cache key the release job and nightly.yml use (the fetch script's own content hash), so
@@ -969,11 +1538,11 @@ jobs:
         run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
 
       - name: Restore Darling.Tests
-        if: steps.filter.outputs.darling == 'true'
+        if: steps.filter.outputs.darling == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
 
       - name: Build Darling.Tests
-        if: steps.filter.outputs.darling == 'true'
+        if: steps.filter.outputs.darling == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
 
       # Throwaway cluster from the bundled runtime. initdb TRUST auth is acceptable ONLY here: an
@@ -1204,9 +1773,14 @@ jobs:
           DARLING_TEST_PG_LOGROTATE: "Host=127.0.0.1;Port=5546;Username=darling;Database=darling"
           DARLING_TEST_PG_LOGROTATE_CSV: "Host=127.0.0.1;Port=5547;Username=darling;Database=darling"
           DARLING_TEST_PG_LOGROTATE_JSON: "Host=127.0.0.1;Port=5548;Username=darling;Database=darling"
+          # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
+          GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json)
+          # The cut and the run must agree (#5459): the listing every shard cuts from leaves the Guard classes out exactly
+          # when the Guard job ran them, so each remaining class still lands in exactly one shard. No artifact: all classes.
+          $guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })
+          $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json @guardFilter)
           if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
           # Only the runner's one-line JSON array is parsed: the dotnet CLI can print its own notice on stdout,
           # and a line starting "W" after the array failed a shard's ConvertFrom-Json on 2026-09-23.
@@ -1217,14 +1791,72 @@ jobs:
 
           $sha = [System.Security.Cryptography.SHA256]::Create()
           $mine = @($classes | Where-Object {
-              ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))[0] % 3) -eq ${{ matrix.shard }}
+              ([System.BitConverter]::ToUInt32($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_)), 0) % ${{ strategy.job-total }}) -eq ${{ matrix.shard }}
           })
           Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 
-          $shardArgs = foreach ($class in $mine) { '-class'; $class }
-          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @shardArgs -trx TestResults/darling-pr-${{ matrix.shard }}.trx
-          exit $LASTEXITCODE
+          # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
+          # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660
+          # (#5100). The budget counts only the -class arguments; the other ~170 characters (the dotnet
+          # path, 'run --project ... --no-build --', and the -trx argument) must fit in what is left, and
+          # 'dotnet run' hands the same arguments on to the test host. Every chunk runs even after one
+          # fails, so a failure in an early chunk never hides the rest of the shard's results.
+          $argBudget = 30000
+          $chunks = [System.Collections.Generic.List[string[]]]::new()
+          $current = [System.Collections.Generic.List[string]]::new()
+          $currentLength = 0
+          foreach ($class in $mine) {
+              $cost = '-class'.Length + 1 + $class.Length + 1
+              if ($current.Count -gt 0 -and ($currentLength + $cost) -gt $argBudget) {
+                  $chunks.Add($current.ToArray())
+                  $current = [System.Collections.Generic.List[string]]::new()
+                  $currentLength = 0
+              }
+              $current.Add($class)
+              $currentLength += $cost
+          }
+          if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
+
+          # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failedChunks = 0
+          $chunkNumber = 0
+          foreach ($chunk in $chunks) {
+              $chunkNumber++
+              $chunkArgs = foreach ($class in $chunk) { '-class'; $class }
+              $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
+              Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
+              # -xml: per-test durations for the darling-tests-timing artifact (#5459 change 4: the test map's
+              # selection estimates need a per-class Darling time, and none was recorded before).
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @chunkArgs -trx TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx -xml TestResults/darling-timing-${{ matrix.shard }}-$chunkNumber.xml
+              if ($LASTEXITCODE -ne 0) {
+                  $failedChunks++
+                  Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
+              }
+          }
+          if ($failedChunks -gt 0) { Write-Host "shard ${{ matrix.shard }}: $failedChunks of $($chunks.Count) chunks failed"; exit 1 }
+          exit 0
+
+      # PR #5480: a TimescaleDB job worker died with 0xC0000005 in two CI runs and both runs read "success",
+      # because the postmaster restarts and the tests retry. The crash shows only in the PostgreSQL log, as
+      # "terminated by exception", so this step turns it into a warning on the run. It only warns: it never
+      # fails the job, and it runs when the tests failed too.
+      - name: Warn if a PostgreSQL worker crashed
+        if: always() && steps.filter.outputs.darling == 'true'
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\darling-pg.log"
+          if (Test-Path $log) {
+            $hits = @(Select-String -Path $log -Pattern 'terminated by exception' -SimpleMatch)
+            foreach ($hit in ($hits | Select-Object -First 5)) {
+              $line = $hit.Line
+              if ($line.Length -gt 300) { $line = $line.Substring(0, 300) }
+              Write-Host "::warning title=PostgreSQL worker terminated by exception (shard ${{ matrix.shard }})::$line"
+            }
+            if ($hits.Count -gt 0) { Write-Host "$($hits.Count) 'terminated by exception' line(s) in darling-pg.log" }
+          }
+          exit 0
 
       # #4160: stop all four clusters (the 5541 store plus the three 5542/5543/5544 log-format
       # clusters started above). Each stop is independent and best-effort: a cluster that never
@@ -1250,6 +1882,18 @@ jobs:
             }
           }
           exit 0
+
+      # #5459 change 4: per-test durations of this shard, kept a week like the Lite shards' lite-tests-timing-N.
+      # Informational: a failed upload never turns the shard red.
+      - name: Upload Darling test timings
+        if: success() && steps.filter.outputs.darling == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-tests-timing-${{ matrix.shard }}
+          path: TestResults/darling-timing-*.xml
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Upload PG log and test results on failure
         if: failure() && steps.filter.outputs.darling == 'true'
@@ -1282,7 +1926,7 @@ jobs:
   # something other than success, and this fails loudly and says which.
   darling-pg-result:
     name: Darling PostgreSQL tests
-    needs: darling-pg
+    needs: [gate, guard-tests, darling-pg]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1292,13 +1936,43 @@ jobs:
         shell: bash
         env:
           RESULT: ${{ needs.darling-pg.result }}
+          GUARD_RESULT: ${{ needs.guard-tests.result }}
+          GATE_RESULT: ${{ needs.gate.result }}
+          GATE_RUN: ${{ needs.gate.outputs.run }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # A gate that did not succeed leaves every job it feeds skipped, which would read as green here.
+          if [ "${GATE_RESULT}" != "success" ]; then
+            echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
+            exit 1
+          fi
+          # A declined run (draft or merge-train) leaves every job skipped, which would also read as green.
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${GATE_RUN}" != "true" ]; then
+            echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it."
+            exit 1
+          fi
+          # The Guard tests job runs first on a pull request (#5459). When it did not succeed the shards were
+          # skipped on purpose, and a skipped matrix reads as green, so this is where that becomes a failure. On
+          # a push, a merge-queue run or a release the shards ran whatever the guards said, but a guard that did
+          # not pass is still a failure. `skipped` is fine on a release only: the guard job does not run there.
+          if [ "${GUARD_RESULT}" != "success" ] && ! { [ "${EVENT_NAME}" = "release" ] && [ "${GUARD_RESULT}" = "skipped" ]; }; then
+            if [ "${EVENT_NAME}" = "pull_request" ]; then
+              echo "::error title=Guard tests failed::needs.guard-tests.result='${GUARD_RESULT}' - the Guard tests job did not succeed, so the shards did not run. Read that job's log for the failing class."
+            else
+              echo "::error title=Guard tests failed::needs.guard-tests.result='${GUARD_RESULT}' - the Guard tests job did not succeed. The shards ran anyway on this event; read that job's log for the failing class."
+            fi
+            exit 1
+          fi
           case "${RESULT}" in
             success)
               echo "::notice title=Darling PG shards green::Every shard succeeded, or the Darling gate skipped the suite on all of them." ;;
             skipped)
-              echo "::notice title=Darling PG shards skipped::The matrix job did not run at all." ;;
+              # Not a by-design skip any more (#5459). The matrix job is skipped on purpose in two cases only: the
+              # gate declined the run, and the guard job failed on a pull request. Both are errors above, so a
+              # skip that reaches this line is unplanned, and a skipped matrix must not read as a pass.
+              echo "::error title=Darling PG shards skipped::needs.darling-pg.result='skipped' although the gate ran this event and the guards passed, so no shard reported. The suite has NOT passed on this commit."
+              exit 1 ;;
             *)
               echo "::error title=Darling PG shards failed::needs.darling-pg.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit; read the failing shard's log."
               exit 1 ;;
@@ -1322,6 +1996,9 @@ jobs:
   # (SignPath signs Windows PEs); the checksums file is the integrity story, same as the nightly.
   darling-linux:
     name: Darling Linux build
+    # Fail fast on a pull request (#5459), exactly as the Darling PG shards: see the comment on that job.
+    needs: [gate, guard-tests]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -1400,6 +2077,22 @@ jobs:
       - name: Build container image
         if: github.event_name != 'release' && steps.filter.outputs.darling == 'true'
         run: docker build -f Darling/Dockerfile -t performancemonitor-darling:pr .
+
+      # #5366: the test project runs on Windows, so the Unix file checks behind the password key (owner, link count, file
+      # identity) and the Linux crypto path run here instead, inside the image the service ships in. The hidden verb runs
+      # the real code in a fresh temporary directory and opens a committed, labelled test vector made on Windows. Any
+      # failure exits non-zero and fails the job. The vector is mounted read-only.
+      - name: Check the password key on Linux (self-check verb in the built image)
+        if: github.event_name != 'release' && steps.filter.outputs.darling == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          vector="${GITHUB_WORKSPACE}/Darling/Darling.Tests/Fixtures/PasswordSeal/linux-self-check-vector.json"
+          test -f "${vector}"
+          docker run --rm \
+            -v "${vector}:/vector/linux-self-check-vector.json:ro" \
+            performancemonitor-darling:pr \
+            --self-check-password-key /vector/linux-self-check-vector.json
 
       # ── Release-only publishing (mirrors nightly.yml's linux job, versioned instead of :nightly) ──
 
@@ -1498,11 +2191,15 @@ jobs:
   # No PostgreSQL here, deliberately. The whole-tree guards need none, and standing up a throwaway
   # TimescaleDB cluster would make a documentation change depend on the flakiest part of CI
   # (#1862's compression flake failed twice in two unrecognizably different ways). Runs on every
-  # non-cancelled event and always reports a result, so it can be a required check.
+  # non-cancelled event, with one exception (#5459): on a pull request whose Guard tests job did not
+  # succeed it skips, because `build` is already red there. So it is NOT a required check, and must not
+  # be made one without reading that skip, which GitHub counts as passing.
   darling-tree-guards:
     name: Darling whole-tree guards
-    needs: build
-    if: ${{ !cancelled() }}
+    # guard-tests too (#5459): when the Guard tests job failed on a pull request, `build` failed at once, and
+    # a Windows runner started here would only report "not decided". It skips with the shards instead.
+    needs: [gate, build, guard-tests]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: windows-latest
     # Measured on a warm NuGet cache: ~40s of .NET setup, ~10s restore, ~95s to build
     # Darling.Tests, ~35s for the suite. 20 minutes is ~6x that, past which something is hung and a
@@ -1525,6 +2222,14 @@ jobs:
           filters: |
             workflow:
               - '.github/workflows/build.yml'
+            # #5459 cut 3c: a change made ONLY of Lite files (lite_tree_count == all_count) needs just the Darling
+            # classes that read Lite, not the whole suite. Counts rather than booleans, as the build job's docs
+            # fast path does it: "every changed file is a Lite file" is a count comparison, never a path predicate.
+            lite_tree:
+              - 'Lite/**'
+              - 'Lite.Tests/**'
+            all:
+              - '**'
 
       # Names the arm that decided, out loud, either way. A job reporting success having quietly run
       # nothing is indistinguishable from one that ran everything, and that indistinguishability is
@@ -1569,20 +2274,89 @@ jobs:
             echo "::notice title=Whole-tree guards skipped::The build job's 'Run Darling tests' step reported '${DARLING_TESTS}', so the suite has already run on this commit."
           fi
 
+      # #5459 cut 3c: when the whole suite would run here for a change made only of Lite files, run the Guard stage and
+      # the classes tagged Reads=Lite instead (the rule is ci-select.py's tree_scope; the replay checks it). build.yml
+      # itself changing keeps the whole suite: that arm exists to exercise this job's own gate.
+      - name: Decide the whole-tree guards scope
+        id: scope
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW: ${{ steps.filter.outputs.workflow }}
+          ALL_COUNT: ${{ steps.filter.outputs.all_count }}
+          LITE_COUNT: ${{ steps.filter.outputs.lite_tree_count }}
+        run: |
+          set -euo pipefail
+          if [ "${WORKFLOW:-}" = "true" ]; then
+            echo "scope=full" >> "$GITHUB_OUTPUT"
+            echo "filter=" >> "$GITHUB_OUTPUT"
+          else
+            python .github/scripts/ci-select.py tree-scope --event "${EVENT_NAME}" --all-count "${ALL_COUNT:-0}" --lite-count "${LITE_COUNT:-0}" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
+      # it before running its tests (see the header on that job). Fetch it instead of restoring and building again.
+      # continue-on-error: no artifact (a release, a docs-only change, a Guard build that failed) is the normal
+      # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
+      - name: Fetch the Guard job's build of the test project
+        id: guard-build
+        if: steps.gate.outputs.run == 'true' && needs.guard-tests.outputs.darling_build_artifact != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ needs.guard-tests.outputs.darling_build_artifact }}
+          path: .
+
+      # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
+      # find the repo root through [CallerFilePath], so a binary built in another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        id: guard-build-check
+        if: steps.gate.outputs.run == 'true'
+        shell: pwsh
+        env:
+          FETCH_OUTCOME: ${{ steps.guard-build.outcome }}
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:FETCH_OUTCOME -ne 'success') {
+            Write-Host "::notice title=Building the test project here::No Guard job build was fetched for this run (fetch outcome '$env:FETCH_OUTCOME'; skipped means the Guard job published none), so this job restores and builds for itself and runs every class, Stage=Guard included."
+            'used=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Guard build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Guard build is incomplete::The fetched build has no $file."
+              exit 1
+            }
+          }
+          Write-Host "::notice title=Using the Guard job's build::The test project was built by the Guard job of this run at the same workspace and commit, so this job skips its restore and build and leaves out the Stage=Guard classes that job ran."
+          'used=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Setup .NET 10.0
         if: steps.gate.outputs.run == 'true'
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
-          cache: true
+          cache: ${{ steps.guard-build-check.outputs.used != 'true' }}
           cache-dependency-path: '**/packages.lock.json'
 
       - name: Restore Darling.Tests
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
 
       - name: Build Darling.Tests
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
 
       # The FULL suite, not a class filter naming the whole-tree guards. Such a filter would be one
@@ -1591,21 +2365,53 @@ jobs:
       # unset, so the gated-live classes skip here just as they do in the build job.
       - name: Run the whole-tree guards
         if: steps.gate.outputs.run == 'true'
-        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
+        env:
+          # 'true' only when this job used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
+          GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
+          # Empty for the whole suite; `-trait Stage=Guard -trait Reads=Lite` for a Lite-only change (cut 3c).
+          SCOPE_FILTER: ${{ steps.scope.outputs.filter }}
+        run: |
+          $scopeArgs = @($env:SCOPE_FILTER -split ' ' | Where-Object { $_ })
+          # The Guard job already ran the Guard classes when its build was used: leave them out, whatever else runs.
+          $guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })
+          if ($scopeArgs.Count -gt 0 -and $env:GUARD_BUILD_USED -eq 'true') { $scopeArgs = @('-trait', 'Reads=Lite') }
+          $guardFilter = @($scopeArgs) + @($guardFilter)
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter
 
-  # The Lite suite on pull requests and pushes: four shards cut by CLASS-NAME HASH (#3887). The
-  # build job's single "Run Lite tests" step had grown to ~9½ minutes of a ~15-minute job — 62% of
-  # the PR wall's critical path over the eight runs measured — and it is release-only there now.
+  # The Lite suite on pull requests and pushes: four shards cut over CLASS NAMES (#3887), balanced
+  # by recorded duration since #5208. The build job's single "Run Lite tests" step had grown to
+  # ~9½ minutes of a ~15-minute job — 62% of the PR wall's critical path over the eight runs
+  # measured — and it is release-only there now.
   #
-  # The cut is a SHA-256 over the class name, modulo four: arithmetic, not a list and not a
-  # semantic filter. This job's own history is the argument (see the retired lite_analysis split
-  # this file documents above the release-only step): any filter somebody has to MAINTAIN drifts,
-  # and a class added tomorrow is exactly the class such a filter misses. A hash cannot drift —
-  # every class lands in exactly one shard, additions included, and the partition is total by
-  # construction. SHA-256 rather than string.GetHashCode() because the latter is randomized per
-  # process ON PURPOSE and would send the same class to a different shard on every run.
+  # Two cuts, both over the class NAME: never a list somebody maintains, never a semantic filter.
+  # This job's own history is the argument (see the retired lite_analysis split this file
+  # documents above the release-only step): any filter somebody has to MAINTAIN drifts, and a
+  # class added tomorrow is exactly the class such a filter misses.
+  #   - The DURATION cut (#5208). The hash balances class COUNT, not time: on one measured run the
+  #     four shards held 12.8, 48.1, 36.6 and 25.3 minutes of test time, and the slowest decides the
+  #     PR wall (at the 30-minute cap below it turns the run red without naming a failing test).
+  #     .github/scripts/lite-shard-pack.py packs classes longest-first into the least-loaded shard,
+  #     weighing each class by the per-test timings the shards already upload (lite-tests-timing-N)
+  #     from the run the gate pinned (its timing-source step). A class with no timing history gets
+  #     the mean weight, so it is placed, never dropped. A class in a DisableParallelization collection
+  #     (run one at a time) weighs its seconds in full, any other class a third of that (about 3.4
+  #     classes overlap), so the serial classes spread across the shards instead of piling on one.
+  #   - The HASH cut, the original: a SHA-256 over the class name, modulo the shard count (SHA-256
+  #     rather than string.GetHashCode(), which is randomized per process ON PURPOSE). It is the
+  #     fallback: no timing source, or timings the packer cannot use (missing, corrupt, empty, all
+  #     zero, or covering under 80% of this commit's classes), cut this way. The shard count comes
+  #     from the matrix (strategy.job-total), so the cut and the matrix cannot disagree: that holds
+  #     while `shard` is the matrix's only axis, and a leg whose job-index is not its shard value
+  #     fails (see the run step).
+  # Totality used to hold by arithmetic; the duration cut earns it by proof. The packer's reconcile
+  # check fails the leg unless the shard files hold every discovered class exactly once. And a leg
+  # whose pinned timings cannot be downloaded, or whose download is not exactly the artifact set the
+  # gate pinned (one expired or was deleted since), FAILS instead of falling back or cutting on its
+  # own: all four legs must cut from the same inputs, or the four cuts would disagree and a class
+  # could run twice or not at all, which no check inside one leg can see. A re-run of a failed leg
+  # reuses the pin.
   #
-  # FOUR and not three, decided on measurement rather than taste: the hash balances CLASSES, and
+  # FOUR and not three, decided on measurement (of the hash cut) rather than taste: the hash balances CLASSES, and
   # Lite's classes carry uneven test counts, so a 3-way cut left one shard holding 42% of the tests
   # (~6½ minutes with setup) while another held 25%. At four the worst shard holds 27% (~5 minutes);
   # five would buy 0.4 minutes more for another Windows runner out of the shared pool this file's
@@ -1618,7 +2424,9 @@ jobs:
   # CrossAppGuardCiGateTests pins the copies equal, so they cannot drift apart silently.
   lite-tests:
     name: Lite tests
-    if: github.event_name != 'release'
+    # Fail fast on a pull request (#5459), exactly as the Darling PG shards: see the comment on that job.
+    needs: [gate, guard-tests]
+    if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -1626,9 +2434,29 @@ jobs:
         shard: [0, 1, 2, 3]
     # A shard is at most ~27% of a ~9½-minute suite plus ~2½ minutes of setup; 20 minutes is ~4x that,
     # past which something is hung and a shared-pool Windows runner is being held for nothing.
-    timeout-minutes: 20
+    #
+    # Raised from 20 to 30. The suite now runs roughly five times slower on hosted runners than the
+    # ~9.5 minutes above assumed, and it is still getting slower: the four shard durations summed to
+    # 18-22 min on Sep 30, 20-27 on Oct 1, 26-34 on Oct 2, 29-42 on Oct 3, 33-45 on Oct 4 and 41-55
+    # on Oct 5, about +7 min/day, while the suite gained only ~110 tests in the last day. So the cost
+    # is growing per test with the SIZE OF THE REPO, not with the number of tests - the suspects are
+    # the ~54 Lite.Tests classes that walk a directory or glob many files, whose work grows every
+    # time anyone adds a file. On a developer VM the whole suite still runs in ~10 minutes in one
+    # process, so this is specific to hosted runners' disk.
+    #
+    # A shard that crosses the cap is a RED THAT IS A TIMEOUT, not a test failure, and is easy to
+    # misread as a bug in whatever pull request happened to be in the train. This is a guard against
+    # those spurious reds, NOT a fix: the slowdown is tracked in #5208, and this value should come
+    # back down when it is fixed. At +7 min/day the slowest shard crosses 30 within about a week.
+    #
+    # The duration cut (#5208) attacks the imbalance, not the growth: on the run measured the slowest
+    # shard held 1.6x the mean test time, and equal shards put every shard near the mean. So the cap
+    # stays at 30 as the guard, and comes down when the slowest shard's measured time says it can.
+    timeout-minutes: 30
     permissions:
       contents: read
+      # Reads the pinned run's lite-tests-timing artifacts (gh run download in the shard step), nothing else.
+      actions: read
     steps:
       - uses: actions/checkout@v7
 
@@ -1639,7 +2467,8 @@ jobs:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
           filters: |
             # COPIES of the build job's root/core/lite predicates, generated from them and pinned
-            # byte-equal by CrossAppGuardCiGateTests.TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs.
+            # byte-equal by CrossAppGuardCiGateTests.TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs
+            # (the build job's `lite` set is carried here as lite_shard plus darling_reads_shard).
             # The REASONING for every entry lives at the build job's own filter block and is not
             # duplicated here — duplicated prose is prose that rots out of step. What matters is that
             # the sets stay identical: the shards must run the Lite suite in exactly the cases the
@@ -1666,55 +2495,307 @@ jobs:
             lite_shard:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
+            # The rest of the build job's `lite` set: the three Darling trees Lite.Tests reads as source.
+            # A diff that reaches ONLY these (no lite_shard, core_shard or root_shard entry) runs just the
+            # Lite.Tests classes tagged [Trait("Reads", "Darling")], in one shard; see the scope step below.
+            # lite_shard followed by darling_reads_shard is the build job's `lite` set, entry for entry.
+            darling_reads_shard:
               - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
               - 'Darling/Darling.Tests/**/!(*.md)'
               - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
+            # Darling.Tests files that Lite.Tests.csproj COMPILES into its own assembly. An edit to one
+            # changes code that dozens of Lite.Tests classes run, not just text they read, so it takes the
+            # whole suite. Not part of the build job's `lite` set (those entries are covered there by the
+            # Darling.Tests tree); DarlingReadsTraitGuardTests pins this list to the project's linked compiles.
+            lite_linked_shard:
+              - 'Darling/Darling.Tests/CSharpSourceWalker.cs'
+              - 'Darling/Darling.Tests/McpInProcessHost.cs'
+              - 'Darling/Darling.Tests/McpArgumentTypeRows.cs'
+              - 'Darling/Darling.Tests/StatementScrubCanary.cs'
+              - 'Darling/Darling.Tests/GuardStageScanner.cs'
+      # How much of the Lite suite THIS leg runs, decided from the filter answers alone (no build needed):
+      #   full  - a Lite, Lite.Tests, core or root path changed, or a Darling.Tests file that Lite.Tests
+      #           compiles into itself, or the event is not a pull request (a push
+      #           to dev or main, a merge-queue run): the whole suite, cut across the four legs by
+      #           duration (or by class-name hash when no timing source is pinned), see the job header.
+      #   reads - a pull request whose diff reaches ONLY the Darling trees Lite.Tests reads as source: just
+      #           the classes tagged [Trait("Reads", "Darling")], all of them in shard 0. Legs 1-3 do nothing.
+      #   none  - nothing the Lite suite depends on changed.
+      # `run` is this leg's own answer: every step below keys on it.
+      - name: Decide how much of the Lite suite runs
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SHARD: ${{ matrix.shard }}
+          LITE: ${{ steps.filter.outputs.lite_shard }}
+          CORE: ${{ steps.filter.outputs.core_shard }}
+          ROOT: ${{ steps.filter.outputs.root_shard }}
+          DARLING_READS: ${{ steps.filter.outputs.darling_reads_shard }}
+          LINKED: ${{ steps.filter.outputs.lite_linked_shard }}
+        run: |
+          set -euo pipefail
+
+          # The ladder (full / reads / none) and the which-shard rule live in .github/scripts/ci-select.py, the one
+          # place the selection rules are kept (#5459). It prints `mode=...` and `run=...`; the replay of the
+          # failure corpus checks the same function.
+          decision=$(python .github/scripts/ci-select.py lite-scope --event "${EVENT_NAME}" --shard "${SHARD}" \
+            --lite "${LITE}" --core "${CORE}" --root "${ROOT}" --reads "${DARLING_READS}" --linked "${LINKED}")
+          echo "${decision}" >> "$GITHUB_OUTPUT"
+          mode=$(echo "${decision}" | sed -n 's/^mode=//p')
+          run=$(echo "${decision}" | sed -n 's/^run=//p')
+          echo "::notice title=Lite scope::mode=${mode}, shard ${SHARD} runs=${run}"
+
+      # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
+      # it before running its tests (see the header on that job). Fetch it instead of restoring and building again.
+      # continue-on-error: no artifact (a release, a docs-only change, a Guard build that failed) is the normal
+      # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
+      - name: Fetch the Guard job's build of the test project
+        id: guard-build
+        if: steps.scope.outputs.run == 'true' && needs.guard-tests.outputs.lite_build_artifact != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ needs.guard-tests.outputs.lite_build_artifact }}
+          path: .
+
+      # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
+      # find the repo root through [CallerFilePath], so a binary built in another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        id: guard-build-check
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        env:
+          FETCH_OUTCOME: ${{ steps.guard-build.outcome }}
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+          REQUIRED_FILES: Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Lite.Tests/obj/project.assets.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:FETCH_OUTCOME -ne 'success') {
+            Write-Host "::notice title=Building the test project here::No Guard job build was fetched for this run (fetch outcome '$env:FETCH_OUTCOME'; skipped means the Guard job published none), so this job restores and builds for itself and runs every class, Stage=Guard included."
+            'used=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Guard build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Guard build is incomplete::The fetched build has no $file."
+              exit 1
+            }
+          }
+          Write-Host "::notice title=Using the Guard job's build::The test project was built by the Guard job of this run at the same workspace and commit, so this job skips its restore and build and leaves out the Stage=Guard classes that job ran."
+          'used=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Setup .NET 10.0
-        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        if: steps.scope.outputs.run == 'true'
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
-          cache: true
+          cache: ${{ steps.guard-build-check.outputs.used != 'true' }}
           cache-dependency-path: '**/packages.lock.json'
 
       - name: Restore Lite.Tests
-        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        if: steps.scope.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
 
       - name: Build Lite.Tests
-        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        if: steps.scope.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # #5208: the packer's own proof (totality, input-order determinism, the hash fallback, serial-aware weighting). No build needed.
+      - name: Shard packer self-test
+        if: matrix.shard == 0
+        run: python .github/scripts/lite-shard-pack.py --self-test
+
+      # #5208: the timing summary's own proof (per-class CPU column, the coverage line). No build needed.
+      - name: Lite timing summary self-test
+        if: matrix.shard == 0
+        run: python .github/scripts/lite-timing-top.py --self-test
 
       # The class list comes off the built assembly itself (-list classes/json), so the population is
       # whatever exists on THIS commit — no roster. An empty selection is a hard error, not a skip:
       # with zero -class arguments the runner executes the WHOLE suite, so "my shard is empty" and
       # "run everything" are one argument-list apart — the loudest possible difference to get wrong
-      # quietly. (394 classes across four shards make an empty one arithmetically implausible; the
-      # measured split is 27/26/25/22% of tests, so the arm is a guard, not an expectation.)
+      # quietly. (Hundreds of classes across four shards make an empty one implausible under either cut,
+      # so the arm is a guard, not an expectation.)
       - name: Run Lite tests (shard)
-        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        if: steps.scope.outputs.run == 'true'
         shell: pwsh
+        env:
+          # The timing source the gate pinned for the WHOLE run (empty: none, so the hash cut). Read from
+          # the gate's output, never looked up here: see the job header and the gate's timing-source step.
+          LITE_TIMING_RUN: ${{ needs.gate.outputs.lite_timing_run }}
+          LITE_TIMING_ARTIFACTS: ${{ needs.gate.outputs.lite_timing_artifacts }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}
+          # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
+          GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $lines = @(dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json)
-          if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
-          # Only the runner's one-line JSON array is parsed; see the Darling shard step (a CLI notice on stdout).
-          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
-          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
-          $classes = @($json[0] | ConvertFrom-Json)
+          # The cut and the run must agree (#5459): every listing below (the full one the shards cut from and the
+          # Darling-reads one) leaves the Guard classes out exactly when the Guard job ran them. No artifact: all classes.
+          $guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })
+          function Get-LiteClasses([string[]] $filter) {
+              $lines = @(dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json @guardFilter @filter)
+              if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+              # Only the runner's one-line JSON array is parsed; see the Darling shard step (a CLI notice on stdout).
+              $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+              if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+              return @($json[0] | ConvertFrom-Json)
+          }
+
+          $classes = @(Get-LiteClasses @())
           if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
-          $sha = [System.Security.Cryptography.SHA256]::Create()
-          $mine = @($classes | Where-Object {
-              $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))
-              ($hash[0] % 4) -eq ${{ matrix.shard }}
-          })
-          Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
+          if ($env:LITE_SCOPE_MODE -eq 'reads') {
+              # A diff that reaches only the Darling trees Lite.Tests reads: run the classes that carry the
+              # trait, all of them, in this one leg. The trait set is read off the built assembly, so it is
+              # whatever exists on THIS commit; DarlingReadsTraitGuardTests fails a class that reads a
+              # Darling path without the trait. An empty set is not "nothing to run": it would mean the trait
+              # went missing, so this leg runs the WHOLE suite rather than none of it.
+              $mine = @(Get-LiteClasses @('-trait', 'Reads=Darling'))
+              if ($mine.Count -eq 0) {
+                  Write-Host '::warning title=Lite Darling-reads selection is empty::No Lite.Tests class carries [Trait("Reads", "Darling")], so this leg runs the whole Lite suite instead.'
+                  $mine = $classes
+              }
+              Write-Host "Darling-reads run: $($mine.Count) of $($classes.Count) classes"
+          }
+          else {
+              # #5208: all four legs must cut the suite from the SAME inputs (see the job header). The gate
+              # pinned one timing source for the whole run. With none pinned the cut is the class-name hash
+              # (SHA-256, first byte, modulo the shard count), exactly as before the packer. With one, this
+              # leg downloads that run's timings and packs by duration. A pinned source this leg cannot
+              # fetch FAILS the leg: falling back to the hash here alone, while the other legs cut by
+              # duration, would leave the four cuts not partitioning the suite.
+              $shards = ${{ strategy.job-total }}
+              # job-total is the shard count only while `shard` is the matrix's one axis. A second axis would cut into
+              # buckets no leg reads; on a one-axis matrix job-index equals the shard value.
+              if (${{ strategy.job-index }} -ne ${{ matrix.shard }}) { throw "the lite-tests matrix is no longer the single shard axis (job-index ${{ strategy.job-index }}, shard ${{ matrix.shard }}), so strategy.job-total is not the shard count" }
+              if ($env:LITE_TIMING_RUN -match '^\d+$') {
+                  $planDir = Join-Path $env:RUNNER_TEMP 'lite-shard-plan'
+                  $timingDir = Join-Path $planDir 'timings'
+                  New-Item -ItemType Directory -Force -Path $timingDir | Out-Null
+                  $classesFile = Join-Path $planDir 'classes.txt'
+                  Set-Content -Path $classesFile -Value $classes -Encoding utf8NoBOM
+
+                  $PSNativeCommandUseErrorActionPreference = $false
+                  $downloaded = $false
+                  foreach ($attempt in 1..3) {
+                      # Start every try from an empty folder: gh will not overwrite a file that a partial try left.
+                      Remove-Item -Recurse -Force -Path $timingDir -ErrorAction SilentlyContinue
+                      New-Item -ItemType Directory -Force -Path $timingDir | Out-Null
+                      gh run download $env:LITE_TIMING_RUN --pattern 'lite-tests-timing-*' --dir $timingDir
+                      if ($LASTEXITCODE -eq 0) { $downloaded = $true; break }
+                      Write-Host "timing download attempt $attempt of 3 failed with exit code $LASTEXITCODE"
+                      if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+                  }
+                  if (-not $downloaded) { throw "could not download the Lite timings of run $env:LITE_TIMING_RUN that the gate pinned - failing this shard rather than cutting alone, because the other shards may have cut by duration" }
+                  # The gate pinned the exact artifact set. A leg that got fewer (one expired or was deleted since,
+                  # which gh skips without failing) would cut from different inputs than the other legs.
+                  $expected = @(($env:LITE_TIMING_ARTIFACTS -split ',') | Where-Object { $_ } | Sort-Object)
+                  $got = @(Get-ChildItem -Path $timingDir -Directory | ForEach-Object { $_.Name } | Sort-Object)
+                  if ($expected.Count -eq 0 -or ($expected -join ',') -ne ($got -join ',')) { throw "downloaded timing artifacts [$($got -join ', ')] are not the [$($expected -join ', ')] the gate pinned from run $env:LITE_TIMING_RUN - failing this shard rather than cutting from different inputs than the other shards" }
+
+                  $packOutput = @(python .github/scripts/lite-shard-pack.py pack --classes $classesFile --shards $shards --out $planDir --timings $timingDir)
+                  $packExit = $LASTEXITCODE
+                  $packOutput | ForEach-Object { Write-Host $_ }
+                  if ($packExit -ne 0) { throw 'the shard packer failed or could not prove its cut total - failing this shard rather than guessing' }
+                  # The packer itself falls back to the hash cut when the timings are unusable (missing, corrupt,
+                  # empty, all zero, or under 80% of this commit's classes); it says which it used, and so does
+                  # the notice below.
+                  $method = if (($packOutput -join ' ') -match 'shards by (\w+);') { $Matches[1] } else { 'an unreported method' }
+                  # The guard again, on the very files this shard reads.
+                  python .github/scripts/lite-shard-pack.py reconcile --classes $classesFile --shards $shards --out $planDir
+                  if ($LASTEXITCODE -ne 0) { throw 'the shard files are not exactly the discovered classes - failing this shard' }
+
+                  $mine = @(Get-Content -Path (Join-Path $planDir "shard-${{ matrix.shard }}.txt") | Where-Object { $_.Trim() })
+                  # A fingerprint of the whole plan, identical on every leg when they cut from the same inputs. Each
+                  # shard file is labelled, so the same classes split differently across shards give a different id
+                  # (joined bare, [A, B] + [C] and [A] + [B, C] hashed the same). Nothing compares the legs' ids: it
+                  # is a diagnostic to read side by side, and the pinned artifact set above is what keeps them equal.
+                  $planText = (0..($shards - 1) | ForEach-Object { "shard-$_`n" + (Get-Content -Raw -Path (Join-Path $planDir "shard-$_.txt")) }) -join ''
+                  $planId = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($planText))).Substring(0, 12).ToLower()
+                  Write-Host "::notice title=Lite shard plan::cut by $method (timings of run $env:LITE_TIMING_RUN); plan $planId. Every shard of this run must print this same id."
+              }
+              else {
+                  $sha = [System.Security.Cryptography.SHA256]::Create()
+                  $mine = @($classes | Where-Object {
+                      $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))
+                      ($hash[0] % $shards) -eq ${{ matrix.shard }}
+                  })
+                  Write-Host "::notice title=Lite shard plan::no timing source pinned, so this run cuts by class-name hash"
+              }
+              Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
+          }
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 
-          $shardArgs = foreach ($class in $mine) { '-class'; $class }
-          dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @shardArgs
-          exit $LASTEXITCODE
+          # One runner invocation per chunk, never one for the whole shard: Windows CreateProcess caps the
+          # complete command line at 32,767 characters, and a Darling PG shard's -class list alone reached ~32,660
+          # (#5100). The budget counts only the -class arguments; the other ~170 characters (the dotnet
+          # path and 'run --project ... --no-build --') must fit in what is left, and
+          # 'dotnet run' hands the same arguments on to the test host. Every chunk runs even after one
+          # fails, so a failure in an early chunk never hides the rest of the shard's results.
+          $argBudget = 30000
+          $chunks = [System.Collections.Generic.List[string[]]]::new()
+          $current = [System.Collections.Generic.List[string]]::new()
+          $currentLength = 0
+          foreach ($class in $mine) {
+              $cost = '-class'.Length + 1 + $class.Length + 1
+              if ($current.Count -gt 0 -and ($currentLength + $cost) -gt $argBudget) {
+                  $chunks.Add($current.ToArray())
+                  $current = [System.Collections.Generic.List[string]]::new()
+                  $currentLength = 0
+              }
+              $current.Add($class)
+              $currentLength += $cost
+          }
+          if ($current.Count -gt 0) { $chunks.Add($current.ToArray()) }
+
+          # A failing chunk must set $LASTEXITCODE, not throw, or the later chunks would be skipped.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failedChunks = 0
+          $chunkNumber = 0
+          foreach ($chunk in $chunks) {
+              $chunkNumber++
+              $chunkArgs = foreach ($class in $chunk) { '-class'; $class }
+              $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
+              Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
+              # -xml: per-test durations for the lite-tests-timing artifact (#5208).
+              dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs -xml TestResults/lite-timing-${{ matrix.shard }}-$chunkNumber.xml
+              if ($LASTEXITCODE -ne 0) {
+                  $failedChunks++
+                  Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
+              }
+          }
+          if ($failedChunks -gt 0) { Write-Host "shard ${{ matrix.shard }}: $failedChunks of $($chunks.Count) chunks failed"; exit 1 }
+          exit 0
+
+      # #5208: where the time goes. Informational; a parse problem must never turn the shard red.
+      - name: Lite test timing summary
+        if: always()
+        continue-on-error: true
+        run: python .github/scripts/lite-timing-top.py TestResults
+
+      - name: Upload Lite test timings
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-tests-timing-${{ matrix.shard }}
+          path: |
+            TestResults/lite-timing-*.xml
+            TestResults/lite-timing-*.xml.cpu.json
+          retention-days: 7
+          if-no-files-found: ignore
 
   # The one result branch protection can require. Four matrix legs cannot each be a required check
   # without hard-coding the shard count into repo settings, and a leg that never starts reports
@@ -1724,7 +2805,7 @@ jobs:
   # (result)" for the shards to gate merges — noted on #3887.)
   lite-tests-result:
     name: Lite tests (result)
-    needs: lite-tests
+    needs: [gate, guard-tests, lite-tests]
     if: ${{ !cancelled() && github.event_name != 'release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1734,13 +2815,44 @@ jobs:
         shell: bash
         env:
           RESULT: ${{ needs.lite-tests.result }}
+          GUARD_RESULT: ${{ needs.guard-tests.result }}
+          GATE_RESULT: ${{ needs.gate.result }}
+          GATE_RUN: ${{ needs.gate.outputs.run }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          # A gate that did not succeed leaves every job it feeds skipped, which would read as green here.
+          if [ "${GATE_RESULT}" != "success" ]; then
+            echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
+            exit 1
+          fi
+          # A declined run (draft or merge-train) leaves every job skipped, which would also read as green.
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${GATE_RUN}" != "true" ]; then
+            echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it."
+            exit 1
+          fi
+          # The Guard tests job runs first on a pull request (#5459). When it did not succeed the shards were
+          # skipped on purpose, and a skipped matrix reads as green, so this is where that becomes a failure. On
+          # a push, a merge-queue run or a release the shards ran whatever the guards said, but a guard that did
+          # not pass is still a failure. `skipped` is fine on a release only: the guard job does not run there.
+          if [ "${GUARD_RESULT}" != "success" ] && ! { [ "${EVENT_NAME}" = "release" ] && [ "${GUARD_RESULT}" = "skipped" ]; }; then
+            if [ "${EVENT_NAME}" = "pull_request" ]; then
+              echo "::error title=Guard tests failed::needs.guard-tests.result='${GUARD_RESULT}' - the Guard tests job did not succeed, so the shards did not run. Read that job's log for the failing class."
+            else
+              echo "::error title=Guard tests failed::needs.guard-tests.result='${GUARD_RESULT}' - the Guard tests job did not succeed. The shards ran anyway on this event; read that job's log for the failing class."
+            fi
+            exit 1
+          fi
           case "${RESULT}" in
             success)
-              echo "::notice title=Lite shards green::All four class-hash shards succeeded (or every leg's filters said the Lite suite is untouched by this diff)." ;;
+              echo "::notice title=Lite shards green::All four shards succeeded (or every leg's filters said the Lite suite is untouched by this diff)." ;;
             skipped)
-              echo "::notice title=Lite shards skipped::The matrix job itself was skipped, which only the release guard does - and releases run the whole suite unsharded in the build job." ;;
+              # Not a by-design skip any more (#5459). The matrix job is skipped on purpose in three cases: the
+              # gate declined the run, the guard job failed on a pull request, and a release (the build job runs
+              # the suite whole there). The first two are errors above, and this job does not run on a release
+              # (its own `if:`), so a skip that reaches this line is unplanned and must not read as a pass.
+              echo "::error title=Lite shards skipped::needs.lite-tests.result='skipped' although the gate ran this event and the guards passed, so no shard reported. The suite has NOT passed on this commit."
+              exit 1 ;;
             *)
               echo "::error title=Lite shards failed::needs.lite-tests.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit."
               exit 1 ;;

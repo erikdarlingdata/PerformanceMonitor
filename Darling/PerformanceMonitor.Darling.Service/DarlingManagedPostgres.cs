@@ -625,6 +625,62 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV17 = "# Managed by PerformanceMonitor Darling (v17 log line prefix) -- do not remove this block";
 
     /// <summary>
+    /// The v18 marker (part of #5097): load <c>auto_explain</c>, so a store statement that runs past ten
+    /// seconds leaves its plan in the store's own log. The store's log-sweep keeps that plan in redacted form;
+    /// before this, a slow store statement was a duration and a masked text with no plan to read.
+    ///
+    /// <para><b>A MERGE, never a literal</b>, the v13 rule: <c>shared_preload_libraries</c> is list-valued and
+    /// the last occurrence replaces the list, so the block restates the EFFECTIVE list plus
+    /// <see cref="StatementStatisticsLibrary"/> and <see cref="AutoExplainLibrary"/>, <c>auto_explain</c>
+    /// last. <see cref="MergePreloadLibraryNames(string?, string[])"/> never shrinks the list, keeps order and
+    /// spelling, and drops case-insensitive duplicates, so a store whose list already names the library gains
+    /// nothing twice.</para>
+    ///
+    /// <para><b>The settings, and why each:</b>
+    /// <list type="bullet">
+    /// <item><description><c>auto_explain.log_min_duration = 10s</c>: only a statement that ran at least ten
+    /// seconds is logged. Short enough to catch the reads the viewer and the MCP tools can run into, long
+    /// enough that the log gains a handful of plans a day, not a stream.</description></item>
+    /// <item><description><c>auto_explain.log_analyze = off</c>: with it on, instrumentation runs on EVERY
+    /// statement, not only the slow ones (a 31% throughput loss was measured at threshold 0). Off costs one
+    /// EXPLAIN, only for a statement already over the threshold. <c>log_timing</c> and <c>log_buffers</c> do
+    /// nothing without it, so they are not set.</description></item>
+    /// <item><description><c>auto_explain.log_format = json</c>: the one form the store-log reader parses and
+    /// redacts. A text-format plan has no redaction path.</description></item>
+    /// <item><description><c>auto_explain.log_nested_statements = off</c>: statements inside functions and
+    /// procedures are not logged separately, which keeps volume and the amount of text down.</description></item>
+    /// <item><description><c>auto_explain.log_verbose = on</c>: EXPLAIN VERBOSE prints the query identifier
+    /// while <c>compute_query_id</c> is active, which pg_stat_statements turns on under its default <c>auto</c>.
+    /// That joins a plan to its pg_stat_statements row without changing <c>log_line_prefix</c>.</description></item>
+    /// <item><description><c>auto_explain.log_settings = on</c>: lists the non-default planner settings in
+    /// force when the plan was made, so the plan can be read against them.</description></item>
+    /// <item><description><c>auto_explain.log_parameter_max_length = 0</c>: LOAD-BEARING. The default, -1,
+    /// writes every bind value into the plan. The store roles' own <c>log_parameter_max_length = 0</c> covers
+    /// statement logging only, not this module.</description></item>
+    /// </list></para>
+    ///
+    /// <para><b>Restart semantics.</b> <c>shared_preload_libraries</c> is postmaster-context. This block is
+    /// written by the pre-start conf paths (the Legacy append in <see cref="EnsureConfAppended"/> and the
+    /// managed-conf render), so it takes effect on the next start the SERVICE ITSELF performs, which in
+    /// production is the nightly install's service start. Nothing here restarts, stops or reloads a running
+    /// store: the adopted-listener case waits for the next service-owned start, as v13 does. A bring-your-own
+    /// store keeps its owner's settings. Any later change to a value above needs a NEW marker (the
+    /// v11/v14/v15/v16/v17 precedent): the block heals by its marker's absence, so an edited value in an
+    /// already-marked file would never be seen.</para>
+    ///
+    /// <para><b>A missing library.</b> A missing <c>auto_explain</c> library (<c>lib\auto_explain.dll</c> in
+    /// the bundled runtime) stops the store at its next start. The pre-start <c>postgres -C</c> validation
+    /// returns before PostgreSQL loads its preload libraries, so it cannot catch this. The guard is the
+    /// runtime packaging check in <c>Darling/tools/fetch-pg-runtime.ps1</c>, which fails a runtime that lacks
+    /// the file. <c>pg_stat_statements</c> already has the same dependency.</para>
+    ///
+    /// <para><b>Major-version upgrade.</b> The new cluster's conf carries this block too, so
+    /// <c>auto_explain</c> is loaded while <c>pg_upgrade</c> runs. A restore statement over the threshold logs
+    /// a plan, which is harmless.</para>
+    /// </summary>
+    public const string ConfMarkerV18 = "# Managed by PerformanceMonitor Darling (v18 slow-statement plans) -- do not remove this block";
+
+    /// <summary>
     /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
     /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
     /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
@@ -637,7 +693,7 @@ public sealed class DarlingManagedPostgres
     [
         ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
         ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
-        ConfMarkerV15, ConfMarkerV16, ConfMarkerV17,
+        ConfMarkerV15, ConfMarkerV16, ConfMarkerV17, ConfMarkerV18,
     ];
 
     /// <summary>
@@ -1721,6 +1777,11 @@ public sealed class DarlingManagedPostgres
     /// <summary>The library the v13 block adds to <c>shared_preload_libraries</c>.</summary>
     public const string StatementStatisticsLibrary = "pg_stat_statements";
 
+    /// <summary>The library the v18 block adds to <c>shared_preload_libraries</c>, after
+    /// <see cref="StatementStatisticsLibrary"/>. A contrib module with no <c>CREATE EXTENSION</c>: loading it
+    /// is the whole install.</summary>
+    public const string AutoExplainLibrary = "auto_explain";
+
     /// <summary>The library v1 preloads, and the base the v13 merge falls back to when the conf carries no
     /// active assignment. A managed conf always carries one by then, because v1 is appended first.</summary>
     internal const string TimescaleLibrary = "timescaledb";
@@ -1759,8 +1820,23 @@ public sealed class DarlingManagedPostgres
     internal static string MergePreloadLibraries(string? effectivePreloadList) =>
         FormatPreloadList(MergePreloadLibraryNames(effectivePreloadList));
 
-    /// <summary><see cref="MergePreloadLibraries"/>'s names, before they are written in either form.</summary>
-    internal static List<string> MergePreloadLibraryNames(string? effectivePreloadList)
+    /// <summary><see cref="MergePreloadLibraries(string?)"/> for an explicit set of required libraries: the
+    /// v18 block asks for <see cref="StatementStatisticsLibrary"/> and <see cref="AutoExplainLibrary"/>.</summary>
+    internal static string MergePreloadLibraries(string? effectivePreloadList, params string[] requiredLibraries) =>
+        FormatPreloadList(MergePreloadLibraryNames(effectivePreloadList, requiredLibraries));
+
+    /// <summary><see cref="MergePreloadLibraries"/>'s names, before they are written in either form: the
+    /// effective list plus <see cref="StatementStatisticsLibrary"/>, the v13 merge.</summary>
+    internal static List<string> MergePreloadLibraryNames(string? effectivePreloadList) =>
+        MergePreloadLibraryNames(effectivePreloadList, StatementStatisticsLibrary);
+
+    /// <summary>
+    /// The one merge: the effective list plus each of <paramref name="requiredLibraries"/> not already in it
+    /// (compared without regard to case), appended in the order given. The list never shrinks, and order and
+    /// spelling are kept. v13 asks for <see cref="StatementStatisticsLibrary"/>; v18 asks for it and
+    /// <see cref="AutoExplainLibrary"/>.
+    /// </summary>
+    internal static List<string> MergePreloadLibraryNames(string? effectivePreloadList, params string[] requiredLibraries)
     {
         var libraries = ParsePreloadList(effectivePreloadList);
         if (libraries.Count == 0)
@@ -1768,9 +1844,12 @@ public sealed class DarlingManagedPostgres
             libraries.Add(TimescaleLibrary);
         }
 
-        if (!libraries.Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase))
+        foreach (var required in requiredLibraries)
         {
-            libraries.Add(StatementStatisticsLibrary);
+            if (!libraries.Contains(required, StringComparer.OrdinalIgnoreCase))
+            {
+                libraries.Add(required);
+            }
         }
 
         return libraries;
@@ -2244,6 +2323,9 @@ public sealed class DarlingManagedPostgres
     /// line (v1's, or their own above the block) has an edit PostgreSQL ignores, because the later assignment
     /// replaces the whole list. #3904's review found nothing said so.</description></item>
     /// </list>
+    /// Since v18 (part of #5097) the "lacks the library" outcome is asked of <see cref="AutoExplainLibrary"/> as
+    /// well, with its own message; the <see cref="StatementStatisticsLibrary"/> message is unchanged and comes
+    /// first.
     /// Never throws; a file that cannot be read contributes nothing.
     /// </summary>
     internal void LogStatementStatisticsPreloadCoverage(string dataDirectory)
@@ -2284,7 +2366,8 @@ public sealed class DarlingManagedPostgres
             return;
         }
 
-        if (!inForceLibraries.Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase))
+        var lacksStatementStatistics = !inForceLibraries.Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase);
+        if (lacksStatementStatistics)
         {
             var suggested = MergePreloadLibraryNames(inForce.Value);
             if (inAutoConf)
@@ -2300,7 +2383,35 @@ public sealed class DarlingManagedPostgres
                     inForce.File, inForce.Line, inForce.Value, StatementStatisticsLibrary,
                     EscapeConfValue(FormatPreloadList(suggested)));
             }
+        }
 
+        /* v18: the same shape for the second required library. The pg_stat_statements message above is
+           unchanged and comes first; a list lacking both gets both, each naming its own library. */
+        foreach (var required in new[] { AutoExplainLibrary })
+        {
+            if (inForceLibraries.Contains(required, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var suggested = MergePreloadLibraryNames(inForce.Value, StatementStatisticsLibrary, AutoExplainLibrary);
+            if (inAutoConf)
+            {
+                _logger.LogWarning(
+                    "postgresql.auto.conf sets shared_preload_libraries = '{Value}' (an ALTER SYSTEM override) without {Library}. PostgreSQL reads postgresql.auto.conf AFTER postgresql.conf, so the v18 block's preload is inert and a slow store statement leaves no plan in the store's log until the override includes it: ALTER SYSTEM SET shared_preload_libraries = {Suggested}, then restart the store. One quoted literal per library: a single literal holding the whole list is stored as one library name, and the store would not start. This service does not edit postgresql.auto.conf.",
+                    inForce.Value, required, FormatAlterSystemPreloadList(suggested));
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "{File} line {Line} sets shared_preload_libraries = '{Value}' without {Library}, and it is the assignment in force: it is read after the v18 block, and a later assignment replaces the whole list, so a slow store statement leaves no plan in the store's log until it names the library. Change that line to shared_preload_libraries = '{Suggested}' and restart the store.",
+                    inForce.File, inForce.Line, inForce.Value, required,
+                    EscapeConfValue(FormatPreloadList(suggested)));
+            }
+        }
+
+        if (lacksStatementStatistics)
+        {
             return;
         }
 
@@ -2355,6 +2466,34 @@ public sealed class DarlingManagedPostgres
         builder.Append('\n');
         builder.Append(ConfMarkerV16).Append('\n');
         builder.Append("checkpoint_timeout = 15min\n");
+        return builder.ToString();
+    }
+
+    /* ===================== v18 slow-statement plans (auto_explain, part of #5097) ===================== */
+
+    /// <summary>
+    /// The v18 block: <c>shared_preload_libraries</c> re-stated as the effective list plus
+    /// <see cref="StatementStatisticsLibrary"/> and <see cref="AutoExplainLibrary"/> (last), then the seven
+    /// <c>auto_explain.*</c> settings. See <see cref="ConfMarkerV18"/> for why the list is merged and why each
+    /// setting has its value. Carries no fingerprint or stamp line, so neither every-start check reads it, and
+    /// nothing in it, or in the code that writes it, restarts or reloads a running store.
+    /// </summary>
+    public static string BuildSlowPlanConfAppend(string? effectivePreloadList)
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV18).Append('\n');
+        builder.Append(PreloadSetting).Append(" = '")
+            .Append(EscapeConfValue(MergePreloadLibraries(
+                effectivePreloadList, StatementStatisticsLibrary, AutoExplainLibrary)))
+            .Append("'\n");
+        builder.Append(AutoExplainLibrary).Append(".log_min_duration = 10s\n");
+        builder.Append(AutoExplainLibrary).Append(".log_analyze = off\n");
+        builder.Append(AutoExplainLibrary).Append(".log_format = json\n");
+        builder.Append(AutoExplainLibrary).Append(".log_nested_statements = off\n");
+        builder.Append(AutoExplainLibrary).Append(".log_verbose = on\n");
+        builder.Append(AutoExplainLibrary).Append(".log_settings = on\n");
+        builder.Append(AutoExplainLibrary).Append(".log_parameter_max_length = 0\n");
         return builder.ToString();
     }
 
@@ -2439,6 +2578,29 @@ public sealed class DarlingManagedPostgres
     /// <summary>The share of the data volume's free space the WAL ceiling may claim: one eighth, leaving seven
     /// for the soft limit's overshoot, the store's own growth, and the disk-pressure self-alert.</summary>
     internal const int WalSizingFreeDiskDivisor = 8;
+
+    /// <summary>The verdict's drift tolerance on the WAL ladder (#5459): the share of the data volume's free
+    /// space (one eighth) the reading may have moved since the block was written before the stored
+    /// <c>max_wal_size</c> reads as stale. See <see cref="IsWalSizeWithinDriftOf"/>.</summary>
+    internal const int WalSizingVerdictToleranceDivisor = 8;
+
+    /// <summary>
+    /// Whether <paramref name="currentMaxWalSizeMb"/> is a rung the ladder would pick for ANY free-space reading
+    /// within one eighth of <paramref name="freeDiskBytesOnDataVolume"/> either way (#5459). The writer re-derives
+    /// a rung at each service start, but the host profile and the stored verdicts re-derive from a LATER reading
+    /// of a volume that other work keeps filling and emptying; a volume sitting within a few hundred MB of a rung
+    /// edge (16, 32, 64 or 128 GB free) therefore read "stale after a hardware change" on a store nobody had
+    /// touched. A real hardware change halves or doubles the headroom, which moves the rung by far more than this
+    /// band, so it still reads stale. The ladder is monotonic, so the two ends bound every rung in between.
+    /// </summary>
+    internal static bool IsWalSizeWithinDriftOf(long freeDiskBytesOnDataVolume, long currentMaxWalSizeMb)
+    {
+        var free = Math.Max(0L, freeDiskBytesOnDataVolume);
+        var slack = free / WalSizingVerdictToleranceDivisor;
+        var low = DeriveWalSettings(free - slack).MaxWalSizeMb;
+        var high = DeriveWalSettings(free + slack).MaxWalSizeMb;
+        return currentMaxWalSizeMb >= low && currentMaxWalSizeMb <= high;
+    }
 
     /// <summary>
     /// The PostgreSQL major whose release notes moved <c>checkpoint_completion_target</c>'s default from 0.5 to
@@ -2543,6 +2705,53 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     internal static bool ConfHasCurrentWalSizingStamp(string conf, string expectedStamp)
         => LastLineWithPrefixEquals(conf, ConfWalSizingStampPrefix, expectedStamp);
+
+    /// <summary>
+    /// True when the MOST RECENT v12 stamp in the conf names the same PostgreSQL major as
+    /// <paramref name="postgresMajor"/> and a <c>max_wal_size</c> that <see cref="IsWalSizeWithinDriftOf"/>
+    /// accepts for <paramref name="freeDiskBytesOnDataVolume"/> (#5459). The writer's twin of the verdict
+    /// tolerance, through the same function so the two cannot disagree: a volume whose reading crosses a rung
+    /// edge back and forth between starts keeps the block it wrote instead of appending a new one on every
+    /// crossing. A different major, a halved or doubled headroom, a stamp that does not parse, or no stamp at
+    /// all is not "within drift" and the caller appends as before.
+    /// </summary>
+    internal static bool ConfHasWalSizingStampWithinDrift(string conf, long freeDiskBytesOnDataVolume, int postgresMajor)
+        => ConfHasWalSizingStampWithinDrift(conf, freeDiskBytesOnDataVolume, postgresMajor, out _, out _);
+
+    /// <summary>
+    /// The same test, handing back the <c>max_wal_size</c> and <c>min_wal_size</c> (MB) the stamp names, from the
+    /// one parse that decides it (#5459). The caller's "kept" log line names the values IN FORCE, which are the
+    /// stamp's, not the ones this start's reading would derive. Both are 0 when the stamp is absent or does not
+    /// parse; they are set whenever it parses, whether or not the verdict is "within drift".
+    /// </summary>
+    internal static bool ConfHasWalSizingStampWithinDrift(
+        string conf, long freeDiskBytesOnDataVolume, int postgresMajor, out long stampMaxWalMb, out long stampMinWalMb)
+    {
+        stampMaxWalMb = 0;
+        stampMinWalMb = 0;
+        var lastIndex = conf.LastIndexOf(ConfWalSizingStampPrefix, StringComparison.Ordinal);
+        if (lastIndex < 0)
+        {
+            return false;
+        }
+
+        var lineEnd = conf.IndexOf('\n', lastIndex);
+        var line = (lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd]).TrimEnd('\r');
+        var match = System.Text.RegularExpressions.Regex.Match(
+            line, @"max_wal_size_mb=(\d+) min_wal_size_mb=(\d+) pg_major=(\d+)$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        if (!match.Success
+            || !int.TryParse(match.Groups[3].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var stampMajor)
+            || !long.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out stampMaxWalMb)
+            || !long.TryParse(match.Groups[2].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out stampMinWalMb))
+        {
+            stampMaxWalMb = 0;
+            stampMinWalMb = 0;
+            return false;
+        }
+
+        return stampMajor == postgresMajor && IsWalSizeWithinDriftOf(freeDiskBytesOnDataVolume, stampMaxWalMb);
+    }
 
     /// <summary>
     /// The v12 block (#3802): the marker, the stamp, one comment line recording the headroom it was derived
@@ -3536,7 +3745,12 @@ public sealed class DarlingManagedPostgres
     /// has only ever been reachable on Windows.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    internal void EnsureConfAppended(string dataDirectory)
+    internal void EnsureConfAppended(string dataDirectory) => EnsureConfAppended(dataDirectory, null);
+
+    /// <summary><see cref="EnsureConfAppended(string)"/> with the data-volume read replaceable, so a test can say
+    /// what free space each start sees (#5459). Production always passes null.</summary>
+    [SupportedOSPlatform("windows")]
+    internal void EnsureConfAppended(string dataDirectory, Func<string, (long AvailableFreeBytes, long TotalBytes)>? readVolumeSpace)
     {
         var confPath = Path.Combine(dataDirectory, "postgresql.conf");
         if (!File.Exists(confPath))
@@ -3765,7 +3979,7 @@ public sealed class DarlingManagedPostgres
            from a figure we could not read is worse than leaving the block in force. All three settings are
            SIGHUP-context and this runs before pg_ctl start, so a service-owned start applies them at once. */
         var v12Major = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
-        if (!TryReadDataVolumeSpace(dataDirectory, out var v12FreeBytes, out var v12TotalBytes))
+        if (!TryReadDataVolumeSpace(dataDirectory, out var v12FreeBytes, out var v12TotalBytes, readVolumeSpace))
         {
             _logger.LogWarning(
                 "Skipped the v12 WAL-sizing check: the free space on the volume holding {DataDirectory} could not be read, so a change in headroom cannot be distinguished from a failed reading. The WAL settings currently in force (the last v12 block if one exists, otherwise v4's max_wal_size = 4GB) stay in force.",
@@ -3783,7 +3997,12 @@ public sealed class DarlingManagedPostgres
                they are looking at. */
             LogWalSizingAutoConfOverrides(dataDirectory, v12Settings);
 
-            if (!ConfHasCurrentWalSizingStamp(conf, v12Stamp))
+            var v12SameStamp = ConfHasCurrentWalSizingStamp(conf, v12Stamp);
+            long v12InForceMaxWalMb = 0;
+            long v12InForceMinWalMb = 0;
+            var v12WithinDrift = !v12SameStamp
+                && ConfHasWalSizingStampWithinDrift(conf, v12FreeBytes, v12Major, out v12InForceMaxWalMb, out v12InForceMinWalMb);
+            if (!v12SameStamp && !v12WithinDrift)
             {
                 File.AppendAllText(confPath, BuildWalSizingConfAppend(v12FreeBytes, v12TotalBytes, v12Major));
                 _logger.LogInformation(
@@ -3795,9 +4014,22 @@ public sealed class DarlingManagedPostgres
                 /* The self-proving shape (#3802): a re-derivation that changes nothing still says what it
                    derived and from what, so a start with no append is distinguishable from a start that never
                    checked. */
-                _logger.LogInformation(
-                    "Managed store WAL sizing (v12): max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume — unchanged, the block in force was derived to the same rung; checkpoint_completion_target {CheckpointNote}.",
-                    v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), v12CheckpointNote);
+                if (!v12WithinDrift)
+                {
+                    _logger.LogInformation(
+                        "Managed store WAL sizing (v12): max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB from {FreeGb} GB free of {TotalGb} GB on the data volume — unchanged, the block in force is kept (the same rung: this reading derives the block in force); checkpoint_completion_target {CheckpointNote}.",
+                        v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), v12CheckpointNote);
+                }
+                else
+                {
+                    /* #5459: the block kept is the stamp's, not this reading's. Near a rung the two differ, so
+                       the line names the values in force and the value this reading derives, and says the
+                       reading is inside the drift tolerance, rather than naming a size that is not in force. */
+                    _logger.LogInformation(
+                        "Managed store WAL sizing (v12): max_wal_size {InForceMaxWal}MB, min_wal_size {InForceMinWal}MB in force and kept; this reading ({FreeGb} GB free of {TotalGb} GB on the data volume) derives max_wal_size {MaxWal}MB, min_wal_size {MinWal}MB, which is within the drift tolerance of the block in force; checkpoint_completion_target {CheckpointNote}.",
+                        v12InForceMaxWalMb, v12InForceMinWalMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes),
+                        v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, v12CheckpointNote);
+                }
             }
         }
 
@@ -3878,6 +4110,22 @@ public sealed class DarlingManagedPostgres
             File.AppendAllText(confPath, BuildLogLinePrefixConfAppend());
             _logger.LogInformation(
                 "Appended v17 log line prefix to postgresql.conf (log_line_prefix = '%m [%p] %a '): the store's own log now names the application behind each line. Effective on this start when the service owns it.");
+        }
+
+        /* v18 (part of #5097): auto_explain. Keyed on its marker's absence and placed after v17, so it is the
+           block this method appends LAST, matching its place at the end of AllManagedConfMarkers. Like v13 it
+           RE-READS the preload chain instead of trusting `conf`: `conf` predates the v1 and v13 appends this
+           same call may have just made, and a merge from it would drop timescaledb. It adds no restart, stop
+           or reload: this runs before pg_ctl start, so a start the service owns loads the library, and the
+           adopted-listener case waits for the next one. */
+        if (!conf.Contains(ConfMarkerV18, StringComparison.Ordinal))
+        {
+            var v18PreloadChain = ReadConfAssignments(confPath, PreloadSetting);
+            var v18EffectivePreload = v18PreloadChain.Count == 0 ? null : v18PreloadChain[^1].Value;
+            File.AppendAllText(confPath, BuildSlowPlanConfAppend(v18EffectivePreload));
+            _logger.LogInformation(
+                "Appended v18 slow-statement plans to postgresql.conf (shared_preload_libraries = '{Libraries}', auto_explain.log_min_duration = 10s): a store statement that runs past ten seconds will leave its plan in the store's log. The preload is restart-only: it loads on this start when the service owns it, otherwise on the next start it owns.",
+                MergePreloadLibraries(v18EffectivePreload, StatementStatisticsLibrary, AutoExplainLibrary));
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);
@@ -5008,10 +5256,20 @@ public sealed class DarlingManagedPostgres
                 $"postgres.network.listen '{network.Listen}' is not a valid IP address (use a specific IP, e.g. 192.168.1.205, or 0.0.0.0 for all interfaces)");
         }
 
-        if (string.IsNullOrWhiteSpace(network.AllowFrom) || !IPNetwork.TryParse(network.AllowFrom.Trim(), out var cidr))
+        /* #5288: the same plain-spelling rule as the MCP and web allowFrom lists (Hosting.CidrAllowList): the
+           address is four plain decimal numbers (no leading zero, no short or hex form) and carries no IPv6 zone
+           index. IPNetwork.TryParse alone would read 192.168.010.0/24 as 192.168.8.0/24, and this value feeds the
+           pg_hba line and the firewall rule, so the range written is the range enforced. Checked as written,
+           before the host bits are masked. */
+        if (string.IsNullOrWhiteSpace(network.AllowFrom)
+            || !IPNetwork.TryParse(network.AllowFrom.Trim(), out var cidr)
+            || !Hosting.CidrAllowList.IsPlainCidrText(network.AllowFrom.Trim()))
         {
             return Degrade(
-                $"postgres.network.allowFrom '{network.AllowFrom}' is not a valid CIDR (e.g. 192.168.1.0/24, with host bits zeroed)");
+                $"postgres.network.allowFrom '{network.AllowFrom}' is not a valid CIDR. The store takes ONE range in CIDR form "
+                + "(e.g. 192.168.1.0/24, or /32 for one address), never a list. Host bits are masked, not refused "
+                + "(192.168.1.5/24 means 192.168.1.0/24). Write an IPv4 address as four plain decimal numbers "
+                + "(no leading zeros, no short or hex form), and leave off any IPv6 zone index (%)");
         }
 
         if (cidr.BaseAddress.AddressFamily != listenIp.AddressFamily)
@@ -5040,7 +5298,7 @@ public sealed class DarlingManagedPostgres
                 "move postgres.dataDirectory to a space-free path to expose the store over TLS");
         }
 
-        /* Canonical base/prefix form (IPNetwork requires zeroed host bits) for the pg_hba line + firewall. */
+        /* Canonical base/prefix form (IPNetwork.TryParse masked any host bits) for the pg_hba line + firewall. */
         return new NetworkExposureDecision(true, listenIp.ToString(), $"{cidr.BaseAddress}/{cidr.PrefixLength}", roles, null);
 
         static NetworkExposureDecision Degrade(string reason) => new(false, null, null, null, reason);
@@ -5641,21 +5899,88 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// PowerShell single-quoted literal. Inside <c>'…'</c> PowerShell expands nothing — no <c>$</c>, no
     /// backtick escapes, no subexpressions — so the ONE metacharacter is the quote itself, escaped by
-    /// doubling it. Every value the firewall builders interpolate goes through this (#1646): the builders
-    /// are then safe no matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is
-    /// the primary fix. The rule names are internally generated and contain no quotes, so quoting them
-    /// leaves the emitted command byte-for-byte what it has always been.
+    /// doubling it. PowerShell reads FIVE characters as a single quote: the apostrophe U+0027 and the
+    /// typographic U+2018, U+2019, U+201A and U+201B (it closes a single-quoted string on any of them, and a
+    /// quote character followed by another stands for one quote inside the string), so all five are doubled
+    /// — the same rule as the PowerShell SDK's <c>CodeGeneration.EscapeSingleQuotedStringContent</c>. Every
+    /// value the firewall builders interpolate goes through this (#1646): the builders are then safe no
+    /// matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is the primary fix.
+    /// The rule names are internally generated and contain no quotes, so quoting them leaves the emitted
+    /// command byte-for-byte what it has always been.
     /// <para><c>internal</c> so <see cref="DarlingFirewallCheck.BuildProbeCommand"/> escapes the rule name
     /// through this same one helper rather than growing a second, subtly different quoting rule (#1771).</para>
     /// </summary>
     internal static string SingleQuotedPowerShell(string value)
-        => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+    {
+        var quoted = new StringBuilder(value.Length + 2);
+        quoted.Append('\'');
+        foreach (var c in value)
+        {
+            quoted.Append(c);
+            if (c is '\'' or '‘' or '’' or '‚' or '‛')
+            {
+                quoted.Append(c);
+            }
+        }
+
+        return quoted.Append('\'').ToString();
+    }
 
     /// <summary>Idempotent-named enable command (remove-by-name then add) — the exact scoped command the docs
-    /// lead with (D1). Pure + testable.</summary>
+    /// lead with (D1). Pure + testable.
+    ///
+    /// <para>#5288: <paramref name="remoteCidr"/> is ONE CIDR, or the CANONICAL comma-joined list
+    /// (<c>CidrAllowList.ToString()</c>, the text <c>FirewallRulePlan.Cidr</c> and both hosts carry). Each
+    /// element is single-quoted on its own and the elements are joined by <c>,</c> with no spaces — PowerShell's
+    /// array syntax, which <c>-RemoteAddress</c> takes: <c>-RemoteAddress '10.8.0.0/16','192.168.1.5/32'</c>.
+    /// ONE CIDR is byte-for-byte what it was before the list existed: <c>-RemoteAddress '192.168.1.0/24'</c>.
+    /// An EMPTY element (a blank value, a doubled comma, a trailing comma) throws
+    /// <see cref="ArgumentException"/> instead of emitting <c>''</c>: a rule scoped by a quietly dropped entry
+    /// is the wrong way to find a typo. An element holding a character outside an address and prefix length
+    /// (<c>0-9</c>, <c>A-F</c>, <c>a-f</c>, <c>:</c>, <c>.</c>, <c>/</c>) throws as well, so only an address-shaped
+    /// element is ever quoted into the command. This is still no parser — the split is on the already-canonical
+    /// text and does no parsing and no trimming (<see cref="Hosting.CidrAllowList"/> owns those) — and each
+    /// element is one single-quoted literal through <see cref="SingleQuotedPowerShell"/> (#1646).</para></summary>
     internal static string BuildFirewallEnableCommand(string ruleName, int port, string remoteCidr)
         => $"Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction SilentlyContinue; " +
-           $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {SingleQuotedPowerShell(remoteCidr)} | Out-Null";
+           $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {QuotedRemoteAddressList(remoteCidr)} | Out-Null";
+
+    /// <summary>#5288: the <c>-RemoteAddress</c> value for <see cref="BuildFirewallEnableCommand"/> — every
+    /// comma-separated element through <see cref="SingleQuotedPowerShell"/>, joined by <c>,</c>. Throws
+    /// <see cref="ArgumentException"/> on an empty (or whitespace-only) element rather than emitting <c>''</c>,
+    /// and on an element holding any character outside <c>[0-9A-Fa-f:./]</c> (an address and prefix length) —
+    /// a quote, a space, a semicolon — rather than quoting it.</summary>
+    private static string QuotedRemoteAddressList(string remoteCidr)
+    {
+        ArgumentNullException.ThrowIfNull(remoteCidr);
+
+        var elements = remoteCidr.Split(',');
+        for (var i = 0; i < elements.Length; i++)
+        {
+            if (string.IsNullOrWhiteSpace(elements[i]))
+            {
+                throw new ArgumentException(
+                    "The firewall -RemoteAddress list has an empty element (a blank value, a doubled comma or a " +
+                    "trailing comma); refusing to emit an empty -RemoteAddress.",
+                    nameof(remoteCidr));
+            }
+
+            foreach (var c in elements[i])
+            {
+                if (c is not ((>= '0' and <= '9') or (>= 'A' and <= 'F') or (>= 'a' and <= 'f') or ':' or '.' or '/'))
+                {
+                    throw new ArgumentException(
+                        $"The firewall -RemoteAddress list element {i + 1} holds a character outside an address and " +
+                        "prefix length (0-9, A-F, ':', '.', '/'); refusing to emit it.",
+                        nameof(remoteCidr));
+                }
+            }
+
+            elements[i] = SingleQuotedPowerShell(elements[i]);
+        }
+
+        return string.Join(",", elements);
+    }
 
     /// <summary>
     /// Idempotent-named disable command (remove-by-name). Pure + testable.

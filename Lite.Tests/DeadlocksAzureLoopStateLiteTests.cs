@@ -36,6 +36,8 @@ namespace Lite.Tests;
 /// </summary>
 public class DeadlocksAzureLoopStateLiteTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private const string TelemetryKey = "dl_telemetry_cursor";
     private const string AlphaKey = "dl_ring_cursor:alpha";
     private const string ZetaKey = "dl_ring_cursor:zeta";
@@ -59,6 +61,11 @@ public class DeadlocksAzureLoopStateLiteTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -75,6 +82,7 @@ public class DeadlocksAzureLoopStateLiteTests : IDisposable
     private async Task<Rig> BuildRigAsync()
     {
         var duckDb = new DuckDbInitializer(_dbPath);
+        _initializers.Add(duckDb);
         await duckDb.InitializeAsync();
 
         var serverManager = new ServerManager(_configDir);
