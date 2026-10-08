@@ -774,6 +774,10 @@ public sealed class DarlingComposeTests
         Assert.DoesNotContain("  AND EXISTS", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>#5525: the server scope as the compiler spells it for names bound at $3 - an id list resolved from the registry
+    /// inside the SQL, never <c>server_name = ANY</c> on the fact (that reads every compressed chunk in full).</summary>
+    private const string ServerIdScope3 = "server_id = ANY(ARRAY(SELECT reg.server_id FROM collect.servers AS reg WHERE reg.server_name = ANY($3)))";
+
     [Fact]
     public void Compile_RankedTimeSeries_BindsEachValueOnce_SharedByBothPasses()
     {
@@ -789,7 +793,7 @@ public sealed class DarlingComposeTests
 
         var sql = compiled!.Sql;
         Assert.Equal(5, compiled.Parameters.Count);
-        Assert.Equal(2, CountOccurrences(sql, "f.server_name = ANY($3)"));
+        Assert.Equal(2, CountOccurrences(sql, "f." + ServerIdScope3));
         Assert.Equal(2, CountOccurrences(sql, "<> ALL($4)"));
         Assert.Contains("LIMIT $5", sql, StringComparison.Ordinal);
         /* Values stay bound, never interpolated — in either pass. */
@@ -1740,7 +1744,7 @@ public sealed class DarlingComposeTests
            a window-function subquery only when the qual's columns appear in every PARTITION BY, so without
            it a fleet store would rank every server's rows before narrowing to the panel's scope. */
         var partition = sql.IndexOf("PARTITION BY", StringComparison.Ordinal);
-        var scope = sql.IndexOf("f.server_name = ANY(", StringComparison.Ordinal);
+        var scope = sql.IndexOf("f.server_id = ANY(", StringComparison.Ordinal);
         Assert.True(scope > partition, "the server scope stays in the outer WHERE, so the partition must carry server_name");
 
         /* The dedup window is pushed INSIDE the derived table, so "latest" means latest within the
@@ -3617,9 +3621,10 @@ public sealed class DarlingComposeTests
         var compiled = CompileEdge(plan, EdgeContext(plan, true, servers, EdgeNow.AddMinutes(-30)));
 
         /* $3 is the scope: the overlay's procedure_stats scan, the map arm and the fact each carry it. */
-        Assert.Contains("          AND server_name = ANY($3)\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("          AND " + ServerIdScope3 + "\n", compiled.Sql, StringComparison.Ordinal);
+        /* module_map has no server_id (keyed server_name, sql_handle) and is small, so its arm keeps the names (#5525). */
         Assert.Contains("      AND mm.server_name = ANY($3)\n", compiled.Sql, StringComparison.Ordinal);
-        Assert.Contains("  AND f.server_name = ANY($3)\n", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("  AND f." + ServerIdScope3 + "\n", compiled.Sql, StringComparison.Ordinal);
         Assert.Equal(7, compiled.Parameters.Count);
         Assert.Equal(servers, (string[])compiled.Parameters[2].Value!);
         Assert.Equal(EdgeNow.AddMinutes(-30) - DarlingModuleMap.WatermarkSlack, (DateTime)compiled.Parameters[5].Value!);
@@ -3962,6 +3967,8 @@ public sealed class ComposeQueryStoreLivePostgresTests
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
         await DeleteAsync(connection, TestContext.Current.CancellationToken);
+        /* #5525: a composed scope resolves its names through the registry, so the fixture server must be registered. */
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, TestContext.Current.CancellationToken);
 
         var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var bucket = end.AddHours(-2);
@@ -4036,6 +4043,8 @@ public sealed class ComposeQueryStoreLivePostgresTests
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
         await DeleteAsync(connection, TestContext.Current.CancellationToken);
+        /* #5525: a composed scope resolves its names through the registry, so the fixture server must be registered. */
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, TestContext.Current.CancellationToken);
 
         var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var bucket = end.AddHours(-2);
@@ -4099,6 +4108,12 @@ public sealed class ComposeQueryStoreLivePostgresTests
         using var command = new NpgsqlCommand("DELETE FROM collect.query_store_stats WHERE server_id = $1", connection);
         command.Parameters.AddWithValue(ServerId);
         await command.ExecuteNonQueryAsync(ct);
+
+        await using (var deleteServer = new NpgsqlCommand("DELETE FROM collect.servers WHERE server_id = $1", connection))
+        {
+            deleteServer.Parameters.AddWithValue(ServerId);
+            await deleteServer.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static async Task InsertAsync(
@@ -4155,6 +4170,8 @@ public sealed class ComposeTopSeriesLivePostgresTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteAsync(connection, ct);
+        /* #5525: a composed scope resolves its names through the registry, so the fixture server must be registered. */
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         /* Two hourly buckets ending on the last whole hour. Window totals: PAGELATCH_BIG 1000,
            SOS_MEDIUM 500, AAA_LOUD_EARLY 300, ZZZ_LATE 200 — so topN=2 keeps PAGELATCH_BIG + SOS_MEDIUM.
@@ -4282,6 +4299,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection);
         using var command = new NpgsqlCommand("DELETE FROM collect.wait_stats WHERE server_id = $1", connection);
         command.Parameters.AddWithValue(ServerId);
         await command.ExecuteNonQueryAsync(ct);
+
+        await using (var deleteServer = new NpgsqlCommand("DELETE FROM collect.servers WHERE server_id = $1", connection))
+        {
+            deleteServer.Parameters.AddWithValue(ServerId);
+            await deleteServer.ExecuteNonQueryAsync(ct);
+        }
     }
 }
 
@@ -4312,6 +4335,8 @@ public sealed class ComposeAdHocModuleLivePostgresTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteAsync(connection, ct);
+        /* #5525: a composed scope resolves its names through the registry, so the fixture server must be registered. */
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var collectionTime = end.AddHours(-1);
@@ -4445,6 +4470,12 @@ VALUES (1, $1, $2, $3, 'ComposeDb', '0xHASHP', '0xH1', 100, 1),
         {
             deleteProcs.Parameters.AddWithValue(ServerId);
             await deleteProcs.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var deleteServer = new NpgsqlCommand("DELETE FROM collect.servers WHERE server_id = $1", connection))
+        {
+            deleteServer.Parameters.AddWithValue(ServerId);
+            await deleteServer.ExecuteNonQueryAsync(ct);
         }
     }
 }
