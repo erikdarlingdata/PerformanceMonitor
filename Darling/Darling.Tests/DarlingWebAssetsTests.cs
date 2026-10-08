@@ -40,6 +40,7 @@ public sealed class DarlingWebAssetsTests
     [InlineData("css/theme.css")]
     [InlineData("css/app.css")]
     [InlineData("css/editor.css")]
+    [InlineData("css/time-range.css")]
     [InlineData("js/app.js")]
     [InlineData("js/util.js")]
     [InlineData("js/panels.js")]

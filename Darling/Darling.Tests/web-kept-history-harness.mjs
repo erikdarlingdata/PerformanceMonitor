@@ -100,7 +100,7 @@ const editorScenario = scenario.startsWith("editor");
    keeps its Range presets, and the widest of them that it hands tabNote, in module-private constants, so the scratch
    copy appends one line exporting RANGE_OPTIONS and WIDEST_RANGE_HOURS, the same way the editor copy exports
    ensureFieldConfigs. */
-const serverPageScenario = scenario === "offeredRanges" || scenario.startsWith("custom");
+const serverPageScenario = scenario === "offeredRanges" || scenario.startsWith("custom") || scenario.startsWith("picker");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
 let modules;
 try {
@@ -133,7 +133,7 @@ try {
   if (serverPageScenario) {
     fs.writeFileSync(
       path.join(scratch, "pages", "server.js"),
-      fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, WIDEST_RANGE_HOURS };\n"
+      fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, WIDEST_RANGE_HOURS, holdSpec };\n"
     );
   }
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
@@ -144,6 +144,7 @@ try {
     charts: await load("charts.js"),
     editor: editorScenario ? await load("editor.js") : null,
     server: serverPageScenario ? await load(path.join("pages", "server.js")) : null,
+    timeRange: serverPageScenario ? await load("time-range.js") : null,
   };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
@@ -495,11 +496,38 @@ Object.assign(scenarios, {
       rounded: r(T0, T1),
       exact: r("2026-01-02T06:30:00.000Z", T1),
       subHour: r("2026-01-02T10:00:00.000Z", T1),
+      tooShort: r("2026-01-02T10:27:00.000Z", T1),
       reversed: r(T1, T0),
       future: r("2026-05-31T00:00:00.000Z", "2026-06-02T00:00:00.000Z"),
       tooWide: r("2025-12-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"),
       live: modules.server.resolveCustomRange(NOW - 5 * 3600000, NOW - 1000, NOW),
     };
+    return [];
+  },
+  // #5562: a range under an hour is fetched as the whole hour that holds it and trimmed to the exact pair, and the picker's choices
+  // reach the page as whole-hour presets (no trimming) or as custom ranges (trimmed).
+  pickerSubHour: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const before = fetches.length;
+    const err = modules.server.holdSpec("SRV1", modules.timeRange.fixedSpec(Date.parse("2026-01-02T10:00:00.000Z"), Date.parse(T1)), NOW);
+    const ctx = modules.server.rangeContext(NOW);
+    const cpu = await modules.util.readTool("get_cpu_utilization", { server: "SRV1", hours: ctx.hours });
+    found = { err, hours: ctx.hours, label: ctx.label, custom: ctx.custom === true, reads: fetches.slice(before), rows: cpu.data.samples.length };
+    return [];
+  },
+  // Every preset and calendar period the picker offers, held for a server in the browser's zone (the scenario name carries it).
+  pickerPresetsLocal: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const tr = modules.timeRange;
+    const out = {};
+    for (const spec of [...tr.ROLLING_PRESETS, ...tr.CALENDAR_PRESETS]) {
+      const err = modules.server.holdSpec("SRV1", spec, NOW);
+      const ctx = modules.server.rangeContext(NOW);
+      out[tr.specId(spec)] = { err, hours: ctx.hours, label: ctx.label, custom: ctx.custom === true };
+    }
+    found = out;
     return [];
   },
   // A past-end custom range through the page: its reads carry as_of=end and the rounded hours.

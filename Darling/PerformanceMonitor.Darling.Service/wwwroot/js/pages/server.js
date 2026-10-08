@@ -51,21 +51,24 @@ import { databaseFilterControl, databaseFilterUnavailable } from "./database-fil
 import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
+import { timeRangePicker } from "../time-range-picker.js";
+import { browserZone, resolveSpec, relativeSpec, fixedSpec, specName, wholeHours, readWindow, reachRefusal, ROLLING_PRESETS, MINIMUM_SPAN_MS } from "../time-range.js";
 
-/** The page time range: the desktop viewers' presets, which stop at 7 days. All but three ranged reads on these
- *  tabs (the collection log, current waits and blocking stats) take at most McpHelpers.MaxHoursBack (168) hours, so
- *  a wider choice was never served: those panels asked again for 7 days and said so. Custom Views offer longer
- *  windows: their composed panels read the store directly, through rollups for the query tables.
+/** How far back this page's reads reach, in hours. All but three ranged reads on these tabs (the collection log, current waits and
+ *  blocking stats) take at most McpHelpers.MaxHoursBack (168) hours, so a longer choice was never served: those panels asked again
+ *  for 7 days and said so (#2802). The picker greys out a longer range and says why. Custom Views offer longer windows: their
+ *  composed panels read the store directly, through rollups for the query tables. A catalog `max_hours` per read (#5562) lets a
+ *  page that shows one read raise this for that read; this page shows many, so it keeps the common 168.
  *  WebServerPageRangeTests runs every option through every tab of both registries. */
-const RANGE_OPTIONS = [
-  { hours: 1, label: "last hour" },
-  { hours: 4, label: "last 4 hours" },
-  { hours: 12, label: "last 12 hours" },
-  { hours: 24, label: "last 24 hours" },
-  { hours: 24 * 7, label: "last 7 days" },
-];
+const PAGE_REACH_HOURS = 168;
 
-/** The widest preset. A tab note that names the longest window this page shows (the Blocking tab's) is given it. */
+/** The short presets that are a whole number of hours within the reach: the ranges the reads take as `hours` alone, with no
+ *  trimming. Every other range (30 minutes, Yesterday, 2 days 3 hours, a typed pair) is fetched as whole hours back from its
+ *  end and trimmed to the exact pair, the custom path below. */
+const RANGE_OPTIONS = ROLLING_PRESETS.map((spec) => wholeHours(spec))
+  .filter((hours) => hours != null && hours <= PAGE_REACH_HOURS)
+  .map((hours) => ({ hours, label: hours === 1 ? "last hour" : hours > 24 && hours % 24 === 0 ? "last " + hours / 24 + " days" : "last " + hours + " hours" }));
+
 const WIDEST_RANGE_HOURS = Math.max(...RANGE_OPTIONS.map((o) => o.hours));
 
 /* Module state, deliberately not persisted — see the header comment. `gridNode` + the current server/tab let the
@@ -102,11 +105,11 @@ let panelAbort = null;
    matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
 const lastCard = new Map();
 
-/* The custom start/end, keyed by server (module scope, so the 60s poll's rebuild keeps it and another server starts on
-   the presets). Each value is `{ startMs, endMs, live, spanMs }`. A range whose end is within LIVE_SLACK_MS of now when
-   it is applied is LIVE: it keeps its width and slides to end at "now" on every rebuild, so the poll keeps refreshing
-   it. Any other end is a fixed historical window: its data cannot change, so the poll leaves the panels on screen
-   instead of reading the same hours again. */
+/* The range the reader picked that is not one of RANGE_OPTIONS, keyed by server (module scope, so the 60s poll's rebuild keeps it and
+   another server starts on the presets). Each value is `{ spec, live }`: the range as the picker names it (a length, a calendar
+   period, a typed pair) and whether its end slides with now. A LIVE range keeps its meaning and slides to end at "now" on every
+   rebuild, so the poll keeps refreshing it. Any other end is a fixed historical window: its data cannot change, so the poll leaves
+   the panels on screen instead of reading the same hours again. */
 const customRanges = new Map();
 const LIVE_SLACK_MS = 60000;
 const HOUR_MS = 3600000;
@@ -114,7 +117,8 @@ const HOUR_MS = 3600000;
 /**
  * Check a picked start and end and map them onto the reads' window (an end, `as_of`, and a whole number of `hours`).
  * The start rounds EARLIER to a whole hour for the fetch (`hours` is an integer of at least 1); the page trims what comes
- * back to the exact pair. Returns `{ error }` for an unusable pair, else `{ hours, asOf, live, startMs, endMs }`; `asOf`
+ * back to the exact pair, so a range of 15 minutes is fetched as the hour that holds it. Returns `{ error }` for an unusable
+ * pair (under 5 minutes, reversed, in the future, past the reach), else `{ hours, asOf, live, startMs, endMs }`; `asOf`
  * is null for a live range, whose reads are anchored at the server's own clock.
  */
 export function resolveCustomRange(startMs, endMs, nowMs) {
@@ -122,12 +126,28 @@ export function resolveCustomRange(startMs, endMs, nowMs) {
   if (endMs <= startMs) return { error: "The end must be after the start." };
   if (endMs > nowMs + LIVE_SLACK_MS) return { error: "The end cannot be in the future." };
   const span = endMs - startMs;
-  if (span < HOUR_MS) return { error: "Pick at least one hour. Drag across a chart to look at a shorter span." };
-  if (span > WIDEST_RANGE_HOURS * HOUR_MS) {
-    return { error: "The range can be at most " + WIDEST_RANGE_HOURS / 24 + " days, the widest preset." };
-  }
+  if (span < MINIMUM_SPAN_MS) return { error: "The shortest range is 5 minutes. Drag across a chart to look at a shorter span." };
+  const tooLong = reachRefusal(span, PAGE_REACH_HOURS);
+  if (tooLong) return { error: tooLong };
   const live = endMs >= nowMs - LIVE_SLACK_MS;
-  return { hours: Math.ceil(span / HOUR_MS), asOf: live ? null : new Date(endMs).toISOString(), live, startMs, endMs };
+  return { hours: Math.max(1, Math.ceil(span / HOUR_MS)), asOf: live ? null : new Date(endMs).toISOString(), live, startMs, endMs };
+}
+
+/** Hold a picked range for a server: a whole-hour preset is the page's own range (the reads take it as `hours` alone), anything
+ *  else is this server's custom range. Returns the error text when the range cannot be held, else null. */
+function holdSpec(server, spec, nowMs) {
+  const resolved = resolveSpec(spec, nowMs, browserZone());
+  if (!resolved.ok) return resolved.error.message;
+  const tooLong = reachRefusal(resolved.range.spanMs, PAGE_REACH_HOURS);
+  if (tooLong) return tooLong;
+  const hours = wholeHours(spec);
+  if (hours != null && RANGE_OPTIONS.some((o) => o.hours === hours)) {
+    customRanges.delete(server);
+    pageHours = hours;
+  } else {
+    customRanges.set(server, { spec, live: resolved.range.live });
+  }
+  return null;
 }
 
 /** Apply a custom range to a server and redraw. Returns the error text, or null when the range was taken. `redraw: false`
@@ -137,7 +157,8 @@ export function resolveCustomRange(startMs, endMs, nowMs) {
 export function applyCustomRange(server, startMs, endMs, nowMs = Date.now(), { redraw = true } = {}) {
   const r = resolveCustomRange(startMs, endMs, nowMs);
   if (r.error) return r.error;
-  customRanges.set(server, { startMs, endMs, live: r.live, spanMs: endMs - startMs });
+  /* A range that ends now keeps its width and slides; any other end is a fixed pair. */
+  customRanges.set(server, { spec: r.live ? relativeSpec(endMs - startMs) : fixedSpec(startMs, endMs), live: r.live });
   if (redraw) redrawPanels();
   return null;
 }
@@ -147,21 +168,23 @@ export function applyCustomRange(server, startMs, endMs, nowMs = Date.now(), { r
 export function rangeContext(nowMs = Date.now()) {
   const custom = current.server ? customRanges.get(current.server) : null;
   if (custom) {
-    const endMs = custom.live ? nowMs : custom.endMs;
-    const startMs = custom.live ? nowMs - custom.spanMs : custom.startMs;
-    const r = resolveCustomRange(startMs, endMs, nowMs);
-    if (!r.error) {
-      setActiveRange({ server: current.server, hours: r.hours, startMs, endMs, asOf: r.asOf });
+    const resolved = resolveSpec(custom.spec, nowMs, browserZone());
+    if (resolved.ok && !reachRefusal(resolved.range.spanMs, PAGE_REACH_HOURS)) {
+      const range = resolved.range;
+      const w = readWindow(range);
+      setActiveRange({ server: current.server, hours: w.hours, startMs: range.startMs, endMs: range.endMs, asOf: w.asOf });
       /* Totals and rankings are read over whole hours back from the end, so they can begin earlier than the picked start:
          when the span is not a whole number of hours the label says where they begin. */
-      const aggregateFrom = endMs - r.hours * HOUR_MS;
-      const rounded = aggregateFrom < startMs ? "; totals and rankings aggregate from " + localTime(new Date(aggregateFrom).toISOString()) : "";
-      return { hours: r.hours, label: "custom: " + localTime(new Date(startMs).toISOString()) + " to " + (custom.live ? "now" : localTime(new Date(endMs).toISOString())) + rounded, custom: true };
+      const aggregateFrom = range.endMs - w.hours * HOUR_MS;
+      const rounded = aggregateFrom < range.startMs ? "; totals and rankings aggregate from " + localTime(new Date(aggregateFrom).toISOString()) : "";
+      const times = localTime(new Date(range.startMs).toISOString()) + " to " + (range.live ? "now" : localTime(new Date(range.endMs).toISOString()));
+      const named = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom";
+      return { hours: w.hours, label: named + ": " + times + rounded, custom: true };
     }
     customRanges.delete(current.server);
   }
   setActiveRange(null);
-  const opt = RANGE_OPTIONS.find((o) => o.hours === pageHours) || RANGE_OPTIONS[3];
+  const opt = RANGE_OPTIONS.find((o) => o.hours === pageHours) || RANGE_OPTIONS.find((o) => o.hours === 24) || RANGE_OPTIONS[0];
   return { hours: opt.hours, label: opt.label };
 }
 
@@ -333,62 +356,21 @@ function subtabBar(server, active, tabs) {
   );
 }
 
-/** The time-range picker: the presets, and "Custom…" for a start and end. Changing it redraws the panels in place, exactly
- *  like the fleet page's sort. The start and end are typed in the browser's zone, the zone every time on this page uses. */
+/** The time-range picker (time-range-picker.js): the short presets, the calendar periods, a typed range and a date pick, in the
+ *  browser's zone, the zone every time on this page uses. Changing it redraws the panels in place, exactly like the fleet page's
+ *  sort. A range longer than the reads take (PAGE_REACH_HOURS) is greyed out with the reason. */
 function rangeControl() {
-  const CUSTOM = "custom";
   const server = current.server;
-  const sel = el(
-    "select",
-    { class: "range-select-inline", "aria-label": "Time range" },
-    [...RANGE_OPTIONS.map((o) => el("option", { value: String(o.hours), text: o.label })), el("option", { value: CUSTOM, text: "Custom…" })]
-  );
   const saved = customRanges.get(server);
-  sel.value = saved ? CUSTOM : String(pageHours);
-
-  const input = (label, ms) => {
-    const box = el("input", { type: "datetime-local", class: "range-custom-input", "aria-label": label, step: "60" });
-    if (ms != null) box.value = localInputValue(ms);
-    return box;
-  };
-  const start = input("Range start", saved ? saved.startMs : null);
-  const end = input("Range end", saved ? (saved.live ? Date.now() : saved.endMs) : null);
-  /* An end the form filled in as "now" stays "now" however long the form sits open: Apply then reads the clock again.
-     Typing in the end box makes it the reader's own. */
-  let endIsNow = !saved || saved.live;
-  end.addEventListener("input", () => { endIsNow = false; });
-  const message = el("span", { class: "range-custom-error", role: "alert" });
-  const apply = el("button", { type: "button", class: "btn range-custom-apply", text: "Apply" });
-  const form = el("span", { class: "range-custom" }, [start, el("span", { text: "to" }), end, apply, message]);
-  form.hidden = sel.value !== CUSTOM;
-
-  apply.addEventListener("click", () => {
-    const err = applyCustomRange(server, new Date(start.value).getTime(), endIsNow ? Date.now() : new Date(end.value).getTime());
-    message.textContent = err || "";
+  const picker = timeRangePicker({
+    spec: saved ? saved.spec : relativeSpec(pageHours * HOUR_MS),
+    reachHours: PAGE_REACH_HOURS,
+    label: "Time range",
+    onChange: (spec) => {
+      if (holdSpec(server, spec, Date.now()) == null) redrawPanels();
+    },
   });
-  sel.addEventListener("change", () => {
-    if (sel.value === CUSTOM) {
-      form.hidden = false;
-      if (!end.value) {
-        end.value = localInputValue(Date.now());
-        endIsNow = true;
-      }
-      if (!start.value) start.value = localInputValue(Date.now() - 24 * HOUR_MS);
-      return;
-    }
-    form.hidden = true;
-    message.textContent = "";
-    customRanges.delete(server);
-    pageHours = Number(sel.value) || 24;
-    redrawPanels();
-  });
-  return el("div", { class: "range-control" }, [el("span", { text: "Range" }), sel, form]);
-}
-
-/* A UTC-epoch instant as a datetime-local value in the browser's zone ("2026-01-02T03:04"). */
-function localInputValue(ms) {
-  const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60000);
-  return d.toISOString().slice(0, 16);
+  return el("div", { class: "range-control" }, [el("span", { text: "Range" }), picker.node]);
 }
 
 /* This server's fleet card, plus the reason sentence the fleet's worst-first ranking computed for it. ONE

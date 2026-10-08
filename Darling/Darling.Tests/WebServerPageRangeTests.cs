@@ -130,21 +130,19 @@ public sealed class WebServerPageRangeTests
         Assert.Single(notes, n => n.Contains("A Custom View can show more", System.StringComparison.Ordinal));
     }
 
-    /// <summary>The same rule read from <c>pages/server.js</c>: each preset is at least an hour and no wider than
-    /// <see cref="McpHelpers.MaxHoursBack"/>.</summary>
+    /// <summary>The same rule read from <c>pages/server.js</c> (#5562): the page declares how far its reads reach (no wider than
+    /// <see cref="McpHelpers.MaxHoursBack"/>), hands that reach to the picker so a longer range is greyed out, and derives the
+    /// whole-hour presets it reads as plain <c>hours</c> from the picker module's presets, never a list of its own.</summary>
     [Fact]
     public void TheOfferedRanges_InTheSource_AreNoWiderThanTheReadsTake()
     {
         var server = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js");
-        var options = Regex.Match(server, @"const RANGE_OPTIONS = \[(.*?)\];", RegexOptions.Singleline);
-        Assert.True(options.Success, "pages/server.js no longer declares RANGE_OPTIONS.");
-
-        var hours = Regex.Matches(options.Groups[1].Value, @"hours:\s*([0-9\s*]+),")
-            .Select(m => m.Groups[1].Value.Split('*').Aggregate(1, (product, factor) => product * int.Parse(factor.Trim())))
-            .ToArray();
-
-        Assert.NotEmpty(hours);
-        Assert.All(hours, h => Assert.InRange(h, 1, McpHelpers.MaxHoursBack));
+        var reach = Regex.Match(server, @"const PAGE_REACH_HOURS = ([0-9]+);");
+        Assert.True(reach.Success, "pages/server.js no longer declares PAGE_REACH_HOURS.");
+        Assert.InRange(int.Parse(reach.Groups[1].Value, CultureInfo.InvariantCulture), 1, McpHelpers.MaxHoursBack);
+        Assert.Contains("reachHours: PAGE_REACH_HOURS", server, System.StringComparison.Ordinal);
+        Assert.Matches(@"const RANGE_OPTIONS = ROLLING_PRESETS", server);
+        Assert.Contains("hours <= PAGE_REACH_HOURS", server, System.StringComparison.Ordinal);
     }
 
     /// <summary>A custom start and end maps to the reads' window: <c>as_of</c> is the end and <c>hours</c> is the span rounded
@@ -161,7 +159,10 @@ public sealed class WebServerPageRangeTests
         Assert.Equal("2026-01-02T10:30:00.000Z", rounded.GetProperty("asOf").GetString());
         Assert.False(rounded.GetProperty("live").GetBoolean());
         Assert.Equal(4, found.GetProperty("exact").GetProperty("hours").GetInt32());
-        Assert.Contains("at least one hour", found.GetProperty("subHour").GetProperty("error").GetString());
+        var subHour = found.GetProperty("subHour");
+        Assert.Equal(1, subHour.GetProperty("hours").GetInt32());
+        Assert.Equal("2026-01-02T10:30:00.000Z", subHour.GetProperty("asOf").GetString());
+        Assert.Contains("shortest range is 5 minutes", found.GetProperty("tooShort").GetProperty("error").GetString());
         Assert.Contains("after the start", found.GetProperty("reversed").GetProperty("error").GetString());
         Assert.Contains("future", found.GetProperty("future").GetProperty("error").GetString());
         Assert.Contains("7 days", found.GetProperty("tooWide").GetProperty("error").GetString());
