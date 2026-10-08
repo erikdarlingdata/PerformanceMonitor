@@ -57,20 +57,23 @@ public static class DarlingModuleMap
 
     /// <summary>The late-commit slack the hourly refresh re-reads behind the watermark: a procedure_stats row
     /// committed up to this long after its <c>collection_time</c> is still picked up by the next refresh. A row
-    /// committed later than that waits for the daily refresh, which re-reads <see cref="DailyRepairSlack"/> behind
-    /// the watermark.</summary>
+    /// committed later than that waits for the daily (or start-up) refresh, which re-reads
+    /// <see cref="DailyRepairSlack"/> behind the watermark.</summary>
     public static readonly TimeSpan WatermarkSlack = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// How far behind the watermark the daily refresh re-reads (#5519). The daily refresh is the repair for what the
-    /// hourly path can miss: a procedure_stats row committed more than <see cref="WatermarkSlack"/> after its
-    /// <c>collection_time</c> sits behind the watermark and no hourly run looks there. The old daily read
-    /// (<see cref="RefreshSql"/>, a flat two days) cost 88 to 103 s of store time per call on a 43-server store to
-    /// repair that; six hours behind the watermark still covers a collector that stalled and committed late by hours,
-    /// at about a quarter of the blocks. A row committed later than this behind the watermark is not repaired by
-    /// the daily refresh; a handle the map misses that way is re-read the next time that procedure collects.
+    /// How far behind the watermark the daily and start-up refreshes re-read (#5519). They are the repair for what
+    /// the hourly path can miss: a procedure_stats row committed more than <see cref="WatermarkSlack"/> after its
+    /// <c>collection_time</c> sits behind the watermark and no hourly run looks there. The hourly refresh keeps the
+    /// watermark near now, so the span must cover the daily's own 24-hour cadence plus a margin for how late a row
+    /// commits: 30 hours does, so a row stamped anywhere in the day since the previous daily run is re-read, however
+    /// late it committed (up to the margin). The old daily read (<see cref="RefreshSql"/>, a flat two days) cost
+    /// 88 to 103 s of store time per call on a 43-server store; 30 hours is 62 percent of that span, and
+    /// <see cref="MaxLookback"/> still caps it. The span is fixed rather than a stored "repaired through" point,
+    /// which would need a schema column. A purge pass delayed more than 6 hours past its 24-hour cadence, or a
+    /// restart gap that long, can still leave a gap; the start-up refresh covers the same span.
     /// </summary>
-    public static readonly TimeSpan DailyRepairSlack = TimeSpan.FromHours(6);
+    public static readonly TimeSpan DailyRepairSlack = TimeSpan.FromHours(30);
 
     /// <summary>The farthest back an hourly refresh ever reads, inside procedure_stats' 4-day raw retention.
     /// It bounds the first refresh on a store with no watermark, and a refresh after a long stall.</summary>
@@ -175,8 +178,8 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     public static DateTime SinceFor(DateTime? watermark, DateTime utcNow) => SinceFor(watermark, utcNow, WatermarkSlack);
 
     /// <summary><see cref="SinceFor(DateTime?, DateTime)"/> with the slack behind the watermark chosen by the
-    /// caller: <see cref="WatermarkSlack"/> for the hourly and start-up refreshes, <see cref="DailyRepairSlack"/>
-    /// for the daily one.</summary>
+    /// caller: <see cref="WatermarkSlack"/> for the hourly refresh, <see cref="DailyRepairSlack"/>
+    /// for the start-up and daily ones.</summary>
     public static DateTime SinceFor(DateTime? watermark, DateTime utcNow, TimeSpan slack)
     {
         var floor = utcNow - MaxLookback;
@@ -223,22 +226,23 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
     /// last two days (<see cref="RefreshSql"/>). Returns the number of rows upserted; a failure warns and the
     /// existing map keeps serving (never throws). Called from the daily maintenance sweep.</summary>
     public static Task<int> RefreshAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default) =>
-        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, cancellationToken);
+        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, "module_map daily refresh", cancellationToken);
 
-    /// <summary>The refresh at service start (#5519): the same watermark-bounded read as the hourly path
-    /// (<see cref="WatermarkSlack"/> behind the watermark) when the map has a watermark and rows, instead of
-    /// re-reading two days of procedure_stats on every restart; the two-day read (<see cref="RefreshSql"/>) only
-    /// for an empty map or one with no watermark. Never throws.</summary>
+    /// <summary>The refresh at service start (#5519): when the map has a watermark and rows it re-reads
+    /// <see cref="DailyRepairSlack"/> behind the watermark (the same span as the daily repair, so a restart repairs
+    /// the late rows the hourly path missed that the old two-day read repaired), instead of the flat two days; the
+    /// two-day read (<see cref="RefreshSql"/>) only for an empty map or one with no watermark. Never throws.</summary>
     public static Task<int> RefreshAtStartAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default) =>
-        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, WatermarkSlack, cancellationToken);
+        RefreshFromWatermarkOrFullAsync(connection, logger, DateTime.UtcNow, DailyRepairSlack, "module_map start-up refresh", cancellationToken);
 
     /// <summary>The map has at least one row. A watermark over an empty map means the map was rebuilt without its
     /// state row; the refresh then reads the full two days instead of trusting the watermark.</summary>
     public const string MapHasRowsSql = "SELECT EXISTS (SELECT 1 FROM collect.module_map)";
 
-    /// <summary>The start-up and daily refreshes against an explicit clock and slack; the tests pass a fixed clock.</summary>
+    /// <summary>The start-up and daily refreshes against an explicit clock and slack; the tests pass a fixed clock.
+    /// <paramref name="label"/> names the caller in the log lines.</summary>
     public static async Task<int> RefreshFromWatermarkOrFullAsync(
-        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, TimeSpan slack, CancellationToken cancellationToken = default)
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, TimeSpan slack, string label, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(connection);
         DateTime? watermark = null;
@@ -264,7 +268,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
             return await RefreshFullAsync(connection, logger, cancellationToken);
         }
 
-        return await RefreshSinceWatermarkAsync(connection, logger, watermark, utcNow, slack, "module_map", cancellationToken);
+        return await RefreshSinceWatermarkAsync(connection, logger, watermark, utcNow, slack, label, cancellationToken);
     }
 
     private static async Task<int> RefreshFullAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
