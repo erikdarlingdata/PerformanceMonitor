@@ -110,15 +110,24 @@ ORDER BY ds.total_size_mb DESC";
     /// "no query activity in 7 days", so 7 days must have been watched: the oldest sample at or before now - 7 days (with fewer days of
     /// history, six days of samples touch seven UTC dates), and a sample on each complete day (after a collection gap the oldest
     /// sample is old, yet the days since hold none, and every database reads as idle because nothing was watching, not because
-    /// nothing ran). <see cref="IdleCoverageHolds"/> reads both. $1 server_id, $2 D-7 00:00, $3 today 00:00 (naive UTC).
+    /// nothing ran). <see cref="IdleCoverageHolds"/> reads both. The days are counted by one <c>EXISTS</c> probe per complete day (a
+    /// <c>generate_series</c> of the day starts D-7 .. D-1), each an index range seek on <c>(server_id, collection_time)</c> that stops at its
+    /// first row, not a <c>COUNT(DISTINCT ...)</c> over 7 days of raw rows (the same answer, #5492). The probe is an <c>EXISTS</c> in the select list,
+    /// not in a <c>WHERE</c>: a <c>WHERE EXISTS</c> is flattened to a semi join, and on a hypertable the planner then chose to read every chunk of the
+    /// server once and filter the days in the join (measured on a test store). The select-list form stays one parameterized index scan per day, with
+    /// the chunks outside that day excluded at run time. The oldest sample is <c>ORDER BY collection_time LIMIT 1</c> rather than <c>MIN</c>, which
+    /// through this view read every row of the server in the store's whole history (an ordered index scan that stops at its first row does not). $1 server_id, $2 D-7 00:00, $3 today 00:00 (naive UTC).
     /// </summary>
     public const string IdleCoverageSql = @"
-SELECT (SELECT MIN(collection_time) FROM v_query_stats WHERE server_id = $1),
-       (SELECT COUNT(DISTINCT CAST(collection_time AS DATE))
-        FROM v_query_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <  $3)";
+SELECT (SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY collection_time LIMIT 1),
+       (SELECT COUNT(*)
+        FROM (SELECT EXISTS (SELECT 1
+                             FROM v_query_stats q
+                             WHERE q.server_id = $1
+                             AND   q.collection_time >= d.day_start
+                             AND   q.collection_time <  d.day_start + INTERVAL '1 day') AS has_sample
+              FROM generate_series(CAST($2 AS timestamp), CAST($3 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day') AS d(day_start)) AS probes
+        WHERE has_sample)";
 
     /// <summary>True once <see cref="IdleCoverageHolds"/>: 7 days of query-stats history and a sample on each complete UTC day of them.</summary>
     public static Task<bool> HasIdleCoverageAsync(

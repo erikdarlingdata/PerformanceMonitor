@@ -86,7 +86,7 @@ public sealed class ServerInventoryFleetMetricsTests
         Assert.Contains("FILTER (WHERE ad.database_name IS NULL)", sql, StringComparison.Ordinal);
         Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
 
-        /* Five binds: cpu cutoff, idle cutoff, the idle-coverage start, the days it must cover and the coverage end (today excluded) — server_id is gone. A server without
+        /* Five binds: cpu cutoff, idle cutoff, the idle-coverage start, the days it must cover and the coverage end (today 00:00, exclusive) — server_id is gone. A server without
            a query-stats sample on each of those days has no idle_dbs row, so its count is NULL (a dash), not a count from unwatched days. */
         Assert.Contains("$1", sql, StringComparison.Ordinal);
         Assert.Contains("$2", sql, StringComparison.Ordinal);

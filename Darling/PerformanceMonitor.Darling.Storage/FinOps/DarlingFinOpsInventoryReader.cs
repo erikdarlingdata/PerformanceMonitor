@@ -155,16 +155,17 @@ active_dbs AS (
    D-1, today excluded -- holds a sample ($4 is how many days). A server without that coverage gets NO idle_dbs row, so its
    count is NULL (a dash), never a count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
 idle_coverage AS (
-    SELECT d.server_id
-    FROM (
-        SELECT server_id
-        FROM v_query_stats
-        WHERE collection_time >= $3
-        AND   collection_time <  $5
-        GROUP BY server_id
-        HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
-    ) AS d
-    WHERE EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = d.server_id AND o.collection_time <= $2)
+    SELECT s.server_id
+    FROM servers s
+    WHERE (SELECT COUNT(*)
+           FROM (SELECT EXISTS (SELECT 1
+                                FROM v_query_stats q
+                                WHERE q.server_id = s.server_id
+                                AND   q.collection_time >= d.day_start
+                                AND   q.collection_time <  d.day_start + INTERVAL '1 day') AS has_sample
+                 FROM generate_series(CAST($3 AS timestamp), CAST($5 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day') AS d(day_start)) AS probes
+           WHERE has_sample) >= $4
+    AND   EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = s.server_id AND o.collection_time <= $2)
 ),
 /* LEFT JOIN from servers, not an EXCEPT grouped by server_id: a server whose every known database is
    active has ZERO rows surviving an EXCEPT, and GROUP BY over zero rows contributes NO ROW for that
@@ -217,18 +218,20 @@ LEFT JOIN grants g ON g.server_id = s.server_id
 WHERE s.server_id <> 0";
 
     /// <summary>The RAW <c>idle_coverage</c> CTE in <see cref="ServerMetricsSql"/>, verbatim — the second anchor <see cref="ServerMetricsSqlFor"/>
-    /// replaces, so the coverage days come from the same hourly rollup as the activity check rather than a raw 7-day scan of every server.</summary>
+    /// replaces, so the coverage days come from the same hourly rollup as the activity check rather than a raw 7-day scan of every server. The raw days are one <c>EXISTS</c> probe per complete day and server (an index range seek
+    /// on <c>(server_id, collection_time)</c> each, written in the select list so the planner keeps one index scan per day, see <c>IdleCoverageSql</c>), not a <c>COUNT(DISTINCT ...)</c> over every raw row of the 7 days (#5492).</summary>
     private const string IdleCoverageRawCte = @"idle_coverage AS (
-    SELECT d.server_id
-    FROM (
-        SELECT server_id
-        FROM v_query_stats
-        WHERE collection_time >= $3
-        AND   collection_time <  $5
-        GROUP BY server_id
-        HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $4
-    ) AS d
-    WHERE EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = d.server_id AND o.collection_time <= $2)
+    SELECT s.server_id
+    FROM servers s
+    WHERE (SELECT COUNT(*)
+           FROM (SELECT EXISTS (SELECT 1
+                                FROM v_query_stats q
+                                WHERE q.server_id = s.server_id
+                                AND   q.collection_time >= d.day_start
+                                AND   q.collection_time <  d.day_start + INTERVAL '1 day') AS has_sample
+                 FROM generate_series(CAST($3 AS timestamp), CAST($5 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day') AS d(day_start)) AS probes
+           WHERE has_sample) >= $4
+    AND   EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = s.server_id AND o.collection_time <= $2)
 ),";
 
     /// <summary>
