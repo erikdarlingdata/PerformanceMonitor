@@ -1080,8 +1080,14 @@ public partial class MainWindow : Window
 
         try
         {
-            _tags = await _dataService.GetServerTagsAsync();
-            var assignments = await _dataService.GetServerTagAssignmentsAsync();
+            /* #5457: both reads run off the UI thread, in one hop. This runs on every Overview refresh, and a read
+               takes the store read lock before it opens a connection: awaited on the dispatcher, it waited there
+               whenever archival or compaction was parked on the lock (a parked writer holds back new readers), and
+               then ran the query there. Task.Run keeps the lock enter and exit on one pool thread. */
+            var dataService = _dataService;
+            var (tags, assignments) = await Task.Run(async () =>
+                (await dataService.GetServerTagsAsync(), await dataService.GetServerTagAssignmentsAsync()));
+            _tags = tags;
 
             var map = new Dictionary<int, HashSet<int>>();
             foreach (var a in assignments)

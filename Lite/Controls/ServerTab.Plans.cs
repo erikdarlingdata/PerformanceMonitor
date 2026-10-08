@@ -71,7 +71,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -126,7 +126,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -259,7 +259,8 @@ public partial class ServerTab : UserControl
         {
             /* #4530: the server's edition/MAXDOP for rule 38, best-effort (null on a missing row or a
                read failure, same as GetServerMetadataForPlanAnalysisAsync's own contract). */
-            viewer.ServerMetadata = await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId);
+            /* #5457: off the UI thread, so a held store lock cannot freeze the window (see ServerTab.BlockChain). */
+            viewer.ServerMetadata = await Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId));
             /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed
                plan XML, replacing the redundant up-front XDocument.Parse validation. */
             await viewer.LoadPlan(planXml, label, queryText);

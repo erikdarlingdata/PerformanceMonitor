@@ -183,9 +183,18 @@ public partial class FinOpsTab : UserControl
     private PlanNavigationController? _planActions;
     private PlanNavigationController PlanActions => _planActions ??= new PlanNavigationController(
         Window.GetWindow(this)!,
-        async (xml, label, qt) => await Windows.PlanViewerWindow.ShowPlanAsync(
-            Window.GetWindow(this)!, xml, label, qt,
-            _dataService != null ? await _dataService.GetServerMetadataForPlanAnalysisAsync(GetSelectedServerId()) : null),
+        async (xml, label, qt) =>
+        {
+            /* #5457: the owner and the selected server are read here, on the UI thread, and the metadata read runs
+               off it, so a held store lock cannot freeze the window. */
+            var owner = Window.GetWindow(this)!;
+            var dataService = _dataService;
+            var serverId = GetSelectedServerId();
+            var metadata = dataService != null
+                ? await Task.Run(() => dataService.GetServerMetadataForPlanAnalysisAsync(serverId))
+                : null;
+            await Windows.PlanViewerWindow.ShowPlanAsync(owner, xml, label, qt, metadata);
+        },
         (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
             GetSelectedConnectionString() ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
             productName: "SQL Server Performance Monitor Lite"),
@@ -690,7 +699,9 @@ public partial class FinOpsTab : UserControl
 
             if (data.Count > 0 && _dataService != null)
             {
-                var properties = await _dataService.GetLatestServerPropertiesAsync(serverId);
+                /* #5457: off the UI thread, so a held store lock cannot freeze the window. */
+                var dataService = _dataService;
+                var properties = await Task.Run(() => dataService.GetLatestServerPropertiesAsync(serverId));
                 if (_loads.Superseded(nameof(LoadDatabaseSizesAsync), gen)) return;
 
                 if (properties?.EngineEdition == 5)
@@ -1194,9 +1205,12 @@ public partial class FinOpsTab : UserControl
                So on Azure the connection targets the database being ANALYSED, not the utility database: the
                proc has to be installed in each database anyway (which is what the reporter found by
                experiment), and pointing at the target is the only shape that can work. */
-            var properties = _dataService == null
+            /* #5457: the combo is read here, on the UI thread, and the read itself runs off it. */
+            var propertiesDataService = _dataService;
+            var propertiesServerId = GetSelectedServerId();
+            var properties = propertiesDataService == null
                 ? null
-                : await _dataService.GetLatestServerPropertiesAsync(GetSelectedServerId());
+                : await Task.Run(() => propertiesDataService.GetLatestServerPropertiesAsync(propertiesServerId));
             if (_loads.Superseded(nameof(RunIndexAnalysis_Click), gen)) return;
             var isAzureSqlDb = properties?.EngineEdition == 5;
 
@@ -1261,7 +1275,7 @@ public partial class FinOpsTab : UserControl
         {
             AppLogger.Error("FinOps", $"Failed to run index analysis: {ex.Message}");
             if (_loads.Superseded(nameof(RunIndexAnalysis_Click), gen)) return;
-            IndexAnalysisStatusText.Text = $"Error: {ex.Message}";
+            IndexAnalysisStatusText.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
         finally
         {

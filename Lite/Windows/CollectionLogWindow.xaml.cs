@@ -67,7 +67,7 @@ namespace PerformanceMonitorLite.Windows
         /// </summary>
         internal static Task<DrillRead> ReadDrillAsync(LocalDataService dataService, int serverId, string collectorName, DateTime? asOfUtc = null) =>
             ReadDrillAsync(
-                (startUtc, endUtc) => dataService.GetCollectionLogByCollectorAsync(serverId, collectorName, startUtc, endUtc),
+                (startUtc, endUtc) => Task.Run(() => dataService.GetCollectionLogByCollectorAsync(serverId, collectorName, startUtc, endUtc)),
                 (startUtc, endUtc) => Task.Run(() => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.CollectionLog, serverId, startUtc, endUtc)),
                 $"[server {serverId}] Collection Log drill",
                 asOfUtc);
@@ -129,7 +129,7 @@ namespace PerformanceMonitorLite.Windows
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    $"Failed to load collection history:\n\n{ex.Message}",
+                    $"Failed to load collection history:\n\n{DuckDbMemoryLimitSetting.Describe(ex)}",
                     "Error",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error

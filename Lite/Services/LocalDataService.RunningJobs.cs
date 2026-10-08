@@ -17,8 +17,15 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets the latest snapshot of running jobs for a server.
-    /// Returns only the most recent collection_time's data.
+    /// Gets the latest snapshot of running jobs for a server, and only while that snapshot is the
+    /// collector's CURRENT answer.
+    /// <para>The collector writes no row when no job is running, so "the newest snapshot ever written"
+    /// can be weeks old: the tab then listed a job that ended days ago as running now. The collector's own
+    /// latest SUCCESSFUL run (<c>v_collection_log</c>, which records a SUCCESS with zero rows for a run that
+    /// found nothing) decides: a run that stored rows means the newest snapshot is that run's, and a run that
+    /// stored none means nothing is running, unless a snapshot newer than that log row exists (a run whose
+    /// rows are stored but whose log row is not written yet). A store with no such log row (retention) keeps
+    /// the newest snapshot, as before. Darling's twin is <c>ViewerDataService.RunningJobsSql</c>.</para>
     /// </summary>
     public async Task<List<RunningJobRow>> GetRunningJobsAsync(int serverId)
     {
@@ -37,12 +44,39 @@ SELECT
     successful_run_count,
     is_running_long,
     percent_of_average
-FROM v_running_jobs
+FROM v_running_jobs AS j
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
     FROM v_running_jobs
     WHERE server_id = $1
+)
+AND   (
+    NOT EXISTS
+    (
+        SELECT 1
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = 'running_jobs'
+        AND   status = 'SUCCESS'
+    )
+    OR EXISTS
+    (
+        SELECT 1
+        FROM
+        (
+            SELECT collection_time, rows_collected
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'running_jobs'
+            AND   status = 'SUCCESS'
+            ORDER BY collection_time DESC
+            LIMIT 1
+        ) AS last_run
+        WHERE last_run.rows_collected IS NULL
+        OR    last_run.rows_collected > 0
+        OR    j.collection_time > last_run.collection_time
+    )
 )
 ORDER BY current_duration_seconds DESC";
 
