@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// a server the worker's way, plant rows across the collector tables, call the tool METHODS directly and
 /// assert each read round-trips its data-bearing envelope and an empty store returns the #1224 miss.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */
@@ -979,6 +980,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 /// serialized "live-postgres" collection and cleans up in finally.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpDataToolsLivePostgresTests
 {
     private const string ServerName = "darling-mcp-data-e2e";

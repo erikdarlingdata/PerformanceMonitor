@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// reading source text needs nothing Windows-only. This runs on macOS and in CI alike.
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class RemoteCollectorServiceCancellationCensusTests
 {
     /// <summary>

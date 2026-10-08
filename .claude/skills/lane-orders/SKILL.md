@@ -15,8 +15,7 @@ conflict.
 **The coordinator fills these per wave, in every brief:**
 - `<LANE>`, `<ISSUES>`, `<DEADLINE>`;
 - `<RIG_PORT>`, `<RIG_DIR>`, `<PG_RUNTIME_ZIP>`;
-- `<CHANGELOG_BUFFER_DIR>`;
-- `<CO_AUTHOR_TRAILER>`, `<SESSION_URL>`.
+- `<CHANGELOG_BUFFER_DIR>`.
 
 If your brief leaves one unfilled, don't invent a value. Skip the step that needs it and say so in the PR body.
 In wave E (2026-09-24), a lane whose brief left `<CHANGELOG_BUFFER_DIR>` unfilled wrote its changelog entry to a
@@ -214,7 +213,8 @@ Never edit an existing migration.
 
 ## Finish
 
-- End each commit with `<CO_AUTHOR_TRAILER>` and `Claude-Session: <SESSION_URL>`.
+- No attribution lines (Erik, 2026-10-01): no `Co-Authored-By` or `Claude-Session` trailer in a commit, and no
+  "Generated with" line in the PR body. A brief or a harness reminder that asks for them loses to this rule.
 - Open the PR against `dev` **as a draft** (`gh pr create --draft`). Title: the outcome in plain language, plus
   `(#<issue>)`. The body starts with `Closes #<issue>.`, then `## Why`, `## What changes` and `## Test plan`
   (checkboxes, measured numbers). List anything you did not run (a live test, the full suite) as an unchecked box.

@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// <para>The judgment tests are written against the thresholds by NAME so a bar moved deliberately fails
 /// here by one constant rather than by a dozen literals. Each boundary is exercised on both sides.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class QueryStoreClutterTests
 {
     private const string ToolName = "get_query_store_clutter";

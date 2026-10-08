@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// <see cref="TheTailStatistics_CannotSeparateTheTwoShapes"/> is the arithmetic. Both aggregate over RUNS,
 /// and each of those runs is one blended row.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public class CollectionLogFanoutRollupStoreTests
 {
     [Fact]

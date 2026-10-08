@@ -58,6 +58,7 @@ namespace Darling.Tests;
 /// and every lock file as covered — and would do it in green.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class LockedModeRestoreCoverageTests
 {
     private static readonly string[] s_buildSegments = { ".github", "workflows", "build.yml" };

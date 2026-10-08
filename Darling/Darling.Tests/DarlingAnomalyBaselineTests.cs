@@ -39,6 +39,7 @@ namespace Darling.Tests;
 /// wait type named as a contrib_&lt;TYPE&gt; contributor.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class DarlingAnomalyBaselineTests
 {
     /// <summary>Distinctive fake id — a real server_id is a storage-name hash, never this.</summary>

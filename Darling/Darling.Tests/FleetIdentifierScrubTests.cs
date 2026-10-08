@@ -48,6 +48,7 @@ namespace Darling.Tests;
     does not look, and this file is public. Their absence is load-bearing, not an oversight.
 */
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class FleetIdentifierScrubTests
 {
     /* Greek letters and role words -- nothing here names a real customer. pgmonitor is a role

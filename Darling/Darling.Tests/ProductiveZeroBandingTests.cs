@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// cry-wolf outcome #3754 drew its closed list to prevent. So the N boundary, the event collector and
 /// #3819's own class are each asserted to keep their EXISTING answers by name.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ProductiveZeroBandingTests
 {
     private static readonly DateTime Now = DateTime.UtcNow;
