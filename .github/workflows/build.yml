@@ -2611,6 +2611,7 @@ jobs:
               - 'Darling/Darling.Tests/StatementScrubCanary.cs'
               - 'Darling/Darling.Tests/GuardStageScanner.cs'
               - 'Darling/Darling.Tests/StaTestThread.cs'
+              - 'Darling/Darling.Tests/TimingTestScanner.cs'
       # How much of the Lite suite THIS leg runs, decided from the filter answers alone (no build needed):
       #   full  - a Lite, Lite.Tests, core or root path changed, or a Darling.Tests file that Lite.Tests
       #           compiles into itself, or the event is not a pull request (a push
