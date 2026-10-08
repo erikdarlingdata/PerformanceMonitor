@@ -123,11 +123,14 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
         await DarlingMcpTestData.RegisterServerAsync(c, ServerIdC, ServerNameC, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, ServerIdD, ServerNameD, ct);
 
-        /* Server A, latest snapshot at today's midnight. The 7-day point is the newest snapshot at or before now-7d (anchor-8d);
-           anchor-6d is a decoy that is newer than that cutoff and must be ignored. The 30-day point is anchor-31d, decoy anchor-29d. */
+        /* Server A, latest snapshot at today's midnight. A baseline is the snapshot NEAREST its mark (now-7d, now-30d) and within a day
+           of it. The marks sit at anchor-7d and anchor-30d plus the time of day, so anchor-7d and anchor-30d are the only offsets within
+           that day at every hour (the live Storage Growth view tests seed 7.5 and 30.5 days back relative to the real clock and assert
+           the exact rate over the real span). The decoys, anchor-5d and anchor-27d, are more than a day from either mark at every hour
+           and must be ignored. */
         var latest = anchor;
-        var p7 = anchor.AddDays(-8);
-        var p30 = anchor.AddDays(-31);
+        var p7 = anchor.AddDays(-7);
+        var p30 = anchor.AddDays(-30);
         await Size(c, ct, ServerIdA, ServerNameA, latest, "GrowAlpha", 1, 1000.5m);
         await Size(c, ct, ServerIdA, ServerNameA, latest, "GrowAlpha", 2, 250m);
         await Size(c, ct, ServerIdA, ServerNameA, latest, "GrowBeta", 1, 800m);
@@ -146,8 +149,8 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
         await Size(c, ct, ServerIdA, ServerNameA, p30, "GrowAlpha", 2, 100m);
         await Size(c, ct, ServerIdA, ServerNameA, p30, "TieDelta", 1, 300m);
         await Size(c, ct, ServerIdA, ServerNameA, p30, "TieEpsilon", 1, 300m);
-        await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-6), "GrowAlpha", 1, 99999m);
-        await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-29), "GrowAlpha", 1, 88888m);
+        await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-5), "GrowAlpha", 1, 99999m);
+        await Size(c, ct, ServerIdA, ServerNameA, anchor.AddDays(-27), "GrowAlpha", 1, 88888m);
 
         /* Azure sibling database on server A: one whole-database row per snapshot (file_id NULL, file_name = the sibling name),
            so HasSiblingRow is true. The p30 row is an old-shape row (no used_size_mb); ExcludePreFixRows drops it, so the
