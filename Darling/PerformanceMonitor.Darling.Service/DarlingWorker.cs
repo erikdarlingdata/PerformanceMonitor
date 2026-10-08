@@ -1418,7 +1418,7 @@ LIMIT 1";
         _launchMemoryGuard = LaunchMemoryGuard.CreateDefault(logger);
 
         /* #5592: the retention drain's "is collection behind" read, built from the fleet gate's own counts. */
-        _collectionPressure = new CollectionPressure(_fleetGateStats, static () => DateTime.UtcNow, DateTime.UtcNow);
+        _collectionPressure = new CollectionPressure(_fleetGateStats);
     }
 
     /* #5592: the retention drain's pressure read (see CollectionPressure). */
@@ -3428,6 +3428,10 @@ LIMIT 1";
 
         /* #5479: true from a pass that the memory launch guard held off until the first pass that launches bodies again. */
         var heldSinceLastLaunch = false;
+
+        /* #5595: the retention drain's settle window starts here, where the loop starts collecting, not when the worker
+           was built: the store retries and migrations before this point can take minutes. */
+        _collectionPressure.MarkCollectionStarted();
 
         while (!stoppingToken.IsCancellationRequested)
         {

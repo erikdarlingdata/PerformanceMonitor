@@ -168,6 +168,87 @@ public sealed class RetentionCollectionYieldTests
         Assert.Equal(1, table.Batches);
     }
 
+    /// <summary>One table's purge the way <c>PurgeOneAsync</c> does it: the entry check, the drain, then the table's record.</summary>
+    private static async Task<int> PurgeLikeTheSweep(RetentionCollectionYield gate, FakeTable table, string name, CancellationToken cancellationToken)
+    {
+        if (gate.SkipTableOnBudget(name))
+        {
+            return 0;
+        }
+
+        var drained = await Drain(table, PacerCarrying(gate), cancellationToken);
+        gate.FinishTable(name, drained);
+        return drained;
+    }
+
+    [Fact]
+    public async Task Pass_UnderASignalThatAlwaysReadsBehind_StillGivesEveryTableItsBatches_AndTheWaitsStopAtHalfTheBudget()
+    {
+        /* #5595 H1: 40 tables of one batch each, a signal that never clears, the real 30-minute budget. Uncapped, each
+           table's first batch waits 300 s and the pass starts 6 tables. Capped, the waits stop at 900 s (half the budget)
+           and the rest of the pass keeps only the pauses. */
+        var time = new FakeTime();
+        var gate = GateOn(time, new ScriptedPressure("behind"));
+        var tables = Enumerable.Range(0, 40).Select(_ => new FakeTable(time, rows: 50)).ToList();
+
+        for (var i = 0; i < tables.Count; i++)
+        {
+            await PurgeLikeTheSweep(gate, tables[i], "t" + i, TestContext.Current.CancellationToken);
+        }
+
+        Assert.All(tables, t => Assert.Equal(1, t.Batches));
+        Assert.All(tables, t => Assert.Equal(0, t.Rows));
+        Assert.False(gate.StoppedOnBudget);
+        Assert.Equal(0, gate.TablesNotReached);
+        Assert.Equal(900, gate.TotalWaitSeconds);
+        Assert.Equal(180, time.Events.Count(e => e == "w"));
+        Assert.True(gate.WaitsCapped);
+
+        /* After the cap there is no wait at all, only batch and pause. */
+        var lastWait = time.Events.FindLastIndex(e => e == "w");
+        Assert.All(time.Events.Skip(lastWait + 1), e => Assert.NotEqual("w", e));
+        Assert.Equal(40, gate.TotalPauseSeconds);
+    }
+
+    [Fact]
+    public async Task Pass_TheCapCutsAWaitShort_WhenTheTotalReachesHalfTheBudgetInTheMiddleOfOne()
+    {
+        /* A 700 s budget caps the waits at 350 s: the first table waits its 300 s, the second only 50 s of its 300, and
+           the third none. */
+        var time = new FakeTime();
+        var gate = GateOn(time, new ScriptedPressure("behind"), budgetSeconds: 700);
+        var tables = Enumerable.Range(0, 3).Select(_ => new FakeTable(time, rows: 50)).ToList();
+
+        for (var i = 0; i < tables.Count; i++)
+        {
+            await PurgeLikeTheSweep(gate, tables[i], "t" + i, TestContext.Current.CancellationToken);
+        }
+
+        Assert.All(tables, t => Assert.Equal(1, t.Batches));
+        Assert.Equal(350, gate.WaitCapSeconds);
+        Assert.Equal(350, gate.TotalWaitSeconds);
+        Assert.Equal(70, time.Events.Count(e => e == "w"));
+    }
+
+    [Fact]
+    public async Task Pass_SaysOncePerPassThatItStoppedWaiting()
+    {
+        var time = new FakeTime();
+        var log = new CapturingTestLogger();
+        var gate = new RetentionCollectionYield(
+            new ScriptedPressure("behind"), TimeSpan.FromSeconds(1_800), log, time.Delay, time.Clock, RetentionCollectionYield.PauseFactor);
+
+        for (var i = 0; i < 10; i++)
+        {
+            await PurgeLikeTheSweep(gate, new FakeTable(time, rows: 50), "t" + i, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(1, log.Lines.Count(l => l.Contains("stops waiting and keeps only the pause", StringComparison.Ordinal)));
+        var note = gate.Describe();
+        Assert.NotNull(note);
+        Assert.Contains("stopped waiting at 15 minutes, half the time budget", note, StringComparison.Ordinal);
+    }
+
     /* ---- rule 2: after each batch, pause for the batch's own run time ---- */
 
     [Fact]
@@ -213,31 +294,96 @@ public sealed class RetentionCollectionYieldTests
     [Fact]
     public async Task Drain_ThePauseIsBeforeTheWalWait_SoTheTwoOverlap()
     {
-        /* The WAL pacer refills by elapsed time, so a pause taken before its wait is time its bucket already refilled:
-           the order has to be batch, pause, WAL wait. A 4 MiB/s pacer, a 100 MiB batch: the bucket (40 MiB) is 60 MiB
-           in debt, a 15 s wait. */
-        var time = new FakeTime();
-        var pacer = new RetentionWalPacer(
-            rateBytesPerSecond: 4 * 1_048_576,
-            delay: (wait, _) => { time.Events.Add("wal"); time.Now += wait.TotalSeconds; return Task.CompletedTask; },
-            secondsClock: time.Clock)
+        /* The WAL pacer refills by elapsed time, so a pause taken before its wait is time its bucket already refilled.
+           A 4 MiB/s pacer whose bucket (40 MiB) is already spent, then a 3 s batch that writes 24 MiB: the batch alone
+           leaves a 12 MiB debt after its own 3 s of refill, a 3 s wait. With the 3 s pause before the wait the refill is
+           24 MiB, so the debt is gone and the pacer waits 0 s: the pause absorbed the wait instead of adding to it. */
+        const long MiB = 1_048_576;
+        async Task<(double WalWait, List<string> Events)> Run(bool withPause)
         {
-            Yield = GateOn(time, new ScriptedPressure(null)),
-        };
-
-        var deleted = await DarlingRetention.DrainBatchesAsync(
-            ct =>
+            var time = new FakeTime();
+            var pacer = new RetentionWalPacer(
+                rateBytesPerSecond: 4 * MiB,
+                delay: (wait, _) => { time.Events.Add("wal"); time.Now += wait.TotalSeconds; return Task.CompletedTask; },
+                secondsClock: time.Clock);
+            if (withPause)
             {
-                time.Events.Add("b");
-                time.Now += 3;
-                return Task.FromResult((10, 100, 100L * 1_048_576));
-            },
-            pacer,
-            TestContext.Current.CancellationToken);
+                pacer.Yield = GateOn(time, new ScriptedPressure(null));
+            }
 
-        Assert.Equal(10, deleted);
-        Assert.Equal(new[] { "b", "p", "wal" }, time.Events);
-        Assert.Equal(15, pacer.TotalWaitSeconds);
+            await pacer.AfterBatchAsync(40 * MiB, TestContext.Current.CancellationToken);
+            var spentWait = pacer.TotalWaitSeconds;
+            var deleted = await DarlingRetention.DrainBatchesAsync(
+                ct =>
+                {
+                    time.Events.Add("b");
+                    time.Now += 3;
+                    return Task.FromResult((10, 100, 24 * MiB));
+                },
+                pacer,
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(10, deleted);
+            return (pacer.TotalWaitSeconds - spentWait, time.Events);
+        }
+
+        var without = await Run(withPause: false);
+        Assert.Equal(3, without.WalWait);
+        Assert.Equal(new[] { "b", "wal" }, without.Events);
+
+        var with = await Run(withPause: true);
+        Assert.Equal(0, with.WalWait);
+        Assert.Equal(new[] { "b", "p" }, with.Events);
+    }
+
+    [Fact]
+    public async Task Drain_ABatchThatThrowsStillGetsItsPause_ThenTheErrorReachesTheCaller()
+    {
+        var time = new FakeTime();
+        var gate = GateOn(time, new ScriptedPressure(null));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => DarlingRetention.DrainBatchesAsync(
+            ct => { time.Events.Add("b"); time.Now += 3; throw new InvalidOperationException("statement timeout"); },
+            PacerCarrying(gate),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(new[] { "b", "p" }, time.Events);
+        Assert.Equal(3, gate.TotalPauseSeconds);
+    }
+
+    [Fact]
+    public async Task Drain_CancellationDuringThePauseEndsTheDrain()
+    {
+        var time = new FakeTime();
+        var gate = GateOn(time, new ScriptedPressure(null));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var batches = 0;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingRetention.DrainBatchesAsync(
+            ct => { batches++; time.Events.Add("b"); time.Now += 3; cts.Cancel(); return Task.FromResult((100, 100, 0L)); },
+            PacerCarrying(gate),
+            cts.Token));
+
+        /* The pause's delay saw the cancelled token: no pause was taken and no second batch ran. */
+        Assert.Equal(1, batches);
+        Assert.Equal(new[] { "b" }, time.Events);
+        Assert.Equal(0, gate.TotalPauseSeconds);
+    }
+
+    [Fact]
+    public async Task Drain_ABatchThatThrowsOnACancelledTokenGetsNoPause()
+    {
+        var time = new FakeTime();
+        var gate = GateOn(time, new ScriptedPressure(null));
+        using var cts = new CancellationTokenSource();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingRetention.DrainBatchesAsync(
+            ct => { cts.Cancel(); ct.ThrowIfCancellationRequested(); return Task.FromResult((0, 100, 0L)); },
+            PacerCarrying(gate),
+            cts.Token));
+
+        Assert.Equal(0, gate.TotalPauseSeconds);
+        Assert.Empty(time.Events);
     }
 
     /* ---- rule 3: a wall budget per pass ---- */
@@ -273,17 +419,20 @@ public sealed class RetentionCollectionYieldTests
     public async Task Drain_TimeSpentWaitingCountsAgainstTheBudget()
     {
         var time = new FakeTime();
+        /* A 60 s budget: the wait before the first batch is capped at half of it (30 s), then each batch is 10 s plus a
+           10 s pause. Without the wait three batches would start (at 0, 20 and 40 s); with it the second starts at 50 s
+           and the third never does. */
         var gate = GateOn(time, new ScriptedPressure("behind"), budgetSeconds: 60);
-        var table = new FakeTable(time, rows: 500);
+        var table = new FakeTable(time, rows: 1_000, cap: 100, batchSeconds: 10);
 
         var deleted = await Drain(table, PacerCarrying(gate), TestContext.Current.CancellationToken);
         gate.FinishTable("t", deleted);
 
-        Assert.Equal(0, deleted);
-        Assert.Equal(0, table.Batches);
-        Assert.Equal(60, gate.TotalWaitSeconds);
+        Assert.Equal(200, deleted);
+        Assert.Equal(2, table.Batches);
+        Assert.Equal(30, gate.TotalWaitSeconds);
         Assert.True(gate.StoppedOnBudget);
-        Assert.Equal(1, gate.TablesNotReached);
+        Assert.Equal(0, gate.TablesNotReached);
     }
 
     [Fact]
@@ -315,6 +464,45 @@ public sealed class RetentionCollectionYieldTests
         Assert.True(gate.StoppedOnBudget);
         Assert.Equal("first-skipped", gate.FirstStoppedTable);
         Assert.Equal(2, gate.TablesNotReached);
+    }
+
+    [Fact]
+    public async Task Describe_AStopAtATablesEntryReadsBefore_NotIn_AndAStopInsideATableReadsIn()
+    {
+        /* #5595 L1: the budget runs out during table A's last batch, A ends normally, and B is the first table the pass
+           never started. The record must not say the pass stopped "in" B. */
+        var time = new FakeTime();
+        var gate = GateOn(time, new ScriptedPressure(null), budgetSeconds: 20);
+        await PurgeLikeTheSweep(gate, new FakeTable(time, rows: 50, batchSeconds: 25), "table_a", TestContext.Current.CancellationToken);
+        await PurgeLikeTheSweep(gate, new FakeTable(time, rows: 50), "table_b", TestContext.Current.CancellationToken);
+        await PurgeLikeTheSweep(gate, new FakeTable(time, rows: 50), "table_c", TestContext.Current.CancellationToken);
+
+        Assert.Equal("before table_b", gate.StoppedPlace);
+        Assert.Equal(2, gate.TablesNotReached);
+        Assert.Contains("time budget before table_b, with 2 table(s) not reached", gate.Describe(), StringComparison.Ordinal);
+
+        /* Stopped part-way through a table: "in". */
+        var time2 = new FakeTime();
+        var gate2 = GateOn(time2, new ScriptedPressure(null), budgetSeconds: 20);
+        await PurgeLikeTheSweep(gate2, new FakeTable(time2, rows: 1_000, batchSeconds: 25), "table_x", TestContext.Current.CancellationToken);
+        Assert.Equal("in table_x", gate2.StoppedPlace);
+        Assert.Contains("time budget in table_x", gate2.Describe(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Describe_APassThatOnlyPausedReadsAsBefore_AndAPassThatWaitedSaysSo()
+    {
+        /* #5595 L2: the pause after a batch happens on every paced pass; it is not pressure and does not write the sentence. */
+        var time = new FakeTime();
+        var calm = GateOn(time, new ScriptedPressure(null));
+        await PurgeLikeTheSweep(calm, new FakeTable(time, rows: 250, batchSeconds: 2), "t", TestContext.Current.CancellationToken);
+        Assert.True(calm.TotalPauseSeconds > 0);
+        Assert.Null(calm.Describe());
+
+        var time2 = new FakeTime();
+        var pushed = GateOn(time2, new ScriptedPressure(null, "behind", "behind"));
+        await PurgeLikeTheSweep(pushed, new FakeTable(time2, rows: 50), "t", TestContext.Current.CancellationToken);
+        Assert.Contains("yielded to collection: waited 10 s while it was behind, paused 1 s between batches", pushed.Describe(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -424,24 +612,75 @@ public sealed class RetentionCollectionYieldTests
     /* ---- the real signal ---- */
 
     [Fact]
-    public void Pressure_CollectionIsSettlingForTheFirstTenMinutesAfterStart()
+    public void Pressure_CollectionIsSettlingForTheFirstTenMinutesAfterCollectionStarts()
     {
-        var start = new DateTime(2026, 10, 8, 19, 14, 57, DateTimeKind.Utc);
-        var now = start.AddSeconds(5);
-        var pressure = new CollectionPressure(stats: null, () => now, start);
+        double seconds = 100_000;
+        var pressure = new CollectionPressure(stats: null, () => seconds);
+        pressure.MarkCollectionStarted();
 
+        seconds += 5;
         Assert.Contains("still settling", pressure.BehindReason(), StringComparison.Ordinal);
 
-        now = start + CollectionPressure.SettleWindow - TimeSpan.FromSeconds(1);
+        seconds = 100_000 + CollectionPressure.SettleWindow.TotalSeconds - 1;
         Assert.NotNull(pressure.BehindReason());
 
-        now = start + CollectionPressure.SettleWindow;
+        seconds = 100_000 + CollectionPressure.SettleWindow.TotalSeconds;
         Assert.Null(pressure.BehindReason());
         Assert.Equal(TimeSpan.FromMinutes(10), CollectionPressure.SettleWindow);
+
+        /* The first mark wins: a second call does not restart the window. */
+        pressure.MarkCollectionStarted();
+        Assert.Null(pressure.BehindReason());
+    }
+
+    [Fact]
+    public void Pressure_TheSettleWindowStartsAtTheMark_NotWhenThePressureWasBuilt()
+    {
+        /* #5595 M2: the worker is built, then the store retries and migrations take 25 minutes, then the loop starts
+           collecting. The window runs from the loop's start, not the construction. Until then it reads settling. */
+        double seconds = 0;
+        var pressure = new CollectionPressure(stats: null, () => seconds);
+
+        seconds = 1_500;
+        Assert.Contains("has not started", pressure.BehindReason(), StringComparison.Ordinal);
+
+        pressure.MarkCollectionStarted();
+        seconds = 1_500 + 599;
+        Assert.Contains("still settling", pressure.BehindReason(), StringComparison.Ordinal);
+
+        seconds = 1_500 + 600;
+        Assert.Null(pressure.BehindReason());
+    }
+
+    [Fact]
+    public void Pressure_TheSettleClockIsMonotonic_AndTheWorkerMarksTheStartWhereTheLoopBegins()
+    {
+        /* No wall clock in the pressure read: a backward step of the clock must not hold the drain, so it carries no DateTime. */
+        var pressureSource = ReadSource("RetentionCollectionYield.cs");
+        Assert.DoesNotContain("DateTime", pressureSource, StringComparison.Ordinal);
+
+        var worker = ReadWorkerSource().Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(worker, "_collectionPressure.MarkCollectionStarted();"));
+        Assert.Equal(1, CountOf(worker, "new CollectionPressure(_fleetGateStats);"));
+        var loopStarted = worker.IndexOf("PerformanceMonitor Darling collection loop started", StringComparison.Ordinal);
+        var mark = worker.IndexOf("_collectionPressure.MarkCollectionStarted();", StringComparison.Ordinal);
+        var loop = worker.IndexOf("while (!stoppingToken.IsCancellationRequested)", mark, StringComparison.Ordinal);
+        Assert.True(loopStarted > 0 && mark > loopStarted && loop > mark, "the mark must sit between the loop's start log and the sweep loop");
+        Assert.DoesNotContain("while (", worker[mark..loop], StringComparison.Ordinal);
     }
 
     /// <summary>The start of the fake hour: well past the settle window, on a half-minute so a minute never straddles a read.</summary>
     private static readonly DateTime HourStart = new(2026, 10, 8, 10, 0, 30, DateTimeKind.Utc);
+
+    /// <summary>A pressure read whose collection started two hours ago, so the settle window is long over.</summary>
+    private static CollectionPressure Settled(FleetGateStats? stats)
+    {
+        var seconds = 0.0;
+        var pressure = new CollectionPressure(stats, () => seconds);
+        pressure.MarkCollectionStarted();
+        seconds = 7_200;
+        return pressure;
+    }
 
     /// <summary>
     /// Plays one hour a minute at a time and re-checks the signal once a minute (the drain re-checks every 5 s, so
@@ -452,7 +691,7 @@ public sealed class RetentionCollectionYieldTests
     {
         var now = HourStart;
         var stats = new FleetGateStats(() => now);
-        var pressure = new CollectionPressure(stats, () => now, HourStart.AddHours(-2));
+        var pressure = Settled(stats);
         var behind = 0;
         for (var minute = 0; minute < 60; minute++)
         {
@@ -520,8 +759,9 @@ public sealed class RetentionCollectionYieldTests
     [InlineData(194, 6, true)]    /* 6 of 200 = 3% */
     [InlineData(203, 5, false)]   /* 5 of 208 = 2.4%: at the field's rate the share, not the minimum, decides */
     [InlineData(202, 6, true)]    /* 6 of 208 = 2.88% */
-    [InlineData(16, 4, false)]    /* 4 of 20 = 20%: a big share of a thin window, but under the 5-slot minimum */
-    [InlineData(15, 5, true)]     /* 5 of 20 = 25%: at the minimum */
+    [InlineData(18, 2, false)]    /* 2 of 20 = 10%: a big share of a thin window, but under the 3-slot minimum */
+    [InlineData(17, 3, true)]     /* 3 of 20 = 15%: at the minimum */
+    [InlineData(16, 4, true)]     /* 4 of 20 = 20% */
     [InlineData(0, 0, false)]     /* nothing due */
     public void IsBehind_NeedsTheMinimumCountAndTheShare(long run, long skipped, bool expected)
     {
@@ -529,11 +769,26 @@ public sealed class RetentionCollectionYieldTests
     }
 
     [Fact]
+    public void Pressure_ASustainedRateJustUnderTheMinimum_NeverHoldsTheDrain_AndStaysUnderTheAlert()
+    {
+        /* A thin fleet (2 slots a minute, 20 in a window) with (minimum - 1) = 2 skipped slots landing in each of the
+           hour's six 10-minute windows: never behind, and the hour's total (12) is under the alert's minimum. One more
+           slot in a window holds the drain. */
+        var justUnder = PlayHour(_ => 2, minute => minute % 10 == 0 ? (int)(CollectionPressure.SkipMinCount - 1) : 0, out var hour);
+        Assert.Equal(0, justUnder);
+        Assert.Equal(6 * (CollectionPressure.SkipMinCount - 1), hour.Skipped);
+        Assert.True(hour.Skipped < DarlingSelfAlertEvaluator.FleetGateBehindMinSkipped);
+
+        var atMinimum = PlayHour(_ => 2, minute => minute % 10 == 0 ? (int)CollectionPressure.SkipMinCount : 0, out _);
+        Assert.True(atMinimum > 0);
+    }
+
+    [Fact]
     public void Pressure_TheSkippedSlotsAgeOutOfTheWindowAfterTenMinutes()
     {
         var now = HourStart;
         var stats = new FleetGateStats(() => now);
-        var pressure = new CollectionPressure(stats, () => now, HourStart.AddHours(-2));
+        var pressure = Settled(stats);
         for (var i = 0; i < 200; i++)
         {
             stats.RecordSlot(0);
@@ -555,19 +810,29 @@ public sealed class RetentionCollectionYieldTests
     [Fact]
     public void Pressure_AWorkerBuiltWithoutStatsReadsNoSkips()
     {
-        var now = HourStart;
-        Assert.Null(new CollectionPressure(stats: null, () => now, HourStart.AddHours(-2)).BehindReason());
+        Assert.Null(Settled(stats: null).BehindReason());
     }
 
     [Fact]
     public void Pressure_TheConstantsAreTheDocumentedOnes()
     {
         Assert.Equal(10, CollectionPressure.SkipWindowMinutes);
-        Assert.Equal(5, CollectionPressure.SkipMinCount);
+        Assert.Equal(3, CollectionPressure.SkipMinCount);
         /* Half the alert's 5%: the drain backs off before the hour reaches the alert. */
         Assert.Equal(25, CollectionPressure.SkipSharePerMille);
         Assert.Equal(DarlingSelfAlertEvaluator.FleetGateBehindPercent * 10 / 2, CollectionPressure.SkipSharePerMille);
-        Assert.True(CollectionPressure.SkipMinCount < DarlingSelfAlertEvaluator.FleetGateBehindMinSkipped);
+        /* #5595 M1: the alert's 60 buckets are six disjoint windows. A drain held just under the minimum lets
+           (minimum - 1) slots skip per window, plus one slot of slop between reads: that hour must stay under the alert's
+           minimum, and the next minimum up must not (so 3 is the largest). */
+        var windowsPerHour = 60 / CollectionPressure.SkipWindowMinutes;
+        Assert.Equal(6, windowsPerHour);
+        Assert.True(
+            (CollectionPressure.SkipMinCount - 1 + 1) * windowsPerHour < DarlingSelfAlertEvaluator.FleetGateBehindMinSkipped,
+            "the worst hour a drain held just under the minimum can sustain must stay under the alert's minimum");
+        Assert.True(
+            (CollectionPressure.SkipMinCount + 1) * windowsPerHour >= DarlingSelfAlertEvaluator.FleetGateBehindMinSkipped,
+            "the minimum is the largest that stays under the alert's");
+        Assert.Equal(0.5, RetentionCollectionYield.WaitBudgetFraction);
         /* One wait is half the window: a burst can hold the signal for the whole window, but a batch goes every 5 minutes. */
         Assert.Equal(300, RetentionCollectionYield.MaxWaitSeconds);
         Assert.Equal(CollectionPressure.SkipWindowMinutes * 60 / 2, RetentionCollectionYield.MaxWaitSeconds);

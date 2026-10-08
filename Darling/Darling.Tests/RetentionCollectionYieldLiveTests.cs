@@ -164,10 +164,15 @@ public sealed class RetentionCollectionYieldLiveTests
             retentionDaysFor: null, planContentRetentionDays: 0,
             paceWal: true, collectionPressure: new NeverBehind(), wallBudget: TimeSpan.Zero);
 
-        /* The caveats prune is a direct statement, not a paced batch, so the budget does not gate it. */
+        /* The caveats prune is a direct statement, not a paced batch, so the budget does not gate it. It is the one table
+           this pass purged: every gated table the spent budget kept from starting is taken back out of the count (#5595
+           L4: without that subtraction the count is the 80-odd tables the loop walked, and without the entry skip the
+           record would say the pass stopped "in" the first table instead of before it). */
         Assert.Equal(0, stopped.RowsDeleted);
         Assert.Equal((long)SeededRows, await MapRowsAsync(connection, ct));
-        Assert.Contains(log.Lines, l => l.Contains("Retention purge stopped at its", StringComparison.Ordinal));
+        Assert.Equal(1, stopped.TablesPurged);
+        Assert.Contains(log.Lines, l => l.Contains("Retention purge stopped at its", StringComparison.Ordinal)
+            && l.Contains("time budget before ", StringComparison.Ordinal));
 
         /* Unpaced: the same signal and budget are ignored, and the signal is never read. */
         var unpaced = await DarlingRetention.PurgeAsync(

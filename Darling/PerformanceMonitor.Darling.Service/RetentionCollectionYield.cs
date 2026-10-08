@@ -38,30 +38,46 @@ public interface ICollectionPressure
 /// on any body running 30 s. Measured on a large field store over a normal day, with the drain's own window left
 /// out, that read "behind" in 513 of 843 five-minute windows (61%): the hang rule (a body past
 /// <see cref="DarlingWorker.SweepWatchdogSeconds"/>, 60 s) warned 58 to 75 times a day, one per hang episode, each
-/// skipping a few slots, and a fleet's per-minute sum of collector run time passed 30 s in 22% of minutes (its p90 is
-/// 47.7 s). A drain that backs off for a normal day never gets its work done. The incident the rule has to stay loud
-/// on skipped 97 of 1,252 due slots in an hour (7.7%), which is about 16 of 208 in ten minutes.
-/// <para>The normal day's own hourly lines (3 days, full hours of 5,000 or more due slots, 90 hours): the share of
+/// skipping one slot of every one-minute collector the stalled body runs (about 19 on a default SQL Server target),
+/// and a fleet's per-minute sum of collector run time passed 30 s in 22% of minutes (its p90 is 47.7 s). A drain that
+/// backs off for a normal day never gets its work done. The incident's own line skipped 97 of 1,252 due slots (7.7%),
+/// but that is a short first line after a service start, not an hour: this store's full hours hold about 54,000 due
+/// slots (51,561 to 54,056), and its normal post-start lines with no drain running ran 6.8% to 24.1% (613 to 1,503 due
+/// slots). So the 7.7% does not show by itself that the drain caused the skips; the drain hour has to be compared with
+/// a normal post-start hour as well as a normal full hour.
+/// <para>The normal day's own hourly lines (3 days, full hours of about 54,000 due slots, 90 hours): the share of
 /// slots skipped was 0.00% at the median, 0.20% at the 90th percentile and 4.39% at the 99th, and one hour met the
-/// alert's rule; six more short lines right after a service start did (6.8% to 24.1% of 600 to 1,500 due), so a burst
+/// alert's rule; six more short lines right after a service start did (6.8% to 24.1% of 613 to 1,503 due), so a burst
 /// after a start is real, and the settle arm below covers it.</para>
 /// <list type="bullet">
 /// <item><description><b>Share, 2.5%</b>: half the alert's 5% (<c>DarlingSelfAlertEvaluator.FleetGateBehindPercent</c>),
 /// so the drain backs off before an hour reaches the alert, not after it has fired. It sits about 12 times over a normal
 /// hour's 0.20% (p90) and under the 5% line, so a normal day does not hold the drain and a bad hour does.</description></item>
 /// <item><description><b>Window, 10 minutes.</b> The stats keep whole minutes, so the read covers 9 to 10 minutes. A full
-/// hour on that fleet holds 5,000 or more due slots, so the window holds 800 or more and the share asks for about 20
-/// skipped slots there: a single hang episode (a few slots) cannot reach it, a sustained skip rate can. A shorter window
-/// would hold fewer slots and let the 5-slot minimum below decide; a longer one would average a burst away. Ten minutes is
-/// also the settle window below. At the incident's rate (about 208 due slots in ten minutes) the same share is 6 slots,
-/// and the incident's 16 is well over it.</description></item>
-/// <item><description><b>Minimum, 5 slots</b>: a quarter of the alert's 20 (the window is a sixth of the hour). It only
-/// matters on a small fleet, where 2.5% of a thin window is a fraction of one slot: a single hang (1 to 3 slots) is a
-/// hiccup and must not hold the drain.</description></item>
+/// hour on that fleet holds about 54,000 due slots, so the window holds about 9,000 and the share asks for about 225
+/// skipped slots there: a single hang episode (about 19 slots) cannot reach it, a sustained skip rate can. A shorter
+/// window would hold fewer slots and let the minimum below decide; a longer one would average a burst away. Ten minutes
+/// is also the settle window below. On a short line right after a start (1,252 due slots, about 208 in ten minutes) the
+/// same share is 6 slots, which is why the settle arm covers that period and the share takes over once it ends.</description></item>
+/// <item><description><b>Minimum, 3 slots.</b> It only matters on a small fleet, where 2.5% of a thin window is a
+/// fraction of one slot. The alert counts 20 skipped slots over 60 one-minute buckets, which is exactly six disjoint
+/// 10-minute windows. A drain held just under the minimum lets (minimum - 1) slots skip per window, and the signal is
+/// read only at batch boundaries, so about a slot more lands between reads: 6 x (3 - 1) = 12 an hour, 18 with one
+/// slot of slop per window, under the alert's 20. A minimum of 5 allowed 24 to 30 an hour, over it, and 4 gives 24 with
+/// the slop, so 3 is the largest that stays under at any fleet size. The minimum only binds when the hour holds fewer
+/// than about 720 due slots (0.025 x D / 6 &lt; 3), and the alert could only fire from that rate at 360 or fewer (18 is
+/// 5% of 360); a default SQL Server target alone is about 1,300 due slots an hour, so by the defaults no fleet is in
+/// that zone. The minimum is not what keeps a real hang from holding the drain: a stalled body skips one slot of each
+/// one-minute collector it runs (about 19), so on a small fleet one hang reads behind at any minimum from 3 up to 19.
+/// It only keeps a one- or two-slot blip from doing so.</description></item>
 /// </list>
 /// A wait from this arm lasts until the skips age out of the window (up to ten minutes), and the drain's own cap
-/// (<see cref="RetentionCollectionYield.MaxWaitSeconds"/>) lets one batch through every five.</description></item>
-/// <item><description><b>The service is still settling</b>: it started less than <see cref="SettleWindow"/> ago.
+/// (<see cref="RetentionCollectionYield.MaxWaitSeconds"/>) lets one batch through every five. A pass's waits together
+/// stop at half its budget (<see cref="RetentionCollectionYield.WaitBudgetFraction"/>).</description></item>
+/// <item><description><b>The service is still settling</b>: collection started less than <see cref="SettleWindow"/> ago.
+/// The clock starts when the sweep loop starts collecting (<see cref="MarkCollectionStarted"/>), after the store
+/// retries and migrations, and it is a monotonic clock, so neither a slow start nor a wall-clock step moves it. Until the
+/// loop has started the signal reads settling.
 /// The first collections after a start run heavy, and the share above cannot see them in their first minutes (the
 /// first bodies are spread over <see cref="DarlingWorker.ColdStartSpreadSeconds"/> seconds, then queue behind the
 /// gate, and a slot is only counted skipped when its run ends). The field store's first skips came 5 minutes after
@@ -80,8 +96,12 @@ internal sealed class CollectionPressure : ICollectionPressure
     /// <summary>The window skipped slots are counted over. The stats keep whole minutes, so this reads 9 to 10 minutes back.</summary>
     internal const int SkipWindowMinutes = 10;
 
-    /// <summary>The fewest skipped slots in the window that can count as behind, however large a share of a thin window they are.</summary>
-    internal const long SkipMinCount = 5;
+    /// <summary>
+    /// The fewest skipped slots in the window that can count as behind, however large a share of a thin window they are.
+    /// The largest value whose worst case stays under the alert's 20 an hour: 6 windows x (minimum - 1 + 1 slot of slop
+    /// between reads) = 18 at 3, 24 at 4 (see the type's remarks).
+    /// </summary>
+    internal const long SkipMinCount = 3;
 
     /// <summary>
     /// The share of due slots (ran plus skipped) that must be skipped, in thousandths: half the self-alert's percentage,
@@ -93,19 +113,25 @@ internal sealed class CollectionPressure : ICollectionPressure
     internal static readonly TimeSpan SettleWindow = TimeSpan.FromMinutes(10);
 
     private readonly FleetGateStats? _stats;
-    private readonly Func<DateTime> _utcNow;
-    private readonly DateTime _startedUtc;
+    private readonly Func<double> _secondsClock;
+    private long _startedBits = NotStarted;
+
+    private static readonly long NotStarted = BitConverter.DoubleToInt64Bits(double.NaN);
 
     /// <param name="stats">The fleet gate's counts; null reads no skipped slots (a worker built without them).</param>
-    /// <param name="utcNow">The clock, injected so a test does not wait.</param>
-    /// <param name="startedUtc">When the service started.</param>
-    internal CollectionPressure(FleetGateStats? stats, Func<DateTime> utcNow, DateTime startedUtc)
+    /// <param name="secondsClock">A monotonic clock in seconds, injected so a test does not wait; null takes the stopwatch.</param>
+    internal CollectionPressure(FleetGateStats? stats, Func<double>? secondsClock = null)
     {
-        ArgumentNullException.ThrowIfNull(utcNow);
         _stats = stats;
-        _utcNow = utcNow;
-        _startedUtc = startedUtc;
+        _secondsClock = secondsClock ?? (() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency);
     }
+
+    /// <summary>
+    /// Stamps the start of the settle window: called when the sweep loop starts collecting (#5595), not when the worker
+    /// is built, because the store retries and migrations before the loop can take minutes. The first call wins.
+    /// </summary>
+    internal void MarkCollectionStarted() =>
+        Interlocked.CompareExchange(ref _startedBits, BitConverter.DoubleToInt64Bits(_secondsClock()), NotStarted);
 
     /// <summary>The test: at least <see cref="SkipMinCount"/> skipped AND at least <see cref="SkipSharePerMille"/> thousandths of the due slots.</summary>
     internal static bool IsBehind(long run, long skipped) =>
@@ -114,12 +140,18 @@ internal sealed class CollectionPressure : ICollectionPressure
     /// <inheritdoc />
     public string? BehindReason()
     {
-        var sinceStart = _utcNow() - _startedUtc;
-        if (sinceStart < SettleWindow)
+        var started = BitConverter.Int64BitsToDouble(Interlocked.Read(ref _startedBits));
+        if (double.IsNaN(started))
+        {
+            return "collection has not started yet";
+        }
+
+        var sinceStart = _secondsClock() - started;
+        if (sinceStart < SettleWindow.TotalSeconds)
         {
             return string.Create(
                 CultureInfo.InvariantCulture,
-                $"the service started {Math.Max(0, sinceStart.TotalSeconds):F0} s ago and collection is still settling");
+                $"collection started {Math.Max(0, sinceStart):F0} s ago and is still settling");
         }
 
         var (run, skipped) = _stats?.SlotsInLastMinutes(SkipWindowMinutes) ?? (0, 0);
@@ -141,17 +173,21 @@ internal sealed class CollectionPressure : ICollectionPressure
 /// it is applied and no call site passes anything new.
 ///
 /// <para>The cause it answers: the first drain after the 3.10 upgrade paced only its WAL. The field store's drain
-/// deleted 18,007,201 rows in 40 minutes while collection skipped 97 of 1,252 due slots in the hour (7.7%, past the
-/// self-alert's 5%), nine servers' bodies ran past 60 s, and the Query Store collector's 95th percentile went from 13.1 s
-/// to 20.0 s. The WAL pacer does not bound the reads and index work each batch does, and those compete with the
-/// collectors' writes.</para>
+/// deleted 18,007,201 rows in 40 minutes while collection skipped 97 of 1,252 due slots on its first line after the
+/// start (7.7%; a short line, not an hour, see <see cref="CollectionPressure"/>), nine servers' bodies ran past 60 s, and
+/// the Query Store collector's 95th percentile went from 13.1 s to 20.0 s. The WAL pacer does not bound the reads and
+/// index work each batch does, and those compete with the collectors' writes.</para>
 ///
 /// <para>Three rules, all of them cheap and all of them pure over the injected signal, clock and delay:</para>
 /// <list type="number">
 /// <item><description><b>Before each batch</b>, wait while collection is behind
 /// (<see cref="ICollectionPressure"/>), re-checking every <see cref="RecheckSeconds"/>. One wait is bounded by
 /// <see cref="MaxWaitSeconds"/>, so a fleet that is behind for its own reasons still sees one batch go through every
-/// few minutes instead of a drain that never moves.</description></item>
+/// few minutes instead of a drain that never moves. A pass's waits together stop at half its budget
+/// (<see cref="WaitBudgetFraction"/>); after that the drain keeps only the pause below. Without that cap a pass that is
+/// behind the whole time spends 300 s before the first batch of every table and starts only about 6 of the 80-odd, the
+/// same ones every day. The first batch of a table is not exempt: the field's relaunch skips came while the drain was
+/// on the small tables, where each table needs one batch.</description></item>
 /// <item><description><b>After each batch</b>, pause for the batch's own run time times <see cref="PauseFactor"/>
 /// (1, so the drain deletes at most half the time), at most <see cref="MaxPauseSeconds"/>. It comes before the WAL
 /// pacer's wait, and that wait refills by elapsed time, so the two overlap and do not add.</description></item>
@@ -173,6 +209,12 @@ internal sealed class RetentionCollectionYield
     /// </summary>
     internal const double MaxWaitSeconds = 300;
 
+    /// <summary>
+    /// The share of a pass's wall budget its waits may use in all (#5595). Once the waits reach it the pass stops waiting
+    /// and keeps only the pause after each batch, so a fleet that stays behind still walks every table.
+    /// </summary>
+    internal const double WaitBudgetFraction = 0.5;
+
     /// <summary>The pause after a batch, as a multiple of the batch's own run time. 1 means the drain deletes at most half the time.</summary>
     internal const double PauseFactor = 1.0;
 
@@ -188,9 +230,12 @@ internal sealed class RetentionCollectionYield
     /// batches and pauses. A wait only happens while collection is behind. On a normal day that is a few percent of the
     /// time (1 of 90 full hours met the alert's rule, and the share rule is behind for at most the 10 minutes after
     /// the skips that trip it; the six post-start bursts are the settle window's), so take 5%: a pass gets
-    /// 30 x (1 - 0.05) = 28.5 minutes of work and the first drain takes 58 / 28.5 = 2.0 to 80 / 28.5 = 2.8, so 3 daily
-    /// passes, 4 when collection pushes back. It would take more than 7 only if collection were behind more than 62%
-    /// of the time (1 - 80 / (7 x 30)), so the pass has no floor on its waits.
+    /// 30 x (1 - 0.05) = 28.5 minutes of work. The daily purge launches on the sweep loop's first tick, inside the settle
+    /// window, so the first pass after a start spends its first 10 minutes on two 300 s waits and gets about 20 minutes of
+    /// work. The first drain then takes (58 - 20) / 28.5 + 1 = 2.3 to (80 - 20) / 28.5 + 1 = 3.1 passes: 3 daily passes,
+    /// 4 when collection pushes back. The waits are capped at half the budget (<see cref="WaitBudgetFraction"/>), so even a
+    /// pass that is behind from start to end keeps 15 minutes of work and the drain takes at most 80 / 15 = 5.3, so 6,
+    /// passes, instead of starting the same few tables every day.
     /// </summary>
     internal static readonly TimeSpan DefaultWallBudget = TimeSpan.FromMinutes(30);
 
@@ -201,7 +246,9 @@ internal sealed class RetentionCollectionYield
     private readonly double _pauseFactor;
     private readonly double _startSeconds;
     private bool _loggedFirstWait;
+    private bool _loggedWaitCap;
     private bool _stopPending;
+    private bool _firstStopWasEntrySkip;
 
     internal RetentionCollectionYield(
         ICollectionPressure pressure,
@@ -233,8 +280,22 @@ internal sealed class RetentionCollectionYield
     /// <summary>True once any table's drain stopped, or was never started, because the budget was spent.</summary>
     internal bool StoppedOnBudget { get; private set; }
 
-    /// <summary>The first table the budget stopped, or null.</summary>
+    /// <summary>The first table the budget stopped, or never let start, or null.</summary>
     internal string? FirstStoppedTable { get; private set; }
+
+    /// <summary>
+    /// Where the pass stopped, for the run record and the log: "in &lt;table&gt;" when the budget ran out inside that table's
+    /// drain, "before &lt;table&gt;" when it was already spent at the table's entry and the table was never started (#5595).
+    /// Null when the pass did not stop.
+    /// </summary>
+    internal string? StoppedPlace =>
+        FirstStoppedTable is null ? null : (_firstStopWasEntrySkip ? "before " : "in ") + FirstStoppedTable;
+
+    /// <summary>The most the waits may add up to in one pass: <see cref="WaitBudgetFraction"/> of the wall budget.</summary>
+    internal double WaitCapSeconds => WallBudget.TotalSeconds * WaitBudgetFraction;
+
+    /// <summary>True once this pass's waits have reached <see cref="WaitCapSeconds"/>: from then on it only pauses.</summary>
+    internal bool WaitsCapped => TotalWaitSeconds >= WaitCapSeconds;
 
     /// <summary>Tables whose drain was never started because the budget was already spent.</summary>
     internal int TablesNotReached { get; private set; }
@@ -259,6 +320,13 @@ internal sealed class RetentionCollectionYield
             return false;
         }
 
+        /* #5595: the pass has waited as long as it may. Not even a table's first batch waits any more, so a pass that is
+           behind the whole time still reaches every table; the pause after each batch stays. */
+        if (WaitsCapped)
+        {
+            return true;
+        }
+
         var reason = _pressure.BehindReason();
         if (reason is null)
         {
@@ -279,7 +347,7 @@ internal sealed class RetentionCollectionYield
         var waited = 0.0;
         while (waited < MaxWaitSeconds)
         {
-            var wait = Math.Min(RecheckSeconds, MaxWaitSeconds - waited);
+            var wait = Math.Min(Math.Min(RecheckSeconds, MaxWaitSeconds - waited), WaitCapSeconds - TotalWaitSeconds);
             await _delay(TimeSpan.FromSeconds(wait), cancellationToken);
             waited += wait;
             TotalWaitSeconds += wait;
@@ -293,6 +361,19 @@ internal sealed class RetentionCollectionYield
             if (_pressure.BehindReason() is null)
             {
                 _logger?.LogDebug("Retention drain resumed after waiting {Seconds:F0} s for collection", waited);
+                return true;
+            }
+
+            if (WaitsCapped)
+            {
+                if (!_loggedWaitCap)
+                {
+                    _loggedWaitCap = true;
+                    _logger?.LogInformation(
+                        "Retention drain has waited {Seconds:F0} s for collection in this pass, half of its {Budget:F0}-minute budget; it stops waiting and keeps only the pause after each batch",
+                        TotalWaitSeconds, WallBudget.TotalMinutes);
+                }
+
                 return true;
             }
         }
@@ -342,7 +423,12 @@ internal sealed class RetentionCollectionYield
         }
 
         StoppedOnBudget = true;
-        FirstStoppedTable ??= tableName;
+        if (FirstStoppedTable is null)
+        {
+            FirstStoppedTable = tableName;
+            _firstStopWasEntrySkip = true;
+        }
+
         TablesNotReached++;
         return true;
     }
@@ -368,25 +454,36 @@ internal sealed class RetentionCollectionYield
     }
 
     /// <summary>
-    /// The sentence the run record and the log carry when the pass yielded to collection or stopped on its budget; null
-    /// when it did neither, so a pass that had no pressure reads exactly as before.
+    /// The sentence the run record and the log carry when the pass waited for collection or stopped on its budget; null
+    /// when it did neither, so a pass that had no pressure reads exactly as before. The ordinary pause between batches
+    /// happens on every paced pass and is not pressure, so on its own it adds nothing; it is named only when the sentence
+    /// is written for another reason.
     /// </summary>
     internal string? Describe()
     {
         var inv = CultureInfo.InvariantCulture;
-        if (!StoppedOnBudget && TotalWaitSeconds <= 0 && TotalPauseSeconds <= 0)
+        if (!StoppedOnBudget && TotalWaitSeconds <= 0)
         {
             return null;
         }
 
-        var text = string.Create(
-            inv,
-            $"yielded to collection: waited {TotalWaitSeconds:F0} s while it was behind, paused {TotalPauseSeconds:F0} s between batches");
+        var text = TotalWaitSeconds > 0
+            ? string.Create(
+                inv,
+                $"yielded to collection: waited {TotalWaitSeconds:F0} s while it was behind, paused {TotalPauseSeconds:F0} s between batches")
+            : string.Create(inv, $"paused {TotalPauseSeconds:F0} s between batches");
+        if (WaitsCapped)
+        {
+            text += string.Create(
+                inv,
+                $"; stopped waiting at {WaitCapSeconds / 60:F0} minutes, half the time budget, and kept only the pauses");
+        }
+
         if (StoppedOnBudget)
         {
             text += string.Create(
                 inv,
-                $"; stopped at its {WallBudget.TotalMinutes:F0}-minute time budget in {FirstStoppedTable}, with {TablesNotReached} table(s) not reached - the next pass continues from the rows left");
+                $"; stopped at its {WallBudget.TotalMinutes:F0}-minute time budget {StoppedPlace}, with {TablesNotReached} table(s) not reached - the next pass continues from the rows left");
         }
 
         return text;

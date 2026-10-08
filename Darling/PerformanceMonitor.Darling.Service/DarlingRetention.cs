@@ -1107,8 +1107,8 @@ public static class DarlingRetention
             if (yieldGate is { StoppedOnBudget: true })
             {
                 logger?.LogInformation(
-                    "Retention purge stopped at its {Budget:F0}-minute time budget in {Table} with {NotReached} table(s) not reached; the next pass continues from the rows left. Collection was waited for {WaitSeconds:F0} s and the drain paused {PauseSeconds:F0} s between batches",
-                    yieldGate.WallBudget.TotalMinutes, yieldGate.FirstStoppedTable, yieldGate.TablesNotReached,
+                    "Retention purge stopped at its {Budget:F0}-minute time budget {Place} with {NotReached} table(s) not reached; the next pass continues from the rows left. Collection was waited for {WaitSeconds:F0} s and the drain paused {PauseSeconds:F0} s between batches",
+                    yieldGate.WallBudget.TotalMinutes, yieldGate.StoppedPlace, yieldGate.TablesNotReached,
                     yieldGate.TotalWaitSeconds, yieldGate.TotalPauseSeconds);
             }
 
@@ -2054,7 +2054,20 @@ public static class DarlingRetention
                 batchStarted = yield.NowSeconds;
             }
 
-            var (deleted, cap, walBytes) = await executeBatch(cancellationToken);
+            int deleted, cap;
+            long walBytes;
+            try
+            {
+                (deleted, cap, walBytes) = await executeBatch(cancellationToken);
+            }
+            catch (Exception) when (yield is not null && !cancellationToken.IsCancellationRequested)
+            {
+                /* #5595: a batch that throws (a timeout under heavy I/O) was the heaviest one of all. Give the pause
+                   its turn before the error reaches the caller, whose next table would otherwise start at once. */
+                await yield.AfterBatchAsync(batchStarted, cancellationToken);
+                throw;
+            }
+
             totalDeleted += deleted;
 
             if (yield is not null)
