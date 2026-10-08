@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// here, because each guards a security boundary, an upgrade path or a shared path.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class SlowClassCensusTests
 {
     private const string Darling = "darling";
