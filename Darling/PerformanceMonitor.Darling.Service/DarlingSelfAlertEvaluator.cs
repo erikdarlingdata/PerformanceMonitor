@@ -1513,7 +1513,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// threshold; the constant overload keeps the shipped defaults for the tests pinning them.</summary>
     internal static bool IsCollectionStopped(
         DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, DateTime nowUtc,
-        TimeSpan staleWindow, int consecutiveFailureThreshold, out string reason)
+        TimeSpan staleWindow, int consecutiveFailureThreshold, out string reason,
+        DateTime? reportedLastSuccessUtc = null)
     {
         /* Fast path: the most-recent N runs all failed. */
         if (recentRunCount >= consecutiveFailureThreshold && recentSuccessCount == 0)
@@ -1525,13 +1526,46 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Backstop: a server that HAS collected before but hasn't succeeded within the staleness window. */
         if (lastSuccessUtc.HasValue && nowUtc - lastSuccessUtc.Value >= staleWindow)
         {
-            int minutes = (int)(nowUtc - lastSuccessUtc.Value).TotalMinutes;
-            reason = $"No successful collection in {minutes.ToString(CultureInfo.InvariantCulture)} minutes — the collectors are failing or the server is unreachable.";
+            /* The firing basis (lastSuccessUtc) may be the service's watch start rather than the store's last
+               success (#4757); the TEXT counts from the store's own last success when the caller has one, so a
+               restart does not reset "how long" to zero for a server that has been dark for days (#5489). */
+            var silent = nowUtc - (reportedLastSuccessUtc ?? lastSuccessUtc.Value);
+            reason = $"No successful collection in {FormatSilence(silent)} — the collectors are failing or the server is unreachable.";
             return true;
         }
 
         reason = "";
         return false;
+    }
+
+    /// <summary>
+    /// How long a server has gone without a successful collection, as the Collection Stopped text says it:
+    /// minutes up to two hours ("47 minutes"), whole hours up to two days ("5 hours"), then days with the
+    /// leftover hours ("12 days", "12 days 3 hours"). A 12-day gap used to read "17805 minutes".
+    /// </summary>
+    internal static string FormatSilence(TimeSpan silent)
+    {
+        if (silent < TimeSpan.Zero)
+        {
+            silent = TimeSpan.Zero;
+        }
+
+        static string Unit(long n, string one) =>
+            n.ToString(CultureInfo.InvariantCulture) + " " + one + (n == 1 ? "" : "s");
+
+        if (silent < TimeSpan.FromHours(2))
+        {
+            return Unit((long)silent.TotalMinutes, "minute");
+        }
+
+        if (silent < TimeSpan.FromDays(2))
+        {
+            return Unit((long)silent.TotalHours, "hour");
+        }
+
+        var days = (long)silent.TotalDays;
+        var hours = silent.Hours;
+        return hours == 0 ? Unit(days, "day") : Unit(days, "day") + " " + Unit(hours, "hour");
     }
 
     /// <summary>
@@ -1564,7 +1598,8 @@ internal sealed class DarlingSelfAlertEvaluator
             : int.MaxValue;
 
         return IsCollectionStopped(
-            staleBasis, recentRunCount, recentSuccessCount, now, SettingsStaleWindow, failureThreshold, out reason);
+            staleBasis, recentRunCount, recentSuccessCount, now, SettingsStaleWindow, failureThreshold, out reason,
+            reportedLastSuccessUtc: lastSuccessUtc);
     }
 
     /// <summary>

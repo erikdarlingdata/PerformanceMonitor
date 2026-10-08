@@ -909,7 +909,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
-            if (!TotalCpuPercent.HasValue) return "--";
+            if (!TotalCpuPercent.HasValue || IsOffline) return "--";
 
             /* #3281: on the Performance Insights arm the headline is percent of the capacity CURRENTLY
                ALLOCATED, which is NOT the figure the band read — so the figure that did is shown beside
@@ -930,11 +930,24 @@ public sealed class ServerSummaryItem
     /// serverless target (#3281 — "ACU 33% of 12 configured", the sentence that makes a green 100%
     /// headline make sense), else the non-SQL host CPU (the Dashboard's CPU detail), when known.</summary>
     public string CpuDetail =>
-        AcuUtilizationPercent.HasValue && MaxConfiguredAcu.HasValue
+        IsOffline ? StaleDetail
+        : AcuUtilizationPercent.HasValue && MaxConfiguredAcu.HasValue
             ? $"ACU {AcuUtilizationPercent:F0}% of {MaxConfiguredAcu:0.#} configured"
             : OtherProcessCpuPercent.HasValue ? $"Other: {OtherProcessCpuPercent:F0}%" : "";
 
-    public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+    public string MemoryDisplay => MemoryMb.HasValue && !IsOffline ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+
+    /// <summary>
+    /// #5489, the twin of the web fleet card's stale chips: the detail an Offline card's measurement rows
+    /// carry in place of a reading. A server whose newest collection is past the fleet's offline mark has no
+    /// CURRENT value, only the last one collected, days ago; "0% CPU" and a calm memory row off a 12-day-old
+    /// sample read as live health. Those rows read "--" in the neutral tone, and this says when it was last
+    /// collected.
+    /// </summary>
+    public string StaleDetail =>
+        LastCollectionTime.HasValue
+            ? "last collected " + FormatMinutesAgo(Math.Max(0, (int)(DateTime.UtcNow - LastCollectionTime.Value).TotalMinutes))
+            : "no recent collection";
 
     /// <summary>
     /// The Memory detail: under resource-semaphore pressure it names the pressure (grant waiters, then
@@ -945,6 +958,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
+            if (IsOffline) return "";
             if (HasMemoryPressure)
             {
                 var parts = new List<string>();
@@ -961,7 +975,7 @@ public sealed class ServerSummaryItem
         }
     }
 
-    public string BlockingDisplay => BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
 
     /// <summary>
     /// The blocking detail (Dashboard's BlockingDetailText): while blocking is present in the window, the
@@ -974,6 +988,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
+            if (IsOffline) return "";
             if (BlockingCount > 0)
             {
                 var max = $"max: {MaxBlockedSeconds:F0}s";
@@ -990,7 +1005,7 @@ public sealed class ServerSummaryItem
     /// <summary>The worst blocking wait in the window, in seconds.</summary>
     public double MaxBlockedSeconds => MaxBlockingWaitMs / 1000.0;
 
-    public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
+    public string DeadlockDisplay => IsOffline ? "--" : DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
 
     /// <summary>
     /// The deadlock detail — the banded RATE, then how long since the last deadlock ever ("Last: N ago").
@@ -1025,7 +1040,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
-            if (!TotalThreads.HasValue) return "--";
+            if (!TotalThreads.HasValue || IsOffline) return "--";
             if (RequestsWaitingForThreads > 0) return $"{RequestsWaitingForThreads} starved";
             if (ThreadsWaitingForCpu >= 20) return $"{ThreadsWaitingForCpu} runnable";
             if (TotalThreads.Value > 0 && AvailableThreads < TotalThreads.Value * 0.10) return "Low";
@@ -1035,7 +1050,7 @@ public sealed class ServerSummaryItem
 
     /// <summary>Threads detail — "Available: in/ceiling" (Dashboard's ThreadsDetailText); blank with no snapshot.</summary>
     public string ThreadsDetail =>
-        TotalThreads is > 0 ? $"Available: {AvailableThreads}/{TotalThreads}" : "";
+        IsOffline ? "" : TotalThreads is > 0 ? $"Available: {AvailableThreads}/{TotalThreads}" : "";
 
     /// <summary>
     /// Collectors value — "Stale" when the server is offline, else "N failed" / "OK" (Dashboard's
@@ -1282,11 +1297,11 @@ public sealed class ServerSummaryItem
 
     // ── Per-metric dot / value brushes ───────────────────────────────────────────────────────────────
 
-    public SolidColorBrush CpuSeverityBrush => SeverityBrush(CpuSeverity);
-    public SolidColorBrush MemorySeverityBrush => SeverityBrush(MemorySeverity);
-    public SolidColorBrush BlockingSeverityBrush => SeverityBrush(BlockingSeverity);
-    public SolidColorBrush DeadlockSeverityBrush => SeverityBrush(DeadlockSeverity);
-    public SolidColorBrush ThreadsSeverityBrush => SeverityBrush(ThreadsSeverity);
+    public SolidColorBrush CpuSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(CpuSeverity);
+    public SolidColorBrush MemorySeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(MemorySeverity);
+    public SolidColorBrush BlockingSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(BlockingSeverity);
+    public SolidColorBrush DeadlockSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(DeadlockSeverity);
+    public SolidColorBrush ThreadsSeverityBrush => IsOffline ? s_unknownBrush : SeverityBrush(ThreadsSeverity);
     public SolidColorBrush CollectorSeverityBrush => SeverityBrush(CollectorSeverity);
 
     public bool HasAlerts => BlockingCount > 0 || DeadlockCount > 0;

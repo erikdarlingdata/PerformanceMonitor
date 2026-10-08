@@ -566,6 +566,62 @@ export async function apiGet(path, signal) {
   }
 }
 
+/* The /api/read/ requests in flight right now, by path - see apiGetJoined. */
+const joinedReads = new Map();
+
+/**
+ * apiGet for a tool read, with ONE request shared by every caller that asks for the same path while it is in flight
+ * (#5489, the apiGetFleet idea for the tool reads). The Wait Stats tab asked for get_spinlock_stats twice in one load:
+ * the Spinlock Stats grid, and the Spinlock Trend picker that lists the same top spinlocks (the latch pair did the
+ * same). At 7 days on a large store that read took 3.0 s and 5.7 s, so the page paid for it twice. The second caller
+ * of a load now joins the first's request instead of sending its own.
+ *
+ * Nothing outlives the response: a caller that starts after it landed sends a fresh request, so no page renders an
+ * older answer than it would have. Each caller classifies (so parses) the shared body for itself, so every panel owns
+ * the rows it was handed. A caller's `signal` (#4191) cancels only that caller: it gets { kind: "aborted" } at once,
+ * and the request itself is cancelled only when no caller is left waiting on it.
+ */
+export async function apiGetJoined(path, signal) {
+  if (signal && signal.aborted) return { kind: "aborted" };
+  inFlightReads++;
+  let entry = null;
+  let onAbort = null;
+  try {
+    entry = joinedReads.get(path);
+    if (!entry) {
+      const controller = new AbortController();
+      const joined = { controller, waiters: 0, body: null };
+      joined.body = fetchBody(path, controller.signal).finally(() => {
+        if (joinedReads.get(path) === joined) joinedReads.delete(path);
+      });
+      joinedReads.set(path, joined);
+      entry = joined;
+    }
+
+    entry.waiters++;
+    const cancelled = new Promise((resolve) => {
+      if (!signal) return;
+      onAbort = () => resolve(null);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    const shared = await Promise.race([entry.body, cancelled]);
+    if (!shared || shared.aborted) return { kind: "aborted" };
+    if (shared.transportError) return { kind: "error", message: shared.transportError };
+    return await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+  } finally {
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    if (entry) {
+      entry.waiters--;
+      if (entry.waiters === 0 && joinedReads.get(path) === entry) {
+        /* Nobody is waiting: stop the fetch, and let the next caller start a fresh one. */
+        joinedReads.delete(path);
+        entry.controller.abort();
+      }
+    }
+    inFlightReads--;
+  }
+}
+
 /* The /api/fleet request every caller in flight at the same moment shares — see apiGetFleet. */
 let fleetRequest = null;
 
@@ -599,11 +655,12 @@ export async function apiGetFleet() {
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
     value rather than a rejection, so one lost request cannot surface as an unhandled rejection per caller. */
-async function fetchBody(path) {
+async function fetchBody(path, signal) {
   try {
-    const resp = await fetch(path, { headers: { Accept: "application/json" } });
+    const resp = await fetch(path, { headers: { Accept: "application/json" }, signal });
     return { ok: resp.ok, status: resp.status, raw: await resp.text() };
   } catch (e) {
+    if (e && e.name === "AbortError") return { aborted: true };
     return { transportError: "Network error: " + (e && e.message ? e.message : String(e)) };
   }
 }
@@ -830,7 +887,7 @@ export function alertDeliveryState(a) {
 /** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
 export function readTool(tool, params, signal) {
   const plan = planCustomRange(tool, params);
-  return apiGet("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
+  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan));
 }
