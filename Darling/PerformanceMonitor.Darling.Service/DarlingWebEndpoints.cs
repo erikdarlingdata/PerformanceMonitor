@@ -2860,7 +2860,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a connection. Only checked for a panel that actually reads query_store_stats; every other panel
            pays nothing extra. */
         var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
-            ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken)
+            ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken, plan)
             : default;
         var queryStoreWideEligible = wideResolution.Eligible;
 
@@ -2871,7 +2871,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         if (queryStoreWideEligible)
         {
             var countedStart = wideResolution.WideStart is { } wideReadStart && wideReadStart > start ? wideReadStart : start;
-            var limit = QueryStoreWideReadGuard.LimitFor(ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(plan!, start, end));
+            var limit = QueryStoreWideReadGuard.LimitFor(ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(plan!, start, end, wideResolution.GroupMembers));
             if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken, limit) is { } tooBig)
             {
                 return ComposeRunOutcome.BadRequest(tooBig);
@@ -2919,7 +2919,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -3060,9 +3060,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
     /// the same rule #3953 already applies to the single-server reads.
     /// </summary>
-    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer)> ResolveQueryStoreWideEligibleAsync(
+    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers)> ResolveQueryStoreWideEligibleAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
-        DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken)
+        DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken, PanelPlan? groupMembersFor = null)
     {
         if (end - start < ComposeQueryStoreWideMinWindow)
         {
@@ -3137,7 +3137,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
             }
 
-            return (true, wideStart, bound, settingServer);
+            /* #5582: for a Query Store RankedTimeSeries panel, the members of its group dimension, on this same connection, so the
+               compiler can bound the single-scan base CTE (buckets x members). Null for any other panel, and when unknown. */
+            long? groupMembers = groupMembersFor is null
+                ? null
+                : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, cancellationToken);
+
+            return (true, wideStart, bound, settingServer, groupMembers);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -32,7 +32,7 @@ public sealed class ComposeQueryStoreStampCompileTests
     private static ComposeRunContext Context(
         DateTime start, DateTime end, DateTime? stampThrough, DateTime? wideStart = null, bool wide = true, IReadOnlyList<string>? servers = null) =>
         new(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.None, end, RollupCoverage.Unknown,
-            QueryStoreWideEligible: wide, QueryStoreWideStart: wideStart, QueryStoreStampThrough: stampThrough);
+            QueryStoreWideEligible: wide, QueryStoreWideStart: wideStart, QueryStoreGroupMembers: 10, QueryStoreStampThrough: stampThrough);
 
     private static ComposeCompiled Compile(
         string json, ComposeRunContext context, bool singleScan = true, Func<string, string?>? stampColumns = null)

@@ -31,14 +31,36 @@ public sealed class QueryStoreWideReadGuardTests
     private static readonly DateTime Start = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Unspecified);
 
     [Fact]
-    public void TheLimit_IsTheObservedColdRate_At90PercentOfTheStatementTimeout()
+    public void TheLimits_AreTheFieldColdRate_At75PercentOfTheStatementTimeout()
     {
-        /* 8,457,483 rows in 48.3 s, against a 60 s timeout. */
-        const double rowsPerSecond = 8_457_483d / 48.3d;
-        var derived = rowsPerSecond * 60d * 0.9d;
-        Assert.InRange(ComposeLimits.MaxQueryStoreWideRows, derived * 0.99d, derived * 1.01d);
+        /* S4: 8,457,483 rows cold in 55.2 s, 6.53 us per row. The budget is 45 s, 75% of the 60 s timeout (three cold runs differed by 14%). */
+        const double coldPerRow = 55.215d / 8_457_483d;
+        const double budget = 60d * 0.75d;
         Assert.Equal("60s", ComposeLimits.StatementTimeout);
-        Assert.True(ComposeLimits.MaxQueryStoreWideRows > 8_457_483, "the observed read that finished in 48 s must not be refused");
+
+        var oneScan = budget / coldPerRow;
+        Assert.InRange(ComposeLimits.MaxQueryStoreWideRows, oneScan * 0.98d, oneScan);
+        Assert.Equal(6_800_000L, ComposeLimits.MaxQueryStoreWideRows);
+
+        /* Two scans: 6.53 cold first scan + 0.13 hash aggregate + 1.54 warm second scan = 8.19 us per row. */
+        var twoScans = budget / ((6.53d + 0.13d + 1.54d) / 1_000_000d);
+        Assert.InRange(ComposeLimits.MaxQueryStoreWideRowsTwoScans, twoScans * 0.98d, twoScans);
+        Assert.Equal(5_400_000L, ComposeLimits.MaxQueryStoreWideRowsTwoScans);
+
+        /* The old limit, 9.4 million, takes 61.4 s cold at the field rate: over the timeout. */
+        Assert.True(9_400_000d * coldPerRow > 60d, "the old limit is over the timeout at the field rate");
+        Assert.True(ComposeLimits.MaxQueryStoreWideRows * coldPerRow < budget);
+    }
+
+    [Fact]
+    public void TheWeightAndTheBaseRowBound_AreThePinnedFigures()
+    {
+        Assert.Equal(0.3d, ComposeLimits.StampRowWeight);
+        Assert.Equal(1_000_000L, ComposeLimits.MaxSingleScanBaseRows);
+
+        /* 436 bytes of temp per base row against the 1 GB limit: the bound is 43% of it, and 3 million rows would pass it. */
+        Assert.True(ComposeLimits.MaxSingleScanBaseRows * 436L < 1_000_000_000L * 0.5d);
+        Assert.True(100L * 30_000L * 436L > 1_000_000_000L);
     }
 
     [Fact]
@@ -47,18 +69,18 @@ public sealed class QueryStoreWideReadGuardTests
         var message = QueryStoreWideReadGuard.Refusal(new QueryStoreWideReadGuard.Estimate(12_000_000, 43), Start, Start.AddDays(1));
 
         Assert.Equal(
-            "This panel needs about 12 million Query Store rows (43 servers, 1 day), over the limit of 9.4 million. Choose fewer servers or a shorter window.",
+            "This panel needs about 12 million Query Store rows (43 servers, 1 day), over the limit of 6.8 million. Choose fewer servers or a shorter window.",
             message);
     }
 
     [Fact]
     public void TheEstimate_ScalesWithTheCountedRange_NotTheWindowTheCallerAsked()
     {
-        var estimate = new QueryStoreWideReadGuard.Estimate(4_000_000, 10);
+        var estimate = new QueryStoreWideReadGuard.Estimate(3_000_000, 10);
 
         Assert.Null(QueryStoreWideReadGuard.Refusal(estimate, Start, Start.AddDays(2)));
         Assert.Equal(
-            "This panel needs about 12 million Query Store rows (10 servers, 3 days), over the limit of 9.4 million. Choose fewer servers or a shorter window.",
+            "This panel needs about 9 million Query Store rows (10 servers, 3 days), over the limit of 6.8 million. Choose fewer servers or a shorter window.",
             QueryStoreWideReadGuard.Refusal(estimate, Start, Start.AddDays(3)));
 
         /* The same window with the counted range cut to the newest day: under the limit, so no refusal. */
@@ -72,8 +94,8 @@ public sealed class QueryStoreWideReadGuardTests
         Assert.Null(QueryStoreWideReadGuard.Refusal(atLimit, Start, Start.AddDays(1)));
         Assert.NotNull(QueryStoreWideReadGuard.Refusal(new QueryStoreWideReadGuard.Estimate(ComposeLimits.MaxQueryStoreWideRows + 1, 5), Start, Start.AddDays(1)));
 
-        /* The panel that ran in 48 s on the large store. */
-        Assert.Null(QueryStoreWideReadGuard.Refusal(new QueryStoreWideReadGuard.Estimate(8_457_483, 43), Start, Start.AddDays(1)));
+        /* The fleet day that took 55 s cold on the large store is refused by the one-scan limit (before the stamp covers it). */
+        Assert.NotNull(QueryStoreWideReadGuard.Refusal(new QueryStoreWideReadGuard.Estimate(8_457_483, 43), Start, Start.AddDays(1)));
     }
 
     [Fact]
@@ -117,15 +139,77 @@ public sealed class QueryStoreWideReadGuardTests
     }
 
     [Fact]
-    public void ARankedTimeSeriesPanelThatScansTwice_GetsHalfTheLimit_AndTheMessageNamesIt()
+    public void ARankedTimeSeriesPanelThatScansTwice_GetsTheTwoScanLimit_AndTheMessageNamesIt()
     {
         Assert.Equal(ComposeLimits.MaxQueryStoreWideRows, QueryStoreWideReadGuard.LimitFor(false));
-        Assert.Equal(ComposeLimits.MaxQueryStoreWideRows / 2, QueryStoreWideReadGuard.LimitFor(true));
+        Assert.Equal(ComposeLimits.MaxQueryStoreWideRowsTwoScans, QueryStoreWideReadGuard.LimitFor(true));
         var estimate = new QueryStoreWideReadGuard.Estimate(6_000_000, 43);
         Assert.Null(QueryStoreWideReadGuard.Refusal(estimate, Start, Start.AddDays(1), QueryStoreWideReadGuard.LimitFor(false)));
         Assert.Equal(
-            "This panel needs about 6 million Query Store rows (43 servers, 1 day), over the limit of 4.7 million. Choose fewer servers or a shorter window.",
+            "This panel needs about 6 million Query Store rows (43 servers, 1 day), over the limit of 5.4 million. Choose fewer servers or a shorter window.",
             QueryStoreWideReadGuard.Refusal(estimate, Start, Start.AddDays(1), QueryStoreWideReadGuard.LimitFor(true)));
+    }
+
+    /* A fleet day after the build: 8.46 million wide rows in the day, the newest 2.5 hours not yet stamped. The first 21.5 hours
+       count at 0.3 and the tail at 1.0. */
+    private static readonly QueryStoreWideReadGuard.Estimate FleetDay = new(8_457_483, 43);
+    private static readonly DateTime StampedThrough = Start.AddHours(21.5d);
+
+    [Fact]
+    public void AFleetDayWithATail_CountsTheStampedHoursAtTheWeight_AndPassesBothLimits()
+    {
+        var rows = FleetDay.RowsOver(Start, Start.AddDays(1), StampedThrough);
+        /* 2.5/24 x 8.46 M = 0.88 M wide + 0.3 x 7.57 M = 3.15 M, as the design derived it. */
+        Assert.InRange(rows, 3_100_000L, 3_200_000L);
+        Assert.Null(QueryStoreWideReadGuard.Refusal(FleetDay, Start, Start.AddDays(1), QueryStoreWideReadGuard.LimitFor(false), StampedThrough));
+        Assert.Null(QueryStoreWideReadGuard.Refusal(FleetDay, Start, Start.AddDays(1), QueryStoreWideReadGuard.LimitFor(true), StampedThrough));
+    }
+
+    [Fact]
+    public void TwoStampedDays_PassOneScanAndFailTwo_AndThreeDaysFailBoth()
+    {
+        /* Two days with the same 2.5 h tail: 5.7 million equivalent rows. */
+        var twoDays = Start.AddDays(2);
+        var throughTwo = twoDays.AddHours(-2.5d);
+        Assert.InRange(FleetDay.RowsOver(Start, twoDays, throughTwo), 5_600_000L, 5_800_000L);
+        Assert.Null(QueryStoreWideReadGuard.Refusal(FleetDay, Start, twoDays, QueryStoreWideReadGuard.LimitFor(false), throughTwo));
+        Assert.NotNull(QueryStoreWideReadGuard.Refusal(FleetDay, Start, twoDays, QueryStoreWideReadGuard.LimitFor(true), throughTwo));
+
+        /* Three days: 8.2 million, refused by both. */
+        var threeDays = Start.AddDays(3);
+        var throughThree = threeDays.AddHours(-2.5d);
+        Assert.InRange(FleetDay.RowsOver(Start, threeDays, throughThree), 8_100_000L, 8_300_000L);
+        Assert.NotNull(QueryStoreWideReadGuard.Refusal(FleetDay, Start, threeDays, QueryStoreWideReadGuard.LimitFor(false), throughThree));
+        Assert.NotNull(QueryStoreWideReadGuard.Refusal(FleetDay, Start, threeDays, QueryStoreWideReadGuard.LimitFor(true), throughThree));
+    }
+
+    [Fact]
+    public void TheStampThrough_IsClamped_AndNoStampThroughIsTodaysFigure()
+    {
+        var end = Start.AddDays(1);
+        var unweighted = FleetDay.RowsOver(Start, end);
+        Assert.Equal(unweighted, FleetDay.RowsOver(Start, end, null));
+        Assert.Equal(unweighted, FleetDay.RowsOver(Start, end, Start));                    /* nothing stamped */
+        Assert.Equal(unweighted, FleetDay.RowsOver(Start, end, Start.AddHours(-5)));       /* before the range */
+        var allStamped = FleetDay.RowsOver(Start, end, end);
+        Assert.Equal(FleetDay.RowsOver(Start, end, end.AddDays(3)), allStamped);           /* past the range */
+        Assert.InRange(allStamped, (long)(unweighted * 0.3d) - 1, (long)(unweighted * 0.3d) + 2);
+    }
+
+    [Fact]
+    public void AWeightedRefusal_NeverCallsTheFigureRows_AndNamesTheServersTheWindowAndWhatToChange()
+    {
+        var through = Start.AddDays(3).AddHours(-2.5d);
+        var message = QueryStoreWideReadGuard.Refusal(FleetDay, Start, Start.AddDays(3), QueryStoreWideReadGuard.LimitFor(false), through)!;
+        Assert.Equal(
+            "This panel reads too much Query Store history to finish inside the time limit (43 servers, 3 days). Choose fewer servers or a shorter window.",
+            message);
+        Assert.DoesNotContain("rows", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("million", message, StringComparison.OrdinalIgnoreCase);
+        foreach (var sentence in message.Split(". ", StringSplitOptions.RemoveEmptyEntries))
+        {
+            Assert.True(sentence.Split(' ').Length <= 20, "keep each sentence short: " + sentence);
+        }
     }
 
     [Fact]

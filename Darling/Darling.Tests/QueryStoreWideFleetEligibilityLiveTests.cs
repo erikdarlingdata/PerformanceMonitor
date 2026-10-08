@@ -171,7 +171,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         {
             var before = floorReads.Count;
             var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
-            Assert.Equal(expected, got);
+            Assert.Equal(expected, (got.Eligible, got.WideStart, got.Bound, got.SettingServer));
             Assert.Equal(1, floorReads.Count - before);
         }
     }
