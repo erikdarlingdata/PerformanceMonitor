@@ -3,7 +3,7 @@
   "Shared cases for the time range grammar (#5562). The C# parser (PerformanceMonitor.Ui TimeRangeParser) and the web module (time-range.js) must both produce every row here.",
   "Zone ids are IANA names (America/New_York, UTC, Asia/Kolkata, Australia/Sydney): .NET resolves them through ICU and Node through Intl. Do not use Windows ids.",
   "All instants are ISO 8601 UTC with a trailing Z. 'now' is the clock the case is resolved at; nothing reads the machine's clock.",
-  "'start' and 'end' are the resolved instants (end is now for a live range). 'live' is true when the end slides with now. 'echo' is the exact label text the picker shows. 'error' is a stable code; the message text is not compared.",
+  "'start' and 'end' are the resolved instants (end is now for a live range). 'live' is true when the end slides with now. 'echo' is the exact label text the picker shows. 'error' is a stable code; the message text is not compared unless the row also carries errorMessage, the exact words both front ends must give.",
   "Typed wall times use the earliest instant for a start and the latest for an end (a repeated hour widens; a skipped time maps to the change instant). Nm/Nh/Nd are real elapsed time. Calendar periods use wall-clock midnights in the zone and weeks start Monday. 1mo is 30 real days.",
   "Echo format: '<length>  <start> - <end> (<zone>)'. Length is Nd (floored) for a day or more, else 'Hh Mm' with zero parts dropped. A bound is 'Mon D, h:mm am|pm' (English month abbreviations, lower-case am/pm), with ', YYYY' after the day when either end is not in now's year, ':ss' for typed/unix ranges when the seconds are not zero, and ' +hh:mm' appended to a bound whose wall time happens twice. Zone is 'UTC-04:00' or 'UTC-05:00 to UTC-04:00' when the ends differ."
  ],
@@ -976,6 +976,30 @@
    "live": true,
    "echo": "2m  Oct 8, 12:00 am - Oct 8, 12:02 am (UTC-04:00)",
    "error": null
+  },
+  {
+   "name": "today at exactly midnight has not started",
+   "input": "today",
+   "now": "2026-10-08T04:00:00Z",
+   "zone": "America/New_York",
+   "start": null,
+   "end": null,
+   "live": null,
+   "echo": null,
+   "error": "too_short",
+   "errorMessage": "Today has only just started. Pick another range."
+  },
+  {
+   "name": "week to date at Monday midnight has not started",
+   "input": "week to date",
+   "now": "2026-10-05T04:00:00Z",
+   "zone": "America/New_York",
+   "start": null,
+   "end": null,
+   "live": null,
+   "echo": null,
+   "error": "too_short",
+   "errorMessage": "Week to Date has only just started. Pick another range."
   },
   {
    "name": "end before start",

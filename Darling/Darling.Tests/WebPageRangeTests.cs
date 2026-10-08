@@ -151,7 +151,9 @@ public sealed class WebPageRangeTests
     {
         var server = Js("pages", "server.js");
         Assert.Contains("serverCatalog(server).then((catalog) => {", server);
-        Assert.Contains("picker.setSampleInterval(collectorIntervalFromCatalog(catalog, tab.collector));", server);
+        // A tab with no collector gives the picker no interval (null: no sample note, and the range is never widened);
+        // collectorIntervalFromCatalog itself answers null for a missing collector, so the guard and the helper agree.
+        Assert.Contains("picker.setSampleInterval(tab.collector ? collectorIntervalFromCatalog(catalog, tab.collector) : null);", server);
         // The note is set before the keep-the-panels return, so a poll that keeps the grid still gets it.
         var noteCall = server.IndexOf("  applySampleNote();", StringComparison.Ordinal);
         Assert.True(noteCall >= 0, "server.js no longer calls applySampleNote().");
@@ -204,7 +206,7 @@ public sealed class WebPageRangeTests
         // R9: Today two minutes after midnight is held (a calendar period is exempt from the floor); exactly midnight is refused; a typed span keeps the floor.
         var floor = r.GetProperty("calendarFloor");
         Assert.Equal(1, floor.GetProperty("twoMinutesIn").GetProperty("window").GetProperty("hours").GetInt32());
-        Assert.Contains("shortest range is 5 minutes", floor.GetProperty("atMidnight").GetProperty("error").GetString());
+        Assert.Equal("Today has only just started. Pick another range.", floor.GetProperty("atMidnight").GetProperty("error").GetString());
         Assert.Equal("too_short", floor.GetProperty("typedUnderFloor").GetString());
 
         // The per-server catalog is read once, kept for its time to live, then read again (and expires on lookup, not on a timer that holds Node open).

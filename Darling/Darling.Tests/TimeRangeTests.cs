@@ -67,6 +67,12 @@ public sealed class TimeRangeFixtureTests
             Assert.False(result.Ok, "expected an error but got " + result.Echo);
             Assert.Equal(expectedError.GetString(), result.ErrorCode);
             Assert.False(string.IsNullOrWhiteSpace(result.Error));
+            if (c.TryGetProperty("errorMessage", out var message))
+            {
+                // A row that states its words holds both front ends to them (the midnight refusal of a calendar period).
+                Assert.Equal(message.GetString(), result.Error);
+            }
+
             Assert.Equal(string.Empty, result.Echo);
             return;
         }

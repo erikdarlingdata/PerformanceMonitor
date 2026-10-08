@@ -31,6 +31,7 @@ for (const c of fixture.cases) {
   if (c.error) {
     if (r.ok) problems.push("expected error " + c.error + " but got " + r.echo);
     else if (r.errorCode !== c.error) problems.push("error code " + r.errorCode + " (" + r.error + "), expected " + c.error);
+    else if (c.errorMessage && r.error !== c.errorMessage) problems.push("error message '" + r.error + "', expected '" + c.errorMessage + "'");
   } else if (!r.ok) {
     problems.push("refused with " + r.errorCode + " (" + r.error + ")");
   } else {

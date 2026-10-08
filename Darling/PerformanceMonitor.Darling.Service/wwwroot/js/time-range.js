@@ -439,7 +439,8 @@ export function resolveSpec(spec, nowMs, zone) {
   /* A calendar period is exempt from the 5-minute floor (#5562): "Today" at 00:02 reads 00:00 to now and the "collected every N min" note
      explains a sparse chart; no other range is ever substituted. Typed spans, "since" and custom start/end keep the floor. A period that
      has not started (zero length, exactly midnight) is still refused. */
-  if (spec.kind === "calendar" ? end <= start : end - start < MINIMUM_SPAN_MS) return fail("too_short", shortMessage(end - start));
+  if (spec.kind === "calendar" && end <= start) return fail("too_short", specName(spec) + " has only just started. Pick another range.");
+  if (spec.kind !== "calendar" && end - start < MINIMUM_SPAN_MS) return fail("too_short", shortMessage(end - start));
   return { ok: true, range: buildRange(spec, start, end, live, zone, nowMs) };
 }
 

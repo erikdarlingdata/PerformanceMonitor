@@ -202,7 +202,14 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
         /* A calendar period is exempt from the floor (#5562, seat ruling): "Today" at 00:02 reads 00:00 to now and the "collected
            every N min" note explains a sparse chart; no other range is ever substituted. The floor applies to typed spans and
            custom start/end only. A period that has not started (zero length) is still refused. */
-        if (Kind == TimeRangeKind.Calendar ? end <= start : end - start < MinimumSpan)
+        if (Kind == TimeRangeKind.Calendar && end <= start)
+        {
+            /* Zero length: say that the period has not begun, not that 5 minutes is the floor (the web words it the same way). */
+            error = new TimeRangeError("too_short", Name + " has only just started. Pick another range.");
+            return false;
+        }
+
+        if (Kind != TimeRangeKind.Calendar && end - start < MinimumSpan)
         {
             error = new TimeRangeError("too_short", ShortMessage(end - start));
             return false;

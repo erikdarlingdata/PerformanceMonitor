@@ -370,7 +370,7 @@ public partial class TimeRangePicker : UserControl
             var text = TimeRangePresets.CurrentLength(spec, now, zone);
             length.Text = text ?? string.Empty;
             button.IsEnabled = text is not null;
-            button.ToolTip = text is null ? spec.Name + " has only just started; the shortest range is 5 minutes." : spec.Name;
+            button.ToolTip = text is null ? spec.Name + " has only just started. Pick another range." : spec.Name;
         }
     }
 
