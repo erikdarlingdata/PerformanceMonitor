@@ -33,6 +33,10 @@ namespace Darling.Tests;
 /// count: every database with the extension has one, and an abandoned database would otherwise never look idle.</item>
 /// <item>The drop is a plain <c>DROP DATABASE</c>, never <c>WITH (FORCE)</c>, so a database that gained a session
 /// between the check and the drop refuses to go instead of being pulled out from under a test.</item>
+/// <item>Each drop is preceded by <see cref="ScratchPostgres.QuiesceTimescaleJobsAsync"/> (#5549): a database is never
+/// dropped while one of its TimescaleDB job workers is still attached, the same rule every in-test drop follows.
+/// The quiesce is best-effort and bounded, it never throws, and it opens one short client session of its own in the
+/// database, so the drop retries briefly while that session finishes closing (<see cref="DropAttempts"/>).</item>
 /// <item>The database the connection string itself names is never a candidate.</item>
 /// </list></para>
 /// </summary>
@@ -72,6 +76,17 @@ WHERE d.datname LIKE 'darling\_scratch\_%'
   AND NOT EXISTS (
       SELECT 1 FROM pg_stat_activity AS a
       WHERE a.datid = d.oid AND a.backend_type = 'client backend')";
+
+    /// <summary>
+    /// How many times, and how far apart, the plain drop is tried while the database still reports "being accessed by
+    /// other users" (SQLSTATE 55006). The quiesce just before it connected to the database and disconnected again, and the
+    /// server's backend for that session can outlive the client's close by a few milliseconds. A session that is really
+    /// there stays, so the last attempt's refusal is logged and the database is left, as before.
+    /// </summary>
+    internal const int DropAttempts = 30;
+
+    /// <summary>The wait between two of the <see cref="DropAttempts"/>.</summary>
+    internal static readonly TimeSpan DropRetryDelay = TimeSpan.FromMilliseconds(100);
 
     /// <summary>A fresh name: the prefix, the creation time to the second, then 12 hex characters.</summary>
     internal static string NewName(DateTime utcNow) =>
@@ -152,12 +167,30 @@ WHERE d.datname LIKE 'darling\_scratch\_%'
                 continue;
             }
 
+            /* #5549: no TimescaleDB job worker is left in the database the drop below removes. Best-effort: it never
+               throws, so a database that cannot be opened, or one without the extension, goes straight to the drop; and
+               it ends at once when nothing runs there, so a sweep over idle databases stays quick. */
+            await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString, name, cancellationToken);
+
             try
             {
-                /* The name matched the anchored pattern above, so it is hex and digits only: safe as a quoted
-                   identifier. */
-                await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\"", admin);
-                await drop.ExecuteNonQueryAsync(cancellationToken);
+                for (var attempt = 1; ; attempt++)
+                {
+                    try
+                    {
+                        /* The name matched the anchored pattern above, so it is hex and digits only: safe as a quoted
+                           identifier. */
+                        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\"", admin);
+                        await drop.ExecuteNonQueryAsync(cancellationToken);
+                        break;
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ObjectInUse && attempt < DropAttempts)
+                    {
+                        /* Most likely the quiesce's own session, still closing on the server. */
+                        await Task.Delay(DropRetryDelay, cancellationToken);
+                    }
+                }
+
                 dropped.Add(name);
                 log($"Dropped abandoned scratch database {name}.");
             }
