@@ -251,17 +251,11 @@ public sealed class PerfmonRegroupLiveTests
         TimescaleSupport.BusyStreaks.Reset();
 
         var held = ChunkOfDay(await ReadChunksAsync(connection, ct), 1);
-        var holder = await HoldLockAsync(scratch.ConnectionString, held.Name, ct);
+        await using var holder = await HoldLockAsync(scratch.ConnectionString, held.Name, ct);
         var logger = new CapturingTestLogger();
         var pauses = new List<TimeSpan>();
-        try
-        {
-            Assert.Equal(4, await RunBoundedAsync(NewDrain(scratch.ConnectionString, logger, TimeSpan.FromSeconds(90), pauses), 60, ct));
-        }
-        finally
-        {
-            await ReleaseLockAsync(holder, ct);
-        }
+        Assert.Equal(4, await RunBoundedAsync(NewDrain(scratch.ConnectionString, logger, TimeSpan.FromSeconds(90), pauses), 60, ct));
+        await holder.ReleaseAsync(ct);
 
         var after = await ReadChunksAsync(connection, ct);
         Assert.Equal(OldChunkSegmentBy, after.Single(chunk => chunk.Name == held.Name).SegmentBy);
@@ -326,24 +320,12 @@ public sealed class PerfmonRegroupLiveTests
 
         var chunk = ChunkOfDay(await ReadChunksAsync(connection, ct), 3);
         await ExecAsync(connection, $"SELECT decompress_chunk('{chunk.Name}')", ct);
-        NpgsqlConnection? holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
+        await using var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
         var logger = new CapturingTestLogger();
-        bool compressed;
-        try
-        {
-            var compress = TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromMilliseconds(200), ct);
-            await WaitForAsync(() => logger.Lines.Any(line => line.Contains("not changed this pass", StringComparison.Ordinal)), 15, ct);
-            await ReleaseLockAsync(holder, ct);
-            holder = null;
-            compressed = await compress;
-        }
-        finally
-        {
-            if (holder is not null)
-            {
-                await ReleaseLockAsync(holder, ct);
-            }
-        }
+        var compress = TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromMilliseconds(200), ct);
+        await WaitForAsync(() => logger.Lines.Any(line => line.Contains("not changed this pass", StringComparison.Ordinal)), 15, ct);
+        await holder.ReleaseAsync(ct);
+        var compressed = await compress;
 
         Assert.True(compressed);
         Assert.Equal(1, logger.Lines.Count(line => line.Contains("not changed this pass", StringComparison.Ordinal)));
@@ -373,16 +355,10 @@ public sealed class PerfmonRegroupLiveTests
 
         var chunk = ChunkOfDay(await ReadChunksAsync(connection, ct), 3);
         await ExecAsync(connection, $"SELECT decompress_chunk('{chunk.Name}')", ct);
-        var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
+        await using var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
         var logger = new CapturingTestLogger();
-        try
-        {
-            Assert.False(await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct));
-        }
-        finally
-        {
-            await ReleaseLockAsync(holder, ct);
-        }
+        Assert.False(await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct));
+        await holder.ReleaseAsync(ct);
 
         Assert.Equal(3, logger.Lines.Count(line => line.Contains("not changed this pass", StringComparison.Ordinal)));
         Assert.Single(logger.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains("stays uncompressed", StringComparison.Ordinal));
@@ -425,7 +401,7 @@ public sealed class PerfmonRegroupLiveTests
     }
 
     /// <summary>
-    /// A reader beside the re-group of a chunk of about 1.5 M rows never waits more than a few seconds (#5574): the
+    /// A reader beside the re-group of a chunk of about 1.5 M rows never waits more than a few seconds (#5574; the bound is 2.5 s, against 0.1 to 0.2 s measured with two transactions and 4.9 s of a 10.3 s re-group with one): the
     /// decompress holds only a lock that lets reads go on, and the ACCESS EXCLUSIVE it takes at its end is released by
     /// its own commit, before the compress half starts. The same re-group in ONE transaction made the reader wait for
     /// the whole compress half.
@@ -500,7 +476,7 @@ public sealed class PerfmonRegroupLiveTests
         Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.Regrouped, outcome.Result);
         Assert.Equal(1_497_600, outcome.Rows);
         Assert.True(reads >= 3, $"the reader only got {reads} reads in during a {outcome.Elapsed.TotalSeconds:0.0} s re-group");
-        Assert.True(slowest < TimeSpan.FromSeconds(5), $"a read waited {slowest.TotalSeconds:0.0} s during a {outcome.Elapsed.TotalSeconds:0.0} s re-group");
+        Assert.True(slowest < TimeSpan.FromSeconds(2.5), $"a read waited {slowest.TotalSeconds:0.0} s during a {outcome.Elapsed.TotalSeconds:0.0} s re-group");
     }
 
     /// <summary>
@@ -566,20 +542,14 @@ public sealed class PerfmonRegroupLiveTests
 
         var chunk = ChunkOfDay(await ReadChunksAsync(connection, ct), 3);
         await ExecAsync(connection, $"SELECT decompress_chunk('{chunk.Name}')", ct);
-        var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
+        await using var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
         var logger = new CapturingTestLogger();
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        try
-        {
-            using var stopping = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            stopping.CancelAfter(TimeSpan.FromMilliseconds(500));
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(
-                () => TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromSeconds(5), stopping.Token));
-        }
-        finally
-        {
-            await ReleaseLockAsync(holder, ct);
-        }
+        using var stopping = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        stopping.CancelAfter(TimeSpan.FromMilliseconds(500));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromSeconds(5), stopping.Token));
+        await holder.ReleaseAsync(ct);
 
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2.5), $"the stop took {clock.Elapsed.TotalSeconds:0.0} s to end the wait");
         Assert.Single(logger.Lines, line => line.Contains("the service is stopping with perfmon_stats chunk", StringComparison.Ordinal));
@@ -742,19 +712,41 @@ public sealed class PerfmonRegroupLiveTests
 
     /// <summary>Another session holds ROW EXCLUSIVE on the chunk inside an open transaction, which conflicts with the
     /// EXCLUSIVE lock both halves of the re-group ask for.</summary>
-    private static async Task<NpgsqlConnection> HoldLockAsync(string connectionString, string chunk, CancellationToken ct)
+    private static async Task<HeldLock> HoldLockAsync(string connectionString, string chunk, CancellationToken ct)
     {
         var holder = new NpgsqlConnection(connectionString);
         await holder.OpenAsync(ct);
         await ExecAsync(holder, "BEGIN", ct);
         await ExecAsync(holder, $"LOCK TABLE {chunk} IN ROW EXCLUSIVE MODE", ct);
-        return holder;
+        return new HeldLock(holder);
     }
 
-    private static async Task ReleaseLockAsync(NpgsqlConnection holder, CancellationToken ct)
+    /// <summary>The session that holds a chunk's lock; released by <see cref="ReleaseAsync"/> or, at the latest, when
+    /// the test's scope ends.</summary>
+    private sealed class HeldLock : IAsyncDisposable
     {
-        await ExecAsync(holder, "ROLLBACK", ct);
-        await holder.DisposeAsync();
+        private NpgsqlConnection? _connection;
+
+        public HeldLock(NpgsqlConnection connection) => _connection = connection;
+
+        public async Task ReleaseAsync(CancellationToken ct)
+        {
+            var connection = Interlocked.Exchange(ref _connection, null);
+            if (connection is not null)
+            {
+                await ExecAsync(connection, "ROLLBACK", ct);
+                await connection.DisposeAsync();
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            var connection = Interlocked.Exchange(ref _connection, null);
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+        }
     }
 
     private static async Task RequirePerChunkSettingsAsync(NpgsqlConnection connection, CancellationToken ct) =>
