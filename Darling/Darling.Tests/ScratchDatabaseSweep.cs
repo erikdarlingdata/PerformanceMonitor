@@ -130,7 +130,9 @@ WHERE d.datname LIKE 'darling\_scratch\_%'
         var ownDatabase = new NpgsqlConnectionStringBuilder(baseConnectionString).Database;
         var dropped = new List<string>();
 
-        await using var admin = new NpgsqlConnection(baseConnectionString);
+        /* #5549: unpooled, like ScratchPostgres's own create and drop, so the backend that ran a DROP DATABASE ends
+           with this connection instead of going back into the pool every live test draws from. */
+        await using var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(baseConnectionString));
         await admin.OpenAsync(cancellationToken);
 
         var idle = new List<string>();

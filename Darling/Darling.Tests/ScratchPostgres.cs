@@ -84,7 +84,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
         try
         {
-            await using var admin = new NpgsqlConnection(baseConnectionString);
+            await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
             await admin.OpenAsync(cancellationToken);
             await using var create = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\"", admin);
             await create.ExecuteNonQueryAsync(cancellationToken);
@@ -253,7 +253,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     private static async Task DropAsync(string adminConnectionString, string databaseName)
     {
         await QuiesceTimescaleJobsAsync(adminConnectionString, databaseName);
-        await using var admin = new NpgsqlConnection(adminConnectionString);
+        await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(adminConnectionString));
         await admin.OpenAsync();
         await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin);
         await drop.ExecuteNonQueryAsync();
@@ -319,6 +319,17 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// and left the very database the drain exists to remove.
     /// </summary>
     internal const int ExitDrainCommandTimeoutSeconds = 30;
+
+    /// <summary>
+    /// #5549: the admin connection string with pooling off, for the CREATE DATABASE and the DROP DATABASE. The admin
+    /// string is the caller's <c>DARLING_TEST_PG</c>, so a pooled admin connection went back into the pool every live
+    /// test opens, and the next test took the backend that had just run the drop. CI's log showed one backend PID run
+    /// <c>DROP DATABASE ... WITH (FORCE)</c> on a scratch database and, half a second later, the
+    /// <c>CALL run_job(...)</c> of the retired-baseline race test. With pooling off, the backend that ran a create or a
+    /// drop ends when the connection closes, and no other test ever runs on it.
+    /// </summary>
+    internal static string UnpooledAdminConnectionString(string adminConnectionString) =>
+        new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false }.ConnectionString;
 
     /// <summary>The admin connection string with the exit drain's own connect and command timeouts, and no pooling: one connection per drop.</summary>
     internal static string ExitDrainConnectionString(string adminConnectionString) =>
