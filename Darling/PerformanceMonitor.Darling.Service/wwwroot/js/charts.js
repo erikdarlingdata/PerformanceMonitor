@@ -37,6 +37,7 @@ const BRUSH_MIN_PX = 8;
 const BAR_LABEL_CHARS = 30;
 const BAR_CHAR_PX = 7.6;
 const BAR_CHAR_BUDGET_PX = BAR_CHAR_PX * 1.16;
+const BAR_TRACK_MIN = 40;
 /* Top margin leaves headroom for the y-axis unit caption to sit fully clear of the top tick's label. */
 const M = { l: 58, r: 16, t: 26, b: 30 };
 const PLOT_H = H - M.t - M.b;
@@ -819,15 +820,21 @@ export function renderBarChart(spec) {
      any panel width, so a narrow panel truncates the label rather than scaling it down. */
   const buildBars = (W) => {
     const longestLabel = Math.max(...shown.map((d) => Math.min(BAR_LABEL_CHARS, String(d.label == null || d.label === "" ? "—" : d.label).length)));
-    /* Rounded UP: a gutter rounded down can hold one character fewer than the longest label ("AdvWork" read "AdvWo…"). */
-    const labelW = Math.ceil(Math.min(longestLabel * BAR_CHAR_BUDGET_PX + 8, Math.max(72, W * 0.35)));
-    const labelChars = Math.min(BAR_LABEL_CHARS, Math.max(2, Math.floor((labelW - 8) / BAR_CHAR_BUDGET_PX)));
     const valueW = Math.round(Math.max(...valueTexts.map((t) => t.length)) * BAR_CHAR_BUDGET_PX + 12);
+    /* Rounded UP: a gutter rounded down can hold one character fewer than the longest label ("AdvWork" read "AdvWo…"). */
+    let labelW = Math.ceil(Math.min(longestLabel * BAR_CHAR_BUDGET_PX + 8, Math.max(72, W * 0.35)));
+    /* The box never overflows (#5586): when the track would fall under its 40 px minimum, the label column gives way first, down
+       to 2 characters and the ellipsis (still budgeted by BAR_CHAR_BUDGET_PX, so a wide font fits), and no further. */
+    if (W - (labelW + 8) - valueW < BAR_TRACK_MIN) {
+      labelW = Math.min(labelW, Math.max(Math.ceil(3 * BAR_CHAR_BUDGET_PX + 8), Math.floor(W - valueW - BAR_TRACK_MIN - 8)));
+    }
+    const labelChars = Math.min(BAR_LABEL_CHARS, Math.max(2, Math.floor((labelW - 8) / BAR_CHAR_BUDGET_PX)));
     const barLeft = labelW + 8;
-    const barW = Math.max(40, W - barLeft - valueW);
+    const barW = Math.max(BAR_TRACK_MIN, W - barLeft - valueW);
 
     const root = svg("svg", { viewBox: `0 0 ${W} ${height}`, width: W, height, style: `width:${W}px;height:${height}px`, class: "plot-svg", role: "img" });
 
+    const valueLayer = [];
     shown.forEach((d, i) => {
       const y = M.t + i * (rowH + gap);
       const val = Number(d.value);
@@ -855,7 +862,7 @@ export function renderBarChart(spec) {
       root.appendChild(label);
       root.appendChild(track);
       root.appendChild(bar);
-      root.appendChild(value);
+      valueLayer.push(value);
     });
 
     /* Render-only threshold reference lines (design D3): a ranked bar's value runs along the x axis, so each in-domain
@@ -867,6 +874,9 @@ export function renderBarChart(spec) {
         root.appendChild(thresholdLine(tx, M.t, tx, height, tx, M.t - 4, "middle", formatValue(tv)));
       }
     }
+    /* The value texts go on top (#5586): the dashed line draws over the bar fills, where a long bar crosses it, but stops at a
+       number (the .bar-value halo in the panel colour). */
+    for (const value of valueLayer) root.appendChild(value);
     return root;
   };
 

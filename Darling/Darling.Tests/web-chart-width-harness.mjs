@@ -487,10 +487,20 @@ out.distinctLabels = {
       longestLabel: Math.max(...labels.map((n) => n.textContent.length)),
       firstLabel: labels[0].textContent,
       thresholds: find(root, (n) => String(n.attrs.class) === "threshold-line").length,
+      trackW: Number(tracks[0].attrs.width),
+      /* #5586: the document order (find is pre-order) of the layers: the bar fills, the threshold lines, then every value text */
+      layers: (() => {
+        const all = find(root, () => true);
+        const idx = (pred) => all.map((n, i) => (pred(n) ? i : -1)).filter((i) => i >= 0);
+        const fills = idx((n) => n.tag === "rect" && /^bar( |$)/.test(String(n.attrs.class)));
+        const lines = idx((n) => String(n.attrs.class) === "threshold-line");
+        const vals = idx((n) => n.tag === "text" && n.attrs.class === "bar-value");
+        return { lastFill: Math.max(...fills), firstLine: Math.min(...lines), lastLine: Math.max(...lines), firstValue: Math.min(...vals) };
+      })(),
     };
   };
   out.bar = {};
-  for (const w of [260, 360, 600, 2000]) {
+  for (const w of [200, 230, 260, 360, 600, 2000]) {
     const c = charts.renderBarChart(barSpec());
     mount(c, w);
     out.bar[w] = barGeometry(c);

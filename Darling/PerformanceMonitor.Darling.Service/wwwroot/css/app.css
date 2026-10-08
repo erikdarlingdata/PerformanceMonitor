@@ -639,7 +639,8 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart-bar svg { max-height: none; }
 .chart .bar-label { fill: var(--dim); font-size: 12px; }
 .chart .bar-track { fill: var(--bg-dark); }
-.chart .bar-value { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* The halo is the panel (.card) colour, so a dashed threshold line stops at the number instead of running through it (#5586). */
+.chart .bar-value { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; }
 
 /* A ranked donut: the wedges, the center total, and a value-bearing legend below. */
 .chart-pie .pie-wrap { display: flex; justify-content: center; }

@@ -136,6 +136,8 @@ public sealed class WebChartWidthBehaviourTests
     /// that is too tight for a wide font fails here. RED proof: without the width-driven gutters a 360 px panel keeps the 220
     /// px label gutter and 110 px value gutter of the old 1000-wide drawing, and the values run past the right edge.</summary>
     [Theory]
+    [InlineData(200)]
+    [InlineData(230)]
     [InlineData(260)]
     [InlineData(360)]
     [InlineData(600)]
@@ -148,6 +150,23 @@ public sealed class WebChartWidthBehaviourTests
         Assert.True(g.GetProperty("valueRightMax").GetDouble() <= width, "a value runs past the right edge at " + width + " px");
         Assert.True(g.GetProperty("trackRight").GetDouble() <= width - 40, "the bar track is too wide for its value at " + width + " px");
         Assert.EndsWith("\u2026", g.GetProperty("firstLabel").GetString(), StringComparison.Ordinal);
+        // #5586: the label column gives way before the box overflows, and the track keeps its 40 px minimum
+        Assert.True(g.GetProperty("trackW").GetDouble() >= 40, "the bar track is under 40 px at " + width + " px");
+    }
+
+    /// <summary>The value texts are the last layer of a ranked bar: every one comes after every threshold line, and the
+    /// threshold lines come after the bar fills, so the dashed line shows where a long bar crosses it and stops at a number.
+    /// RED proof: with each value text appended right after its bar (the old order), the first value text comes before the
+    /// threshold line at every width.</summary>
+    [Theory]
+    [InlineData(260)]
+    [InlineData(600)]
+    [InlineData(2000)]
+    public void TheBarChart_DrawsEveryValueTextAfterTheThresholdLines(int width)
+    {
+        var l = Run().GetProperty("bar").GetProperty(width.ToString()).GetProperty("layers");
+        Assert.True(l.GetProperty("firstValue").GetDouble() > l.GetProperty("lastLine").GetDouble(), "a value text is drawn before a threshold line at " + width + " px");
+        Assert.True(l.GetProperty("firstLine").GetDouble() > l.GetProperty("lastFill").GetDouble(), "a threshold line is drawn under a bar fill at " + width + " px");
     }
 
     /// <summary>A bar panel whose longest label has any length from 1 to 30 draws it whole at 2,000 px, with no ellipsis: the
@@ -480,5 +499,19 @@ public sealed class WebChartWidthBehaviourTests
         Assert.Contains("@media print {", css, StringComparison.Ordinal);
         Assert.Contains(".chart svg.plot-svg { position: static; width: 100% !important; height: auto !important; }", css, StringComparison.Ordinal);
         Assert.Contains(".chart .chart-plot { height: auto !important; overflow: visible; }", css, StringComparison.Ordinal);
+    }
+
+    /// <summary>A source pin (a Node run has no painting): a ranked bar's value text carries a halo in the panel (.card)
+    /// colour, painted under the glyphs, so the dashed threshold line drawn before the value texts stops at the number.
+    /// RED proof: without the halo declarations the rule below is gone.</summary>
+    [Fact]
+    public void TheBarValueText_HasAHaloInThePanelColour()
+    {
+        var css = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
+        var rule = css.Split('\n').Single(l => l.StartsWith(".chart .bar-value {", StringComparison.Ordinal));
+        Assert.Contains("paint-order: stroke;", rule, StringComparison.Ordinal);
+        Assert.Contains("stroke: var(--card);", rule, StringComparison.Ordinal);
+        Assert.Contains("stroke-width: 3px;", rule, StringComparison.Ordinal);
+        Assert.Contains("stroke-linejoin: round;", rule, StringComparison.Ordinal);
     }
 }
