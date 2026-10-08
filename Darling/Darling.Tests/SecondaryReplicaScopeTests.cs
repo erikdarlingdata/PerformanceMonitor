@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// #5558: <see cref="PgSecondaryReplicaScope"/>'s predicate builder and its fail-open read, with no database. The seeded
 /// twins of Lite's fact tests are in <see cref="SecondaryReplicaScopeLiveTests"/>.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class PgSecondaryReplicaScopeTests
 {
     private static AnalysisContext ContextWith(params string[] secondaries) => new()
@@ -138,6 +139,7 @@ public sealed class PgSecondaryReplicaScopeTests
 /// secondary copy would quietly come back for that one pass. A pass that reads only node-local facts says so by setting the
 /// empty set on purpose. Scans Lite and Darling; test projects build contexts freely and are not scanned.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AnalysisContextSecondaryScopeSourceScanTests
 {
     private static string RepoRoot([CallerFilePath] string thisFile = "")
@@ -217,6 +219,7 @@ public sealed class AnalysisContextSecondaryScopeSourceScanTests
 }
 
 /// <summary>#5558: the viewer Recommendations view model carries the note only where a list or the all-clear shows.</summary>
+[Trait("Reads", "Lite")]
 public sealed class RecommendationsReplicaNoteTests
 {
     [Fact]

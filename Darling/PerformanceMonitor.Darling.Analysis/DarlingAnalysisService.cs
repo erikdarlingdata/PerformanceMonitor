@@ -280,8 +280,20 @@ public sealed class DarlingAnalysisService
     /// so the replicated facts skip them. Every context this service builds goes through here. Fails open: any unknown
     /// returns an empty set.
     /// </summary>
-    internal Task<IReadOnlySet<string>> SecondaryScopeForAsync(int serverId, DateTime windowEndUtc, CancellationToken cancellationToken) =>
-        PgSecondaryReplicaScope.ReadAsync(_postgres, serverId, windowEndUtc, _logger, cancellationToken);
+    internal async Task<IReadOnlySet<string>> SecondaryScopeForAsync(int serverId, DateTime windowEndUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await PgSecondaryReplicaScope.ReadAsync(_postgres, serverId, windowEndUtc, _logger, cancellationToken);
+        }
+        catch (Exception ex) when (AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
+        {
+            /* This runs in the context initializer, ahead of the pass's own try. An abandoned budget must not escape the
+               wrapper from here: an empty set lets the pass reach its first checkpoint and take the normal abandon
+               path (and the read-only wrappers fail on their next store read, as #4203 requires). */
+            return PgSecondaryReplicaScope.NoneSkipped;
+        }
+    }
 
     /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
     /// <param name="planFetcher">Optional; the SQL Server drill-down's cached-plan fetch.</param>
