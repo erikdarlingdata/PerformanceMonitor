@@ -118,7 +118,7 @@ public sealed class ServerTagViewerRoleLiveTests
             await PgMigrations.MigrateAsync(connection, null, ct);
         }
 
-        var viewerStatements = ViewerGrantReplay.StatementsFor(roleName);
+        var viewerStatements = ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName);
 
         /* The viewer's table-wide config SELECT and its column carve must both be in what we replay. */
         Assert.Contains(viewerStatements, x => x.Contains("SELECT ON ALL TABLES IN SCHEMA config", StringComparison.Ordinal));
