@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -168,14 +169,16 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// PostgreSQL postmaster log "terminated by exception 0xC0000005" for a TimescaleDB worker, twice, both times
     /// with a scratch-database FORCE drop in flight (PR #5480); no worker is running in the dropped database
     /// once this returns, so the drop has nothing to kill.
-    /// <para>Best-effort and bounded: it never throws, never fails a test, and never skips the drop. A database
+    /// <para>Best-effort and bounded: it never throws, never fails a test, and never skips the drop. A caller's
+    /// <paramref name="cancellationToken"/> ends it early too, without a message (the exit drain passes its deadline). A database
     /// without the extension, or one already gone, returns at once. It does NOT call
     /// <c>_timescaledb_functions.stop_background_workers()</c>, which SIGTERMs running jobs, the very kill this
     /// avoids.</para>
     /// </summary>
-    internal static async Task QuiesceTimescaleJobsAsync(string adminConnectionString, string databaseName)
+    internal static async Task QuiesceTimescaleJobsAsync(string adminConnectionString, string databaseName, CancellationToken cancellationToken = default)
     {
-        using var cap = new CancellationTokenSource(QuiesceCap);
+        using var cap = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cap.CancelAfter(QuiesceCap);
         try
         {
             var scratchBuilder = new NpgsqlConnectionStringBuilder(adminConnectionString)
@@ -219,6 +222,10 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InvalidCatalogName)
         {
             /* The database is already gone: nothing to quiesce, and the drop below is IF EXISTS. */
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* The caller's own deadline (the exit drain's), not the cap: the caller decides whether the drop still runs. */
         }
         catch (Exception ex)
         {
@@ -292,8 +299,11 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// <summary>One database the exit drain was asked to drop: its name, the connection string that drops it, and the test that created it.</summary>
     internal readonly record struct RememberedDatabase(string Name, string AdminConnectionString, string Creator);
 
-    /// <summary>What an exit drain did: connections it tried to open, databases it dropped, drops that failed, and databases it left alone.</summary>
-    internal readonly record struct ExitDrainOutcome(int ConnectAttempts, int Dropped, int Failed, int Skipped);
+    /// <summary>
+    /// What an exit drain did: connections it tried to open, databases it dropped, drops that failed, databases it left
+    /// alone because their cluster did not answer, and databases it had not finished when its deadline passed.
+    /// </summary>
+    internal readonly record struct ExitDrainOutcome(int ConnectAttempts, int Dropped, int Failed, int Skipped, int Unfinished);
 
     /// <summary>
     /// How long the exit drain waits to connect to a cluster, in seconds. The default is 15, and the drain ran once per
@@ -320,59 +330,199 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         }.ConnectionString;
 
     /// <summary>
+    /// How long the whole exit drain may take, in seconds, in-flight drops included. The drain is a ProcessExit handler,
+    /// and xUnit v3 under Microsoft.Testing.Platform gives that stage 11 seconds after the run returns (one second, then
+    /// its <c>shutdownForegroundThreadWaitSeconds</c> default of 10) before it prints "[FATAL ERROR] Foreground threads
+    /// were left running, forcing process exit" and exits with code 1. No thread was left running: the 2026-10-08
+    /// nightly passed every test and still failed because this drain, then dropping 39 leaked databases one at a time
+    /// with a TimescaleDB quiesce before each (#5480), was still at work when that window closed. The drain returns when
+    /// this passes even with a drop in flight (one DROP DATABASE waited 26 seconds for its checkpoint on a local rig), and
+    /// names every database it did not finish; the next run's start-of-run sweep removes those, or they go with the
+    /// throwaway cluster. Tests that mint a database must still drop it themselves (see
+    /// <c>ScratchDatabaseDisposalCensusTests</c>); this budget only keeps a leak from failing a run.
+    /// </summary>
+    internal const int ExitDrainBudgetSeconds = 6;
+
+    /// <summary>How many databases the exit drain quiesces and drops at once. Each holds at most two connections at a time.</summary>
+    internal const int ExitDrainParallelism = 16;
+
+    /// <summary>
     /// The exit drain's body, taking its list as a parameter so a test can run it without a process exit and without
     /// touching the databases that other tests, running in parallel, still hold.
     /// </summary>
     /// <remarks>
-    /// Connects with the short connect wait above, and stops trying a cluster once a connect to it fails without the
-    /// server answering (a stopped cluster, a refused or timed-out connection), so N databases on a dead cluster cost
-    /// one short wait, not N. A server that answers with an error (a bad password, a missing database) is not a dead
-    /// cluster, and a failed drop on a live cluster never stops the others; each skipped database is still named.
+    /// <para>Clusters drain side by side, and within a live cluster up to <see cref="ExitDrainParallelism"/> databases
+    /// drop at once, all under one <paramref name="budget"/> (default <see cref="ExitDrainBudgetSeconds"/> seconds).
+    /// When it passes, the drain returns and names every
+    /// database it did not finish. A drop already sent is not cancelled (an interrupted DROP DATABASE can leave an
+    /// invalid database behind), but no new connect, quiesce or drop starts.</para>
+    /// <para>The first database on each cluster goes alone and probes it. A connect that fails without the server
+    /// answering (a stopped cluster, a refused or timed-out connection) marks the cluster dead, so N databases on it
+    /// cost one short wait, not N, and the rest are skipped by name. A server that answers with an error (a bad
+    /// password, a missing database) is not a dead cluster, and a failed drop on a live cluster never stops the
+    /// others.</para>
     /// </remarks>
-    internal static ExitDrainOutcome DropRememberedAtExit(IEnumerable<RememberedDatabase> remembered)
+    internal static ExitDrainOutcome DropRememberedAtExit(IEnumerable<RememberedDatabase> remembered, TimeSpan? budget = null)
     {
-        var unreachable = new HashSet<string>(StringComparer.Ordinal);
-        int attempts = 0, dropped = 0, failed = 0, skipped = 0;
-        foreach (var db in remembered)
+        var deadline = budget ?? TimeSpan.FromSeconds(ExitDrainBudgetSeconds);
+        var databases = remembered.ToList();
+        var drain = new ExitDrain(databases.Count);
+        using var stop = new CancellationTokenSource(deadline);
+        using var gate = new SemaphoreSlim(ExitDrainParallelism);
+
+        var clusters = databases
+            .Select((db, index) => (Db: db, Index: index))
+            .GroupBy(entry => ClusterKeyOrOwn(entry.Db), StringComparer.Ordinal)
+            .Select(cluster => Task.Run(() => DrainClusterAsync(cluster.ToList(), drain, gate, stop.Token)))
+            .ToArray();
+
+        try
         {
-            try
-            {
-                var cluster = ClusterKey(db.AdminConnectionString);
-                if (unreachable.Contains(cluster))
-                {
-                    skipped++;
-                    Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and was not dropped at exit: its cluster did not answer an earlier connect.");
-                    continue;
-                }
+            Task.WaitAll(clusters, deadline);
+        }
+        catch (AggregateException)
+        {
+            /* Every per-database step catches its own failure; nothing here should throw, and nothing may stop the exit. */
+        }
 
-                attempts++;
-                using var admin = new NpgsqlConnection(ExitDrainConnectionString(db.AdminConnectionString));
-                try
-                {
-                    admin.Open();
-                }
-                catch (Exception ex) when (ex is not PostgresException)
-                {
-                    unreachable.Add(cluster);
-                    throw;
-                }
-
-                /* Process exit has no async context; the helper is bounded (10 s) and never throws. */
-                QuiesceTimescaleJobsAsync(ExitDrainConnectionString(db.AdminConnectionString), db.Name).GetAwaiter().GetResult();
-                using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{db.Name}\" WITH (FORCE)", admin);
-                drop.ExecuteNonQuery();
-                Remembered.TryRemove(db.Name, out _);
-                dropped++;
-                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}); dropped at process exit.");
-            }
-            catch (Exception ex)
+        /* One snapshot: a drop sent before the deadline can still finish after this line, and the counts and the names
+           printed below must agree. */
+        var states = drain.Snapshot();
+        for (var i = 0; i < databases.Count; i++)
+        {
+            if (states[i] == ExitDrain.Unsettled)
             {
-                failed++;
-                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and could not be dropped at exit: {ex.Message}");
+                var db = databases[i];
+                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and was not dropped within the exit drain's {deadline.TotalSeconds:0.#}-second limit; the next run's start-of-run sweep removes it.");
             }
         }
 
-        return new ExitDrainOutcome(attempts, dropped, failed, skipped);
+        return new ExitDrainOutcome(
+            Volatile.Read(ref drain.ConnectAttempts),
+            states.Count(state => state == ExitDrain.Dropped),
+            states.Count(state => state == ExitDrain.Failed),
+            states.Count(state => state == ExitDrain.Skipped),
+            states.Count(state => state == ExitDrain.Unsettled));
+    }
+
+    /// <summary>The database's cluster by host and port, or a key of its own when its connection string does not parse, so it fails alone.</summary>
+    private static string ClusterKeyOrOwn(RememberedDatabase db)
+    {
+        try
+        {
+            return ClusterKey(db.AdminConnectionString);
+        }
+        catch (Exception)
+        {
+            return "unparsed:" + db.Name;
+        }
+    }
+
+    private static async Task DrainClusterAsync(List<(RememberedDatabase Db, int Index)> cluster, ExitDrain drain, SemaphoreSlim gate, CancellationToken stop)
+    {
+        if (await DropOneAtExitAsync(cluster[0].Db, cluster[0].Index, drain, gate, stop) == ExitDrop.ClusterDead)
+        {
+            foreach (var (db, index) in cluster.Skip(1))
+            {
+                drain.Settle(index, ExitDrain.Skipped);
+                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and was not dropped at exit: its cluster did not answer an earlier connect.");
+            }
+
+            return;
+        }
+
+        await Task.WhenAll(cluster.Skip(1).Select(entry => DropOneAtExitAsync(entry.Db, entry.Index, drain, gate, stop)));
+    }
+
+    private static async Task<ExitDrop> DropOneAtExitAsync(RememberedDatabase db, int index, ExitDrain drain, SemaphoreSlim gate, CancellationToken stop)
+    {
+        try
+        {
+            await gate.WaitAsync(stop);
+        }
+        catch (OperationCanceledException)
+        {
+            return ExitDrop.OutOfTime;
+        }
+
+        try
+        {
+            Interlocked.Increment(ref drain.ConnectAttempts);
+            var connectionString = ExitDrainConnectionString(db.AdminConnectionString);
+            await using var admin = new NpgsqlConnection(connectionString);
+            try
+            {
+                await admin.OpenAsync(stop);
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
+            {
+                return ExitDrop.OutOfTime;
+            }
+            catch (Exception ex) when (ex is not PostgresException)
+            {
+                drain.Settle(index, ExitDrain.Failed);
+                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and could not be dropped at exit: {ex.Message}");
+                return ExitDrop.ClusterDead;
+            }
+
+            /* Bounded by its own cap and by the drain's deadline, and it never throws. */
+            await QuiesceTimescaleJobsAsync(connectionString, db.Name, stop);
+            if (stop.IsCancellationRequested)
+            {
+                return ExitDrop.OutOfTime;
+            }
+
+            await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{db.Name}\" WITH (FORCE)", admin);
+            await drop.ExecuteNonQueryAsync(CancellationToken.None);
+            Remembered.TryRemove(db.Name, out _);
+            drain.Settle(index, ExitDrain.Dropped);
+            Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}); dropped at process exit.");
+            return ExitDrop.Done;
+        }
+        catch (Exception ex)
+        {
+            drain.Settle(index, ExitDrain.Failed);
+            Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}) and could not be dropped at exit: {ex.Message}");
+            return ExitDrop.Done;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>How one database's exit drop ended, as far as the rest of its cluster is concerned.</summary>
+    private enum ExitDrop
+    {
+        Done,
+        ClusterDead,
+        OutOfTime,
+    }
+
+    /// <summary>Each database's outcome in the drain, set once, and the connect count, safe to update from every drop at once.</summary>
+    private sealed class ExitDrain(int count)
+    {
+        public const int Unsettled = 0;
+        public const int Dropped = 1;
+        public const int Failed = 2;
+        public const int Skipped = 3;
+
+        private readonly int[] _states = new int[count];
+
+        public int ConnectAttempts;
+
+        public void Settle(int index, int state) => Interlocked.CompareExchange(ref _states[index], state, Unsettled);
+
+        public int[] Snapshot()
+        {
+            var copy = new int[_states.Length];
+            for (var i = 0; i < copy.Length; i++)
+            {
+                copy[i] = Volatile.Read(ref _states[i]);
+            }
+
+            return copy;
+        }
     }
 
     /// <summary>The cluster a connection string names, by host and port: what the start-of-run sweep and the exit drain each treat as one cluster.</summary>
