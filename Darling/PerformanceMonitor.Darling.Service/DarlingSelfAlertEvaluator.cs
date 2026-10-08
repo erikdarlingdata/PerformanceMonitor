@@ -8569,8 +8569,8 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         return failed;
     }
 
-    private const string CaptureDownMetric = "Capture Down";
-    private const string AgentDownMetric = "Agent Not Running";
+    internal const string CaptureDownMetric = "Capture Down";
+    internal const string AgentDownMetric = "Agent Not Running";
 
     /// <summary>
     /// #5493: retries of the lasting-state self-alerts, keyed by <see cref="StateRetryKey"/>. Collection Stopped and
