@@ -23,16 +23,20 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 /* Line and scatter charts draw at the width their container really has (#5586): one SVG unit is one CSS pixel in both
    directions, so the axis text keeps its size on a wide panel and on a phone. CHART_DEFAULT_W is the width a chart is drawn
    at before it is on the page and measured (it is built before it is mounted); the first measurement redraws it before the
-   first paint. CHART_MIN_W keeps the plot box from collapsing in a very narrow container (the host clips the rest). */
+   first paint. CHART_MIN_W keeps the plot box from collapsing in a very narrow container (the host clips the rest). It is 200
+   so that a phone-width panel (a 260 px box) is drawn at its own width, with nothing clipped, in all three renderers. */
 const CHART_DEFAULT_W = 1000;
-const CHART_MIN_W = 300;
+const CHART_MIN_W = 200;
 const H = 300;
 /* A pointer drag shorter than this many CSS pixels is a click, not a brush. */
 const BRUSH_MIN_PX = 8;
 /* The ranked bar chart is drawn at its box's real width like the line and scatter charts (#5586); its row geometry is its own.
-   A label is at most BAR_LABEL_CHARS characters, and its 12px text is about BAR_CHAR_PX px a character (0.63 em, a little over the average so a capital-heavy name still fits). */
+   A label is at most BAR_LABEL_CHARS characters, and its 12px text is about BAR_CHAR_PX px a character (0.63 em, a little over the
+   average so a capital-heavy name still fits). The gutters reserve BAR_CHAR_BUDGET_PX a character, 16 % more, so text up to
+   0.73 em a character (a wide font, a run of capitals) still stays inside its gutter and the box. */
 const BAR_LABEL_CHARS = 30;
 const BAR_CHAR_PX = 7.6;
+const BAR_CHAR_BUDGET_PX = BAR_CHAR_PX * 1.16;
 /* Top margin leaves headroom for the y-axis unit caption to sit fully clear of the top tick's label. */
 const M = { l: 58, r: 16, t: 26, b: 30 };
 const PLOT_H = H - M.t - M.b;
@@ -97,12 +101,14 @@ function xTickIntervals(plotW, labels) {
  * count at the window's minutes, so a brush-zoomed span of a few minutes does not repeat HH:mm. A window too short for one
  * minute per tick shows HH:mm:ss and puts the ticks on whole seconds, capped at the window's seconds. The two end ticks keep
  * the exact domain bounds; the ticks between are floored onto the whole minute (second), which keeps them distinct from both
- * ends because each step is at least that unit.
+ * ends because each step is at least that unit. A window across a clock change repeats a wall-clock hour, so the caller then
+ * labels every tick with its zone (`withZone`: "01:00 AM EDT", "01:00 AM EST"), which keeps the labels distinct; the width
+ * estimate counts that suffix.
  */
-function xTickPlan(tMin, spanMs, plotW, crossesDay) {
+function xTickPlan(tMin, spanMs, plotW, crossesDay, withZone = false) {
   if (spanMs === 0) return { times: [tMin], seconds: false };
   const tMax = tMin + spanMs;
-  const widthIntervals = (seconds) => xTickIntervals(plotW, [tMin, tMin + spanMs / 2, tMax].map((t) => axisTime(new Date(t), crossesDay, seconds)));
+  const widthIntervals = (seconds) => xTickIntervals(plotW, [tMin, tMin + spanMs / 2, tMax].map((t) => axisTime(new Date(t), crossesDay, seconds, withZone)));
   const evenTicks = (n, unit) => {
     const times = [tMin];
     for (let i = 1; i < n; i++) times.push(Math.floor((tMin + (spanMs * i) / n) / unit) * unit);
@@ -378,7 +384,10 @@ export function renderLineChart(spec) {
     const crossesDay = new Date(tMin).toDateString() !== new Date(tMax).toDateString();
     /* The tick count follows the plot width (#5586): as many evenly spaced labels as fit side by side with a gap, so none
        overlap on a phone and a wide panel gets more of them, not wider ones. */
-    const xPlan = xTickPlan(tMin, spanMs, plotW, crossesDay);
+    /* A window whose start and end have different UTC offsets in the browser's zone crosses a clock change: the repeated hour
+       would read the same twice, so every label then carries the zone's short name. One offset: the label is unchanged. */
+    const withZone = new Date(tMin).getTimezoneOffset() !== new Date(tMax).getTimezoneOffset();
+    const xPlan = xTickPlan(tMin, spanMs, plotW, crossesDay, withZone);
     /* One bucket spans no time, so the evenly-spaced loop would stack identical labels on the centered point. The plan then
        holds a single tick: one centered gridline + time label. */
     const xTickTimes = xPlan.times;
@@ -392,7 +401,7 @@ export function renderLineChart(spec) {
         y: H - 8,
         "text-anchor": anchor,
       });
-      label.textContent = axisTime(new Date(t), crossesDay, xPlan.seconds);
+      label.textContent = axisTime(new Date(t), crossesDay, xPlan.seconds, withZone);
       axis.appendChild(label);
     }
     /* Dual-axis overlay (#1606): the series2 values get their OWN nice scale on a right-hand axis — tick
@@ -716,7 +725,7 @@ export function renderLineChart(spec) {
       }
       const renderedX = (px / W) * rect.width;
       tooltip.style.display = "block";
-      /* Clamp to the box the reader can see: below CHART_MIN_W the SVG is wider than its clipped host (#5586). */
+      /* Clamp to the box the reader can see: below CHART_MIN_W (200 px) the SVG is wider than its clipped host (#5586). */
       const visibleW = plotHost.clientWidth > 0 ? Math.min(rect.width, plotHost.clientWidth) : rect.width;
       tooltip.style.left = Math.min(renderedX + 12, visibleW - tooltip.offsetWidth - 4) + "px";
       tooltip.style.top = "8px";
@@ -805,14 +814,15 @@ export function renderBarChart(spec) {
   /* The height follows the bar count, not the width, so the plot box never feeds back into the width it watches. */
   const height = M.t + shown.length * (rowH + gap);
   const valueTexts = shown.map((d) => formatValue(Number(d.value)));
-  /* The label gutter fits the longest label (at most BAR_LABEL_CHARS characters) and takes at most a third of the width, and
+  /* The label gutter fits the longest label (at most BAR_LABEL_CHARS characters) and takes at most 35 % of the width, and
      the value gutter fits the longest value, both by the 12px text's width (#5586): the text is drawn at its CSS size at
      any panel width, so a narrow panel truncates the label rather than scaling it down. */
   const buildBars = (W) => {
     const longestLabel = Math.max(...shown.map((d) => Math.min(BAR_LABEL_CHARS, String(d.label == null || d.label === "" ? "—" : d.label).length)));
-    const labelW = Math.round(Math.min(longestLabel * BAR_CHAR_PX + 8, Math.max(72, W * 0.35)));
-    const labelChars = Math.min(BAR_LABEL_CHARS, Math.max(2, Math.floor((labelW - 8) / BAR_CHAR_PX)));
-    const valueW = Math.round(Math.max(...valueTexts.map((t) => t.length)) * BAR_CHAR_PX + 12);
+    /* Rounded UP: a gutter rounded down can hold one character fewer than the longest label ("AdvWork" read "AdvWo…"). */
+    const labelW = Math.ceil(Math.min(longestLabel * BAR_CHAR_BUDGET_PX + 8, Math.max(72, W * 0.35)));
+    const labelChars = Math.min(BAR_LABEL_CHARS, Math.max(2, Math.floor((labelW - 8) / BAR_CHAR_BUDGET_PX)));
+    const valueW = Math.round(Math.max(...valueTexts.map((t) => t.length)) * BAR_CHAR_BUDGET_PX + 12);
     const barLeft = labelW + 8;
     const barW = Math.max(40, W - barLeft - valueW);
 

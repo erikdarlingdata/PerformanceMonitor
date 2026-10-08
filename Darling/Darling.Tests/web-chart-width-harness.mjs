@@ -408,15 +408,15 @@ out.distinctLabels = {
   thirtyDaysEvenly: evenly,
 };
 
-/* 7. the tooltip is clamped to the visible box: in a 260 px host the svg is 300 px wide and clipped */
+/* 7. the tooltip is clamped to the visible box: in a 180 px host (below the 200 px floor) the svg is 200 px wide and clipped */
 {
   const c = charts.zoomableLineChart(specFor(), "tip1", scope);
-  mount(c, 260);
+  mount(c, 180);
   const tip = find(c, (n) => String(n.className) === "chart-tooltip")[0];
   tip.offsetWidth = 120;
   const overlay = find(c, (n) => (n.listeners.mousemove || []).length)[0];
-  overlay.listeners.mousemove[0]({ clientX: 270 });
-  out.tooltip = { left: parseFloat(tip.style.left), visibleWidth: 260, tooltipWidth: 120 };
+  overlay.listeners.mousemove[0]({ clientX: 190 });
+  out.tooltip = { left: parseFloat(tip.style.left), visibleWidth: 180, tooltipWidth: 120 };
 }
 
 /* 8. the scatter keeps every gridline and labels fewer ticks on a narrow plot, always the first and the last */
@@ -456,9 +456,11 @@ out.distinctLabels = {
 
 /* 10. the ranked bar chart is drawn at its box's width like the line and scatter charts: one unit per pixel at 600 and 2,000 px,
    a height that follows the bar count alone, labels that fit their gutter and values that fit the right edge. A glyph is
-   BAR_TEST_CHAR_PX wide (12px text at 0.6 em); the browser check measures the real font. */
+   BAR_TEST_CHAR_PX wide: this test's own estimate (12px text at 0.73 em, 8.76 px), 15 % or more over the 7.6 px a character the
+   script's own glyph estimate is (BAR_CHAR_PX), so a layout that is too tight for a wide font fails here; the browser check
+   measures the real font (about 6 px a character). */
 {
-  const BAR_TEST_CHAR_PX = 12 * 0.6;
+  const BAR_TEST_CHAR_PX = 12 * 0.73;
   const barItems = [
     { label: "a_rather_long_database_name_that_is_cut_at_thirty", value: 1234567, drill: [{ dimension: "d", value: "x" }] },
     { label: "master", value: 900000 },
@@ -488,10 +490,19 @@ out.distinctLabels = {
     };
   };
   out.bar = {};
-  for (const w of [360, 600, 2000]) {
+  for (const w of [260, 360, 600, 2000]) {
     const c = charts.renderBarChart(barSpec());
     mount(c, w);
     out.bar[w] = barGeometry(c);
+  }
+  /* the longest label shows whole when its gutter was sized for it: a longest label of every length 1 to 30 at 2,000 px (a
+     gutter rounded down held one character fewer at lengths such as 4, 7 and 9) */
+  out.barLabelLengths = [];
+  for (let len = 1; len <= 30; len++) {
+    const c = charts.renderBarChart({ items: [{ label: "x".repeat(len), value: 5 }, { label: "a", value: 3 }] });
+    mount(c, 2000);
+    const labels = find(rootOf(c), (n) => n.tag === "text" && n.attrs.class === "bar-label").map((n) => n.textContent);
+    out.barLabelLengths.push({ len, shown: labels[0].length, cut: labels[0].includes("…") });
   }
   const rc = charts.renderBarChart(barSpec());
   mount(rc, 600);
@@ -540,5 +551,70 @@ out.distinctLabels = {
       labelRowY: 300 - 8,
     };
   }
+}
+/* 13. a window across a clock change labels every tick with its zone, so no two read the same; a window with one offset is
+   unchanged. The harness sets the zone itself (the runtime honours a TZ assigned here) and puts it back. */
+{
+  const savedTz = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  const HOUR = 60 * MIN;
+  /* The UTC instant of a New York wall-clock hour, found by trying both offsets so the test does not hard-code one. */
+  const ny = (y, m, d, h) => {
+    for (const off of [4, 5]) {
+      const t = Date.UTC(y, m, d, h + off);
+      if (new Date(t).getHours() === h && new Date(t).getDate() === d) return t;
+    }
+    throw new Error("no such local time");
+  };
+  out.dst = {
+    zone: new Date(Date.UTC(2026, 6, 1)).toLocaleTimeString("en-US", { timeZoneName: "short" }),
+    fallBack600: windowChart(ny(2026, 10, 1, 0), 4 * HOUR, 600),
+    fallBackFrom0100At600: windowChart(Date.UTC(2026, 10, 1, 5), 4 * HOUR, 600),
+    fallBack2000: windowChart(ny(2026, 10, 1, 0), 4 * HOUR, 2000),
+    fallBack360: windowChart(ny(2026, 10, 1, 0), 4 * HOUR, 360),
+    springForward600: windowChart(ny(2026, 2, 8, 0), 4 * HOUR, 600),
+    springForward2000: windowChart(ny(2026, 2, 8, 0), 4 * HOUR, 2000),
+    sameOffset600: windowChart(ny(2026, 0, 15, 0), 4 * HOUR, 600),
+    sameOffset2000: windowChart(ny(2026, 0, 15, 0), 4 * HOUR, 2000),
+  };
+  /* the zone suffix makes a label longer: the labels still keep their gap and stay inside the plot */
+  for (const width of [360, 600, 2000]) {
+    const start = ny(2026, 10, 1, 0);
+    const c = charts.renderLineChart({
+      points: [0, 1].map((i) => ({ t: iso(start + i * (4 * HOUR - 1000)), v: i })),
+      xKey: "t",
+      series: [{ key: "v", label: "v", color: "#fff" }],
+      windowStart: start,
+      windowEnd: start + 4 * HOUR,
+    });
+    mount(c, width);
+    const g = minGap(xLabels(c));
+    out.dst["fit" + width] = { gap: g.least, first: g.first, last: g.last, plotRight: width - 16 };
+  }
+  if (savedTz === undefined) delete process.env.TZ;
+  else process.env.TZ = savedTz;
+}
+
+/* 14. a 260 px box (a phone): the line and scatter charts are drawn at the box's own width, so the host clips nothing; no x label
+   overlaps another, the first starts inside the plot and the last ends inside the box. At and below the 200 px floor the width is
+   the floor. (The bar chart's 260 px case is in section 10.) */
+{
+  out.narrow = {};
+  const fit = (labels) => {
+    const g = minGap(labels);
+    return { count: labels.length, gap: g.least, first: g.first, last: g.last };
+  };
+  const line = charts.renderLineChart(specFor());
+  mount(line, 260);
+  out.narrow.line = { ...geometry(line), ...fit(xLabels(line)) };
+  const scatter = charts.renderScatterChart(scatterSpec());
+  mount(scatter, 260);
+  out.narrow.scatter = { ...geometry(scatter), ...fit(xLabels(scatter).filter((l) => l.text.endsWith(" ms"))) };
+  const floor = charts.renderLineChart(specFor());
+  mount(floor, 200);
+  out.narrow.floorLine = geometry(floor);
+  const below = charts.renderLineChart(specFor());
+  mount(below, 150);
+  out.narrow.belowFloorLine = geometry(below);
 }
 console.log(JSON.stringify(out));

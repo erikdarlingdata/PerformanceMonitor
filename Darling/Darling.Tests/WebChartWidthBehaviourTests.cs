@@ -37,6 +37,9 @@ public sealed class WebChartWidthBehaviourTests
     private static JsonElement Run()
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        // The labels are local wall-clock times: pin the zone so a run does not depend on the machine's (the harness sets
+        // America/New_York itself for the clock-change cases).
+        psi.Environment["TZ"] = "UTC";
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-chart-width-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
 
@@ -127,11 +130,13 @@ public sealed class WebChartWidthBehaviourTests
         Assert.Equal(1d, few.GetProperty("xScale").GetDouble());
     }
 
-    /// <summary>At 360, 600 and 2,000 px no label runs off the left edge or into its bar track, the value of every bar ends
-    /// inside the box, and a long label is cut to what its gutter holds (most characters on the widest panel). RED proof:
-    /// without the width-driven gutters a 360 px panel keeps the 220 px label gutter and 110 px value gutter of the old
-    /// 1000-wide drawing, and the values run past the right edge.</summary>
+    /// <summary>At 260, 360, 600 and 2,000 px no label runs off the left edge or into its bar track, the value of every bar
+    /// ends inside the box, and a long label is cut to what its gutter holds (most characters on the widest panel). The
+    /// harness measures a glyph at 8.76 px (0.73 em), 15 % or more over the 7.6 px the script's own estimate is, so a layout
+    /// that is too tight for a wide font fails here. RED proof: without the width-driven gutters a 360 px panel keeps the 220
+    /// px label gutter and 110 px value gutter of the old 1000-wide drawing, and the values run past the right edge.</summary>
     [Theory]
+    [InlineData(260)]
     [InlineData(360)]
     [InlineData(600)]
     [InlineData(2000)]
@@ -143,6 +148,22 @@ public sealed class WebChartWidthBehaviourTests
         Assert.True(g.GetProperty("valueRightMax").GetDouble() <= width, "a value runs past the right edge at " + width + " px");
         Assert.True(g.GetProperty("trackRight").GetDouble() <= width - 40, "the bar track is too wide for its value at " + width + " px");
         Assert.EndsWith("\u2026", g.GetProperty("firstLabel").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>A bar panel whose longest label has any length from 1 to 30 draws it whole at 2,000 px, with no ellipsis: the
+    /// gutter is sized for that label. RED proof: with the gutter rounded to the nearest pixel instead of up, the longest
+    /// label is one character short (and cut) at lengths 3, 4, 5, 9, 10, 14, 15, 16, 20, 21, 25, 26, 27 and 30.</summary>
+    [Fact]
+    public void TheBarChart_ShowsItsLongestLabelWhole_AtEveryLengthFrom1To30()
+    {
+        var lengths = Run().GetProperty("barLabelLengths").EnumerateArray().ToArray();
+        Assert.Equal(30, lengths.Length);
+        foreach (var l in lengths)
+        {
+            var len = l.GetProperty("len").GetInt32();
+            Assert.False(l.GetProperty("cut").GetBoolean(), "a label of " + len + " characters was cut");
+            Assert.Equal(len, l.GetProperty("shown").GetInt32());
+        }
     }
 
     [Fact]
@@ -288,8 +309,72 @@ public sealed class WebChartWidthBehaviourTests
             d.GetProperty("thirtyDays").EnumerateArray().Select(l => l.GetString()));
     }
 
-    /// <summary>The tooltip is placed inside the box the reader sees. Below 300 px the SVG is wider than its clipped host;
-    /// RED proof: clamping to the SVG's width puts the tooltip at 176 px in a 260 px box.</summary>
+    /// <summary>A window across a clock change (the repeated hour in the autumn, the skipped one in the spring) gives every
+    /// x label its zone, so no two read the same ("01:00 AM EDT", "01:00 AM EST"), and the longer labels still keep their gap
+    /// and stay inside the plot. A window with one offset has no zone text. The harness runs these in America/New_York. RED
+    /// proof: without the zone name the 4-hour window over 2026-11-01 at 600 px reads "01:00 AM" twice.</summary>
+    [Fact]
+    public void AWindowAcrossAClockChange_LabelsEveryTickWithItsZone_AndNoTwoLabelsReadTheSame()
+    {
+        var d = Run().GetProperty("dst");
+        Assert.Contains("EDT", d.GetProperty("zone").GetString(), StringComparison.Ordinal);
+        string[] Labels(string name) => d.GetProperty(name).EnumerateArray().Select(l => l.GetString()!).ToArray();
+        foreach (var name in new[] { "fallBack600", "fallBackFrom0100At600", "fallBack2000", "springForward600", "springForward2000" })
+        {
+            var labels = Labels(name);
+            Assert.True(labels.Length >= 3, name + " drew fewer than three labels");
+            Assert.True(labels.Distinct().Count() == labels.Length, name + " repeats a label: " + string.Join(" | ", labels));
+            Assert.All(labels, l => Assert.True(l.EndsWith("EDT", StringComparison.Ordinal) || l.EndsWith("EST", StringComparison.Ordinal), name + ": " + l));
+        }
+
+        // the repeated hour: the autumn window shows 01:00 under both zones
+        Assert.Contains("01:36 AM EDT", Labels("fallBack2000"));
+        Assert.Contains("01:00 AM EST", Labels("fallBack2000"));
+
+        // one offset: the label is unchanged, with no zone text
+        foreach (var name in new[] { "sameOffset600", "sameOffset2000" })
+        {
+            Assert.All(Labels(name), l => Assert.Matches(@"^\d\d:\d\d [AP]M$", l));
+        }
+
+        foreach (var width in new[] { 360, 600, 2000 })
+        {
+            var fit = d.GetProperty("fit" + width);
+            Assert.True(fit.GetProperty("gap").GetDouble() >= 8, "zone labels overlap at " + width + " px");
+            Assert.True(fit.GetProperty("first").GetDouble() >= 58);
+            Assert.True(fit.GetProperty("last").GetDouble() <= fit.GetProperty("plotRight").GetDouble());
+        }
+    }
+
+    /// <summary>In a 260 px box (a phone) the line and scatter charts are drawn at 260 px, not wider, so the host clips nothing:
+    /// no labels overlap and the last ends inside the box. RED proof: with the old 300 px floor the drawn width is 300 and
+    /// the last x label ends at 284, past the 260 px box.</summary>
+    [Theory]
+    [InlineData("line")]
+    [InlineData("scatter")]
+    public void ANarrowChart_IsDrawnAtTheBoxWidth_AndKeepsItsLabelsInside(string kind)
+    {
+        var g = Run().GetProperty("narrow").GetProperty(kind);
+        Assert.Equal(260, g.GetProperty("vbW").GetDouble());
+        Assert.Equal(260, g.GetProperty("cssW").GetDouble());
+        Assert.Equal(1d, g.GetProperty("xScale").GetDouble());
+        Assert.True(g.GetProperty("count").GetInt32() >= 2);
+        Assert.True(g.GetProperty("gap").GetDouble() >= 8, "labels overlap at 260 px");
+        Assert.True(g.GetProperty("first").GetDouble() >= 58);
+        Assert.True(g.GetProperty("last").GetDouble() <= 260, "the last x label runs past the box");
+    }
+
+    /// <summary>The floor is 200 px: a box of 200 px is drawn at 200, and a narrower one at 200 (the host clips the rest).</summary>
+    [Fact]
+    public void TheChartFloor_Is200Px()
+    {
+        var n = Run().GetProperty("narrow");
+        Assert.Equal(200, n.GetProperty("floorLine").GetProperty("vbW").GetDouble());
+        Assert.Equal(200, n.GetProperty("belowFloorLine").GetProperty("vbW").GetDouble());
+    }
+
+    /// <summary>The tooltip is placed inside the box the reader sees. Below the 200 px floor the SVG is wider than its clipped
+    /// host; RED proof: clamping to the SVG's width puts the tooltip 20 px further right (76 px, not 56) in a 180 px box.</summary>
     [Fact]
     public void TheTooltip_StaysInsideTheVisibleBox_WhenTheSvgIsWiderThanItsHost()
     {
