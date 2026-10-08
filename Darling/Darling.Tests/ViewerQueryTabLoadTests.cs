@@ -77,7 +77,7 @@ public sealed class ViewerQueryTabLoadTests
     public void EveryInnerTabLoad_IsTimed_AndASlowOneLogsItsPhaseSplit()
     {
         var shell = Source("ViewerServerTab.xaml.cs");
-        Assert.Contains("var timer = _loadTimer = new ViewerLoadTimer();", shell, StringComparison.Ordinal);
+        Assert.Contains("var timer = new ViewerLoadTimer();", shell, StringComparison.Ordinal);
         Assert.Contains("timer.Finish(", shell, StringComparison.Ordinal);
         Assert.Contains("ViewerLogger.Warn(\"SlowLoad\"", shell, StringComparison.Ordinal);
     }
@@ -86,11 +86,12 @@ public sealed class ViewerQueryTabLoadTests
     public void StatusBarStoreSize_ReadsTheRecordedFigure_BeforeMeasuringTheLiveDirectory()
     {
         var source = Source("ViewerDataService.ServerStatus.cs");
-        var start = source.IndexOf("private async Task<long?> FetchStoreSizeBytesAsync()", StringComparison.Ordinal);
-        var body = source[start..];
-        var recorded = body.IndexOf("StoreSelfMetrics.LatestStoreSizeSql", StringComparison.Ordinal);
-        var live = body.IndexOf("CreateCommand(StoreSizeSql)", StringComparison.Ordinal);
-        Assert.True(recorded >= 0 && live > recorded, "the recorded figure is read first; the live directory only when none is recorded");
+        Assert.Contains("ResolveStoreSizeAsync(ReadRecordedStoreSizeAsync, ReadLiveStoreSizeAsync", source, StringComparison.Ordinal);
+        var recordedRead = source.IndexOf("private async Task<long?> ReadRecordedStoreSizeAsync()", StringComparison.Ordinal);
+        var liveRead = source.IndexOf("private async Task<long?> ReadLiveStoreSizeAsync()", StringComparison.Ordinal);
+        Assert.True(recordedRead >= 0 && liveRead > recordedRead);
+        Assert.Contains("StoreSelfMetrics.LatestStoreSizeSql", source[recordedRead..liveRead], StringComparison.Ordinal);
+        Assert.Contains("CreateCommand(StoreSizeSql)", source[liveRead..], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -149,9 +150,17 @@ public sealed class ViewerQueryTabLoadTests
         Assert.True(traceStarted < gridAwaited, "the trace check must be started before the grid read is awaited, so the round trips overlap");
         Assert.DoesNotContain("await _dataService.GetLongQueryTraceEnabledAsync(", body, StringComparison.Ordinal);
         Assert.DoesNotContain("await Timed(\"trace check\"", body, StringComparison.Ordinal);
-        /* The note for a trace that is off is still driven by the check's answer. */
-        Assert.Contains("LongQueriesDisabledWarning.Visibility = await traceTask", body, StringComparison.Ordinal);
-        Assert.Contains("ViewerDataService.ObserveAsync(traceTask)", body, StringComparison.Ordinal);
+        /* The note for a trace that is off is still driven by the check's answer, whether the grid read succeeds or fails. */
+        var applied = body.IndexOf("await ApplyTraceNoteAsync(traceTask);", StringComparison.Ordinal);
+        var gridCatch = body.IndexOf("catch", gridAwaited, StringComparison.Ordinal);
+        var failurePath = body.IndexOf("_ = ApplyTraceNoteAsync(traceTask);", gridCatch, StringComparison.Ordinal);
+        var rethrow = body.IndexOf("throw;", failurePath, StringComparison.Ordinal);
+        Assert.True(gridCatch > gridAwaited && failurePath > gridCatch && rethrow > failurePath,
+            "a failed grid read still sets the note from the check, without awaiting it, and rethrows at once");
+        Assert.True(applied > rethrow, "a good grid read awaits the check once, then binds the rows");
+        Assert.DoesNotContain("ContinueWith", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("await traceTask", body, StringComparison.Ordinal);
+        Assert.True(body.IndexOf("_longQueryFilterMgr!.UpdateData(rows)", applied, StringComparison.Ordinal) > applied);
     }
 
     [Theory]
@@ -161,29 +170,82 @@ public sealed class ViewerQueryTabLoadTests
     public void ComparisonReads_AreTimed_SoSlowLoadDoesNotCallThemClientWork(string read)
     {
         var source = Source("ViewerServerTab.QueriesComparison.cs");
-        Assert.Contains($"Timed(\"comparison read\", _dataService.{read}(", source, StringComparison.Ordinal);
+        Assert.Contains($"Timed(timer, \"comparison read\", _dataService.{read}(", source, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void LoadTimer_CountsALateComparisonRead_AsAStoreRead_NotAsClientWork()
+    public async Task Timed_WithNoTimer_IsTheTaskItself_AndWithOne_BooksTheReadOnThatTimerAlone()
     {
-        var phases = new List<(string Phase, long StartedMs, long EndedMs)>
-        {
-            ("grid read", 0, 4000), ("slicer read", 0, 1000), ("comparison read", 4100, 6800),
-        };
-        var line = ViewerLoadTimer.Describe("Queries > Top Queries by Duration", 7000, phases);
-        Assert.NotNull(line);
-        Assert.Contains("comparison read 2700 ms", line, StringComparison.Ordinal);
-        Assert.Contains("200 ms of client work", line, StringComparison.Ordinal);
+        var live = new ViewerLoadTimer();
+        var other = new ViewerLoadTimer();
+        var drill = Task.FromResult(1);
+        Assert.Same(drill, ViewerServerTab.Timed(null, "grid read", drill));
+
+        await drill;
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Equal(0, live.PhaseCount);
+        Assert.Equal(0, other.PhaseCount);
+
+        var read = Task.FromResult(2);
+        Assert.Same(read, ViewerServerTab.Timed(live, "grid read", read));
+        await read;
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Equal(1, live.PhaseCount);
+        Assert.Equal(0, other.PhaseCount);
     }
 
     [Fact]
-    public void InnerTabLoad_ClearsItsTimer_WhenItEnds()
+    public void TheLoadsTimer_IsAParameterHandedDown_NeverAField_SoANonLoadReadCannotJoinAnotherLoadsLine()
+    {
+        foreach (var file in new[] { "ViewerServerTab.xaml.cs", "ViewerServerTab.Queries.cs", "ViewerServerTab.QueriesComparison.cs", "ViewerServerTab.LongQueries.cs", "ViewerServerTab.DailySummary.cs" })
+        {
+            Assert.DoesNotContain("_loadTimer", Source(file), StringComparison.Ordinal);
+        }
+
+        var shell = Source("ViewerServerTab.xaml.cs");
+        Assert.Contains("await LoadQueriesAsync(timer);", shell, StringComparison.Ordinal);
+        Assert.Contains("await LoadLongQueriesAsync(timer);", shell, StringComparison.Ordinal);
+
+        var queries = Source("ViewerServerTab.Queries.cs");
+        Assert.Contains("await LoadTopQueriesAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
+        Assert.Contains("await LoadTopProceduresAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
+        Assert.Contains("await LoadQueryStoreAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
+        Assert.Contains("await RefreshQueryStatsComparisonAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
+        Assert.Contains("await RefreshProcStatsComparisonAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
+        Assert.Contains("await RefreshQueryStoreComparisonAsync(startUtc, endUtc, timer);", queries, StringComparison.Ordinal);
+
+        /* The paths that start outside a load pass no timer: the day-summary drill and the three slicer drags. */
+        Assert.Contains("await LoadTopQueriesAsync(startUtc, endUtc);", Source("ViewerServerTab.DailySummary.cs"), StringComparison.Ordinal);
+        Assert.Contains("await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);", queries, StringComparison.Ordinal);
+        Assert.Contains("await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);", queries, StringComparison.Ordinal);
+        Assert.Contains("await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);", queries, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InnerTabLoad_HandsTheTabHeaderToFinish_SoASlowLineNamesTheTab()
     {
         var shell = Source("ViewerServerTab.xaml.cs");
-        var finallyAt = shell.IndexOf("var slow = timer.Finish(", StringComparison.Ordinal);
-        Assert.True(finallyAt >= 0);
-        Assert.Contains("if (ReferenceEquals(_loadTimer, timer))", shell[finallyAt..], StringComparison.Ordinal);
+        var finish = shell.IndexOf("timer.Finish(", StringComparison.Ordinal);
+        Assert.True(finish >= 0);
+        var call = shell[finish..shell.IndexOf(';', finish)];
+        Assert.Contains("InnerTabLoadName(tabIndex,", call, StringComparison.Ordinal);
+        Assert.Contains("InnerTabs.Items[tabIndex] as TabItem", call, StringComparison.Ordinal);
+        Assert.Contains(".Header", call, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TraceCheck_AnswersTrueOrFalse_WhenItSucceeds_AndNullWithAWarning_WhenItFails()
+    {
+        var warned = new List<string>();
+        Assert.True(await ViewerServerTab.TraceEnabledOrNullAsync(Task.FromResult(true), (_, m) => warned.Add(m)));
+        Assert.False(await ViewerServerTab.TraceEnabledOrNullAsync(Task.FromResult(false), (_, m) => warned.Add(m)));
+        Assert.Empty(warned);
+
+        var answer = await ViewerServerTab.TraceEnabledOrNullAsync(Task.FromException<bool>(new InvalidOperationException("check boom")), (_, m) => warned.Add(m));
+        Assert.Null(answer);
+        var line = Assert.Single(warned);
+        Assert.Contains("check boom", line, StringComparison.Ordinal);
+        Assert.Contains("left as it was", line, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -213,16 +275,82 @@ public sealed class ViewerQueryTabLoadTests
         Assert.Contains("_ = ViewerDataService.ObserveAsync(slicerTask)", body, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void StatusBarStoreSize_FallsBackToTheLiveDirectory_WhenTheRecordedReadFails()
+    private static Func<Task<long?>> Counting(Func<long?> answer, Action onCall) => () =>
     {
-        var source = Source("ViewerDataService.ServerStatus.cs");
-        var start = source.IndexOf("private async Task<long?> FetchStoreSizeBytesAsync()", StringComparison.Ordinal);
-        var body = source[start..];
-        var recorded = body.IndexOf("StoreSelfMetrics.LatestStoreSizeSql", StringComparison.Ordinal);
-        var guard = body.IndexOf("catch (Exception)", recorded, StringComparison.Ordinal);
-        var live = body.IndexOf("CreateCommand(StoreSizeSql)", StringComparison.Ordinal);
-        Assert.True(recorded >= 0 && guard > recorded && live > guard, "a failed recorded read must fall through to the live read");
+        onCall();
+        return Task.FromResult(answer());
+    };
+
+    [Fact]
+    public async Task StoreSize_AFailedRecordedRead_WalksTheLiveDirectory_AndLogsTheFallbackOncePerCause()
+    {
+        await using var service = new ViewerDataService("Host=localhost;Port=1;Database=darling;Timeout=1");
+        var warned = new List<string>();
+        var liveCalls = 0;
+        Func<Task<long?>> recorded = () => throw new InvalidOperationException("permission denied for table store_metrics");
+        var live = Counting(() => 42L, () => liveCalls++);
+
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.Equal(42L, await service.ResolveStoreSizeAsync(recorded, live, (_, m) => warned.Add(m)));
+        }
+
+        Assert.Equal(3, liveCalls);
+        var line = Assert.Single(warned);
+        Assert.Contains("walks the live directory", line, StringComparison.Ordinal);
+        Assert.Contains("permission denied for table store_metrics", line, StringComparison.Ordinal);
+
+        /* A different cause is a new fact, so it is logged again. */
+        Func<Task<long?>> other = () => throw new InvalidOperationException("relation does not exist");
+        Assert.Equal(42L, await service.ResolveStoreSizeAsync(other, live, (_, m) => warned.Add(m)));
+        Assert.Equal(2, warned.Count);
+        Assert.Contains("relation does not exist", warned[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StoreSize_ATimedOutRecordedRead_SkipsTheLiveWalk_KeepsTheLastSize_AndSaysSo()
+    {
+        await using var service = new ViewerDataService("Host=localhost;Port=1;Database=darling;Timeout=1");
+        var warned = new List<string>();
+        var liveCalls = 0;
+        var live = Counting(() => 7L, () => liveCalls++);
+        Func<Task<long?>> goodRecorded = () => Task.FromResult<long?>(5_000L);
+        Func<Task<long?>> timedOut = () => throw new NpgsqlException("The operation has timed out", new TimeoutException());
+
+        /* Nothing shown yet: the empty value, and no live walk. */
+        Assert.Null(await service.ResolveStoreSizeAsync(timedOut, live, (_, m) => warned.Add(m)));
+        Assert.Equal(0, liveCalls);
+
+        Assert.Equal(5_000L, await service.ResolveStoreSizeAsync(goodRecorded, live, (_, m) => warned.Add(m)));
+        Assert.Equal(5_000L, await service.ResolveStoreSizeAsync(timedOut, live, (_, m) => warned.Add(m)));
+        Assert.Equal(0, liveCalls);
+        var line = Assert.Single(warned);
+        Assert.Contains("timed out", line, StringComparison.Ordinal);
+        Assert.Contains("keeps the last size", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StoreSize_NoRecordedRow_WalksTheLiveDirectory_WithoutAWarning_AndARecordedFigureNeverDoes()
+    {
+        await using var service = new ViewerDataService("Host=localhost;Port=1;Database=darling;Timeout=1");
+        var warned = new List<string>();
+        var liveCalls = 0;
+        var live = Counting(() => 9L, () => liveCalls++);
+        Assert.Equal(9L, await service.ResolveStoreSizeAsync(() => Task.FromResult<long?>(null), live, (_, m) => warned.Add(m)));
+        Assert.Equal(1, liveCalls);
+        Assert.Equal(11L, await service.ResolveStoreSizeAsync(() => Task.FromResult<long?>(11L), live, (_, m) => warned.Add(m)));
+        Assert.Equal(1, liveCalls);
+        Assert.Empty(warned);
+    }
+
+    [Fact]
+    public void CommandTimeout_IsDetectedByStructure_NotByMessage()
+    {
+        Assert.True(ViewerDataService.IsCommandTimeout(new TimeoutException()));
+        Assert.True(ViewerDataService.IsCommandTimeout(new NpgsqlException("x", new TimeoutException())));
+        Assert.True(ViewerDataService.IsCommandTimeout(new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014")));
+        Assert.False(ViewerDataService.IsCommandTimeout(new PostgresException("permission denied", "ERROR", "ERROR", "42501")));
+        Assert.False(ViewerDataService.IsCommandTimeout(new InvalidOperationException("the operation has timed out")));
     }
 
     /* ------------------------------------------------------------------ live pins */

@@ -131,7 +131,7 @@ public partial class ViewerServerTab
     /// Procedures / Query Store each read their grid + slicer + comparison over the toolbar's settable window.
     /// The shell's <see cref="LoadInnerTabAsync"/> owns the try/catch that surfaces failures.
     /// </summary>
-    private async Task LoadQueriesAsync()
+    private async Task LoadQueriesAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
@@ -149,10 +149,10 @@ public partial class ViewerServerTab
                    its last snapshot / hint until then. */
                 break;
             case TopProceduresSubTabIndex:
-                await LoadTopProceduresAsync(startUtc, endUtc);
+                await LoadTopProceduresAsync(startUtc, endUtc, timer);
                 break;
             case QueryStoreSubTabIndex:
-                await LoadQueryStoreAsync(startUtc, endUtc);
+                await LoadQueryStoreAsync(startUtc, endUtc, timer);
                 break;
             case QueryStoreRegressionsSubTabIndex:
                 await LoadQueryStoreRegressionsAsync(startUtc, endUtc);
@@ -168,23 +168,25 @@ public partial class ViewerServerTab
                 break;
             case TopQueriesSubTabIndex:
             default:
-                await LoadTopQueriesAsync(startUtc, endUtc);
+                await LoadTopQueriesAsync(startUtc, endUtc, timer);
                 break;
         }
     }
 
-    /// <summary>Walk finding D15: hands a started store read to the load's phase clock (<see cref="ViewerLoadTimer"/>) and back
-    /// unchanged. Outside a timed load (a slicer drag, a test) it is the task itself.</summary>
-    private Task<T> Timed<T>(string phase, Task<T> read) => _loadTimer?.Track(phase, read) ?? read;
+    /// <summary>Walk finding D15: hands a started store read to a load's phase clock (<see cref="ViewerLoadTimer"/>) and back
+    /// unchanged. #5555: the clock is the one <see cref="LoadInnerTabAsync"/> passes down to the loader it calls, never a field,
+    /// so a read that starts outside that load (a Daily Summary drill, a slicer drag) passes null and is the task itself: it can
+    /// not land in another load's line or rename it.</summary>
+    internal static Task<T> Timed<T>(ViewerLoadTimer? timer, string phase, Task<T> read) => timer?.Track(phase, read) ?? read;
 
-    private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
-        _loadTimer?.Surface = "Queries > Top Queries by Duration";
-        var floorTask = Timed("data start", _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc));
-        var dataReadTask = Timed("grid read", _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        timer?.Surface = "Queries > Top Queries by Duration";
+        var floorTask = Timed(timer, "data start", _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc));
+        var dataReadTask = Timed(timer, "grid read", _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         /* Walk finding D15: the slicer's read does not depend on the grid's, so it starts beside it and is awaited after the grid
            is bound. It used to start only once the grid read was in, which put its whole round trip behind the grid's. */
-        var slicerTask = Timed("slicer read", _dataService.GetQueryStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var slicerTask = Timed(timer, "slicer read", _dataService.GetQueryStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         try
         {
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
@@ -207,7 +209,7 @@ public partial class ViewerServerTab
             throw;
         }
 
-        await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
+        await RefreshQueryStatsComparisonAsync(startUtc, endUtc, timer);
     }
 
     /// <summary>#4231 stage 3: the Queries-tab grid header's hourly-routing disclosure — appended to the
@@ -246,12 +248,12 @@ public partial class ViewerServerTab
     internal static HourlyServed? HourlyServedOf(string tier, DateTime? firstBucket) =>
         tier == "hourly" ? new HourlyServed(firstBucket) : null;
 
-    private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
-        _loadTimer?.Surface = "Queries > Top Procedures by Duration";
-        var floorTask = Timed("data start", _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc));
-        var dataReadTask = Timed("grid read", _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
-        var slicerTask = Timed("slicer read", _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        timer?.Surface = "Queries > Top Procedures by Duration";
+        var floorTask = Timed(timer, "data start", _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc));
+        var dataReadTask = Timed(timer, "grid read", _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var slicerTask = Timed(timer, "slicer read", _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         try
         {
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
@@ -272,20 +274,20 @@ public partial class ViewerServerTab
             throw;
         }
 
-        await RefreshProcStatsComparisonAsync(startUtc, endUtc);
+        await RefreshProcStatsComparisonAsync(startUtc, endUtc, timer);
     }
 
-    private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
-        _loadTimer?.Surface = "Queries > Query Store by Duration";
-        var floorTask = Timed("data start", _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, startUtc, endUtc));
+        timer?.Surface = "Queries > Query Store by Duration";
+        var floorTask = Timed(timer, "data start", _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, startUtc, endUtc));
         /* #3953 clause 4: only a genuine custom range is a literal end the gate must honor against
            applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
            the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
            ordinary read (M1) — null tells the gate this end is open. */
-        var dataReadTask = Timed("grid read", _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null));
+        var dataReadTask = Timed(timer, "grid read", _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null));
         /* Walk finding D15: the slicer's read starts beside the grid's (see LoadTopQueriesAsync). */
-        var slicerTask = Timed("slicer read", _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var slicerTask = Timed(timer, "slicer read", _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
         try
         {
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
@@ -303,7 +305,7 @@ public partial class ViewerServerTab
             throw;
         }
 
-        await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
+        await RefreshQueryStoreComparisonAsync(startUtc, endUtc, timer);
     }
 
     /// <summary>

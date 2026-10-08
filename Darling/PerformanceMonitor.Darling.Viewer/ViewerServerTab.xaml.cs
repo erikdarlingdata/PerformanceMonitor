@@ -370,14 +370,9 @@ public partial class ViewerServerTab : UserControl
         }
     }
 
-    /// <summary>Walk finding D15: the clock and phase record of the inner-tab load in flight. Loads are overlap-guarded
-    /// (<see cref="RefreshActiveInnerTabAsync"/>), so one field serves them; a loader that wants its store reads in the
-    /// slow-load line wraps each in <c>Timed(...)</c>. Cleared when the load ends, so it is null outside a timed load.</summary>
-    private ViewerLoadTimer? _loadTimer;
-
     private async Task LoadInnerTabAsync(int tabIndex)
     {
-        var timer = _loadTimer = new ViewerLoadTimer();
+        var timer = new ViewerLoadTimer();
         try
         {
             switch (tabIndex)
@@ -389,7 +384,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadLatchSpinlockAsync();
                     break;
                 case QueriesInnerTabIndex:
-                    await LoadQueriesAsync();
+                    await LoadQueriesAsync(timer);
                     break;
                 case PlanViewerInnerTabIndex:
                     /* No data feed: plans are pushed into the host by OpenPlanTab (a "View Plan" click),
@@ -436,7 +431,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadSystemEventsAsync();
                     break;
                 case LongQueriesInnerTabIndex:
-                    await LoadLongQueriesAsync();
+                    await LoadLongQueriesAsync(timer);
                     break;
 
                 /* #2530: the PostgreSQL run. Explicit arms, never the default: falling through to
@@ -482,14 +477,10 @@ public partial class ViewerServerTab : UserControl
         {
             /* Walk finding D15: a slow load (over ViewerLoadTimer.SlowLoadThresholdMs) names its tab and where the time went. */
             var slow = timer.Finish(InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header));
-            /* #5555: the timer belongs to this load. Clearing it keeps a read started outside a load (a
-               day-summary drill into Top Queries, a slicer drag) from appending its phases to a finished load's clock, or
-               to a refresh's live one. A newer load has already replaced it, so only clear our own. */
-            if (ReferenceEquals(_loadTimer, timer))
-            {
-                _loadTimer = null;
-            }
-
+            /* #5555: this load's clock is a local handed down to the loaders this method calls (Walk finding D15: a loader wraps each
+               store read in Timed(timer, ...)), not a field. A read that starts outside this load (a Daily Summary drill into
+               Top Queries, a slicer drag) passes null, so it cannot append its phases to this load's line, finished or live, or
+               rename it. */
             if (slow is not null)
             {
                 ViewerLogger.Warn("SlowLoad", $"[{_server.DisplayName}] {slow}");

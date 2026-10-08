@@ -93,6 +93,18 @@ internal sealed class ViewerLoadTimer
         return $"slow load: {surface} took {totalMs} ms: store reads [{split}], then {clientMs} ms of client work after the last read";
     }
 
+    /// <summary>How many store reads this load has booked so far (a test reads it; the slow-load line is the product's read).</summary>
+    internal int PhaseCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _phases.Count;
+            }
+        }
+    }
+
     /// <summary>Stops the clock and returns the slow-load line, or null when the load was quick.</summary>
     internal string? Finish(string fallbackSurface)
     {

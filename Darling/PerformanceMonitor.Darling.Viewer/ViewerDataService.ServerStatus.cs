@@ -115,36 +115,127 @@ WHERE s.server_id <> 0";
     /// <see cref="StoreSizeCacheLifetime"/> (#4477): a call inside the window returns the cached reading with
     /// no store round trip at all. A cold read takes the size the service recorded on its last self-metrics sweep
     /// (up to one sweep old, see <see cref="StoreSizeCacheLifetime"/>) and walks the live directory
-    /// (<see cref="StoreSizeSql"/>) only when none is recorded or the recorded read fails.</summary>
+    /// (<see cref="StoreSizeSql"/>) only when none is recorded or the recorded read fails; a recorded read that times out
+    /// keeps the last size shown instead (<see cref="ResolveStoreSizeAsync"/>).</summary>
     public Task<long?> GetStoreSizeBytesAsync(CancellationToken cancellationToken = default)
         => _storeSizeCache.GetOrStartAsync(FetchStoreSizeBytesAsync, shouldCache: static bytes => bytes is not null, cancellationToken);
 
     /// <summary>The actual read behind <see cref="GetStoreSizeBytesAsync"/>'s single-flight gate. Runs with
     /// <see cref="CancellationToken.None"/> (via <see cref="SingleFlightTtlCache{T}"/>): shared work, not any
     /// one caller's.</summary>
-    private async Task<long?> FetchStoreSizeBytesAsync()
+    private Task<long?> FetchStoreSizeBytesAsync() =>
+        ResolveStoreSizeAsync(ReadRecordedStoreSizeAsync, ReadLiveStoreSizeAsync, StoreSizeWarn ?? ViewerLogger.Warn);
+
+    /// <summary>Test hook: where the fallback WARN goes (the log source and the message), <see cref="ViewerLogger.Warn"/> when null.</summary>
+    internal Action<string, string>? StoreSizeWarn { get; set; }
+
+    /// <summary>The last size the status-bar field read, kept so a recorded read that times out can leave it showing (#5555).
+    /// Guarded by <see cref="_storeSizeStateGate"/>.</summary>
+    private long? _lastStoreSizeBytes;
+
+    /// <summary>The cause of the last recorded-size failure that was logged, so the same cause is logged once per session
+    /// and a different one again (#5555). Guarded by <see cref="_storeSizeStateGate"/>.</summary>
+    private string? _loggedRecordedSizeFailure;
+
+    private readonly object _storeSizeStateGate = new();
+
+    /// <summary>A command deadline, detected structurally (Npgsql's own <see cref="TimeoutException"/> in the chain, or the
+    /// server's 57014 cancel), never by message text.</summary>
+    internal static bool IsCommandTimeout(Exception ex) =>
+        (ex is PostgresException pg && pg.SqlState == "57014")
+        || ex is TimeoutException
+        || ex.InnerException is TimeoutException;
+
+    /// <summary>
+    /// #5555: the recorded size first, the live directory walk only when it is needed.
+    /// <list type="bullet">
+    /// <item>A recorded figure is the answer.</item>
+    /// <item>No recorded row (a store that has not swept yet) walks the live directory.</item>
+    /// <item>A recorded read that fails for another reason (no SELECT on <c>collect.store_metrics</c>, a store without the
+    /// relation) is logged as a WARN naming the fallback and the cause, once per session for the same cause, and walks the
+    /// live directory: that is the answer the field had before the recorded read existed.</item>
+    /// <item>A recorded read that TIMES OUT does not walk the live directory: a store slow enough to time out a one-row read
+    /// would only be slower on the walk, and the field is display only. It keeps the last size it showed (null when there
+    /// was none) and the WARN says so.</item>
+    /// </list>
+    /// </summary>
+    internal async Task<long?> ResolveStoreSizeAsync(Func<Task<long?>> readRecorded, Func<Task<long?>> readLive, Action<string, string> warn)
+    {
+        try
+        {
+            var recorded = await readRecorded();
+            if (recorded is not null)
+            {
+                RememberStoreSize(recorded);
+                return recorded;
+            }
+        }
+        catch (Exception ex)
+        {
+            var timedOut = IsCommandTimeout(ex);
+            WarnRecordedSizeFailureOnce(ex, timedOut, warn);
+            if (timedOut)
+            {
+                lock (_storeSizeStateGate)
+                {
+                    return _lastStoreSizeBytes;
+                }
+            }
+        }
+
+        var live = await readLive();
+        RememberStoreSize(live);
+        return live;
+    }
+
+    private void RememberStoreSize(long? bytes)
+    {
+        if (bytes is null)
+        {
+            return;
+        }
+
+        lock (_storeSizeStateGate)
+        {
+            _lastStoreSizeBytes = bytes;
+        }
+    }
+
+    private void WarnRecordedSizeFailureOnce(Exception ex, bool timedOut, Action<string, string> warn)
+    {
+        var cause = $"{ex.GetType().Name}: {ex.Message}";
+        lock (_storeSizeStateGate)
+        {
+            if (string.Equals(_loggedRecordedSizeFailure, cause, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _loggedRecordedSizeFailure = cause;
+        }
+
+        warn(
+            "ViewerDataService",
+            timedOut
+                ? $"The recorded store size read timed out, so the status bar keeps the last size it showed (or none) and does not walk the live directory | {cause}"
+                : $"The recorded store size could not be read (collect.store_metrics), so the status bar walks the live directory instead; a store that never reads the recorded row pays that walk every {StoreSizeCacheLifetime.TotalMinutes:0} minutes | {cause}");
+    }
+
+    private async Task<long?> ReadRecordedStoreSizeAsync()
     {
         /* Walk finding D15: the status-bar field is display only, so it reads the size the service already records on its
            hourly self-metrics sweep (the #3209 shape the service's own disk check reads) and measures the live directory
            only for a store that has not swept yet. pg_database_size took a mean of 4.4 s (worst 39.9 s) on a large store,
-           every five minutes, for a number the field rounds to a whole MB or one GB decimal. */
-        try
-        {
-            await using var recorded = _dataSource.CreateCommand(StoreSelfMetrics.LatestStoreSizeSql);
-            recorded.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            var recordedBytes = await recorded.ExecuteScalarAsync(CancellationToken.None);
-            if (recordedBytes is not null && recordedBytes != DBNull.Value)
-            {
-                return Convert.ToInt64(recordedBytes);
-            }
-        }
-        catch (Exception)
-        {
-            /* The recorded row is an optimisation. A viewer role without SELECT on collect.store_metrics, a store that does not
-               have the relation yet, or a transient error must not take the live answer away: before this read existed the live
-               directory walk answered, so it still does. */
-        }
+           every five minutes, for a number the field rounds to a whole MB or one GB decimal. The recorded row is an
+           optimisation: ResolveStoreSizeAsync keeps the live answer when it cannot be read. */
+        await using var recorded = _dataSource.CreateCommand(StoreSelfMetrics.LatestStoreSizeSql);
+        recorded.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        var recordedBytes = await recorded.ExecuteScalarAsync(CancellationToken.None);
+        return recordedBytes is null || recordedBytes == DBNull.Value ? (long?)null : Convert.ToInt64(recordedBytes);
+    }
 
+    private async Task<long?> ReadLiveStoreSizeAsync()
+    {
         await using var command = _dataSource.CreateCommand(StoreSizeSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         var result = await command.ExecuteScalarAsync(CancellationToken.None);

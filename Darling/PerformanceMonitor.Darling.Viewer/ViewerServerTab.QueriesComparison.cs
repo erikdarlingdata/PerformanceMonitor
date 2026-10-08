@@ -99,7 +99,7 @@ public partial class ViewerServerTab
         }
     }
 
-    private async Task RefreshQueryStatsComparisonAsync(DateTime currentStart, DateTime currentEnd)
+    private async Task RefreshQueryStatsComparisonAsync(DateTime currentStart, DateTime currentEnd, ViewerLoadTimer? timer = null)
     {
         var baseline = GetComparisonRange(currentStart, currentEnd);
         if (baseline == null)
@@ -110,7 +110,7 @@ public partial class ViewerServerTab
 
         SetComparisonMode(QueryStatsGrid, QueryStatsComparisonGrid, QueryStatsComparisonBanner, active: true, baseline);
 
-        var items = await Timed("comparison read", _dataService.GetQueryStatsComparisonAsync(
+        var items = await Timed(timer, "comparison read", _dataService.GetQueryStatsComparisonAsync(
             _server.ServerId, currentStart, currentEnd, baseline.Value.From, baseline.Value.To, databaseNames: SelectedDatabaseFilter));
         QueryStatsComparisonGrid.ItemsSource = items
             .OrderBy(x => x.SortGroup)
@@ -118,7 +118,7 @@ public partial class ViewerServerTab
             .ToList();
     }
 
-    private async Task RefreshProcStatsComparisonAsync(DateTime currentStart, DateTime currentEnd)
+    private async Task RefreshProcStatsComparisonAsync(DateTime currentStart, DateTime currentEnd, ViewerLoadTimer? timer = null)
     {
         var baseline = GetComparisonRange(currentStart, currentEnd);
         if (baseline == null)
@@ -129,7 +129,7 @@ public partial class ViewerServerTab
 
         SetComparisonMode(ProcedureStatsGrid, ProcStatsComparisonGrid, ProcStatsComparisonBanner, active: true, baseline);
 
-        var items = await Timed("comparison read", _dataService.GetProcedureStatsComparisonAsync(
+        var items = await Timed(timer, "comparison read", _dataService.GetProcedureStatsComparisonAsync(
             _server.ServerId, currentStart, currentEnd, baseline.Value.From, baseline.Value.To, databaseNames: SelectedDatabaseFilter));
         ProcStatsComparisonGrid.ItemsSource = items
             .OrderBy(x => x.SortGroup)
@@ -137,7 +137,7 @@ public partial class ViewerServerTab
             .ToList();
     }
 
-    private async Task RefreshQueryStoreComparisonAsync(DateTime currentStart, DateTime currentEnd)
+    private async Task RefreshQueryStoreComparisonAsync(DateTime currentStart, DateTime currentEnd, ViewerLoadTimer? timer = null)
     {
         var baseline = GetComparisonRange(currentStart, currentEnd);
         if (baseline == null)
@@ -148,7 +148,7 @@ public partial class ViewerServerTab
 
         SetComparisonMode(QueryStoreGrid, QueryStoreComparisonGrid, QueryStoreComparisonBanner, active: true, baseline);
 
-        var items = await Timed("comparison read", _dataService.GetQueryStoreComparisonAsync(
+        var items = await Timed(timer, "comparison read", _dataService.GetQueryStoreComparisonAsync(
             _server.ServerId, currentStart, currentEnd, baseline.Value.From, baseline.Value.To, databaseNames: SelectedDatabaseFilter));
         QueryStoreComparisonGrid.ItemsSource = items
             .OrderBy(x => x.SortGroup)
