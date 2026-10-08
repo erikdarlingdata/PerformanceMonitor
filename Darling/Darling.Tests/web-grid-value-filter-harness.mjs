@@ -80,7 +80,11 @@ const shownIx = (w) => tbodyOf(w).children.filter((t) => t.style.display !== "no
 const type = (w, text) => { const b = textBox(w); b.value = text; b.fire("input"); };
 const search = (w, text) => { const b = searchBox(w); b.value = text; b.fire("input"); };
 const tick = (item, on) => { const b = itemBox(item); b.checked = on; b.fire("change"); };
-const findItem = (w, value) => valueItems(w).find((n) => !n.className.split(" ").includes("gfv-blank") && itemText(n).toUpperCase() === String(value).toUpperCase());
+const findItem = (w, value) => {
+  const real = valueItems(w).filter((n) => !n.className.split(" ").includes("gfv-blank"));
+  /* the exact spelling first (the sharp s and "SS" are different values), then the same value in another case */
+  return real.find((n) => itemText(n) === String(value)) || real.find((n) => itemText(n).toLowerCase() === String(value).toLowerCase());
+};
 const blankItem = (w) => valueItems(w).find((n) => n.className.split(" ").includes("gfv-blank"));
 const notes = (w) => byClass(w, "gfv-note").map((n) => n.textContent).filter((t) => t !== "");
 /* What a reader's next visit would see: the kept copy of the filters, read the way the page reads it. */

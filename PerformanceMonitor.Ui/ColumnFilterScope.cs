@@ -30,7 +30,7 @@ public static class ColumnFilterScope
     /// no server id or name can, so it never meets a real server's entry. The drill-down windows (three of them name
     /// their grid "HistoryDataGrid") get no scope at all and keep their filters for the session only.
     /// </summary>
-    public const string AllServers = "all-servers";
+    public const string AllServers = "\u0001all-servers";
 
     public static string? GetServer(DependencyObject element) => (string?)element.GetValue(ServerProperty);
 

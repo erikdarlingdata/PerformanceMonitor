@@ -45,6 +45,8 @@ public sealed class GridValueFilterBehaviourTests
         }
         catch (Win32Exception)
         {
+            // CI (GITHUB_ACTIONS is set there) must have Node: a missing Node fails there instead of quietly skipping the page tests.
+            Assert.False(System.Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true", "Node is not installed on this CI runner, so the value filter page tests cannot run.");
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             return default;
         }
