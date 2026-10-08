@@ -37,7 +37,7 @@ public sealed class ViewerNotificationRouteDisplayTests : IDisposable
 
     public ViewerNotificationRouteDisplayTests()
     {
-        /* "g" runs on the current culture, as every grid's text does; the invariant one fixes its pattern (MM/dd/yyyy HH:mm). */
+        /* The time is culture-independent (yyyy-MM-dd HH:mm:ss, like every other grid); the invariant culture is kept so nothing else varies. */
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
     }
 
@@ -61,13 +61,13 @@ public sealed class ViewerNotificationRouteDisplayTests : IDisposable
         ViewerTimeHelper.ActiveServerClock = Eastern;
 
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.Equal("11/01/2026 01:30 -04:00", Route(2026, 11, 1, 5, 30).ModifiedDisplay);
-        Assert.Equal("11/01/2026 01:30 -05:00", Route(2026, 11, 1, 6, 30).ModifiedDisplay);
-        Assert.Equal("11/01/2026 02:30", Route(2026, 11, 1, 7, 30).ModifiedDisplay);
+        Assert.Equal("2026-11-01 01:30:00 -04:00", Route(2026, 11, 1, 5, 30).ModifiedDisplay);
+        Assert.Equal("2026-11-01 01:30:00 -05:00", Route(2026, 11, 1, 6, 30).ModifiedDisplay);
+        Assert.Equal("2026-11-01 02:30:00", Route(2026, 11, 1, 7, 30).ModifiedDisplay);
 
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-        Assert.Equal("11/01/2026 05:30", Route(2026, 11, 1, 5, 30).ModifiedDisplay);
-        Assert.Equal("11/01/2026 06:30", Route(2026, 11, 1, 6, 30).ModifiedDisplay);
+        Assert.Equal("2026-11-01 05:30:00", Route(2026, 11, 1, 5, 30).ModifiedDisplay);
+        Assert.Equal("2026-11-01 06:30:00", Route(2026, 11, 1, 6, 30).ModifiedDisplay);
     }
 
     /// <summary>The column follows the display mode: a summer instant on the Eastern server reads its wall time, not this machine's.</summary>
@@ -77,7 +77,7 @@ public sealed class ViewerNotificationRouteDisplayTests : IDisposable
         ViewerTimeHelper.ActiveServerClock = Eastern;
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
 
-        Assert.Equal("07/01/2026 10:30", Route(2026, 7, 1, 14, 30).ModifiedDisplay);
+        Assert.Equal("2026-07-01 10:30:00", Route(2026, 7, 1, 14, 30).ModifiedDisplay);
     }
 
     /// <summary>A route that has not been stored yet has no time to show.</summary>
@@ -95,7 +95,7 @@ public sealed class ViewerNotificationRouteDisplayTests : IDisposable
             ViewerTypedRangeTests.MemberText(
                 ViewerTypedRangeTests.ViewerSource("ViewerDataService.NotificationRoutes.cs", ThisFile()), "ModifiedDisplay"));
 
-        Assert.Contains("ViewerTimeHelper.FormatForDisplay(ModifiedAtUtc, \"g\")", source);
+        Assert.Contains("ViewerTimeHelper.FormatForDisplay(ModifiedAtUtc, \"yyyy-MM-dd HH:mm:ss\")", source);
         Assert.DoesNotContain("ToLocalTime", source);
     }
 

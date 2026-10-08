@@ -139,6 +139,9 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
+        /* F17: tabs and column headers made of panels get an accessible name equal to their visible text. */
+        PerformanceMonitor.Ui.AccessibleNames.Register();
+
         base.OnStartup(e);
 
         // Right-click selects the DataGrid row under the cursor app-wide, so context-menu actions

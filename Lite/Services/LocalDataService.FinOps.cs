@@ -133,7 +133,13 @@ public class UtilizationEfficiencyRow
     // Health score (Increment 6)
     public decimal FreeSpacePct { get; set; }
     public int HealthScore { get; set; }
-    public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+
+    /// <summary>The badge color: the score's own, or gray when the window held no CPU sample and there is no score to color.</summary>
+    public string HealthScoreColor => HasCpuSample ? FinOpsHealthCalculator.ScoreColor(HealthScore) : FinOpsHealthCalculator.NoScoreColor;
+
+    /// <summary>The badge text: "Health: 87", or "Health: -" when the window held no CPU sample (<see cref="HasCpuSample"/> false). Memory and
+    /// storage alone can read a perfect 100 beside a "No Data" card, so with no CPU sample there is no score, not a partial one.</summary>
+    public string HealthScoreText => HasCpuSample ? $"Health: {HealthScore}" : "Health: -";
 
     /// <summary>
     /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
@@ -405,8 +411,13 @@ public class ServerPropertyRow
     }
 
     // Health score (Increment 6)
-    public int HealthScore { get; set; }
-    public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
+    /// not a score built from the memory and storage defaults (<see cref="FinOpsHealthCalculator.InventoryScore"/>).</summary>
+    public int? HealthScore { get; set; }
+    public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
+
+    /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
+    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoScoreNote;
 }
 
 public class StorageGrowthRow
@@ -420,6 +431,12 @@ public class StorageGrowthRow
     public decimal? Growth30dMb { get; set; }
     public decimal? DailyGrowthRateMb { get; set; }
     public decimal? GrowthPct30d { get; set; }
+
+    /// <summary>The tooltip on a blank 7-day baseline cell (shown as n/a): no sample within a day of 7 days ago. Null when there is one.</summary>
+    public string? Size7dAgoNote => Size7dAgoMb == null ? "No sample from 7 days ago" : null;
+
+    /// <summary>The tooltip on a blank 30-day baseline cell (shown as n/a): no sample within a day of 30 days ago. Null when there is one.</summary>
+    public string? Size30dAgoNote => Size30dAgoMb == null ? "No sample from 30 days ago" : null;
 
     /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
     /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
@@ -479,6 +496,12 @@ public class ExpensiveQueryRow
 
 public static class FinOpsHealthCalculator
 {
+    /// <summary>The badge color of a health score that does not exist (no CPU sample in the window).</summary>
+    public const string NoScoreColor = "#7F8C8D";
+
+    /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
+    public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
+
     public static int CpuScore(decimal p95Pct)
     {
         if (p95Pct <= 70) return (int)(100 - p95Pct * 50 / 70);
@@ -513,6 +536,17 @@ public static class FinOpsHealthCalculator
 
         /* integer weights, so no floating-point error can truncate 100 to 99 */
         return (memory * 30 + storage * 30) / 60;
+    }
+
+    /// <summary>
+    /// The Server Inventory grid's score from the server's 24-hour average CPU: CPU, a default memory term of 80 (the inventory has no
+    /// buffer pool ratio) and a default storage term (no file-level free space). Null when there is no CPU sample (<paramref name="avgCpuPct"/>
+    /// null), the same rule as the drill-down badge: the defaults alone must not read as a score for a server nothing was measured on.
+    /// </summary>
+    public static int? InventoryScore(decimal? avgCpuPct)
+    {
+        if (avgCpuPct is not decimal avgCpu) return null;
+        return Overall(CpuScore(avgCpu), 80, StorageScore(50));
     }
 
     public static string ScoreColor(int score) => score switch
@@ -607,7 +641,6 @@ public class RecommendationRow
     public string Finding { get; set; } = "";
     public string Detail { get; set; } = "";
     public decimal? EstMonthlySavings { get; set; }
-    public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
     public int SeveritySort => Severity switch
     {
         "High" => 1,

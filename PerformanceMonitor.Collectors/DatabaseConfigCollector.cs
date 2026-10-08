@@ -123,7 +123,7 @@ public sealed class DatabaseConfigCollector : CollectorDefinitionBase<DatabaseCo
         var query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
 {selectColumns}
 FROM sys.databases AS d
 WHERE (d.database_id > 4 OR d.database_id = 2)
