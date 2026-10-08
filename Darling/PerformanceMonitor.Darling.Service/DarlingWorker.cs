@@ -2414,8 +2414,9 @@ LIMIT 1";
 
     /// <summary>
     /// #5597: reads the fleet gate twice: the full last hour (what the hourly log line reports, truthfully), and the window the
-    /// "Collection Falling Behind" alert judges, which leaves out the first <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/>
-    /// minutes after the sweep loop started or came back (<paramref name="loopSince"/>, <see cref="SkipCreditFloor.Since"/>).
+    /// "Collection Falling Behind" alert judges, which leaves out the slots counted in the first <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/>
+    /// minutes after the service started (<paramref name="loopSince"/>, <see cref="SkipCreditFloor.SinceAt"/>; a start, never a stall,
+    /// a pause or a launch-guard release).
     /// The one place that decides, so the alert and the Warning level of the line cannot disagree.
     /// </summary>
     internal static (FleetGateSnapshot Full, DarlingSelfAlertEvaluator.FleetGateReport Report) ReadFleetGate(
@@ -2442,7 +2443,7 @@ LIMIT 1";
         }
 
         var now = DateTime.UtcNow;
-        var (snapshot, report) = ReadFleetGate(_fleetGateStats, _skipCreditFloor.Since, EffectiveSweepWidth, now);
+        var (snapshot, report) = ReadFleetGate(_fleetGateStats, _skipCreditFloor.SinceAt(now), EffectiveSweepWidth, now);
 
         var standing = _selfAlerts is not null
             && await _selfAlerts.EvaluateFleetGateAsync(report, cancellationToken);
@@ -2453,7 +2454,7 @@ LIMIT 1";
             return;
         }
 
-        var line = FleetGateLine.Describe(snapshot, report.GateWidth, FleetGateLine.SpanMinutes(now, _skipCreditFloor.FirstTick));
+        var line = FleetGateLine.Describe(snapshot, report.GateWidth, FleetGateLine.SpanMinutes(_skipCreditFloor.Uptime));
         if (behind)
         {
             _logger.LogWarning("Collection is falling behind: {Line}", line);
@@ -12998,7 +12999,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                        clock that stepped forward or a pause leaves this stamp hours old, and none of those slots was
                        skipped by a gate that was too narrow. A body that starts late because the gate was full, while the
                        loop keeps ticking, still counts them all. */
-                    var seeded = new DateTime(Interlocked.Read(ref server.SeedFinishedTicks), DateTimeKind.Utc);
+                    var seeded = new DateTime(SkipCreditFloor.ClampSeedStamp(ref server.SeedFinishedTicks, now), DateTimeKind.Utc);
                     _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));
                     server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
                 }

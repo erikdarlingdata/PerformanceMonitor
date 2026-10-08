@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using PerformanceMonitor.Collectors;
@@ -264,19 +265,19 @@ internal sealed class FleetGateStats
 internal static class FleetGateLine
 {
     /// <summary>
-    /// #5597: how many minutes the counts of the line cover: the hour, or the minutes since the service started while it has
-    /// run for less than an hour (rounded up to a whole minute, at least 1). The first line after a start came 4.5 to 6.9
-    /// minutes in and still said "last 60 minutes". 60 when the loop has not ticked yet.
+    /// #5597: how many minutes the counts of the line cover: the hour, or the minutes the service has run
+    /// (<see cref="SkipCreditFloor.Uptime"/>, a monotonic clock, so a wall-clock step cannot make it "1 minute") while that is
+    /// under an hour (rounded up to a whole minute, at least 1). The first line after a start came 4.5 to 6.9 minutes in and
+    /// still said "last 60 minutes". 60 when the loop has not ticked yet.
     /// </summary>
-    internal static int SpanMinutes(DateTime nowUtc, DateTime? serviceStartedUtc)
+    internal static int SpanMinutes(TimeSpan? uptime)
     {
-        if (serviceStartedUtc is not { } started)
+        if (uptime is not { } ran)
         {
             return FleetGateStats.WindowMinutes;
         }
 
-        var minutes = (nowUtc - started).Ticks;
-        var whole = (minutes + TimeSpan.TicksPerMinute - 1) / TimeSpan.TicksPerMinute;
+        var whole = (ran.Ticks + TimeSpan.TicksPerMinute - 1) / TimeSpan.TicksPerMinute;
         return (int)Math.Clamp(whole, 1, FleetGateStats.WindowMinutes);
     }
 
@@ -344,10 +345,21 @@ internal sealed class SkipCreditFloor
     /// seconds, so this is eight ticks in a row missing.</summary>
     internal static readonly TimeSpan MaxTickGap = TimeSpan.FromMinutes(2);
 
+    private static readonly long s_processOrigin = Stopwatch.GetTimestamp();
+
+    private readonly Func<TimeSpan> _monotonic;
     private long _floorTicks;
     private long _lastTickTicks;
-    private long _firstTickTicks;
+    private long _firstMonotonicTicks = -1;
     private bool _ticked;
+
+    /// <summary>The floor reads time on the process's monotonic clock (a stopwatch), which a wall-clock step cannot move.</summary>
+    public SkipCreditFloor() : this(static () => Stopwatch.GetElapsedTime(s_processOrigin))
+    {
+    }
+
+    /// <summary>A floor with a monotonic clock of the caller's own, so a test moves the two clocks apart.</summary>
+    internal SkipCreditFloor(Func<TimeSpan> monotonic) => _monotonic = monotonic;
 
     /// <summary>The instant before which no slot counts as skipped: <see cref="DateTime.MinValue"/> until the loop
     /// first comes back from a stretch it was not running.</summary>
@@ -357,7 +369,8 @@ internal sealed class SkipCreditFloor
     /// Called on every pass of the sweep loop, paused or not, before the pass does anything else. Raises the floor to
     /// <paramref name="nowUtc"/> when the time since the previous tick is over <see cref="MaxTickGap"/> or negative.
     /// The floor follows the clock down after a backward step instead of staying ahead of it, because a floor
-    /// ahead of the clock would hide every real skip until the clock caught up to it.
+    /// ahead of the clock would hide every real skip until the clock caught up to it. The first call also stamps the
+    /// service start on the monotonic clock (<see cref="Uptime"/>).
     /// </summary>
     public void Tick(DateTime nowUtc)
     {
@@ -368,7 +381,7 @@ internal sealed class SkipCreditFloor
 
         if (!hadPrevious)
         {
-            Interlocked.Exchange(ref _firstTickTicks, nowUtc.Ticks);
+            Interlocked.Exchange(ref _firstMonotonicTicks, _monotonic().Ticks);
             return;
         }
 
@@ -379,35 +392,48 @@ internal sealed class SkipCreditFloor
         }
     }
 
-    /// <summary>#5597: the instant of the loop's first tick (the service start, as far as collection goes); null before it.</summary>
-    public DateTime? FirstTick
+    /// <summary>
+    /// #5597: how long the sweep loop has run since its first tick (the service start, as far as collection goes), on a
+    /// monotonic clock; null before the first tick. A wall clock that steps back cannot lengthen it, so the start-up
+    /// minutes the alert leaves out are never more than the real ones. Only a service START gets those minutes: a floor
+    /// raise (a stall over <see cref="MaxTickGap"/>, a clock step), the end of a pause and the memory launch guard's release do
+    /// not start them again, because a store that stalls or is held off every 20 minutes is behind, and the alert has to see it.
+    /// </summary>
+    public TimeSpan? Uptime
     {
         get
         {
-            var first = Interlocked.Read(ref _firstTickTicks);
-            return first == 0 ? null : new DateTime(first, DateTimeKind.Utc);
+            var first = Interlocked.Read(ref _firstMonotonicTicks);
+            return first < 0 ? null : TimeSpan.FromTicks(Math.Max(0, _monotonic().Ticks - first));
         }
     }
 
     /// <summary>
-    /// #5597: the instant the sweep loop last STARTED collecting everything at once: the later of its first tick and
-    /// <see cref="Floor"/> (raised by a sleep, a stall, a clock step, a pause or a launch-guard hold that just released). Every
-    /// collector's slot comes due together at those instants, the gate is a few slots wide, and the first bodies run
-    /// long (connects, on-load snapshots, catch-up reads), so the slots skipped in the minutes after are start-up
-    /// strain and not a store that cannot keep its schedule. Null until the loop has ticked once.
+    /// #5597: the service start as a point on the wall clock <paramref name="nowUtc"/> reads: now less <see cref="Uptime"/>. It is
+    /// derived on every read, so a clock step moves it with the clock instead of leaving a stamp ahead of the clock (a stamp that
+    /// the clock had to catch up to blinded the alert for as long as the step). Null until the loop has ticked once.
     /// </summary>
-    public DateTime? Since
-    {
-        get
-        {
-            var first = Interlocked.Read(ref _firstTickTicks);
-            if (first == 0)
-            {
-                return null;
-            }
+    public DateTime? SinceAt(DateTime nowUtc) => Uptime is { } uptime ? nowUtc - uptime : null;
 
-            return new DateTime(Math.Max(first, Interlocked.Read(ref _floorTicks)), DateTimeKind.Utc);
+    /// <summary>
+    /// #5597: a per-server seed stamp (the wall-clock instant a connect body finished seeding) that is ahead of
+    /// <paramref name="nowUtc"/> because the clock stepped back after it was written, brought down to now. Counting from an
+    /// instant that has not happened leaves no slot due, so every slot of every server that connected inside the step went
+    /// uncounted until the clock caught up to the stamp.
+    /// </summary>
+    internal static long ClampSeedStamp(long stampTicks, DateTime nowUtc) => Math.Min(stampTicks, nowUtc.Ticks);
+
+    /// <summary>The same clamp on the stored stamp: the stamp itself moves down, so the later passes count from it.</summary>
+    internal static long ClampSeedStamp(ref long stampTicks, DateTime nowUtc)
+    {
+        var stamp = Interlocked.Read(ref stampTicks);
+        var clamped = ClampSeedStamp(stamp, nowUtc);
+        if (clamped != stamp)
+        {
+            Interlocked.CompareExchange(ref stampTicks, clamped, stamp);
         }
+
+        return clamped;
     }
 
     /// <summary>Called on the first pass that runs collection after a pause, however short the pause was: the ticks
@@ -430,6 +456,15 @@ internal sealed class SkipCreditFloor
     public long Skipped(DateTime due, DateTime nowUtc, TimeSpan interval, DateTime notBefore)
     {
         var floor = Floor;
+
+        /* A seed stamp ahead of the clock (the clock stepped back after the connect body stamped it) counts from now, never
+           from an instant that has not happened: from there no slot is due and every slot of the server would go uncounted
+           until the clock caught up. */
+        if (notBefore > nowUtc)
+        {
+            notBefore = nowUtc;
+        }
+
         if (notBefore > floor)
         {
             floor = notBefore;

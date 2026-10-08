@@ -28,18 +28,42 @@ public sealed class FleetGateStartupTests
     private static readonly DateTime T0 = new(2026, 10, 8, 13, 37, 0, DateTimeKind.Utc);
     private static readonly TimeSpan Minute = TimeSpan.FromMinutes(1);
 
-    /// <summary>A service start at <see cref="T0"/> and a stats clock the test moves.</summary>
+    /// <summary>
+    /// A service start at <see cref="T0"/> and a stats clock the test moves. The wall clock (<see cref="Now"/>) and the monotonic
+    /// clock the floor times the start-up minutes on move together when time passes; <see cref="StepWall"/> moves only the wall
+    /// clock, like an NTP step.
+    /// </summary>
     private sealed class Clock
     {
-        public DateTime Now = T0;
+        private DateTime _now = T0;
+        private TimeSpan _mono = TimeSpan.Zero;
+
+        public DateTime Now
+        {
+            get => _now;
+            set
+            {
+                if (value > _now)
+                {
+                    _mono += value - _now;
+                }
+
+                _now = value;
+            }
+        }
+
         public FleetGateStats Stats { get; }
-        public SkipCreditFloor Floor { get; } = new();
+        public SkipCreditFloor Floor { get; }
 
         public Clock()
         {
             Stats = new FleetGateStats(() => Now);
+            Floor = new SkipCreditFloor(() => _mono);
             Floor.Tick(T0);
         }
+
+        /// <summary>A wall-clock step (NTP, a VM restore); the monotonic clock does not move.</summary>
+        public void StepWall(TimeSpan by) => _now += by;
 
         public void Record(long run, long skipped)
         {
@@ -52,7 +76,7 @@ public sealed class FleetGateStartupTests
         }
 
         public DarlingSelfAlertEvaluator.FleetGateReport Read() =>
-            DarlingWorker.ReadFleetGate(Stats, Floor.Since, 4, Now).Report;
+            DarlingWorker.ReadFleetGate(Stats, Floor.SinceAt(Now), 4, Now).Report;
     }
 
     /// <summary>
@@ -332,7 +356,7 @@ public sealed class FleetGateStartupTests
     }
 
     [Fact]
-    public async Task AStandingAlert_NeitherResolvesNorLosesItsStanding_WhileTheWindowIsTooShort()
+    public async Task AStandingAlert_NeitherResolvesNorStartsItsQuietClock_OnAReadingThatIsNotJudged()
     {
         var h = new DarlingSelfAlertTests.Harness();
         var e = h.Build();
@@ -341,19 +365,33 @@ public sealed class FleetGateStartupTests
         await e.ApplyFleetGateAsync(new(300, 100, 1, TimeSpan.Zero, TimeSpan.Zero, 4, start), Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* A pause and resume leaves a short window: quiet counts in it do not start the quiet clock, however long it stays short. */
+        /* A short window's quiet reading keeps the alert standing and does NOT start the quiet clock: the clock starts only on a
+           judged reading (#5597). The short reading comes BEFORE the first judged one, so without the short-window check in
+           ApplyFleetGateAsync it starts the clock half an hour early and the alert resolves at +4h. */
         h.Now = start.AddHours(3);
         var shortQuiet = new DarlingSelfAlertEvaluator.FleetGateReport(2000, 0, 1, TimeSpan.Zero, TimeSpan.Zero, 4, h.Now, JudgedMinutes: 3);
         Assert.True(await e.EvaluateFleetGateAsync(shortQuiet, Ct));
         Assert.Empty(h.History.Records);
 
-        /* The quiet-hold logic is the same for a store past its first hour: the first judged quiet reading starts the clock. */
-        var quiet = shortQuiet with { JudgedMinutes = 60 };
+        /* The first judged quiet reading starts the clock, at +3h30. */
+        h.Now = start.AddHours(3).AddMinutes(30);
+        var quiet = shortQuiet with { JudgedMinutes = 60, WindowEndUtc = h.Now };
         await e.ApplyFleetGateAsync(quiet, Ct);
-        h.Now = start.AddHours(4).AddMinutes(-1);
+
+        /* A short reading that is not quiet, between judged quiet readings, does not reset the clock either. */
+        h.Now = start.AddHours(3).AddMinutes(40);
+        var shortLoud = new DarlingSelfAlertEvaluator.FleetGateReport(1000, 1000, 1, TimeSpan.Zero, TimeSpan.Zero, 4, h.Now, JudgedMinutes: 3);
+        await e.ApplyFleetGateAsync(shortLoud, Ct);
+
+        h.Now = start.AddHours(4);
         await e.ApplyFleetGateAsync(quiet, Ct);
         Assert.Empty(h.History.Records);
-        h.Now = start.AddHours(4);
+
+        h.Now = start.AddHours(4).AddMinutes(29);
+        await e.ApplyFleetGateAsync(quiet, Ct);
+        Assert.Empty(h.History.Records);
+
+        h.Now = start.AddHours(4).AddMinutes(30);
         await e.ApplyFleetGateAsync(quiet, Ct);
         Assert.Single(h.History.Records);
     }
@@ -382,25 +420,245 @@ public sealed class FleetGateStartupTests
     }
 
     [Fact]
-    public void TheLoopsStart_IsItsFirstTick_AndEveryReturnFromAStretchItWasNotRunningRestartsIt()
+    public void TheServiceStart_IsTheFirstTick_AndNothingAfterItRestartsIt()
     {
-        var floor = new SkipCreditFloor();
-        Assert.Null(floor.Since);
+        var mono = TimeSpan.Zero;
+        var floor = new SkipCreditFloor(() => mono);
+        Assert.Null(floor.Uptime);
+        Assert.Null(floor.SinceAt(T0));
 
         floor.Tick(T0);
-        Assert.Equal(T0, floor.Since);
+        Assert.Equal(TimeSpan.Zero, floor.Uptime);
+        Assert.Equal(T0, floor.SinceAt(T0));
 
         /* Ticks on time leave it alone. */
+        mono = TimeSpan.FromSeconds(15);
         floor.Tick(T0.AddSeconds(15));
-        Assert.Equal(T0, floor.Since);
+        Assert.Equal(T0, floor.SinceAt(T0.AddSeconds(15)));
 
-        /* A sleep (a gap over MaxTickGap) restarts it, and so does a pause's resume. */
+        /* A stall (a gap over MaxTickGap) raises the floor and does not restart the start-up minutes. */
+        mono = TimeSpan.FromHours(2);
         var back = T0.AddHours(2);
         floor.Tick(back);
-        Assert.Equal(back, floor.Since);
+        Assert.Equal(back, floor.Floor);
+        Assert.Equal(T0, floor.SinceAt(back));
+
+        /* Neither does a pause's resume or the launch guard's release (both are Resume). */
+        mono += TimeSpan.FromMinutes(10);
         var resumed = back.AddMinutes(10);
         floor.Resume(resumed);
-        Assert.Equal(resumed, floor.Since);
+        Assert.Equal(resumed, floor.Floor);
+        Assert.Equal(T0, floor.SinceAt(resumed));
+    }
+
+    [Theory]
+    [InlineData("stall")]
+    [InlineData("resume")]
+    public async Task AFloorRaiseEveryTwentyMinutes_NeverRestartsTheStartUpMinutes_AndAStoreAtSixPercentSkippedFires(string kind)
+    {
+        var clock = new Clock();
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        DateTime? firedAt = null;
+
+        for (var m = 0; m <= 90; m++)
+        {
+            clock.Now = T0.AddMinutes(m);
+            h.Now = clock.Now;
+
+            /* A stall: the loop's ticks stop for three minutes at the end of each 20, so the tick that comes back is over
+               MaxTickGap after the one before it and raises the floor. A resume (a pause ending, or the memory launch guard's
+               release) is the Resume call itself. */
+            var stalled = kind == "stall" && (m % 20 is 17 or 18 or 19);
+            if (!stalled)
+            {
+                clock.Floor.Tick(clock.Now);
+            }
+
+            if (kind == "resume" && m > 0 && m % 20 == 0)
+            {
+                clock.Floor.Resume(clock.Now);
+            }
+
+            clock.Record(940, 60);
+            var before = h.Deliverer.Outcomes.Count;
+            await e.ApplyFleetGateAsync(clock.Read(), Ct);
+            if (h.Deliverer.Outcomes.Count > before)
+            {
+                firedAt ??= clock.Now;
+            }
+        }
+
+        Assert.True(clock.Floor.Floor > T0.AddMinutes(60), "the floor must have been raised again and again");
+        Assert.Equal(T0.AddMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes + DarlingSelfAlertEvaluator.FleetGateMinJudgedMinutes), firedAt);
+    }
+
+    [Fact]
+    public async Task HeldSlots_RecordedAfterTheStartUpMinutes_AreJudged_EvenWhenTheLaunchGuardReleasesRightAfter()
+    {
+        var clock = new Clock();
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        DateTime? firedAt = null;
+
+        for (var m = 0; m <= 45; m++)
+        {
+            clock.Now = T0.AddMinutes(m);
+            h.Now = clock.Now;
+            clock.Floor.Tick(clock.Now);
+
+            /* The guard holds collection off from minute 16 to 25: nothing runs, and every slot that comes due is a held slot,
+               recorded as skipped (RecordSkippedSlots, like CountHeldSlots does). It releases at minute 26. */
+            if (m is >= 16 and <= 25)
+            {
+                clock.Stats.RecordSkippedSlots(1000);
+            }
+            else
+            {
+                clock.Record(1000, 0);
+            }
+
+            if (m == 26)
+            {
+                clock.Floor.Resume(clock.Now);
+            }
+
+            var before = h.Deliverer.Outcomes.Count;
+            await e.ApplyFleetGateAsync(clock.Read(), Ct);
+            if (h.Deliverer.Outcomes.Count > before)
+            {
+                firedAt ??= clock.Now;
+            }
+        }
+
+        Assert.Equal(T0.AddMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes + DarlingSelfAlertEvaluator.FleetGateMinJudgedMinutes), firedAt);
+    }
+
+    [Fact]
+    public void ASkippedSlot_IsCountedInTheMinuteItsLateRunLands_SoASlotDueInTheStartUpMinutesButSteppedOverAfterThemIsJudged()
+    {
+        var clock = new Clock();
+
+        /* A slot due at minute 14 that a run steps over at minute 16 is recorded in minute 16's bucket: it is judged. */
+        clock.Now = T0.AddMinutes(14);
+        clock.Record(100, 0);
+        clock.Now = T0.AddMinutes(16);
+        clock.Record(100, 30);
+        for (var m = 17; m <= 31; m++)
+        {
+            clock.Now = T0.AddMinutes(m);
+            clock.Record(100, 0);
+        }
+
+        Assert.Equal(30, clock.Read().Skipped);
+
+        /* One recorded at minute 14 is not. */
+        var early = new Clock();
+        early.Now = T0.AddMinutes(14);
+        early.Record(100, 30);
+        for (var m = 15; m <= 31; m++)
+        {
+            early.Now = T0.AddMinutes(m);
+            early.Record(100, 0);
+        }
+
+        Assert.Equal(0, early.Read().Skipped);
+    }
+
+    [Fact]
+    public async Task ABackwardClockStepDuringTheStartUpMinutes_AddsNoBlindTime()
+    {
+        var clock = new Clock();
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        DateTime? firstJudgedUptime = null;
+        DateTime? firedAtUptime = null;
+
+        for (var uptime = 1; uptime <= 60; uptime++)
+        {
+            clock.Now = clock.Now.AddMinutes(1);
+            if (uptime == 6)
+            {
+                clock.StepWall(TimeSpan.FromMinutes(-30));
+            }
+
+            h.Now = clock.Now;
+            clock.Floor.Tick(clock.Now);
+            clock.Record(940, 60);
+            var report = clock.Read();
+            if (report.IsJudged && firstJudgedUptime is null)
+            {
+                firstJudgedUptime = T0.AddMinutes(uptime);
+            }
+
+            var before = h.Deliverer.Outcomes.Count;
+            await e.ApplyFleetGateAsync(report, Ct);
+            if (h.Deliverer.Outcomes.Count > before)
+            {
+                firedAtUptime ??= T0.AddMinutes(uptime);
+            }
+
+            if (uptime == 7)
+            {
+                /* The line names the real run time, not "last 1 minutes". */
+                Assert.Equal(7, FleetGateLine.SpanMinutes(clock.Floor.Uptime));
+            }
+        }
+
+        var expected = T0.AddMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes + DarlingSelfAlertEvaluator.FleetGateMinJudgedMinutes);
+        Assert.Equal(expected, firstJudgedUptime);
+        Assert.Equal(expected, firedAtUptime);
+    }
+
+    [Fact]
+    public void ABackwardClockStepAfterTheStartUpMinutes_KeepsTheWindowJudged()
+    {
+        var clock = new Clock();
+        for (var uptime = 1; uptime <= 40; uptime++)
+        {
+            clock.Now = clock.Now.AddMinutes(1);
+            clock.Floor.Tick(clock.Now);
+            clock.Record(940, 60);
+        }
+
+        Assert.Equal(25, clock.Read().JudgedMinutes);
+
+        /* A 30 minute step back, then one more minute: the window is as long as the service has run past its start-up minutes. */
+        clock.StepWall(TimeSpan.FromMinutes(-30));
+        clock.Floor.Tick(clock.Now);
+        clock.Now = clock.Now.AddMinutes(1);
+        clock.Floor.Tick(clock.Now);
+        clock.Record(940, 60);
+        Assert.Equal(26, clock.Read().JudgedMinutes);
+        Assert.True(clock.Read().IsJudged);
+        Assert.Equal(41, FleetGateLine.SpanMinutes(clock.Floor.Uptime));
+    }
+
+    [Fact]
+    public void ASeedStampAheadOfAClockThatSteppedBack_IsClampedToNow_SoTheSlotsAfterItAreCounted()
+    {
+        var floor = new SkipCreditFloor();
+        floor.Tick(T0);
+        var stamp = T0.AddMinutes(4.5).Ticks;
+        var steppedBack = T0.AddMinutes(-25);
+
+        /* The first pass after the step moves the stamp down to now; the later passes count from there. */
+        var clamped = SkipCreditFloor.ClampSeedStamp(stamp, steppedBack);
+        Assert.Equal(steppedBack.Ticks, clamped);
+        Assert.Equal(steppedBack.Ticks, SkipCreditFloor.ClampSeedStamp(clamped, steppedBack.AddMinutes(1)));
+        Assert.Equal(stamp, SkipCreditFloor.ClampSeedStamp(stamp, T0.AddMinutes(5)));
+
+        /* The stored stamp follows (the ref overload is what the collector pass calls). */
+        var stored = stamp;
+        Assert.Equal(steppedBack.Ticks, SkipCreditFloor.ClampSeedStamp(ref stored, steppedBack));
+        Assert.Equal(steppedBack.Ticks, stored);
+
+        var due = steppedBack;
+        var later = steppedBack.AddMinutes(3);
+        Assert.Equal(3, floor.Skipped(due, later, Minute, new DateTime(clamped, DateTimeKind.Utc)));
+
+        /* A stamp still ahead of the clock never counts from an instant that has not happened. */
+        Assert.Equal(0, floor.Skipped(due, later, Minute, new DateTime(stamp, DateTimeKind.Utc)));
     }
 
     [Fact]
@@ -450,8 +708,9 @@ public sealed class FleetGateStartupTests
     public void TheLogLine_NamesTheRealSpan_WhileTheServiceHasRunUnderAnHour(double minutesSinceStart, int expectedSpan)
     {
         var clock = new Clock();
+        clock.Now = T0.AddMinutes(minutesSinceStart);
         clock.Record(100, 30);
-        var span = FleetGateLine.SpanMinutes(T0.AddMinutes(minutesSinceStart), clock.Floor.FirstTick);
+        var span = FleetGateLine.SpanMinutes(clock.Floor.Uptime);
         Assert.Equal(expectedSpan, span);
 
         var line = FleetGateLine.Describe(clock.Stats.Snapshot(), 4, span);
@@ -466,7 +725,7 @@ public sealed class FleetGateStartupTests
             Assert.DoesNotContain("since the service started", line, StringComparison.Ordinal);
         }
 
-        Assert.Equal(60, FleetGateLine.SpanMinutes(T0, null));
+        Assert.Equal(60, FleetGateLine.SpanMinutes(null));
     }
 
     [Fact]
@@ -503,8 +762,8 @@ public sealed class FleetGateStartupTests
         var late = clock.Read();
         Assert.True(late.IsJudged);
         Assert.True(DarlingWorker.FleetGateLogIsBehind(false, late));
-        var (full, _) = DarlingWorker.ReadFleetGate(clock.Stats, clock.Floor.Since, 4, clock.Now);
-        Assert.Contains("last 31 minutes, since the service started", FleetGateLine.Describe(full, 4, FleetGateLine.SpanMinutes(clock.Now, clock.Floor.FirstTick)), StringComparison.Ordinal);
+        var (full, _) = DarlingWorker.ReadFleetGate(clock.Stats, clock.Floor.SinceAt(clock.Now), 4, clock.Now);
+        Assert.Contains("last 31 minutes, since the service started", FleetGateLine.Describe(full, 4, FleetGateLine.SpanMinutes(clock.Floor.Uptime)), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -518,7 +777,7 @@ public sealed class FleetGateStartupTests
         var seeding = source.IndexOf("server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);", StringComparison.Ordinal);
         Assert.True(seeding >= 0 && stamp > seeding, "the stamp must follow the seeding of the due times");
         Assert.Contains(
-            "var seeded = new DateTime(Interlocked.Read(ref server.SeedFinishedTicks), DateTimeKind.Utc);",
+            "var seeded = new DateTime(SkipCreditFloor.ClampSeedStamp(ref server.SeedFinishedTicks, now), DateTimeKind.Utc);",
             source, StringComparison.Ordinal);
     }
 }
