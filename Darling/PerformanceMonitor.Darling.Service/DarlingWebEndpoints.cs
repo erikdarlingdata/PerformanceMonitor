@@ -2864,6 +2864,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             : default;
         var queryStoreWideEligible = wideResolution.Eligible;
 
+        /* #5582: a wide-table read the daily summary says cannot finish inside the statement timeout is refused here, in
+           milliseconds, before any fact row is read. Both callers of this runner (the web endpoint and the MCP tool
+           run_custom_view_panel) get it, because it lives in the shared body. Fails open: no built day, or a fault in
+           the lookup, never refuses. The range passed is the one the wide table is read for. */
+        if (queryStoreWideEligible)
+        {
+            var countedStart = wideResolution.WideStart is { } wideReadStart && wideReadStart > start ? wideReadStart : start;
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken) is { } tooBig)
+            {
+                return ComposeRunOutcome.BadRequest(tooBig);
+            }
+        }
+
         /* #5525: the scoped names that no registry row carries. The compiler scopes by server_id and keeps matching those names on the
            row's stored server_name, so a scope over a name that was never registered keeps matching what it matched before (a scoped name
            that IS registered means the server the registry holds under it now: see ComposeCompiler.ServerScope). Resolved here, before the hourly-edges snapshot below

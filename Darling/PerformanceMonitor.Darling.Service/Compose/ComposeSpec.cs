@@ -29,6 +29,17 @@ public static class ComposeLimits
     /// bucket over a long window from fanning out to hundreds of thousands of buckets.</summary>
     public const int MaxBuckets = 5_000;
 
+    /// <summary>
+    /// The most Query Store wide-table rows (<c>collect.query_store_interval_wide</c>) one composed panel may be expected to
+    /// read (#5582), judged from the daily summary's row counts BEFORE the statement runs; over it the panel is refused with
+    /// a message that says what to narrow. Derived from the observed cold read of a large store: 8,457,483 rows in 48.3 s is
+    /// about 175 thousand rows per second, and 90% of the 60 s <see cref="StatementTimeout"/> (54 s) at that rate is about
+    /// 9.4 million rows. A read the estimate puts under this runs today (the observed 8.46 million rows finished in 48 s), so
+    /// this refuses only a read that cannot finish. One constant, so the value is adjusted in one place from a store
+    /// measurement.
+    /// </summary>
+    public const long MaxQueryStoreWideRows = 9_400_000;
+
     /// <summary>The ceiling on a ranked panel's <c>topN</c> (mirrors the read surface's row clamp).</summary>
     public const int MaxTopN = 1_000;
 
