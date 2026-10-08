@@ -1,12 +1,14 @@
 name: Diag 5596
 
-# Temporary (#5596): finds the thread that outlives the Darling.Tests run. Runs the whole suite the way the
-# whole-tree guards job does, and when the runner prints "Waiting 10 seconds for foreground threads", takes a
-# managed stack dump of the live process. Removed before the fix PR merges.
+# Temporary (#5596): finds what keeps the Darling.Tests process alive after the run returns. Runs the whole suite the
+# way the whole-tree guards job does with DIAG_5596=1 (a module initializer in the test assembly then logs a heartbeat
+# and the exit stages to a file), and when the runner prints "Waiting 10 seconds for foreground threads" takes a full
+# memory dump with procdump (no diagnostics pipe needed) and prints every thread's managed stack. Removed before the
+# fix PR merges.
 on:
   push:
     branches: [fix/5596-foreground-threads]
-    paths: ['.github/workflows/diag-5596.yml']
+    paths: ['.github/workflows/diag-5596.yml', 'Darling/Darling.Tests/Diag5596.cs']
   workflow_dispatch:
 
 permissions:
@@ -15,7 +17,7 @@ permissions:
 jobs:
   diag:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -31,44 +33,61 @@ jobs:
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
 
-      - name: Install dotnet-stack
-        working-directory: ${{ runner.temp }}
-        run: dotnet tool install --tool-path "$env:RUNNER_TEMP\diagtools" dotnet-stack
+      - name: Install dotnet-dump and procdump
+        shell: pwsh
+        run: |
+          dotnet tool install --tool-path "$env:RUNNER_TEMP\diagtools" dotnet-dump
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\procdump" | Out-Null
+          Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/Procdump.zip' -OutFile "$env:RUNNER_TEMP\procdump.zip" -TimeoutSec 60
+          Expand-Archive "$env:RUNNER_TEMP\procdump.zip" -DestinationPath "$env:RUNNER_TEMP\procdump" -Force
+          Get-ChildItem "$env:RUNNER_TEMP\procdump" | Select-Object -First 10 | ForEach-Object { Write-Host $_.Name }
 
-      - name: Run the suite and dump the threads that linger
+      - name: Run the suite and dump the process that lingers
         shell: pwsh
         run: |
           $exe = (Get-ChildItem -Path Darling/Darling.Tests/bin/Release -Recurse -Filter Darling.Tests.exe | Select-Object -First 1).FullName
           Write-Host "exe: $exe"
           $out = Join-Path $env:RUNNER_TEMP 'suite-out.txt'
           $err = Join-Path $env:RUNNER_TEMP 'suite-err.txt'
+          $beat = Join-Path $env:RUNNER_TEMP 'diag5596-heartbeat.txt'
+          $env:DIAG_5596 = '1'
           $p = Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
           Write-Host "started pid $($p.Id)"
-          $dumped = 0
+          $dumped = $false
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
           while (-not $p.HasExited) {
-              Start-Sleep -Milliseconds 400
-              $fs = [System.IO.File]::Open($out, 'Open', 'Read', 'ReadWrite')
-              $sr = New-Object System.IO.StreamReader($fs)
-              $text = $sr.ReadToEnd()
-              $sr.Dispose(); $fs.Dispose()
-              if ($dumped -lt 2 -and $text.Contains('Waiting 10 seconds for foreground threads')) {
-                  $dumped++
-                  Write-Host "::group::stack dump $dumped at $($sw.Elapsed)"
-                  $stackOut = & "$env:RUNNER_TEMP\diagtools\dotnet-stack.exe" report -p $p.Id 2>&1
-                  $stackOut | Select-Object -First 700 | ForEach-Object { Write-Host $_ }
-                  Write-Host "::endgroup::"
-                  Write-Host "::group::OS threads $dumped"
-                  try {
-                      (Get-Process -Id $p.Id).Threads | ForEach-Object { "{0} {1} {2} {3}" -f $_.Id, $_.ThreadState, $_.WaitReason, $_.StartTime } | Select-Object -First 200 | ForEach-Object { Write-Host $_ }
-                  } catch { Write-Host "threads: $_" }
-                  Write-Host "::endgroup::"
-                  Start-Sleep -Seconds 3
+              Start-Sleep -Milliseconds 100
+              if (-not $dumped) {
+                  $fs = [System.IO.File]::Open($out, 'Open', 'Read', 'ReadWrite')
+                  $sr = New-Object System.IO.StreamReader($fs)
+                  $text = $sr.ReadToEnd()
+                  $sr.Dispose(); $fs.Dispose()
+                  if ($text.Contains('Waiting 10 seconds for foreground threads')) {
+                      $dumped = $true
+                      Write-Host "wait line seen at $((Get-Date).ToUniversalTime().ToString('HH:mm:ss.fff')) UTC"
+                      $dmp = Join-Path $env:RUNNER_TEMP 'lingering.dmp'
+                      $pd = Start-Process -FilePath "$env:RUNNER_TEMP\procdump\procdump64.exe" -ArgumentList '-accepteula', '-ma', "$($p.Id)", $dmp -PassThru -NoNewWindow
+                      if (-not $pd.WaitForExit(90000)) { Write-Host 'procdump timed out'; try { $pd.Kill() } catch {} }
+                      Write-Host "procdump done at $((Get-Date).ToUniversalTime().ToString('HH:mm:ss.fff')) UTC, size $(if (Test-Path $dmp) { (Get-Item $dmp).Length } else { 'none' })"
+                      if (Test-Path $dmp) {
+                          Write-Host '::group::clrthreads and clrstack -all'
+                          $da = Join-Path $env:RUNNER_TEMP 'analyze-out.txt'
+                          $dae = Join-Path $env:RUNNER_TEMP 'analyze-err.txt'
+                          $pa = Start-Process -FilePath "$env:RUNNER_TEMP\diagtools\dotnet-dump.exe" -ArgumentList 'analyze', $dmp, '-c', 'clrthreads', '-c', 'clrstack -all', '-c', 'exit' -PassThru -NoNewWindow -RedirectStandardOutput $da -RedirectStandardError $dae
+                          if (-not $pa.WaitForExit(240000)) { Write-Host 'dotnet-dump analyze timed out'; try { $pa.Kill() } catch {} }
+                          Get-Content $da -TotalCount 400 | ForEach-Object { Write-Host $_ }
+                          Get-Content $dae -TotalCount 20 | ForEach-Object { Write-Host $_ }
+                          Write-Host '::endgroup::'
+                      }
+                  }
               }
-              if ($sw.Elapsed.TotalMinutes -gt 30) { Write-Host 'giving up'; Stop-Process -Id $p.Id -Force; break }
+              if ($sw.Elapsed.TotalMinutes -gt 20) { Write-Host 'giving up'; Stop-Process -Id $p.Id -Force; break }
           }
           $p.WaitForExit()
-          Write-Host "exit code $($p.ExitCode) after $($sw.Elapsed)"
+          Write-Host "exit code $($p.ExitCode) after $($sw.Elapsed), now $((Get-Date).ToUniversalTime().ToString('HH:mm:ss.fff')) UTC"
           Get-Content $out | Select-String -Pattern 'Total:|\[FAIL\]|Waiting 10|FATAL' | Select-Object -First 20 | ForEach-Object { Write-Host $_.Line }
           Get-Content $err -Tail 20 | ForEach-Object { Write-Host $_ }
+          Write-Host '::group::heartbeat tail'
+          if (Test-Path $beat) { Get-Content $beat -Tail 60 | ForEach-Object { Write-Host $_ } } else { Write-Host 'no heartbeat file' }
+          Write-Host '::endgroup::'
           exit 0
