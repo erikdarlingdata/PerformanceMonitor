@@ -85,7 +85,7 @@ public sealed class WebClickthroughPickListTests
     {
         var r = Run("pages");
         // The registry (and list_servers) answers PG18 first; the sidebar lists AG1, AG2, PG18, PGEXT, SQL2016.
-        Assert.Equal(["AG1", "AG2", "PG18", "PGEXT", "SQL2016"], Strings(r.GetProperty("finops")));
+        Assert.Equal(["AG1", "AG2", "PG18 (PostgreSQL)", "PGEXT (PostgreSQL)", "SQL2016"], Strings(r.GetProperty("finops")));
         Assert.Equal(["All servers", "AG1", "AG2", "SQL2016"], Strings(r.GetProperty("jobs")));
         var alerts = r.GetProperty("alerts").EnumerateArray().Select(Strings).Single(s => s.Contains("All servers"));
         Assert.Equal(["All servers", "AG1", "AG2", "PG18", "PGEXT", "SQL2016"], alerts);

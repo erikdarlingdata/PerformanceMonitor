@@ -151,6 +151,8 @@ public sealed class FinOpsInventoryGoldenLiveTests
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds) VALUES ($1, $2, $3, $4, 'UserDbBusy', '0xHASHGOLD', '0xHANDLEGOLD', 1000, 1000, 5, 300)",
             CollectionIdGenerator.Next(), now.AddDays(-3), IdA, NameA);
+        /* The idle count (and the idle claim behind it) needs 7 days of query-stats history with a sample on each complete UTC day. */
+        await FinOpsIdleCoverageSeed.SeedAsync(c, ct, IdA, NameA, now);
         await InsertPropertiesAsync(c, IdA, NameA, anchor.AddDays(-1).AddHours(3), "Enterprise Edition", "16.0.4100.1", "RTM", "CU9", 3, 8, 65536L, 2, 4, true, false, anchor.AddDays(-3).AddHours(7), "Windows Server 2022", "PRIMARY", null, ct);
         await InsertPropertiesAsync(c, IdA, NameA, anchor.AddDays(-9), "Developer Edition", "15.0.2000.5", "RTM", null, 3, 4, 8192L, 1, 4, false, false, null, "Windows Server 2019", null, null, ct);
         await DarlingMcpTestData.ExecAsync(c, ct,
@@ -183,6 +185,7 @@ public sealed class FinOpsInventoryGoldenLiveTests
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds) VALUES ($1, $2, $3, $4, 'UserDbOnly', '0xHASHGOLD2', '0xHANDLEGOLD2', 1000, 1000, 5, 300)",
             CollectionIdGenerator.Next(), now.AddHours(-6), IdD, NameD);
+        await FinOpsIdleCoverageSeed.SeedAsync(c, ct, IdD, NameD, now);
         await InsertPropertiesAsync(c, IdD, NameD, anchor.AddDays(-5), "Standard Edition", "15.0.4000.1", "RTM", null, 2, 4, 16384L, 1, 4, false, false, null, null, null, null, ct);
     }
 

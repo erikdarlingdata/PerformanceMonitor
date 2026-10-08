@@ -104,7 +104,9 @@ public sealed class RightSizingWindowTests
         Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("$1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("MIN(collection_time)", sql, StringComparison.Ordinal);
+        /* The complete days stop before today, and the oldest sample is read beside them (the rule needs both). */
+        Assert.Contains("collection_time <  $3", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
