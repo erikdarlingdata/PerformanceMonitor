@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// carries the staged state into the next cycle the way the runner does after a successful write.
 /// </summary>
 [Collection("pg-log-rotation")]
+[Trait("Cost", "Slow")]
 public sealed class PgServerLogTailCsvJsonRotationLiveTests
 {
     private const string SkipReason = "Set DARLING_TEST_PG_LOGROTATE_CSV / DARLING_TEST_PG_LOGROTATE_JSON to a target started with logging_collector = on, log_destination = 'csvlog' / 'jsonlog', log_timezone = 'UTC' to run the csv/json log-rotation live tests.";

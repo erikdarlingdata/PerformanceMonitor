@@ -29,6 +29,7 @@ namespace PerformanceMonitorLite.Tests;
 /// with the earliest point the chart draws, then <see cref="ServerTab.ApplyWindowFloorToBanner"/>.
 /// </summary>
 [Collection("server-time-helper")]
+[Trait("Cost", "Slow")]
 public sealed class BlockingChartsDataStartTests : IDisposable
 {
     private const int ServerId = 4966;

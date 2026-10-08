@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// The per-process rows <c>get_deadlock_detail</c> serves in <c>processes[]</c> (the web Deadlocks sub-grid) come from
 /// the same shared graph walk as the desktop viewer's grid, so the browser never parses the XML. Pure (no store).
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class DeadlockProcessRowsTests
 {
     private const string Graph = """

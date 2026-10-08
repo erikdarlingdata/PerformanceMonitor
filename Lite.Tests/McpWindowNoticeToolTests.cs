@@ -31,6 +31,7 @@ namespace PerformanceMonitorLite.Tests;
 /// (<c>truncated</c>), so none writes <c>effective_hours_back</c>: Darling's census holds that key apart for the
 /// window floor. Own <see cref="DuckDbInitializer"/> per test, like <see cref="QueryWindowTruncationTests"/>.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class McpWindowNoticeToolTests : IDisposable
 {
     private const string ServerName = "NoticeServer";

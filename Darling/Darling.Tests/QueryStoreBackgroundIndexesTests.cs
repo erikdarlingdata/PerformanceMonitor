@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -29,6 +30,7 @@ namespace Darling.Tests;
 public sealed class QueryStoreBackgroundIndexesTests
 {
     private static readonly QueryStoreBackgroundIndexes.IndexSpec Wide = QueryStoreBackgroundIndexes.WideServerFirstExec;
+    private static readonly QueryStoreBackgroundIndexes.IndexSpec Latest = QueryStoreBackgroundIndexes.LatestServerFirstExec;
     private static readonly QueryStoreBackgroundIndexes.IndexSpec Brin = QueryStoreIntervalWideBrinIndex.Spec;
 
     [Theory]
@@ -40,6 +42,66 @@ public sealed class QueryStoreBackgroundIndexesTests
         int serverVersionNum, bool hypertable, QueryStoreBackgroundIndexes.IndexAction expected)
     {
         Assert.Equal(expected, QueryStoreBackgroundIndexes.Decide(Wide, serverVersionNum, hypertable).Action);
+    }
+
+    [Theory]
+    [InlineData(140000, false, QueryStoreBackgroundIndexes.IndexAction.Build)]
+    [InlineData(180006, false, QueryStoreBackgroundIndexes.IndexAction.Build)]
+    [InlineData(140000, true, QueryStoreBackgroundIndexes.IndexAction.SkipHypertable)]
+    [InlineData(180006, true, QueryStoreBackgroundIndexes.IndexAction.SkipHypertable)]
+    public void TheLatestBtree_BuildsConcurrentlyOnTheHeap_AndSkipsAHypertable(
+        int serverVersionNum, bool hypertable, QueryStoreBackgroundIndexes.IndexAction expected)
+    {
+        Assert.Equal(expected, QueryStoreBackgroundIndexes.Decide(Latest, serverVersionNum, hypertable).Action);
+    }
+
+    [Fact]
+    public void TheLatestBtreeDdl_IsAConcurrentBtreeOnServerAndFirstExecutionTime_OnTheLatestTable()
+    {
+        var sql = Latest.PlainCreateSql;
+        Assert.Contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_latest_server_first_exec", sql);
+        Assert.Contains("ON collect.query_store_interval_latest (server_id, first_execution_time)", sql);
+        Assert.DoesNotContain("brin", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(" WHERE ", sql, StringComparison.Ordinal);
+        Assert.Contains("DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_latest_server_first_exec;", Latest.PlainDropSql);
+        Assert.Equal(QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName, Latest.IndexName);
+        Assert.Equal("collect.query_store_interval_latest", Latest.TableName);
+    }
+
+    [Fact]
+    public void TheLatestBtree_LeadsWithTheServerAndCarriesTheFirstExecutionBoundTheLatestReadsFilterOn()
+    {
+        /* #5507. Each read of collect.query_store_interval_latest that bounds server_id and first_execution_time, with the
+           bound it carries; in ux_query_store_interval_latest first_execution_time is the seventh column, so only a btree
+           that leads with server_id turns the bound into a range. */
+        var reads = new (string Name, string Sql, string Table, string Server, string Bound)[]
+        {
+            ("PlanRegressionDaily.BuildDaySql", PlanRegressionDaily.BuildDaySql, "collect.query_store_interval_latest", "l.server_id = $1", "l.first_execution_time >= $4::timestamp"),
+            ("QueryStoreIntervalLatest.PlainTableFloorSql", QueryStoreIntervalLatest.PlainTableFloorSql, "collect.query_store_interval_latest", "t.server_id = $1", "MIN(t.first_execution_time)"),
+            ("PgFactCollector.PlanRegressionDailySql, live half", PgFactCollector.PlanRegressionDailySql, "FROM query_store_interval_latest AS l", "l.server_id = $1::integer", "l.first_execution_time >= $4::timestamp"),
+            ("PgFactCollector.PlanRegressionTableSql", PgFactCollector.PlanRegressionTableSql, "FROM query_store_interval_latest", "WHERE server_id = $1", "first_execution_time >= $4"),
+            ("PgDrillDownCollector.RegressedQueriesTableSql", PgDrillDownCollector.RegressedQueriesTableSql, "FROM query_store_interval_latest", "WHERE server_id = $1", "first_execution_time >= $7"),
+        };
+
+        foreach (var (name, sql, table, server, bound) in reads)
+        {
+            Assert.True(sql.Contains(server, StringComparison.Ordinal), name + " must filter on the server");
+            Assert.True(sql.Contains(bound, StringComparison.Ordinal), name + " must carry its first_execution_time bound");
+            Assert.True(sql.Contains(table, StringComparison.Ordinal), name + " must read the latest table");
+        }
+
+        Assert.Contains("(server_id, first_execution_time)", Latest.PlainCreateSql);
+    }
+
+    [Fact]
+    public void TheLatestWritersDoUpdateSetList_NeverSetsTheServerOrTheFirstExecutionTime_SoTheLatestBtreeKeepsUpdatesHot()
+    {
+        var setColumns = QueryStoreIntervalWideBrinIndexLiveTests.UpsertSetColumns(QueryStoreIntervalLatest.UpsertSql);
+        Assert.True(setColumns.Count >= 8, $"the parse found {setColumns.Count} SET columns; the upsert sets 10");
+        Assert.Contains("collection_time", setColumns);
+        Assert.Contains("execution_count", setColumns);
+        Assert.DoesNotContain("server_id", setColumns);
+        Assert.DoesNotContain("first_execution_time", setColumns);
     }
 
     [Fact]
@@ -84,6 +146,7 @@ public sealed class QueryStoreBackgroundIndexesTests
        is not matched through a concatenation. */
     [Theory]
     [InlineData("collect.query_store_interval_wide", "collect", "query_store_interval_wide")]
+    [InlineData("collect.query_store_interval_latest", "collect", "query_store_interval_latest")]
     [InlineData("collect.query_store_stats", "collect", "query_store_stats")]
     [InlineData("a.b.c", "a.b", "c")]
     public void ATableName_SplitsAtItsLastDot_IntoItsSchemaAndItsName(string tableName, string schema, string name)
@@ -141,13 +204,14 @@ public sealed class QueryStoreBackgroundIndexesTests
        chunk it builds. The Query Store backfill writes backdated rows into older chunks as well as the newest, under
        the collector's 10 s COPY deadline, so no chunk is safe to lock and no background index targets that table. */
     [Fact]
-    public void TheBackgroundIndexes_AreTheBrinThenTheWideBtree_AndNoneTargetsTheRawHypertable()
+    public void TheBackgroundIndexes_AreTheBrinThenTheWideBtreeThenTheLatestBtree_AndNoneTargetsTheRawHypertable()
     {
         Assert.Equal(
             new[]
             {
                 QueryStoreIntervalWideBrinIndex.IndexName,
                 QueryStoreBackgroundIndexes.WideServerFirstExecIndexName,
+                QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName,
             },
             QueryStoreBackgroundIndexes.All.Select(spec => spec.IndexName).ToArray());
 

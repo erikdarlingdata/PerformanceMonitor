@@ -34,10 +34,88 @@ SELECT SUM(size_mb) AS total_size_mb
 FROM latest
 WHERE rn = 1";
 
+    /* #5516: the cheap path for the sum DatabaseSizeSql computes. DatabaseSizeSql numbers every file row in the
+       24-hour lookback to keep the newest per file - 1,788 blocks a call. This reads only the newest snapshot
+       (the (server_id, collection_time) index serves MAX backward, then the rows by equality) and sums its
+       files.
+
+       DatabaseSizeSql also answers with a file's OLDER row when the newest snapshot lacks that file (a database
+       dropped or taken offline inside the lookback, or a per-database read that failed in the newest Azure SQL
+       Database sweep). No index leads with the file key, so no cheap read can find such a file; this read probes
+       instead. It lists the files of the snapshot just before the newest and of the oldest one in the lookback,
+       and reports whether either has a file the newest snapshot lacks. The caller then runs DatabaseSizeSql, so
+       the answer is the old one whenever a file has dropped out. The one case the probe cannot see is a file
+       that appears and vanishes strictly between those two snapshots and in neither of them; DatabaseSizeSql
+       would carry it for up to 24 hours as a ghost, and #3896 exists to age ghosts out. Columns: total_size_mb
+       (NULL with no qualifying row), dropped_out (true when DatabaseSizeSql must decide). */
+    public const string DatabaseSizeNewestSql = @"
+WITH newest AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+cur AS (
+    SELECT DISTINCT ON (database_name, file_name) database_name, file_name, size_mb
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time = (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY database_name, file_name
+),
+edge AS (
+    (
+        SELECT collection_time
+        FROM file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < (SELECT collection_time FROM newest)
+        AND   size_mb > 0
+        ORDER BY collection_time DESC
+        LIMIT 1
+    )
+    UNION
+    (
+        SELECT collection_time
+        FROM file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < (SELECT collection_time FROM newest)
+        AND   size_mb > 0
+        ORDER BY collection_time ASC
+        LIMIT 1
+    )
+)
+SELECT
+    (SELECT SUM(size_mb) FROM cur) AS total_size_mb,
+    EXISTS (
+        SELECT 1
+        FROM file_io_stats AS f
+        WHERE f.server_id = $1
+        AND   f.collection_time IN (SELECT collection_time FROM edge)
+        AND   f.size_mb > 0
+        AND   NOT EXISTS (
+            SELECT 1
+            FROM cur AS c
+            WHERE c.database_name = f.database_name
+            AND   c.file_name = f.file_name
+        )
+    ) AS dropped_out";
+
     /// <summary>
     /// Collects total database data size from file_io_stats.
     /// Sums the latest size_mb across the database files seen within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see>
     /// of the window's end (#3896) — a file not seen in that span belongs to a database that no longer exists.
+    /// The sum comes from the newest snapshot alone (#5516); when a file in the probed older snapshots is
+    /// missing from it, <see cref="DatabaseSizeSql"/> decides. The one accepted difference from the full read: a file
+    /// seen only in snapshots strictly between the two probed ones (the oldest in the lookback and the one just
+    /// before the newest) is not carried as a ghost, where the full read carried it for up to 24 hours. That
+    /// answer can also reappear when the lookback's oldest snapshot later falls inside the file's life; the total
+    /// has no scoring weight, and #3896 treats such a ghost as not a database anyway.
     /// </summary>
     private async Task CollectDatabaseSizeFactAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -45,17 +123,39 @@ WHERE rn = 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(DatabaseSizeSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(FileIoStatsCollector.Instance.Name)));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            double? totalSize = null;
+            var droppedOut = true;
+            using (var cmd = new NpgsqlCommand(DatabaseSizeNewestSql, connection) { CommandTimeout = FactCommandTimeoutSeconds })
+            {
+                cmd.Parameters.AddWithValue(context.ServerId);
+                cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(FileIoStatsCollector.Instance.Name)));
+                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                if (await reader.ReadAsync(context.CancellationToken))
+                {
+                    totalSize = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
+                    droppedOut = reader.GetBoolean(1);
+                }
+            }
 
-            var totalSize = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            if (totalSize > 0)
-                facts.Add(new Fact { Source = "config", Key = "DATABASE_TOTAL_SIZE_MB", Value = totalSize, ServerId = context.ServerId });
+            /* Nothing qualifying at all is DatabaseSizeSql's empty answer too, so only a dropped-out file
+               needs the full read. */
+            if (droppedOut)
+            {
+                using var full = new NpgsqlCommand(DatabaseSizeSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+                full.Parameters.AddWithValue(context.ServerId);
+                full.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(FileIoStatsCollector.Instance.Name)));
+                full.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+                using var fullReader = await full.ExecuteReaderAsync(context.CancellationToken);
+                totalSize = null;
+                if (await fullReader.ReadAsync(context.CancellationToken))
+                    totalSize = fullReader.IsDBNull(0) ? null : Convert.ToDouble(fullReader.GetValue(0));
+            }
+
+            if (totalSize is > 0)
+                facts.Add(new Fact { Source = "config", Key = "DATABASE_TOTAL_SIZE_MB", Value = totalSize.Value, ServerId = context.ServerId });
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {

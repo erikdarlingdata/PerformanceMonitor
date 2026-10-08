@@ -229,11 +229,14 @@ ANALYZE collect.query_store_interval_wide;", ct);
         await SeedAsync(connection, ct);
         await EnsureAllAsync(connection, ct);
 
-        var names = new[] { QueryStoreIntervalWideBrinIndex.IndexName, QueryStoreBackgroundIndexes.WideServerFirstExecIndexName };
+        var names = new[] { QueryStoreIntervalWideBrinIndex.IndexName, QueryStoreBackgroundIndexes.WideServerFirstExecIndexName, QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName };
         foreach (var name in names)
         {
             Assert.True(await IndexIsValidAsync(connection, name, ct), name);
         }
+
+        var latestDefinition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName}'::regclass)", ct))!;
+        Assert.Contains("ON collect.query_store_interval_latest USING btree (server_id, first_execution_time)", latestDefinition);
 
         var wideDefinition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{QueryStoreBackgroundIndexes.WideServerFirstExecIndexName}'::regclass)", ct))!;
         Assert.Contains("USING btree (server_id, first_execution_time)", wideDefinition);
@@ -393,7 +396,7 @@ WHERE i.indrelid = 'collect.query_store_stats'::regclass
         await using var connection = await OpenStoreAsync(scratch, ct);
         await EnsureAllAsync(connection, ct);
 
-        var names = new[] { QueryStoreIntervalWideBrinIndex.IndexName, QueryStoreBackgroundIndexes.WideServerFirstExecIndexName };
+        var names = new[] { QueryStoreIntervalWideBrinIndex.IndexName, QueryStoreBackgroundIndexes.WideServerFirstExecIndexName, QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName };
         var oldOids = new Dictionary<string, object?>();
         foreach (var name in names)
         {
@@ -459,6 +462,167 @@ WHERE i.indrelid = 'collect.query_store_stats'::regclass
         /* The control: a btree on a SET column makes the same update non-HOT, so the counters can fail. */
         await ExecAsync(connection, $"CREATE INDEX ix_btree_probe ON {Wide} (execution_count)", ct);
         var (controlUpdated, controlHot) = await QueryStoreIntervalWideBrinIndexLiveTests.UpdateAndReadHotAsync(connection, setList, "server_id = 1 AND query_id = 1", ct);
+        Assert.Equal(updated, controlUpdated);
+        Assert.Equal(0, controlHot);
+    }
+
+    /* ---- #5507: the btree on collect.query_store_interval_latest (server_id, first_execution_time) ---- */
+
+    private const string Latest = "collect.query_store_interval_latest";
+
+    /* Four servers x 15 fixed past days x 2,000 queries. The days are fixed and old, so the late-day trigger's WHEN (a row
+       whose first execution is at most 17 days back) never fires on the seed. */
+    private static async Task SeedLatestAsync(NpgsqlConnection connection, int queriesPerDay, CancellationToken ct)
+    {
+        await ExecAsync(connection, $@"
+INSERT INTO {Latest}
+    (server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time, collection_time,
+     query_plan_hash, execution_count, avg_cpu_time_us, avg_duration_us, last_execution_time, is_forced_plan, force_failure_count)
+SELECT s, 'db', q, q, NULL, extract(epoch FROM d)::bigint / 3600, d, d + interval '1 hour',
+       'h' || q, 10, 100, 1000, d + interval '30 minutes', false, 0
+FROM generate_series(1, 4) s
+CROSS JOIN generate_series(TIMESTAMP '2026-03-01', TIMESTAMP '2026-03-15', interval '1 day') d
+CROSS JOIN generate_series(1, {queriesPerDay}) q;", ct);
+
+        /* VACUUM cannot share a batch with the insert: a multi-statement simple query is one implicit transaction. */
+        await ExecAsync(connection, $"VACUUM (ANALYZE) {Latest}", ct);
+    }
+
+    /// <summary>Every index the EXPLAIN of <paramref name="sql"/> names.</summary>
+    private static async Task<HashSet<string>> LatestIndexesInPlanAsync(
+        NpgsqlConnection connection, string sql, NpgsqlParameter[] parameters, CancellationToken ct)
+    {
+        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, connection);
+        foreach (var parameter in parameters)
+        {
+            explain.Parameters.Add(parameter);
+        }
+
+        var json = (string)(await explain.ExecuteScalarAsync(ct))!;
+        var found = new HashSet<string>(StringComparer.Ordinal);
+
+        void Walk(JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in element.EnumerateArray())
+                {
+                    Walk(item);
+                }
+
+                return;
+            }
+
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            /* A Bitmap Index Scan names its index but not the relation (its Bitmap Heap Scan parent names the relation), so
+               every index in the plan counts; the statements explained here read no other table with an index. */
+            if (element.TryGetProperty("Index Name", out var index))
+            {
+                found.Add(index.GetString()!);
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                Walk(property.Value);
+            }
+        }
+
+        using var document = JsonDocument.Parse(json);
+        Walk(document.RootElement);
+        return found;
+    }
+
+    [Fact]
+    public async Task ThePerDayBuildAndTheServerFloor_UseTheLatestBtree_OnceItIsBuilt()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5507 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedLatestAsync(connection, 2000, ct);
+
+        /* The premise: a plain table (the ensure builds on a plain table only) of many pages and four servers. */
+        Assert.False((bool)(await ScalarAsync(connection, "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_interval_latest')", ct))!);
+        Assert.Equal(4L, await ScalarAsync(connection, $"SELECT count(DISTINCT server_id) FROM {Latest}", ct));
+        var pages = (int)(await ScalarAsync(connection, $"SELECT relpages FROM pg_class WHERE oid = '{Latest}'::regclass", ct))!;
+        Assert.True(pages >= 200, $"the table spans {pages} pages; the pin needs a table whose slice walk costs more than a range scan");
+
+        var day = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
+        NpgsqlParameter[] BuildParameters() => new[]
+        {
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 2 },
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = DateOnly.FromDateTime(day) },
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(1) },
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(-1) },
+        };
+        NpgsqlParameter[] FloorParameters() => new[] { new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 2 } };
+
+        var latestName = QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName[(QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName.IndexOf('.', StringComparison.Ordinal) + 1)..];
+
+        /* The premise: the index is not there yet, so any plan below that names it names it because the ensure built it. */
+        Assert.False(await IndexExistsAsync(connection, QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName, ct));
+
+        await EnsureAllAsync(connection, ct);
+        await ExecAsync(connection, $"VACUUM (ANALYZE) {Latest}", ct);
+
+        var build = await LatestIndexesInPlanAsync(connection, PlanRegressionDaily.BuildDaySql, BuildParameters(), ct);
+        Assert.Contains(latestName, build);
+
+        /* The floor read: the new btree is one descent. V153's first_execution_time-only btree could also answer a min/max
+           path, so the pin names the new index. */
+        var floor = await LatestIndexesInPlanAsync(connection, QueryStoreIntervalLatest.PlainTableFloorSql, FloorParameters(), ct);
+        Assert.Equal(new[] { latestName }, floor.ToArray());
+    }
+
+    [Fact]
+    public async Task TheLatestUpsertsWholeSetList_StaysHotWithTheLatestBtreePresent_AndNotWithABtreeOnASetColumn()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5507 live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedLatestAsync(connection, 40, ct);
+        await EnsureAllAsync(connection, ct);
+
+        /* The claim is about the latest btree being present, so prove it is: without it the update below stays heap-only
+           trivially. */
+        Assert.True(await IndexIsValidAsync(connection, QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName, ct));
+
+        var setColumns = QueryStoreIntervalWideBrinIndexLiveTests.UpsertSetColumns(QueryStoreIntervalLatest.UpsertSql);
+        var types = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using (var typeCommand = new NpgsqlCommand(
+            "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'query_store_interval_latest'", connection))
+        await using (var reader = await typeCommand.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                types[reader.GetString(0)] = reader.GetString(1);
+            }
+        }
+
+        var setList = string.Join(", ", setColumns.OrderBy(c => c, StringComparer.Ordinal).Select(column => types[column] switch
+        {
+            "timestamp without time zone" => $"{column} = {column} + interval '1 minute'",
+            "boolean" => $"{column} = NOT COALESCE({column}, false)",
+            "text" => $"{column} = COALESCE({column}, '') || 'x'",
+            _ => $"{column} = COALESCE({column}, 0) + 1",
+        }));
+
+        var (updated, hot) = await QueryStoreIntervalWideBrinIndexLiveTests.UpdateAndReadHotAsync(connection, setList, "server_id = 1 AND query_id <= 20", ct, Latest);
+        Assert.True(updated >= 20, $"the update must touch rows; touched {updated}");
+        Assert.Equal(updated, hot);
+
+        /* The control: a btree on a SET column makes the same update non-HOT, so the counters can fail. */
+        await ExecAsync(connection, $"CREATE INDEX ix_btree_probe ON {Latest} (execution_count)", ct);
+        var (controlUpdated, controlHot) = await QueryStoreIntervalWideBrinIndexLiveTests.UpdateAndReadHotAsync(connection, setList, "server_id = 1 AND query_id <= 20", ct, Latest);
         Assert.Equal(updated, controlUpdated);
         Assert.Equal(0, controlHot);
     }

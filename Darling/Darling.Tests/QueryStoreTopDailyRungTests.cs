@@ -93,6 +93,21 @@ public sealed class QueryStoreTopDailyRungTests
             || m.Sql.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide\r\n", StringComparison.Ordinal)).Sql;
 
     [Fact]
+    public void TheCleanup_IsDrivenFromTheSmallBuiltTable_SoTheSummaryDeleteIsAnIndexProbeByKey()
+    {
+        /* #5507: the shape PlanRegressionDaily took in #5448. A delete on the summary with a day test OR a NOT IN of its own
+           cannot use ux_query_store_top_daily and reads every summary row on every hourly tick. */
+        var built = Regex.Replace(QueryStoreTopDaily.GcBuiltSql, @"\s+", " ");
+        Assert.StartsWith("DELETE FROM collect.query_store_top_daily_built", built.TrimStart(), StringComparison.Ordinal);
+        Assert.Contains("RETURNING server_id, day", built, StringComparison.Ordinal);
+
+        var summary = Regex.Replace(QueryStoreTopDaily.GcSummarySql, @"\s+", " ");
+        Assert.Contains("DELETE FROM collect.query_store_top_daily WHERE server_id = $1::integer AND day = $2::date;", summary, StringComparison.Ordinal);
+        Assert.DoesNotContain(" OR ", summary, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT IN", summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheRungIsRegisteredInADenseLadder_AtVersion161()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
