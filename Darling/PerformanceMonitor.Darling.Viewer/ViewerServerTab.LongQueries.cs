@@ -21,6 +21,8 @@ public partial class ViewerServerTab
     /// the session lives (<see cref="LongQueryCompletionsCollector.SessionScopeSentence"/>). On Azure SQL Database the
     /// session is per monitored database, so the banner must not say it is on the server.
     /// </summary>
+    internal const string LongQueriesSwitchLocation = "Settings → Collection Schedule → Edit Collector Schedules…";
+
     internal static string LongQueriesDisabledText(int engineEdition) =>
         "The long-query completion trace is OFF for this server. It is opt-in because a completion trace adds overhead "
         + "on busy servers. Turn it on in Settings → Collection Schedule → Edit Collector Schedules…, then tick "
@@ -38,9 +40,13 @@ public partial class ViewerServerTab
     private async Task LoadLongQueriesAsync()
     {
         LongQueriesDisabledWarning.Text = LongQueriesDisabledText(_server.EngineEdition);
-        LongQueriesDisabledWarning.Visibility = await _dataService.GetLongQueryTraceEnabledAsync(_server.ServerId)
+        var traceEnabled = await _dataService.GetLongQueryTraceEnabledAsync(_server.ServerId);
+        LongQueriesDisabledWarning.Visibility = traceEnabled
             ? Visibility.Collapsed
             : Visibility.Visible;
+        /* Release walk V12a: the empty grid says why it is empty (the trace is opt-in and off), not the generic "No data". */
+        PerformanceMonitor.Ui.EmptyState.SetText(LongQueryCompletionsGrid,
+            PerformanceMonitor.Ui.LongQueriesEmptyText.Text(traceEnabled, LongQueriesSwitchLocation));
 
         var (startUtc, endUtc) = GetWindowUtc();
         var dataStartTask = _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc);

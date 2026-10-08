@@ -474,6 +474,12 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             var data = Assert.Single(rows, r => r.FileName == "Db0_data");
             Assert.Equal(8.0, data.AvgReadLatencyMs, precision: 3);
 
+            /* Release walk V9b: the points carry their read counts, so the Overview lane's figure is total stall over total
+               reads across the files that had reads (8.0 ms), not the average over the log files' zero-read points too. */
+            Assert.Equal(500, data.Reads);
+            Assert.All(rows.Where(r => r.FileName.EndsWith("_log", StringComparison.Ordinal)), r => Assert.Equal(0, r.Reads));
+            Assert.Equal(8.0, PerformanceMonitor.Ui.IoLatencyWeighting.Weighted(rows.Select(r => (r.AvgReadLatencyMs, r.Reads))), precision: 3);
+
             /* The write ranking still keeps ten of the twelve log files, at their 2 ms writes. */
             var logs = rows.Where(r => r.FileName.EndsWith("_log", StringComparison.Ordinal)).ToList();
             Assert.Equal(10, logs.Count);

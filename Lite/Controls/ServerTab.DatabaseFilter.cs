@@ -129,13 +129,12 @@ public partial class ServerTab : UserControl
 
     private void SyncSelectedDatabasesFromItems()
     {
+        /* Release walk V12c: every box ticked (Select All, or the last box ticked by hand) is "All", not a real filter that
+           names every database collected so far and leaves out the next one. */
         _selectedDatabases.Clear();
-        foreach (var item in _databaseFilterItems)
+        foreach (var name in DatabaseFilterSelection.Stored(_databaseFilterItems.Select(i => (i.DisplayName, i.IsSelected)).ToList()))
         {
-            if (item.IsSelected)
-            {
-                _selectedDatabases.Add(item.DisplayName);
-            }
+            _selectedDatabases.Add(name);
         }
         _databaseFilterDirty = true;
         UpdateDatabaseFilterLabel();

@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -112,6 +113,8 @@ public partial class ViewerServerTab
 
         var items = await _dataService.GetQueryStatsComparisonAsync(
             _server.ServerId, currentStart, currentEnd, baseline.Value.From, baseline.Value.To, databaseNames: SelectedDatabaseFilter);
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        QueryStatsComparisonBanner.Text = ComparisonBaselineNote.Banner(QueryStatsComparisonBanner.Text, items);
         QueryStatsComparisonGrid.ItemsSource = items
             .OrderBy(x => x.SortGroup)
             .ThenByDescending(x => x.SortableDurationDelta)
@@ -131,6 +134,8 @@ public partial class ViewerServerTab
 
         var items = await _dataService.GetProcedureStatsComparisonAsync(
             _server.ServerId, currentStart, currentEnd, baseline.Value.From, baseline.Value.To, databaseNames: SelectedDatabaseFilter);
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        ProcStatsComparisonBanner.Text = ComparisonBaselineNote.Banner(ProcStatsComparisonBanner.Text, items);
         ProcStatsComparisonGrid.ItemsSource = items
             .OrderBy(x => x.SortGroup)
             .ThenByDescending(x => x.SortableDurationDelta)
@@ -150,6 +155,8 @@ public partial class ViewerServerTab
 
         var items = await _dataService.GetQueryStoreComparisonAsync(
             _server.ServerId, currentStart, currentEnd, baseline.Value.From, baseline.Value.To, databaseNames: SelectedDatabaseFilter);
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        QueryStoreComparisonBanner.Text = ComparisonBaselineNote.Banner(QueryStoreComparisonBanner.Text, items);
         QueryStoreComparisonGrid.ItemsSource = items
             .OrderBy(x => x.SortGroup)
             .ThenByDescending(x => x.SortableDurationDelta)

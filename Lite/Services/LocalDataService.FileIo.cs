@@ -153,7 +153,11 @@ SELECT
     CASE WHEN SUM(rated_reads) > 0 THEN SUM(rated_queued_read_ms) / SUM(rated_reads) ELSE 0 END AS avg_queued_read_latency_ms,
     CASE WHEN SUM(rated_writes) > 0 THEN SUM(rated_queued_write_ms) / SUM(rated_writes) ELSE 0 END AS avg_queued_write_latency_ms,
     MIN(collection_time) AS first_collection_time,
-    COUNT(*) AS collection_count
+    COUNT(*) AS collection_count,
+    /* Release walk V9b: the bucket's read and write counts ride along so the Overview lane can weight the files'
+       latencies by operations (total stall over total operations) instead of averaging a no-read log file as 0 ms. */
+    CAST(COALESCE(SUM(rated_reads), 0) AS BIGINT) AS total_reads,
+    CAST(COALESCE(SUM(rated_writes), 0) AS BIGINT) AS total_writes
 FROM rated
 GROUP BY database_name, file_name, 3
 HAVING COUNT(rated_reads) > 0
@@ -194,7 +198,7 @@ ORDER BY database_name, file_name, 3";
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
-        var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime, double ReadLatency, double WriteLatency, double QueuedReadLatency, double QueuedWriteLatency)>();
+        var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime, double ReadLatency, double WriteLatency, double QueuedReadLatency, double QueuedWriteLatency, long Reads, long Writes)>();
         var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
@@ -213,7 +217,9 @@ ORDER BY database_name, file_name, 3";
                 reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
                 reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
                 reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6))));
+                reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
+                reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+                reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10))));
         }
 
         var items = new List<FileIoTrendPoint>();
@@ -227,7 +233,9 @@ ORDER BY database_name, file_name, 3";
                 AvgReadLatencyMs = row.ReadLatency,
                 AvgWriteLatencyMs = row.WriteLatency,
                 AvgQueuedReadLatencyMs = row.QueuedReadLatency,
-                AvgQueuedWriteLatencyMs = row.QueuedWriteLatency
+                AvgQueuedWriteLatencyMs = row.QueuedWriteLatency,
+                Reads = row.Reads,
+                Writes = row.Writes
             });
         }
 
@@ -491,6 +499,10 @@ public class FileIoTrendPoint
     public double AvgWriteLatencyMs { get; set; }
     public double AvgQueuedReadLatencyMs { get; set; }
     public double AvgQueuedWriteLatencyMs { get; set; }
+    /// <summary>Reads in this bucket (the denominator of <see cref="AvgReadLatencyMs"/>); the Overview lane weights by it.</summary>
+    public long Reads { get; set; }
+    /// <summary>Writes in this bucket (the denominator of <see cref="AvgWriteLatencyMs"/>).</summary>
+    public long Writes { get; set; }
 }
 
 public class FileIoThroughputPoint

@@ -247,7 +247,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var ioGrouped = fileIoTask.Result
                     .GroupBy(d => d.CollectionTime)
                     .OrderBy(g => g.Key)
-                    .Select(g => (g.Key.ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                    .Select(g => (g.Key.ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))))
                     .ToList();
                 UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
             }

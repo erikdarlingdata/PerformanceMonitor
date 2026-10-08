@@ -131,6 +131,8 @@ public partial class ServerTab : UserControl
             .ThenByDescending(x => x.SortableDurationDelta)
             .ToList();
 
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        QueryStatsComparisonBanner.Text = ComparisonBaselineNote.Banner(QueryStatsComparisonBanner.Text, items);
         QueryStatsComparisonGrid.ItemsSource = sorted;
     }
 
@@ -168,6 +170,8 @@ public partial class ServerTab : UserControl
             .ThenByDescending(x => x.SortableDurationDelta)
             .ToList();
 
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        ProcStatsComparisonBanner.Text = ComparisonBaselineNote.Banner(ProcStatsComparisonBanner.Text, items);
         ProcStatsComparisonGrid.ItemsSource = sorted;
     }
 
@@ -205,6 +209,8 @@ public partial class ServerTab : UserControl
             .ThenByDescending(x => x.SortableDurationDelta)
             .ToList();
 
+        /* Release walk V12d: a baseline period the store holds nothing for (Yesterday on a store a few hours old) says so. */
+        QueryStoreComparisonBanner.Text = ComparisonBaselineNote.Banner(QueryStoreComparisonBanner.Text, items);
         QueryStoreComparisonGrid.ItemsSource = sorted;
     }
 

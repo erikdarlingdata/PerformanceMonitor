@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -22,6 +23,7 @@ namespace PerformanceMonitorLite.Tests;
 /// writes and no reads), so no data file reached the read chart and the lane averaged zeros. Each chart now ranks its own subject:
 /// the ten busiest files by reads feed the read chart and the ten busiest by writes feed the write chart.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class FileIoLatencyTopFilesTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 548900;
@@ -105,5 +107,58 @@ public sealed class FileIoLatencyTopFilesTests : IClassFixture<SharedDuckDbFixtu
         var logs = points.Where(p => p.FileName.EndsWith("_log", StringComparison.Ordinal)).Select(p => p.FileName).Distinct().ToList();
         Assert.Equal(10, logs.Count);
         Assert.All(points.Where(p => p.FileName.EndsWith("_log", StringComparison.Ordinal)), p => Assert.Equal(2.0, p.AvgWriteLatencyMs, 3));
+    }
+
+    /// <summary>
+    /// Release walk V9b: the Overview "I/O Latency ms" lane drew one point per time as the plain average of every charted file's
+    /// read latency, so ten log files with no reads counted as ten 0 ms reads and pulled the figure down to a fraction of the data files'.
+    /// The points now carry the read count, and the lane's figure is total stall over total reads across the files that had reads.
+    /// </summary>
+    [Fact]
+    public async Task OverviewLaneFigure_IsWeightedByReads_AndIgnoresLogFilesWithNoReads()
+    {
+        await SeedLogHeavyServerAsync();
+
+        var points = await _service.GetFileIoLatencyTrendAsync(ServerId, 1);
+
+        Assert.Contains(points, p => p.FileName == "Db0_data" && p.Reads > 0);
+        Assert.All(points.Where(p => p.FileName.EndsWith("_log", StringComparison.Ordinal)), p => Assert.Equal(0, p.Reads));
+
+        /* (4,000 + 1,500) ms of stall over (500 + 300) reads at each time the data files were charted. */
+        var perTime = points.GroupBy(p => p.CollectionTime)
+            .Where(g => g.Any(p => p.Reads > 0))
+            .Select(g => IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads))))
+            .ToList();
+        Assert.NotEmpty(perTime);
+        Assert.All(perTime, v => Assert.Equal(6.875, v, 3));
+
+        /* The old plain average of the same rows is far below it: the lane understated read latency. */
+        var plain = points.GroupBy(p => p.CollectionTime).Select(g => g.Average(x => x.AvgReadLatencyMs)).Max();
+        Assert.True(plain < 2.0, $"plain average {plain}");
+    }
+
+    [Theory]
+    [InlineData("Lite/Controls/CorrelatedTimelineLanesControl.xaml.cs")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/CorrelatedTimelineLanesControl.xaml.cs")]
+    public void OverviewLane_AveragesReadLatencyByReads_NotPerFile(string relativePath)
+    {
+        var dir = AppContext.BaseDirectory;
+        while (dir != null && !System.IO.File.Exists(System.IO.Path.Combine(dir, "PerformanceMonitor.sln")))
+        {
+            dir = System.IO.Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        var source = System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relativePath.Replace('/', System.IO.Path.DirectorySeparatorChar)));
+        Assert.Contains("IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("g.Average(x => x.AvgReadLatencyMs)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IoLatencyWeighting_FilesWithNoOperationsDoNotTakePart()
+    {
+        Assert.Equal(6.875, IoLatencyWeighting.Weighted(new[] { (8.0, 500L), (5.0, 300L), (0.0, 0L), (0.0, 0L) }), 3);
+        Assert.Equal(0, IoLatencyWeighting.Weighted(new[] { (0.0, 0L) }));
+        Assert.Equal(0, IoLatencyWeighting.Weighted(System.Array.Empty<(double, long)>()));
     }
 }
