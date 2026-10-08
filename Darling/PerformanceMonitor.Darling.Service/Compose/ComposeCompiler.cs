@@ -1321,31 +1321,12 @@ public static class ComposeCompiler
     private const string StampTable = "query_store_compose_stamp";
     private const string StampBuiltTable = "query_store_compose_stamp_built";
 
-    /// <summary>The rollup column for each partial aggregate the compiler can ask a Query Store panel for, keyed by the partial's
-    /// fact-form text (<c>SUM(f.execution_count)</c>). The only copy of the map in the compiler: a partial it does not name means
-    /// the panel compiles the wide-table text. <c>COUNT(*)</c> is the rollup's <c>wide_rows</c>.</summary>
-    private static readonly Dictionary<string, string> s_stampColumnByPartial = new(StringComparer.Ordinal)
-    {
-        ["COUNT(*)"] = "wide_rows",
-        ["SUM(f.execution_count)"] = "ec_sum",
-        ["COUNT(f.execution_count)"] = "ec_count",
-        ["MIN(f.execution_count)"] = "ec_min",
-        ["MAX(f.execution_count)"] = "ec_max",
-        ["SUM(f.max_duration_us)"] = "maxdur_sum",
-        ["COUNT(f.max_duration_us)"] = "maxdur_count",
-        ["MIN(f.max_duration_us)"] = "maxdur_min",
-        ["MAX(f.max_duration_us)"] = "maxdur_max",
-        ["SUM(f.max_cpu_time_us)"] = "maxcpu_sum",
-        ["COUNT(f.max_cpu_time_us)"] = "maxcpu_count",
-        ["MIN(f.max_cpu_time_us)"] = "maxcpu_min",
-        ["MAX(f.max_cpu_time_us)"] = "maxcpu_max",
-        ["SUM(f.avg_duration_us * f.execution_count)"] = "dur_wsum",
-        ["SUM(f.avg_cpu_time_us * f.execution_count)"] = "cpu_wsum",
-    };
-
-    /// <summary>The rollup column for <paramref name="partialExpression"/>, or null when the rollup does not hold it.</summary>
+    /// <summary>The rollup column for <paramref name="partialExpression"/> (the partial's fact-form text, for example
+    /// <c>SUM(f.execution_count)</c>), or null when the rollup does not hold it, in which case the panel compiles the wide-table
+    /// text. Reads <see cref="QueryStoreComposeStamp.PartialColumnMap"/>, the one map the builder, the V173 DDL and this compiler
+    /// share (#5582). <c>COUNT(*)</c> is the rollup's <c>wide_rows</c>.</summary>
     internal static string? StampColumnFor(string partialExpression) =>
-        s_stampColumnByPartial.TryGetValue(partialExpression, out var column) ? column : null;
+        QueryStoreComposeStamp.ColumnFor(partialExpression)?.Column;
 
     /// <summary>The columns of the fact relation a stamp-mode panel may name: the rollup's key (the registry's name rides the
     /// join). A group or filter on anything else compiles the wide-table text.</summary>
