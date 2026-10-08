@@ -252,6 +252,9 @@ public partial class ViewerServerTab : UserControl
             return;
         }
 
+        /* Compare works on three Queries sub-tabs only; off everywhere else (walk finding V10b). */
+        UpdateCompareDropdownState();
+
         /* A drill-down navigation switches the inner tab programmatically and runs its own targeted read;
            skip the generic loader so it doesn't race that (mirrors the sub-tab handlers' guard). */
         if (_suppressDrillDownAutoRefresh)

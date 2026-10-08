@@ -41,9 +41,13 @@ public partial class ViewerServerTab
         readFanOut.Release();
 
         _runningJobsFilterMgr!.UpdateData(jobs);
-        await ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count);
+        /* D20: an empty grid says no job is running, unless the collector was denied msdb (then the banner says why the grid is
+           empty, and "no jobs running" would be a claim nobody checked) or the not-collected note applies. */
+        var bannerShows = ShouldShowMsdbBanner(status);
+        _ownNoDataText.TryAdd(RunningJobsNoDataMessage, RunningJobsNoDataMessage.Text); /* the words are kept for when the banner goes away */
+        await ShowEngineGapAsync(RunningJobsNoDataMessage, "running_jobs", jobs.Count, keepsOwnEmptyText: !bannerShows);
 
-        RunningJobsMsdbWarning.Visibility = ShouldShowMsdbBanner(status) ? Visibility.Visible : Visibility.Collapsed;
+        RunningJobsMsdbWarning.Visibility = bannerShows ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>
