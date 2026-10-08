@@ -628,7 +628,7 @@ LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.Se
         {
             await transaction.RollbackAsync(ReadSavepoint, CancellationToken.None);
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* The connection is unusable; the next command on it reports that. */
         }
