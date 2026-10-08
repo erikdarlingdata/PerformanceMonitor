@@ -212,7 +212,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: lite-tests-timing-nightly
-          path: TestResults/lite-timing-*.xml
+          path: |
+            TestResults/lite-timing-*.xml
+            TestResults/lite-timing-*.xml.cpu.json
           retention-days: 7
           if-no-files-found: ignore
 

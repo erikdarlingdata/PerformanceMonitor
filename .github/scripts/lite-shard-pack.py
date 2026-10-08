@@ -23,7 +23,9 @@ the workflow used before this script existed.
 `backtest` replays the model: the DIRs are runs in time order, each holding one xUnit XML per shard. For every run after
 the first it weighs that run's shards by the PREVIOUS run's timings and prints modelled against ran, the way the real
 cut sees them, with each shard's error and the share of shards within 20 %. It writes nothing and the workflow never
-calls it (#5208).
+calls it (#5208). When the earlier run's XML carries the `cpu-ms` attachment (Lite.Tests' per-test CPU accountant), it
+adds one line: the error a CPU-weighted cut would have had beside the wall-weighted error, both scaled to the run's
+total seconds so the unit drops out. `pack` ignores cpu-ms: wall weights still cut the shards.
 
 `reconcile` is the guard: it fails (exit 1) unless the shard files hold every discovered class exactly once
 and nothing else, and prints both differences. `pack` runs it before it exits, so a bad packer cannot
@@ -193,6 +195,63 @@ def backtest(run_dirs, serial_names):
     return rows
 
 
+def load_cpu_weights(dirs):
+    """Managed CPU seconds per class from the `cpu-ms` attachments in every *.xml under dirs (Lite.Tests' per-test CPU
+    accountant, #5208). Returns {} when no test carries one. A missing, junk, NaN, infinite or negative value counts nothing."""
+    weights = collections.defaultdict(float)
+    for d in dirs:
+        paths = sorted(glob.glob(os.path.join(d, "**", "*.xml"), recursive=True)) if os.path.isdir(d) else sorted(glob.glob(d))
+        for p in paths:
+            try:
+                root = ET.parse(p).getroot()
+            except (ET.ParseError, OSError):
+                continue
+            for t in root.iter("test"):
+                cls = t.get("type")
+                if not cls:
+                    continue
+                for a in t.iter("attachment"):
+                    if a.get("name") != "cpu-ms":
+                        continue
+                    try:
+                        ms = float((a.text or "").strip())
+                    except ValueError:
+                        break
+                    if math.isfinite(ms) and ms >= 0:
+                        weights[cls] += ms / 1000.0
+                    break
+    return dict(weights)
+
+
+def backtest_cpu(run_dirs, serial_names):
+    """Rows (run dir, shard file, cpu-weighted share error, wall-weighted share error) for each run after the first
+    whose PREVIOUS run carries cpu-ms. Each model's per-shard loads are scaled so they sum to the run's total ran
+    seconds, which takes the unit out (CPU seconds are not wall seconds): what is compared is how well each weight
+    predicts a shard's SHARE of the work. The wall model is the one `backtest` uses; the CPU model weighs every class
+    at its CPU seconds (a CPU weight has no serial/parallel split), a class with no CPU history at the mean of the rest."""
+    rows = []
+    for prev, cur in zip(run_dirs, run_dirs[1:]):
+        cpu = load_cpu_weights([prev])
+        shards = shard_results(cur)
+        if not cpu or not shards:
+            continue
+        assignment = [sorted(cl) for _, cl, _ in shards]
+        ran = [wall for _, _, wall in shards]
+        serial = {c for c, col in load_collections([prev]).items() if col in serial_names}
+        wall_model = predicted_walls(assignment, load_weights([prev]), serial)
+        assigned = {c for shard in assignment for c in shard}
+        known = [cpu[c] for c in assigned if c in cpu]
+        default = sum(known) / len(known) if known else 0.0
+        cpu_model = [sum(cpu.get(c, default) for c in shard) for shard in assignment]
+        total = sum(ran)
+        scaled = []
+        for model in (cpu_model, wall_model):
+            s = sum(model)
+            scaled.append([m * total / s for m in model] if s > 0 else [0.0] * len(model))
+        rows += [(cur, name, abs(c - r) / r, abs(w - r) / r) for (name, _, r), c, w in zip(shards, scaled[0], scaled[1])]
+    return rows
+
+
 def pack(classes, shards, weights, serial=frozenset()):
     """Returns (assignment: list of lists, method). Never drops or duplicates a class. `serial` is the set of
     classes that run one at a time; with none, every weight is scaled alike and the cut is the plain sum cut."""
@@ -291,6 +350,11 @@ def run_backtest(run_dirs, tests_dir):
     within = sum(1 for _, _, pw, wall in rows if abs(pw - wall) / wall <= 0.2)
     print(f"{len(rows)} shards, {within} within 20% ({within / len(rows):.0%}); mean absolute error "
           f"{sum(abs(pw - wall) / wall for _, _, pw, wall in rows) / len(rows):.1%}" if rows else "no shards to compare")
+    cpu_rows = backtest_cpu(run_dirs, serial_names)
+    if cpu_rows:
+        print(f"CPU-weighted cut (runs that carry cpu-ms, loads scaled to each run's total ran seconds): {len(cpu_rows)} shards; "
+              f"mean absolute error {sum(c for _, _, c, _ in cpu_rows) / len(cpu_rows):.1%} on CPU weights, "
+              f"{sum(w for _, _, _, w in cpu_rows) / len(cpu_rows):.1%} on wall weights, same shards, same scaling")
     return 0
 
 
@@ -465,6 +529,29 @@ def self_test():
         ok(abs(rows[1][2] - 178.0 / PARALLEL_CONCURRENCY) < 1e-9 and rows[1][3] == 40.0, "back-test: the second shard uses its parallel seconds only")
         ok(backtest([r1], {"Ser"}) == [], "back-test of a single run has nothing to compare")
         ok(run_backtest([r1], DEFAULT_TESTS_DIR) == 2, "back-test with one directory is a usage error")
+
+    # CPU back-test (#5208): the previous run's cpu-ms attachments weight a CPU cut; the wall model is scored beside it.
+    with tempfile.TemporaryDirectory() as d:
+        def cpu_xml(path, wall, tests):
+            body = "".join(f'<test type="{c}" time="{t}"><attachments><attachment name="cpu-ms">{ms}</attachment></attachments></test>'
+                           for c, t, ms in tests)
+            with open(path, "w") as f:
+                f.write(f'<assemblies><assembly time="{wall}">{body}</assembly></assemblies>')
+        p1, p2, p0 = (os.path.join(d, n) for n in ("p1", "p2", "p0"))
+        for x in (p0, p1, p2):
+            os.makedirs(x)
+        cpu_xml(os.path.join(p1, "s0.xml"), 99, [("A", 30.0, 3000), ("B", 30.0, 1000)])
+        cpu_xml(os.path.join(p1, "s1.xml"), 99, [("C", 30.0, 1000)])
+        cpu_xml(os.path.join(p2, "s0.xml"), 80.0, [("A", 1.0, 1), ("B", 1.0, 1)])
+        cpu_xml(os.path.join(p2, "s1.xml"), 20.0, [("C", 1.0, 1)])
+        ok(load_cpu_weights([p1]) == {"A": 3.0, "B": 1.0, "C": 1.0}, "cpu weights are seconds per class")
+        crows = backtest_cpu([p1, p2], set())
+        ok(len(crows) == 2 and all(c < 1e-9 for _, _, c, _ in crows), "CPU weights 4:1 predict the 80:20 split exactly")
+        ok(all(w > 0.1 for _, _, _, w in crows), "the wall model (2:1) misses the same split")
+        with open(os.path.join(p0, "s0.xml"), "w") as f:
+            f.write('<assemblies><assembly time="50"><test type="A" time="1"/><test type="C" time="1"><attachments>'
+                    '<attachment name="cpu-ms">junk</attachment></attachments></test></assembly></assemblies>')
+        ok(load_cpu_weights([p0]) == {} and backtest_cpu([p0, p2], set()) == [], "runs without usable cpu-ms back-test nothing")
 
     # The guard must FAIL when a class is withheld, duplicated or invented. `names` is the 60-class list from the top
     # of the self-test; the checks below must run on it, not on collection names (#5208 review F1).
