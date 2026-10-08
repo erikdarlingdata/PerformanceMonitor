@@ -847,6 +847,16 @@ export function reachHours(catalogEntry, fallbackHours = 168) {
   return fallbackHours;
 }
 
+/** The main collector's interval of one read in milliseconds, from the `collector_interval_minutes` its /api/catalog entry carries (on the entry or on its `hours` param), else null (no note). */
+export function collectorIntervalMs(catalogEntry) {
+  const param = catalogEntry && Array.isArray(catalogEntry.params) ? catalogEntry.params.find((p) => p && p.name === "hours") : null;
+  for (const holder of [catalogEntry, param]) {
+    const minutes = holder ? Number(holder.collector_interval_minutes) : NaN;
+    if (Number.isFinite(minutes) && minutes > 0) return minutes * MINUTE_MS;
+  }
+  return null;
+}
+
 /** "7 days" / "90 days" / "36 hours": a reach in words. */
 export function reachText(hours) {
   return hours % 24 === 0 ? hours / 24 + " day" + (hours === 24 ? "" : "s") : hours + " hour" + (hours === 1 ? "" : "s");

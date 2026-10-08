@@ -238,6 +238,8 @@ public sealed class WebTimeRangeTests
 
         var reach = r.GetProperty("reach");
         Assert.Equal(2160, reach.GetProperty("reach").GetInt32());
+        Assert.Equal(300000, reach.GetProperty("interval").GetInt32());
+        Assert.Equal(JsonValueKind.Null, reach.GetProperty("noInterval").ValueKind);
         Assert.Equal(168, reach.GetProperty("none").GetInt32());
         Assert.Equal(168, reach.GetProperty("absent").GetInt32());
         Assert.Equal(new[] { "Year to Date", "Previous Year" }, Strings(reach, "items"));

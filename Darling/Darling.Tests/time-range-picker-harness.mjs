@@ -242,7 +242,8 @@ const found = {};
   const reach = tr.reachHours(entry);
   const { root, button } = make({ reachHours: reach });
   fire(button, "click");
-  found.reach = { reach, none: tr.reachHours({ name: "y", params: [] }), absent: tr.reachHours(null), items: items(root).filter((i) => i.disabled).map((i) => i.name) };
+  const interval = tr.collectorIntervalMs({ params: [{ name: "hours", collector_interval_minutes: 5 }] });
+  found.reach = { interval, noInterval: tr.collectorIntervalMs({ params: [] }), reach, none: tr.reachHours({ name: "y", params: [] }), absent: tr.reachHours(null), items: items(root).filter((i) => i.disabled).map((i) => i.name) };
 }
 
 /* 11. A live range slides: refresh() redraws at the clock it is given. setSpec reads an id back. */
