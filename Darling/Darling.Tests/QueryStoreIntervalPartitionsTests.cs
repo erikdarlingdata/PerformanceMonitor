@@ -53,14 +53,74 @@ public sealed class QueryStoreIntervalPartitionsTests
     }
 
     [Fact]
-    public void ReArm_HappensOnlyForAnInvalidCheckWithLessThanTwelveHoursLeft()
+    public void ReArm_HappensForAnyCheckWithLessThanTwelveHoursLeft_ValidOrNot()
     {
+        /* #5571 review H1: a valid CHECK that could not be promoted in time is re-armed too; the caller decides by validity. */
         var s = Day(10, 10);
-        Assert.True(QueryStoreIntervalPartitions.ShouldReArm(false, s, new DateTime(2026, 10, 9, 12, 0, 1, DateTimeKind.Utc)));
-        Assert.True(QueryStoreIntervalPartitions.ShouldReArm(false, s, new DateTime(2026, 10, 10, 1, 0, 0, DateTimeKind.Utc)));
-        Assert.False(QueryStoreIntervalPartitions.ShouldReArm(false, s, new DateTime(2026, 10, 9, 12, 0, 0, DateTimeKind.Utc)));
-        Assert.False(QueryStoreIntervalPartitions.ShouldReArm(false, s, new DateTime(2026, 10, 8, 0, 0, 0, DateTimeKind.Utc)));
-        Assert.False(QueryStoreIntervalPartitions.ShouldReArm(true, s, new DateTime(2026, 10, 10, 1, 0, 0, DateTimeKind.Utc)));
+        Assert.True(QueryStoreIntervalPartitions.ShouldReArm(s, new DateTime(2026, 10, 9, 12, 0, 1, DateTimeKind.Utc)));
+        Assert.True(QueryStoreIntervalPartitions.ShouldReArm(s, new DateTime(2026, 10, 10, 1, 0, 0, DateTimeKind.Utc)));
+        Assert.False(QueryStoreIntervalPartitions.ShouldReArm(s, new DateTime(2026, 10, 9, 12, 0, 0, DateTimeKind.Utc)));
+        Assert.False(QueryStoreIntervalPartitions.ShouldReArm(s, new DateTime(2026, 10, 8, 0, 0, 0, DateTimeKind.Utc)));
+    }
+
+    [Fact]
+    public void AValidate_NeverStartsWithinItsDeadlinePlusAnHourOfS_AndTheReArmComesFirst()
+    {
+        Assert.Equal(TimeSpan.FromHours(3), QueryStoreIntervalPartitions.ValidateGuard);
+        Assert.True(QueryStoreIntervalPartitions.ValidateGuard < QueryStoreIntervalPartitions.ReArmWithin);
+
+        var s = Day(10, 10);
+        Assert.True(QueryStoreIntervalPartitions.CanStartValidate(s, new DateTime(2026, 10, 9, 21, 0, 0, DateTimeKind.Utc)));
+        Assert.False(QueryStoreIntervalPartitions.CanStartValidate(s, new DateTime(2026, 10, 9, 21, 0, 1, DateTimeKind.Utc)));
+
+        /* Every instant at which a VALIDATE is refused is also an instant at which the CHECK is re-armed. */
+        for (var minutes = 0; minutes <= 24 * 60; minutes += 5)
+        {
+            var now = s.AddMinutes(-minutes);
+            if (!QueryStoreIntervalPartitions.CanStartValidate(s, now))
+            {
+                Assert.True(QueryStoreIntervalPartitions.ShouldReArm(s, now));
+            }
+        }
+    }
+
+    [Fact]
+    public void TheArmBound_IsTheLaterOfTheNormalBoundAndTheDayAfterTheLegacyMaximum()
+    {
+        var now = new DateTime(2026, 10, 8, 14, 0, 0, DateTimeKind.Utc);
+        var normal = Day(10, 10);
+        Assert.Equal(normal, QueryStoreIntervalPartitions.ArmBoundFor(now, null));
+        Assert.Equal(normal, QueryStoreIntervalPartitions.ArmBoundFor(now, new DateTime(2026, 10, 8, 13, 0, 0)));
+
+        /* The last instant before S, and S itself: a row AT S would be refused, so the day after it. */
+        Assert.Equal(normal, QueryStoreIntervalPartitions.ArmBoundFor(now, normal.AddTicks(-10)));
+        Assert.Equal(Day(10, 11), QueryStoreIntervalPartitions.ArmBoundFor(now, normal));
+        Assert.Equal(Day(10, 15), QueryStoreIntervalPartitions.ArmBoundFor(now, new DateTime(2026, 10, 14, 23, 59, 59, 999)));
+
+        /* A maximum at the end of the representable range cannot overflow the arm. */
+        Assert.Equal(normal, QueryStoreIntervalPartitions.ArmBoundFor(now, DateTime.MaxValue));
+    }
+
+    [Fact]
+    public void ALaterBound_CreatesNoDayBelowItAndKeepsTheLegacyTableUntilItsBoundExpires()
+    {
+        /* S = 10-15 is five days ahead of Now (10-08): neither the promotion nor a create-ahead makes a day below it. */
+        var s = Day(10, 15);
+        Assert.Empty(QueryStoreIntervalPartitions.PromotionDays(s, Now));
+        var legacy = new QueryStoreIntervalPartitions.PartitionInfo("collect.query_store_interval_wide_legacy", false, null, s, false);
+        Assert.Empty(QueryStoreIntervalPartitions.CreateAheadDays(QueryStoreIntervalPartitions.NewestUpper(new[] { legacy }), Now, 9));
+
+        /* Three days ahead of the clock reaches S: the first day created is S itself. */
+        var later = new DateTime(2026, 10, 12, 1, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(
+            new[] { Day(10, 15) },
+            QueryStoreIntervalPartitions.CreateAheadDays(QueryStoreIntervalPartitions.NewestUpper(new[] { legacy }), later, 9));
+
+        /* The legacy table is dropped when S is at or below the cutoff (nine days after S), not before. */
+        Assert.Empty(QueryStoreIntervalPartitions.ExpiredPartitions(new[] { legacy }, Day(10, 14)));
+        Assert.Single(QueryStoreIntervalPartitions.ExpiredPartitions(new[] { legacy }, Day(10, 15)));
+        Assert.Empty(QueryStoreIntervalPartitions.ExpiredPartitions(new[] { legacy }, QueryStoreIntervalPartitions.Cutoff(Day(10, 20), 9).AddTicks(-10)));
+        Assert.Single(QueryStoreIntervalPartitions.ExpiredPartitions(new[] { legacy }, QueryStoreIntervalPartitions.Cutoff(Day(10, 24), 9)));
     }
 
     [Theory]

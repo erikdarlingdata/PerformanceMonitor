@@ -803,17 +803,14 @@ public static class DarlingRetention
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.PendingTableName, "recorded_at"),
                 utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
-            foreach (var deleted in new[] { intervalPendingDeleted })
+            if (intervalPendingDeleted is not null)
             {
-                if (deleted is not null)
-                {
-                    tablesPurged++;
-                    totalRowsDeleted += deleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
-                }
+                tablesPurged++;
+                totalRowsDeleted += intervalPendingDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
             }
 
             /* #3953 (V145): the WIDE interval table beside V143's, at its own 9-day horizon
@@ -839,17 +836,14 @@ public static class DarlingRetention
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.PendingTableName, "recorded_at"),
                 utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
-            foreach (var deleted in new[] { intervalWidePendingDeleted })
+            if (intervalWidePendingDeleted is not null)
             {
-                if (deleted is not null)
-                {
-                    tablesPurged++;
-                    totalRowsDeleted += deleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
-                }
+                tablesPurged++;
+                totalRowsDeleted += intervalWidePendingDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
             }
 
             /* config_alert_log (the fired-alert history) is a plain config-schema registry table, never a
@@ -1322,8 +1316,10 @@ public static class DarlingRetention
                 purged++;
                 rows += legacyDeleted.Value;
             }
-            else
+            else if (await RelationExistsAsync(postgres, table.Legacy, logger, cancellationToken) != false)
             {
+                /* A failed purge counts, unless the hourly step dropped the legacy table between the probe above and the
+                   purge (#5571 review L3): its DELETE then fails with 42P01, and there is nothing left to purge. */
                 failed++;
             }
         }

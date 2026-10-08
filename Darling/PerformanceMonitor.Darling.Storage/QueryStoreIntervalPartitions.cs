@@ -36,6 +36,19 @@ namespace PerformanceMonitor.Darling.Storage;
 /// nothing. A row at or after S that arrives before promotion is refused (23514); the collector's pending path holds it
 /// and replays it after promotion (the pending horizon is the table's horizon, so nothing is lost).</para>
 ///
+/// <para><b>Why a CHECK never refuses a current row (#5571 review H1).</b> Until the table is promoted the CHECK is a
+/// wall at S, and S is 24 to 48 h away when it is armed. So two loops keep S ahead of the clock. The hourly convergence
+/// step (<see cref="ConvergeUnpromotedAsync"/>, on the sweep loop, bounded by 5 s lock waits) arms when there is no CHECK,
+/// tries one promote of a valid CHECK, and re-arms (valid or not, a valid one costs a new VALIDATE) when the table is
+/// still not promoted and S is closer than <see cref="ReArmWithin"/>. The background loop
+/// (<see cref="RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/>,
+/// off the sweep loop, every hour until shutdown) does the long work: a VALIDATE, which never starts when S is closer than
+/// <see cref="ValidateGuard"/> (it re-arms first), and the promotion retries. S is the later of <see cref="ArmBound"/> and
+/// the day after the legacy table's newest first_execution_time, read under the arm's own lock through the legacy
+/// first-execution index. A VALIDATE that fails with 23514 drops its CHECK and logs that newest time; the next hourly step
+/// arms again. No day partition is created below S (<see cref="CreateAheadDays"/> starts at the newest upper bound,
+/// which is S while only the legacy table bounds it), and the legacy table is dropped only when S is at or below the cutoff.</para>
+///
 /// <para><b>Locks.</b> Arm: ACCESS EXCLUSIVE on legacy for the ADD CONSTRAINT, 5 s lock_timeout, 55P03 retried three
 /// times 30 s apart. Validate: SHARE UPDATE EXCLUSIVE on legacy (upserts and reads continue), lock_timeout 5 s, a
 /// 7200 s command deadline. Promote: ACCESS EXCLUSIVE on the parent for the DETACH, ATTACH and the CREATEs, held for
@@ -93,6 +106,22 @@ public static class QueryStoreIntervalPartitions
     /// <summary>How long a parent's statistics are kept before <see cref="AnalyzeIfDueAsync"/> refreshes them.</summary>
     public static readonly TimeSpan AnalyzeEvery = TimeSpan.FromHours(24);
 
+    /// <summary>
+    /// A VALIDATE never starts when S is closer than this: its command deadline plus an hour. The VALIDATE then has
+    /// finished (or timed out) with an hour to spare before the CHECK becomes a wall, and the re-arm that has to follow a
+    /// failed one is not racing S (#5571 review H1).
+    /// </summary>
+    public static readonly TimeSpan ValidateGuard = TimeSpan.FromSeconds(ValidateTimeoutSeconds) + TimeSpan.FromHours(1);
+
+    /// <summary>How often the background loop runs Phase A again (and the daily ANALYZE check) until shutdown.</summary>
+    public static readonly TimeSpan BackgroundInterval = TimeSpan.FromHours(1);
+
+    /// <summary><c>statement_timeout</c>, in seconds, of the read of the legacy table's newest first_execution_time.</summary>
+    public const int LegacyMaxTimeoutSeconds = 5;
+
+    /// <summary>The first PostgreSQL major version whose <c>ANALYZE ONLY</c> leaves the partitions of a partitioned table alone.</summary>
+    public const int AnalyzeOnlyMajorVersion = 18;
+
     /// <summary>What a step did.</summary>
     public enum StepOutcome
     {
@@ -110,6 +139,9 @@ public static class QueryStoreIntervalPartitions
 
         /// <summary>The store is not in a state the step applies to (no partitioned parent yet, or not promoted yet).</summary>
         NotReady,
+
+        /// <summary>A VALIDATE was not started because S is too close for it to finish safely; arm again with a later S first.</summary>
+        ReArmFirst,
     }
 
     /// <summary>A step's outcome, a line for the log or a test, and a count (days created, partitions dropped, rows drained).</summary>
@@ -131,6 +163,9 @@ public static class QueryStoreIntervalPartitions
 
         /// <summary>The DEFAULT partition.</summary>
         public string Default => $"{Schema}.{Name}_default";
+
+        /// <summary>The legacy table's btree on <c>(first_execution_time)</c>, which answers its newest row in one index probe.</summary>
+        public string LegacyFirstExecIndex => $"{Schema}.idx_{Name}_first_exec_legacy";
 
         /// <summary>The NOT VALID CHECK that bounds the legacy table.</summary>
         public string CheckName => $"ck_{Name}_legacy_before";
@@ -285,11 +320,34 @@ public static class QueryStoreIntervalPartitions
     internal static string Literal(DateTime day) => day.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// Whether an armed, still-unvalidated CHECK should be dropped and added again with a new S: its S is closer than
-    /// <see cref="ReArmWithin"/>, so a validate that has not finished would be racing the bound.
+    /// Whether an armed CHECK should be dropped and added again with a new S: its S is closer than
+    /// <see cref="ReArmWithin"/>. It applies to a valid CHECK as well, once the table could not be promoted in time: until
+    /// the table is promoted the CHECK is the only thing between a current row and a refusal (#5571 review H1).
     /// </summary>
-    public static bool ShouldReArm(bool checkValid, DateTime checkBound, DateTime utcNow) =>
-        !checkValid && checkBound - DateTime.SpecifyKind(utcNow, DateTimeKind.Unspecified) < ReArmWithin;
+    public static bool ShouldReArm(DateTime checkBound, DateTime utcNow) =>
+        checkBound - DateTime.SpecifyKind(utcNow, DateTimeKind.Unspecified) < ReArmWithin;
+
+    /// <summary>Whether a VALIDATE may start: S is at least <see cref="ValidateGuard"/> away.</summary>
+    public static bool CanStartValidate(DateTime checkBound, DateTime utcNow) =>
+        checkBound - DateTime.SpecifyKind(utcNow, DateTimeKind.Unspecified) >= ValidateGuard;
+
+    /// <summary>
+    /// The bound S to arm: <see cref="ArmBound"/>, or the day after the legacy table's newest first_execution_time when
+    /// that is later (a monitored clock ahead of the store's put a row there; with the normal S the VALIDATE would fail
+    /// on it). No day partition is ever created below S, so a later S only lets the legacy table keep the rows up to it.
+    /// A maximum too close to the end of <see cref="DateTime"/> to add a day to is ignored.
+    /// </summary>
+    public static DateTime ArmBoundFor(DateTime utcNow, DateTime? legacyMax)
+    {
+        var normal = ArmBound(utcNow);
+        if (!legacyMax.HasValue || legacyMax.Value > DateTime.MaxValue.AddDays(-ArmDays - 1))
+        {
+            return normal;
+        }
+
+        var afterMax = DayStart(legacyMax.Value).AddDays(1);
+        return afterMax > normal ? afterMax : normal;
+    }
 
     /// <summary>
     /// The day partitions the promotion creates: every day from S through today plus <see cref="DaysAhead"/>, with no
@@ -393,6 +451,23 @@ AND   NOT EXISTS
 )
 ORDER BY 1;";
 
+    /* $1 the legacy first-execution index, $2 the legacy table: true when it is valid, ready, not partial, on that table
+       and led by first_execution_time, which is what makes max(first_execution_time) one backward index probe. */
+    internal const string LegacyFirstExecIndexUsableSql = @"
+SELECT COALESCE
+(
+    (
+        SELECT i.indisvalid AND i.indisready AND i.indpred IS NULL AND i.indrelid = to_regclass($2)
+               AND i.indkey[0] = (SELECT a.attnum FROM pg_attribute AS a WHERE a.attrelid = i.indrelid AND a.attname = 'first_execution_time')
+        FROM pg_index AS i
+        WHERE i.indexrelid = to_regclass($1)
+    ),
+    false
+);";
+
+    /* ANALYZE of the parent; ONLY (PostgreSQL 18+) leaves the partitions to autovacuum. */
+    internal static string AnalyzeSql(IntervalTable table, bool only) => only ? $"ANALYZE ONLY {table.Parent};" : $"ANALYZE {table.Parent};";
+
     private static string LockTimeoutSql => $"SET LOCAL lock_timeout = '{LockTimeoutSeconds}s';";
 
     internal static string AddCheckSql(IntervalTable table, DateTime s) =>
@@ -432,9 +507,9 @@ ORDER BY 1;";
 
     /// <summary>Reads the catalogs for one table. <paramref name="connection"/> must be open.</summary>
     public static async Task<PartitionState> ReadStateAsync(
-        NpgsqlConnection connection, IntervalTable table, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IntervalTable table, CancellationToken cancellationToken, NpgsqlTransaction? transaction = null)
     {
-        await using var command = Command(connection, StateSql, ShortTimeoutSeconds);
+        await using var command = Command(connection, StateSql, ShortTimeoutSeconds, transaction);
         AddText(command, table.Parent);
         AddText(command, table.Legacy);
         AddText(command, table.CheckName);
@@ -481,43 +556,149 @@ ORDER BY 1;";
     }
 
     /// <summary>
+    /// What <see cref="ArmCoreAsync"/> does with the state it read: an early result (nothing to arm, or not ready), or
+    /// whether to drop the present CHECK first (a re-arm).
+    /// </summary>
+    private static (StepResult? Early, bool ReArm) DecideArm(IntervalTable table, PartitionState state, DateTime utcNow, bool reArmValid)
+    {
+        /* Promoted before everything else: once the legacy table is dropped the parent is still promoted, and that is not
+           "not ready" (#5571 review L2). */
+        if (state.Promoted)
+        {
+            return (new StepResult(StepOutcome.NothingToDo, "already promoted"), false);
+        }
+
+        if (!state.ParentIsPartitioned || !state.LegacyExists)
+        {
+            return (new StepResult(StepOutcome.NotReady, $"{table.Parent} is not a partitioned table with a legacy table yet"), false);
+        }
+
+        var reArm = state.CheckPresent && state.CheckBound.HasValue
+            && ShouldReArm(state.CheckBound.Value, utcNow) && (reArmValid || !state.CheckValid);
+        if (state.CheckPresent && !reArm)
+        {
+            return (new StepResult(StepOutcome.NothingToDo, state.CheckValid ? "already armed and valid" : "already armed"), false);
+        }
+
+        return (null, reArm);
+    }
+
+    /// <summary>
+    /// The legacy table's newest <c>first_execution_time</c>, read through the legacy first-execution index
+    /// (<c>idx_X_first_exec_legacy</c>, which leads with the column, so the maximum is one backward index probe) under
+    /// <c>SET LOCAL statement_timeout</c> of <see cref="LegacyMaxTimeoutSeconds"/> s. Null when the table is empty, when
+    /// that index is missing, invalid, partial or not led by the column (the read would scan the heap, so it is not
+    /// attempted), and when the read times out (rolled back to a savepoint, so the caller's transaction and its lock
+    /// survive). <paramref name="transaction"/> is required: the timeout is transaction-local and is reset afterwards.
+    /// </summary>
+    internal static async Task<DateTime?> ReadLegacyMaxAsync(
+        NpgsqlConnection connection, IntervalTable table, NpgsqlTransaction transaction, ILogger logger, CancellationToken cancellationToken)
+    {
+        bool usable;
+        await using (var probe = Command(connection, LegacyFirstExecIndexUsableSql, ShortTimeoutSeconds, transaction))
+        {
+            AddText(probe, table.LegacyFirstExecIndex);
+            AddText(probe, table.Legacy);
+            usable = (bool)(await probe.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+        }
+
+        if (!usable)
+        {
+            logger.LogWarning(
+                "Query Store interval table {Table}: {Index} is missing or unusable, so the newest first_execution_time of {Legacy} was not read.",
+                table.Parent, table.LegacyFirstExecIndex, table.Legacy);
+            return null;
+        }
+
+        await ExecuteAsync(connection, "SAVEPOINT legacy_max;", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await ExecuteAsync(
+                connection, $"SET LOCAL statement_timeout = '{LegacyMaxTimeoutSeconds}s';", ShortTimeoutSeconds, transaction, cancellationToken)
+                .ConfigureAwait(false);
+            object? value;
+            await using (var read = Command(connection, $"SELECT max(first_execution_time) FROM {table.Legacy};", LegacyMaxTimeoutSeconds + 5, transaction))
+            {
+                value = await read.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            /* The timeout was for this read only: the DDL after it keeps the session's own. */
+            await ExecuteAsync(connection, "RESET statement_timeout;", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, "RELEASE SAVEPOINT legacy_max;", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            return value is DateTime max ? DateTime.SpecifyKind(max, DateTimeKind.Unspecified) : null;
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.QueryCanceled)
+        {
+            await ExecuteAsync(connection, "ROLLBACK TO SAVEPOINT legacy_max;", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            logger.LogWarning(
+                "Query Store interval table {Table}: reading the newest first_execution_time of {Legacy} took longer than {Seconds} s and was cancelled.",
+                table.Parent, table.Legacy, LegacyMaxTimeoutSeconds);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Phase A step 1. Adds <c>CHECK (first_execution_time &lt; S) NOT VALID</c> to the legacy table, or re-arms a CHECK
-    /// that is still not valid with S closer than <see cref="ReArmWithin"/>. A lock timeout is retried
-    /// <see cref="ArmRetries"/> times, <see cref="ArmRetryDelay"/> apart, then returns
+    /// that is still not valid with S closer than <see cref="ReArmWithin"/>. A valid CHECK is left alone here
+    /// (<see cref="ConvergeUnpromotedAsync"/> re-arms a valid one that cannot be promoted in time). S is
+    /// <see cref="ArmBoundFor"/>: the normal bound, or the day after the legacy table's newest row when that is later.
+    /// A lock timeout is retried <see cref="ArmRetries"/> times, <see cref="ArmRetryDelay"/> apart, then returns
     /// <see cref="StepOutcome.RetryLater"/>.
     /// </summary>
     public static Task<StepResult> ArmAsync(
         NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken) =>
         ArmAsync(connection, table, utcNow, logger, ArmRetryDelay, cancellationToken);
 
-    internal static async Task<StepResult> ArmAsync(
-        NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, TimeSpan retryDelay, CancellationToken cancellationToken)
+    internal static Task<StepResult> ArmAsync(
+        NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, TimeSpan retryDelay, CancellationToken cancellationToken) =>
+        ArmCoreAsync(connection, table, utcNow, logger, retryDelay, ArmRetries, reArmValid: false, cancellationToken);
+
+    /// <summary>
+    /// Arm or re-arm in one transaction: <c>lock_timeout</c>, <c>LOCK TABLE legacy IN ACCESS EXCLUSIVE MODE</c> (so no
+    /// row can arrive between the next two reads and the CHECK), the state again (a concurrent arm, re-arm or promotion
+    /// wins and this step does nothing), the legacy maximum, then the DROP of the old CHECK when re-arming and the ADD
+    /// of the new one. <paramref name="retries"/> lock timeouts are retried <paramref name="retryDelay"/> apart; the
+    /// hourly convergence step passes 0 so it never sleeps inside its budget. <paramref name="reArmValid"/> lets a
+    /// valid CHECK be re-armed (it costs a new VALIDATE).
+    /// </summary>
+    internal static async Task<StepResult> ArmCoreAsync(
+        NpgsqlConnection connection,
+        IntervalTable table,
+        DateTime utcNow,
+        ILogger logger,
+        TimeSpan retryDelay,
+        int retries,
+        bool reArmValid,
+        CancellationToken cancellationToken)
     {
         for (var attempt = 0; ; attempt++)
         {
             var state = await ReadStateAsync(connection, table, cancellationToken).ConfigureAwait(false);
-            if (!state.ParentIsPartitioned || !state.LegacyExists)
+            var (early, _) = DecideArm(table, state, utcNow, reArmValid);
+            if (early is { } decided)
             {
-                return new StepResult(StepOutcome.NotReady, $"{table.Parent} is not a partitioned table with a legacy table yet");
+                return decided;
             }
 
-            if (state.Promoted)
-            {
-                return new StepResult(StepOutcome.NothingToDo, "already promoted");
-            }
-
-            var reArm = state.CheckPresent && state.CheckBound.HasValue
-                && ShouldReArm(state.CheckValid, state.CheckBound.Value, utcNow);
-            if (state.CheckPresent && !reArm)
-            {
-                return new StepResult(StepOutcome.NothingToDo, state.CheckValid ? "already armed and valid" : "already armed");
-            }
-
-            var s = ArmBound(utcNow);
             try
             {
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
                 await ExecuteAsync(connection, LockTimeoutSql, ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+                await ExecuteAsync(
+                    connection, $"LOCK TABLE {table.Legacy} IN ACCESS EXCLUSIVE MODE;", ShortTimeoutSeconds, transaction, cancellationToken)
+                    .ConfigureAwait(false);
+
+                var locked = await ReadStateAsync(connection, table, cancellationToken, transaction).ConfigureAwait(false);
+                var (raced, reArm) = DecideArm(table, locked, utcNow, reArmValid);
+                if (raced is { } already)
+                {
+                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                    return already;
+                }
+
+                var legacyMax = await ReadLegacyMaxAsync(connection, table, transaction, logger, cancellationToken).ConfigureAwait(false);
+                var normal = ArmBound(utcNow);
+                var s = ArmBoundFor(utcNow, legacyMax);
                 if (reArm)
                 {
                     await ExecuteAsync(connection, DropCheckSql(table), ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
@@ -525,17 +706,25 @@ ORDER BY 1;";
 
                 await ExecuteAsync(connection, AddCheckSql(table, s), ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                if (s > normal)
+                {
+                    logger.LogWarning(
+                        "Query Store interval table {Table}: the legacy table holds first_execution_time up to {Max:O} (a monitored clock ahead of the store's), "
+                        + "so the legacy bound S is {Bound:O} instead of {Normal:O}. The day partitions start at S.",
+                        table.Parent, legacyMax, s, normal);
+                }
+
                 logger.LogInformation(
                     "Query Store interval table {Table}: armed the legacy bound S = {Bound:O} ({Action}).",
                     table.Parent, s, reArm ? "re-armed" : "armed");
-                return new StepResult(StepOutcome.Done, $"armed at {Literal(s)}");
+                return new StepResult(StepOutcome.Done, $"{(reArm ? "re-armed" : "armed")} at {Literal(s)}", 1);
             }
             catch (PostgresException ex) when (IsLockTimeout(ex))
             {
-                if (attempt >= ArmRetries)
+                if (attempt >= retries)
                 {
                     logger.LogWarning(
-                        "Query Store interval table {Table}: arming the legacy bound hit a lock timeout {Attempts} times; the next start retries.",
+                        "Query Store interval table {Table}: arming the legacy bound hit a lock timeout {Attempts} time(s); the next pass retries.",
                         table.Parent, attempt + 1);
                     return new StepResult(StepOutcome.RetryLater, "lock timeout");
                 }
@@ -549,22 +738,83 @@ ORDER BY 1;";
     }
 
     /// <summary>
-    /// Phase A step 2. Validates the legacy CHECK: a heap read of the legacy table under SHARE UPDATE EXCLUSIVE, so
-    /// upserts and reads continue. A lock timeout (autovacuum, a concurrent index build) returns
-    /// <see cref="StepOutcome.RetryLater"/>.
+    /// The hourly convergence step for a table that is not promoted (#5571 review H1), cheap and bounded by 5 s lock
+    /// waits, with no VALIDATE and no sleeping: no CHECK, arm; a valid CHECK, one promote; and when the table is still
+    /// not promoted and S is closer than <see cref="ReArmWithin"/>, re-arm with a later S, valid or not (a valid one
+    /// costs a new VALIDATE, which is accepted). That is what keeps the CHECK from ever refusing a current row while
+    /// the table waits for its promotion. A promoted table returns <see cref="StepOutcome.NothingToDo"/>.
+    /// </summary>
+    public static async Task<StepResult> ConvergeUnpromotedAsync(
+        NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
+    {
+        var state = await ReadStateAsync(connection, table, cancellationToken).ConfigureAwait(false);
+        if (!state.ParentIsPartitioned)
+        {
+            return new StepResult(StepOutcome.NotReady, $"{table.Parent} is not a partitioned table with a legacy table yet");
+        }
+
+        if (state.Promoted)
+        {
+            return new StepResult(StepOutcome.NothingToDo, "already promoted");
+        }
+
+        if (!state.CheckPresent)
+        {
+            return await ArmCoreAsync(connection, table, utcNow, logger, TimeSpan.Zero, 0, reArmValid: false, cancellationToken).ConfigureAwait(false);
+        }
+
+        StepResult? promoteResult = null;
+        if (state.CheckValid)
+        {
+            var promote = await PromoteAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
+            if (promote.Outcome is StepOutcome.Done or StepOutcome.NothingToDo)
+            {
+                return promote;
+            }
+
+            promoteResult = promote;
+        }
+
+        if (state.CheckBound.HasValue && ShouldReArm(state.CheckBound.Value, utcNow))
+        {
+            return await ArmCoreAsync(connection, table, utcNow, logger, TimeSpan.Zero, 0, reArmValid: true, cancellationToken).ConfigureAwait(false);
+        }
+
+        return promoteResult ?? new StepResult(StepOutcome.NothingToDo, "armed; the background validate proves it");
+    }
+
+    /// <summary>
+    /// Phase A step 2, run only by the background loop, never by a convergence step. Validates the legacy CHECK: a heap
+    /// read of the legacy table under SHARE UPDATE EXCLUSIVE, so upserts and reads continue. It never starts when S is
+    /// closer than <see cref="ValidateGuard"/> (the command deadline plus an hour): the result is
+    /// <see cref="StepOutcome.ReArmFirst"/>. A lock timeout (autovacuum, a concurrent index build) returns
+    /// <see cref="StepOutcome.RetryLater"/>. A 23514 means the legacy table holds a row at or after S: the CHECK is
+    /// dropped, the table's newest <c>first_execution_time</c> is logged, and the result is
+    /// <see cref="StepOutcome.Refused"/>; the next hourly step re-arms with a later S.
     /// </summary>
     public static async Task<StepResult> ValidateAsync(
         NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
     {
         var state = await ReadStateAsync(connection, table, cancellationToken).ConfigureAwait(false);
-        if (!state.ParentIsPartitioned || !state.LegacyExists || !state.CheckPresent)
+        if (state.Promoted)
+        {
+            return new StepResult(StepOutcome.NothingToDo, "already promoted");
+        }
+
+        if (!state.ParentIsPartitioned || !state.LegacyExists || !state.CheckPresent || !state.CheckBound.HasValue)
         {
             return new StepResult(StepOutcome.NotReady, $"{table.Legacy} has no armed bound yet");
         }
 
-        if (state.Promoted || state.CheckValid)
+        if (state.CheckValid)
         {
             return new StepResult(StepOutcome.NothingToDo, "already validated");
+        }
+
+        var s = state.CheckBound.Value;
+        if (!CanStartValidate(s, utcNow))
+        {
+            return new StepResult(StepOutcome.ReArmFirst, $"the bound {Literal(s)} is too close for a validate to finish: re-arm first");
         }
 
         var started = System.Diagnostics.Stopwatch.StartNew();
@@ -578,13 +828,63 @@ ORDER BY 1;";
         catch (PostgresException ex) when (IsLockTimeout(ex))
         {
             logger.LogWarning(
-                "Query Store interval table {Table}: validating the legacy bound hit a lock timeout; the next start retries.", table.Parent);
+                "Query Store interval table {Table}: validating the legacy bound hit a lock timeout; the background loop retries it.", table.Parent);
             return new StepResult(StepOutcome.RetryLater, "lock timeout");
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.CheckViolation)
+        {
+            return await DropViolatedCheckAsync(connection, table, s, logger, cancellationToken).ConfigureAwait(false);
         }
 
         logger.LogInformation(
             "Query Store interval table {Table}: validated the legacy bound in {Seconds:F1}s.", table.Parent, started.Elapsed.TotalSeconds);
         return new StepResult(StepOutcome.Done, "validated");
+    }
+
+    /// <summary>
+    /// A VALIDATE failed with 23514: the legacy table holds a row at or after S (a monitored clock ahead of the store's).
+    /// Do not leave a CHECK armed that can never validate. Read the table's newest first_execution_time for the log (it
+    /// is only for the log, and it is the value the next arm uses for S), then drop the CHECK. If the drop hits a lock
+    /// timeout the CHECK stays, and the next background pass finds the same failure and tries the drop again.
+    /// </summary>
+    private static async Task<StepResult> DropViolatedCheckAsync(
+        NpgsqlConnection connection, IntervalTable table, DateTime s, ILogger logger, CancellationToken cancellationToken)
+    {
+        DateTime? legacyMax = null;
+        try
+        {
+            await using var read = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            legacyMax = await ReadLegacyMaxAsync(connection, table, read, logger, cancellationToken).ConfigureAwait(false);
+            await read.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning("Query Store interval table {Table}: the legacy maximum could not be read: {Message}", table.Parent, ex.Message);
+        }
+
+        var dropped = false;
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, LockTimeoutSql, ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, DropCheckSql(table), ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            dropped = true;
+        }
+        catch (PostgresException ex) when (IsLockTimeout(ex))
+        {
+            /* Left armed; the next pass drops it. */
+        }
+
+        logger.LogWarning(
+            "Query Store interval table {Table}: the legacy bound S = {Bound:O} could not be validated, because {Legacy} holds a row at or "
+            + "after it (newest first_execution_time {Max}). {Action}",
+            table.Parent, s, table.Legacy,
+            legacyMax.HasValue ? legacyMax.Value.ToString("O", CultureInfo.InvariantCulture) : "unknown",
+            dropped
+                ? "The CHECK was dropped; the next hourly step arms it again with a later S."
+                : "The CHECK could not be dropped (lock timeout); the next pass tries again.");
+        return new StepResult(StepOutcome.Refused, dropped ? "a legacy row is at or after S; the check was dropped" : "a legacy row is at or after S");
     }
 
     /// <summary>
@@ -598,14 +898,14 @@ ORDER BY 1;";
         NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
     {
         var state = await ReadStateAsync(connection, table, cancellationToken).ConfigureAwait(false);
-        if (!state.ParentIsPartitioned || !state.LegacyExists)
-        {
-            return new StepResult(StepOutcome.NotReady, $"{table.Parent} is not a partitioned table with a legacy table yet");
-        }
-
         if (state.Promoted)
         {
             return new StepResult(StepOutcome.NothingToDo, "already promoted");
+        }
+
+        if (!state.ParentIsPartitioned || !state.LegacyExists)
+        {
+            return new StepResult(StepOutcome.NotReady, $"{table.Parent} is not a partitioned table with a legacy table yet");
         }
 
         if (!state.CheckPresent || !state.CheckValid || !state.CheckBound.HasValue)
@@ -621,6 +921,23 @@ ORDER BY 1;";
             await ExecuteAsync(
                 connection, $"LOCK TABLE {table.Parent} IN ACCESS EXCLUSIVE MODE;", ShortTimeoutSeconds, transaction, cancellationToken)
                 .ConfigureAwait(false);
+
+            /* The parent's lock takes the legacy table's too, so nothing changes from here on. A convergence step or the
+               background loop may have promoted, or re-armed, since the state above was read: the re-attach below is only
+               a metadata operation while the VALID CHECK for exactly this S is on the table (a re-armed CHECK is NOT
+               VALID, and the attach would then scan the whole legacy heap under this lock). */
+            var locked = await ReadStateAsync(connection, table, cancellationToken, transaction).ConfigureAwait(false);
+            if (locked.Promoted)
+            {
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return new StepResult(StepOutcome.NothingToDo, "already promoted");
+            }
+
+            if (!locked.CheckValid || locked.CheckBound != s)
+            {
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return new StepResult(StepOutcome.NotReady, "the legacy bound changed under the lock; the next pass decides");
+            }
 
             var missing = new List<string>();
             await using (var check = Command(connection, MissingLegacyChildSql, ShortTimeoutSeconds, transaction))
@@ -676,7 +993,14 @@ ORDER BY 1;";
         }
     }
 
-    /// <summary>ANALYZE of the parent. Autovacuum never analyzes a partitioned table, so the parent's statistics only exist when this runs.</summary>
+    /// <summary>
+    /// ANALYZE of the parent. Autovacuum never analyzes a partitioned table, so the parent's statistics only exist when
+    /// this runs. In one transaction under a 5 s <c>lock_timeout</c> (a leaf held by an anti-wraparound vacuum or an index
+    /// build gives <see cref="StepOutcome.RetryLater"/>, not a wait). On PostgreSQL 18 and later it is
+    /// <c>ANALYZE ONLY parent</c>: the leaves are analyzed by autovacuum already, and without ONLY the statement
+    /// samples every leaf again, the 91 GB legacy table included (#5571 review M1). Never called from a convergence
+    /// step: it runs on the background loop and once after a promotion.
+    /// </summary>
     public static async Task<StepResult> AnalyzeAsync(
         NpgsqlConnection connection, IntervalTable table, ILogger logger, CancellationToken cancellationToken)
     {
@@ -687,16 +1011,40 @@ ORDER BY 1;";
         }
 
         var started = System.Diagnostics.Stopwatch.StartNew();
-        await ExecuteAsync(connection, $"ANALYZE {table.Parent};", AnalyzeTimeoutSeconds, null, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, LockTimeoutSql, ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(
+                connection, AnalyzeSql(table, connection.PostgreSqlVersion.Major >= AnalyzeOnlyMajorVersion), AnalyzeTimeoutSeconds, transaction, cancellationToken)
+                .ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (PostgresException ex) when (IsLockTimeout(ex))
+        {
+            logger.LogInformation(
+                "Query Store interval table {Table}: analyzing the parent hit a lock timeout; the next background pass retries.", table.Parent);
+            return new StepResult(StepOutcome.RetryLater, "lock timeout");
+        }
+
         logger.LogInformation(
             "Query Store interval table {Table}: analyzed the parent in {Seconds:F1}s.", table.Parent, started.Elapsed.TotalSeconds);
         return new StepResult(StepOutcome.Done, "analyzed");
     }
 
-    /// <summary>The once-a-day ANALYZE: runs <see cref="AnalyzeAsync"/> when the parent was last analyzed more than <see cref="AnalyzeEvery"/> ago, or never.</summary>
+    /// <summary>
+    /// The once-a-day ANALYZE, for promoted tables: runs <see cref="AnalyzeAsync"/> when the parent was last analyzed more
+    /// than <see cref="AnalyzeEvery"/> ago, or never. Not promoted is <see cref="StepOutcome.NotReady"/>.
+    /// </summary>
     public static async Task<StepResult> AnalyzeIfDueAsync(
         NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
     {
+        var state = await ReadStateAsync(connection, table, cancellationToken).ConfigureAwait(false);
+        if (!state.Promoted)
+        {
+            return new StepResult(StepOutcome.NotReady, $"{table.Parent} is not promoted yet");
+        }
+
         bool due;
         await using (var command = Command(
             connection,
@@ -718,9 +1066,12 @@ ORDER BY 1;";
     }
 
     /// <summary>
-    /// Phase A as one call, for the once-per-start task: arm, validate, promote (a lock timeout is retried
-    /// <see cref="PromoteRetries"/> times, <see cref="PromoteRetryDelay"/> apart), then ANALYZE the parent. Stops at the
-    /// first step that is not done and returns it; the next start continues from the catalogs' state.
+    /// Phase A as one call, one pass of the background loop: arm (or re-arm a not-yet-valid CHECK that is close to S),
+    /// validate (never when S is closer than <see cref="ValidateGuard"/>), promote (a lock timeout is retried
+    /// <see cref="PromoteRetries"/> times, <see cref="PromoteRetryDelay"/> apart), and ANALYZE the parent only when this
+    /// call did the promotion (#5571 review L1). When the table is still not promoted and S is closer than
+    /// <see cref="ReArmWithin"/>, the CHECK is re-armed, valid or not. Stops at the first step that is not done and
+    /// returns it; the next pass of the loop continues from the catalogs' state.
     /// </summary>
     public static Task<StepResult> RunPromotionAsync(
         NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken) =>
@@ -742,7 +1093,7 @@ ORDER BY 1;";
         }
 
         var validate = await ValidateAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
-        if (validate.Outcome is StepOutcome.RetryLater or StepOutcome.NotReady)
+        if (validate.Outcome is StepOutcome.RetryLater or StepOutcome.NotReady or StepOutcome.Refused or StepOutcome.ReArmFirst)
         {
             return validate;
         }
@@ -762,12 +1113,31 @@ ORDER BY 1;";
             }
         }
 
-        if (promote.Outcome is not (StepOutcome.Done or StepOutcome.NothingToDo))
+        if (promote.Outcome == StepOutcome.Done)
         {
+            try
+            {
+                await AnalyzeAsync(connection, table, logger, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(
+                    "Query Store interval table {Table}: analyzing the parent after the promotion failed ({Message}); the daily ANALYZE retries.",
+                    table.Parent, ex.Message);
+            }
+
             return promote;
         }
 
-        await AnalyzeAsync(connection, table, logger, cancellationToken).ConfigureAwait(false);
+        if (promote.Outcome is StepOutcome.RetryLater or StepOutcome.Refused)
+        {
+            var current = await ReadStateAsync(connection, table, cancellationToken).ConfigureAwait(false);
+            if (!current.Promoted && current.CheckBound.HasValue && ShouldReArm(current.CheckBound.Value, utcNow))
+            {
+                await ArmCoreAsync(connection, table, utcNow, logger, armRetryDelay, 0, reArmValid: true, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         return promote;
     }
 
@@ -901,7 +1271,7 @@ ORDER BY 1;";
             {
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
                 await ExecuteAsync(connection, LockTimeoutSql, ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
-                await ExecuteAsync(connection, $"DROP TABLE {partition.Name};", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+                await ExecuteAsync(connection, $"DROP TABLE IF EXISTS {partition.Name};", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 dropped++;
                 logger.LogInformation(
@@ -923,35 +1293,41 @@ ORDER BY 1;";
     }
 
     /// <summary>
-    /// Phase B as one call, for the start step and the hourly pass: create-ahead, then drop-expired. Returns the create-ahead
-    /// result unless it was not done, then the drop's.
+    /// Phase B as one call, for the start step and the hourly pass: converge a table that is not promoted yet
+    /// (<see cref="ConvergeUnpromotedAsync"/>), then create-ahead and drop-expired. Returns the create-ahead result unless
+    /// it was not done, then the drop's; a convergence that changed something adds to the count.
     /// </summary>
     public static async Task<StepResult> RunMaintenanceAsync(
         NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
     {
+        var converge = await ConvergeUnpromotedAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
         var ahead = await CreateAheadAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
         if (ahead.Outcome == StepOutcome.NotReady)
         {
-            return ahead;
+            return converge.Outcome == StepOutcome.NotReady ? ahead : converge;
         }
 
         var drop = await DropExpiredAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
 
         /* A pass that created days AND dropped days reports both counts, so the hourly "changed" tally is not short by
            the drops (#5571). */
-        return ahead.Outcome == StepOutcome.Done ? ahead with { Count = ahead.Count + drop.Count } : drop;
+        var result = ahead.Outcome == StepOutcome.Done ? ahead with { Count = ahead.Count + drop.Count } : drop;
+        return converge.Outcome == StepOutcome.Done
+            ? new StepResult(StepOutcome.Done, converge.Detail + "; " + result.Detail, Math.Max(converge.Count, 1) + (result.Outcome == StepOutcome.Done ? result.Count : 0))
+            : result;
     }
 
     /// <summary>What one <see cref="RunMaintenancePassAsync"/> did: partitions created or dropped, and tables whose step failed.</summary>
     public readonly record struct PassResult(int Changed, int Failed);
 
     /// <summary>
-    /// The hourly step (#5571): for each table, in order, <see cref="RunMaintenanceAsync"/> (create ahead with the DEFAULT
-    /// drain, then drop expired days and the legacy table once it is bounded below the cutoff), then
-    /// <see cref="AnalyzeIfDueAsync"/>. It does nothing for a table that is not promoted yet, so it is safe before and
-    /// during the Phase A task. One table's failure is logged and counted and never stops the other table; a lock
-    /// timeout (55P03) is <see cref="StepOutcome.RetryLater"/>, already logged once by the step, and is not a failure.
-    /// If a failure closed the connection it is reopened for the next table. Shutdown (cancellation) propagates.
+    /// The hourly step (#5571): for each table, in order, <see cref="RunMaintenanceAsync"/> (converge a table that is not
+    /// promoted: arm, one promote of a valid CHECK, re-arm before S; then create ahead with the DEFAULT drain, then drop
+    /// expired days and the legacy table once it is bounded below the cutoff). It never validates and never ANALYZEs: both
+    /// run on the background loop, off the sweep loop (#5571 review H1, M1). One table's failure is logged and counted and
+    /// never stops the other table; a lock timeout (55P03) is <see cref="StepOutcome.RetryLater"/>, already logged once by
+    /// the step, and is not a failure. If a failure closed the connection it is reopened for the next table. Shutdown
+    /// (cancellation) propagates.
     /// </summary>
     public static Task<PassResult> RunMaintenancePassAsync(
         NpgsqlConnection connection, DateTime utcNow, ILogger logger, CancellationToken cancellationToken) =>
@@ -974,11 +1350,6 @@ ORDER BY 1;";
                 if (result.Outcome == StepOutcome.Done)
                 {
                     changed += result.Count;
-                }
-
-                if (result.Outcome != StepOutcome.NotReady)
-                {
-                    await AnalyzeIfDueAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1007,13 +1378,16 @@ ORDER BY 1;";
     }
 
     /// <summary>
-    /// The once-per-start background task (#5571), never awaited on the startup path and never throwing: wait
-    /// <paramref name="delay"/>, then Phase A for each table in order (arm, validate, promote, ANALYZE; each table on its
-    /// own connection, one table's failure never stops the other), then the Query Store index ensures
-    /// (<see cref="QueryStoreBackgroundIndexes.RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/>),
-    /// then promotion again for any table whose promotion was <see cref="StepOutcome.Refused"/> (a parent index had no
-    /// legacy child, which the index ensure has just built). The order is the plan's: the VALIDATE and a concurrent
-    /// <c>CREATE INDEX CONCURRENTLY</c> on the legacy table conflict, so the indexes wait for Phase A.
+    /// The background task (#5571), launched at start, never awaited on the startup path and never throwing: wait
+    /// <paramref name="delay"/>, then loop until shutdown, every <see cref="BackgroundInterval"/>: Phase A for each table
+    /// that is not promoted (arm, validate, promote; each table on its own connection, one table's failure never stops the
+    /// other), then, on the first pass and after any refusal, the Query Store index ensures
+    /// (<see cref="QueryStoreBackgroundIndexes.RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/>)
+    /// and promotion again for any table whose promotion was <see cref="StepOutcome.Refused"/> (a parent index had no
+    /// legacy child, which the index ensure has just built), then the once-a-day ANALYZE of each promoted parent. The
+    /// VALIDATE and a concurrent <c>CREATE INDEX CONCURRENTLY</c> on the legacy table conflict, so the indexes wait for
+    /// Phase A. The loop is serial, so one VALIDATE runs at a time per table, and none of it ever runs inside a
+    /// convergence step's budget (#5571 review H1, M1).
     /// </summary>
     public static Task RunDelayedAsync(
         NpgsqlDataSource postgres,
@@ -1024,21 +1398,29 @@ ORDER BY 1;";
         RunDelayedAsync(
             logger,
             delay,
+            BackgroundInterval,
             All,
             async (table, token) =>
             {
                 await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
                 return await RunPromotionAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
             },
+            async (table, token) =>
+            {
+                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                return await AnalyzeIfDueAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
+            },
             token => QueryStoreBackgroundIndexes.RunDelayedAsync(postgres, logger, TimeSpan.Zero, specs, token),
             cancellationToken);
 
-    /// <summary><see cref="RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/> with the two actions injected, so the order and the isolation run without a store.</summary>
+    /// <summary><see cref="RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/> with the three actions injected, so the order, the repetition and the isolation run without a store.</summary>
     internal static async Task RunDelayedAsync(
         ILogger logger,
         TimeSpan delay,
+        TimeSpan interval,
         IReadOnlyList<IntervalTable> tables,
         Func<IntervalTable, CancellationToken, Task<StepResult>> promote,
+        Func<IntervalTable, CancellationToken, Task<StepResult>> analyze,
         Func<CancellationToken, Task> ensureIndexes,
         CancellationToken cancellationToken)
     {
@@ -1046,59 +1428,78 @@ ORDER BY 1;";
         {
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
 
-            var refused = new List<IntervalTable>();
-            foreach (var table in tables)
+            var indexesEnsured = false;
+            for (var pass = 0; ; pass++)
             {
-                if (await TryPromoteAsync(logger, table, promote, cancellationToken).ConfigureAwait(false) == StepOutcome.Refused)
+                var quiet = pass > 0;
+                var refused = new List<IntervalTable>();
+                foreach (var table in tables)
                 {
-                    refused.Add(table);
+                    if (await TryStepAsync(logger, table, "promotion", promote, quiet, cancellationToken).ConfigureAwait(false) == StepOutcome.Refused)
+                    {
+                        refused.Add(table);
+                    }
                 }
-            }
 
-            try
-            {
-                await ensureIndexes(cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                logger.LogWarning("Query Store index ensure failed after the partition steps: {Message}", ex.Message);
-            }
+                if (!indexesEnsured || refused.Count > 0)
+                {
+                    try
+                    {
+                        await ensureIndexes(cancellationToken).ConfigureAwait(false);
+                        indexesEnsured = true;
+                    }
+                    catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        logger.LogWarning("Query Store index ensure failed after the partition steps: {Message}", ex.Message);
+                    }
+                }
 
-            foreach (var table in refused)
-            {
-                await TryPromoteAsync(logger, table, promote, cancellationToken).ConfigureAwait(false);
+                foreach (var table in refused)
+                {
+                    await TryStepAsync(logger, table, "promotion", promote, quiet, cancellationToken).ConfigureAwait(false);
+                }
+
+                foreach (var table in tables)
+                {
+                    await TryStepAsync(logger, table, "analyze", analyze, quiet: true, cancellationToken).ConfigureAwait(false);
+                }
+
+                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
-            logger.LogInformation("Query Store interval partition promotion was cancelled at shutdown; the next start continues from the catalogs' state.");
+            logger.LogInformation("Query Store interval partition background task was cancelled at shutdown; the next start continues from the catalogs' state.");
         }
         catch (Exception ex)
         {
             logger.LogInformation(
-                "Query Store interval partition promotion stopped at shutdown: {ExceptionType}: {Message}; the next start continues.",
+                "Query Store interval partition background task stopped at shutdown: {ExceptionType}: {Message}; the next start continues.",
                 ex.GetType().Name, ex.Message);
         }
     }
 
-    private static async Task<StepOutcome?> TryPromoteAsync(
+    private static async Task<StepOutcome?> TryStepAsync(
         ILogger logger,
         IntervalTable table,
-        Func<IntervalTable, CancellationToken, Task<StepResult>> promote,
+        string what,
+        Func<IntervalTable, CancellationToken, Task<StepResult>> step,
+        bool quiet,
         CancellationToken cancellationToken)
     {
         try
         {
-            var result = await promote(table, cancellationToken).ConfigureAwait(false);
-            logger.LogInformation(
-                "Query Store interval table {Table}: promotion step ended {Outcome} ({Detail}).", table.Parent, result.Outcome, result.Detail);
+            var result = await step(table, cancellationToken).ConfigureAwait(false);
+            var level = quiet && result.Outcome is StepOutcome.NothingToDo or StepOutcome.NotReady ? LogLevel.Debug : LogLevel.Information;
+            logger.Log(
+                level, "Query Store interval table {Table}: {Step} step ended {Outcome} ({Detail}).", table.Parent, what, result.Outcome, result.Detail);
             return result.Outcome;
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning(
-                "Query Store interval table {Table}: promotion failed ({Message}); the other table still runs and the next start retries.",
-                table.Parent, ex.Message);
+                "Query Store interval table {Table}: the {Step} step failed ({Message}); the other table still runs and the background task tries again in an hour.",
+                table.Parent, what, ex.Message);
             return null;
         }
     }
