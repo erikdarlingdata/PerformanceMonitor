@@ -177,9 +177,12 @@ public sealed class WebPerfmonMultiSelectBehaviourTests
     public void FastClicks_AbortTheSupersededReads_AndLeaveOneDrawsReadsInFlight()
     {
         var r = Run("fastClicks");
-        Assert.Equal(30, r.GetProperty("sent").GetInt32());
-        Assert.Equal(25, r.GetProperty("aborted").GetInt32());
+        // Reads for the same counter that are still in flight are shared (apiGetJoined), so the repeated clicks send fewer
+        // than the thirty they once did; every read nobody waits for any more is aborted and five stay in flight.
+        var sent = r.GetProperty("sent").GetInt32();
+        Assert.True(sent is >= 5 and < 30, "the repeated clicks should share their reads, but " + sent + " were sent");
         Assert.Equal(5, r.GetProperty("stillInFlight").GetInt32());
+        Assert.Equal(sent - 5, r.GetProperty("aborted").GetInt32());
     }
 
     [Fact]

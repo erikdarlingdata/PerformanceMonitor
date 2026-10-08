@@ -973,10 +973,13 @@ function vizStat(data, desc) {
      key with a value still renders the tiles, and a descriptor with no emptyText (every stored view, and
      every SQL Server tile on the server page) falls through unchanged. */
   if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
+  /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
+     of fifteen tiles, half of them dashes, said less than the seven that had a value. */
+  const shown = stats.filter((s) => !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
   return el(
     "div",
     { class: "stats" },
-    stats.map((s) => {
+    shown.map((s) => {
       const sev = s.sev || s.severity;
       const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
       const raw = getPath(data, s.key);

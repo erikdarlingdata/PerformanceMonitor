@@ -171,10 +171,13 @@ public sealed class WebWaitStatsMultiSelectBehaviourTests
     public void FastClicks_AbortTheSupersededReads_SoAtMostOneDrawsReadsAreInFlight()
     {
         var r = Run("fastClicks");
-        Assert.Equal(40, r.GetProperty("sent").GetInt32());
+        // Reads for the same series that are still in flight are shared (apiGetJoined), so four clicks over the same ten
+        // series send ten requests, not forty; a read nobody waits for any more is still aborted.
+        var sent = r.GetProperty("sent").GetInt32();
+        Assert.True(sent is >= 10 and < 40, "the repeated clicks should share their reads, but " + sent + " were sent");
         Assert.True(r.GetProperty("maxInFlight").GetInt32() <= 10, "more than ten reads were in flight at once");
         Assert.Equal(10, r.GetProperty("stillInFlight").GetInt32());
-        Assert.Equal(30, r.GetProperty("aborted").GetInt32());
+        Assert.Equal(sent - 10, r.GetProperty("aborted").GetInt32());
         Assert.Equal(10, r.GetProperty("chart").GetProperty("labels").GetArrayLength());
     }
 

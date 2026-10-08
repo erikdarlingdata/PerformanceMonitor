@@ -23,6 +23,7 @@
 
 import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
+import { orderServers } from "../server-order.js";
 import { tab as utilization } from "./finops/utilization.js";
 import { tab as database_resources } from "./finops/database-resources.js";
 import { tab as storage_growth } from "./finops/storage-growth.js";
@@ -193,7 +194,7 @@ export function renderFinops(main, server, tabId, opts) {
     /* An empty registry answers with prose, which the read classifies as an error; it is the empty case. */
     if (res.kind === "error" && /^No servers are registered/.test(res.message || "")) return showEmpty();
     if (res.kind === "error") return show(errorStrip(res.message));
-    const rows = res.kind === "data" ? serverRows(res.data) : [];
+    const rows = res.kind === "data" ? orderServers(serverRows(res.data)) : [];
     if (rows.length === 0) return showEmpty();
     const unchanged = hadCache && lastRows !== null && sameServers(lastRows, rows);
     lastRows = rows;

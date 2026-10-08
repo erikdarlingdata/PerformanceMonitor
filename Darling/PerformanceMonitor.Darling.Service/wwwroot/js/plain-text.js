@@ -35,6 +35,17 @@ function pairsToText(run) {
     .join(", ");
 }
 
+/* The same counts with the "=" lost: shred_gated_1 events_read_0 report_xml_empty_0. Each token's last part is the value. */
+function underscoreCountsToText(run) {
+  return run
+    .split(" ")
+    .map((tok) => {
+      const at = tok.lastIndexOf("_");
+      return tok.slice(0, at).replace(/_/g, " ") + ": " + tok.slice(at + 1);
+    })
+    .join(", ");
+}
+
 /* Fields of the Collection Health row that its own sentences point at, named by the column that shows them. */
 const FIELD_WORDS = [
   [/\blast_error\b/g, "Last Error"],
@@ -76,6 +87,10 @@ export function plainText(text) {
 
   /* A collector's measurement counts: shred_gated=1 events_read=0 report_xml_empty=0. */
   t = t.replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)*=\d+(?: [a-z][a-z0-9]*(?:_[a-z0-9]+)*=\d+)*/g, pairsToText);
+
+  /* The same counts written with an underscore for the "=": a run of two or more name_digits words. A lone word such as
+     pg_stat_statements_1 is left alone, so a real object name followed by a number is not rewritten. */
+  t = t.replace(/(?<![\w.])[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+(?: [a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+)+(?![\w])/g, underscoreCountsToText);
 
   /* A tool name: use get_collection_health -> use Collection Health. */
   t = t.replace(/\bget_([a-z0-9]+(?:_[a-z0-9]+)*)\b/g, (_m, rest) => toolWords(rest));

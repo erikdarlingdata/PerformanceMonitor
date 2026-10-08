@@ -400,7 +400,7 @@ public sealed class ProductiveZeroBandingTests
            always carried the sentence, but no column rendered it, so a regressed row read WARNING with every
            cell beside it blank. */
         Assert.Contains(
-            "{ key: \"regression_finding\", label: \"Regression\", wrap: true }",
+            "{ key: \"regression_finding\", label: \"Regression\", wrap: true, plain: true }",
             ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/server-tabs.js"),
             StringComparison.Ordinal);
 

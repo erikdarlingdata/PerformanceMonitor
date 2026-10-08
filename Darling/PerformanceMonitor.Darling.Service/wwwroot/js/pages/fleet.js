@@ -567,19 +567,31 @@ function groupControl() {
  *
  * Returns null (no sub-line) for a response with no coverage object or an empty fleet — nothing to qualify.
  */
-function deadlockCoverageSub(coverage) {
+export function deadlockCoverageSub(coverage) {
   if (!coverage || typeof coverage.servers_total !== "number" || coverage.servers_total <= 0) return null;
 
   const total = coverage.servers_total;
   const read = typeof coverage.servers_read === "number" ? coverage.servers_read : 0;
   const noun = total === 1 ? "server" : "servers";
 
-  return read >= total
-    ? { text: "read all " + fmtInt(total) + " " + noun, partial: false }
-    : { text: "read " + fmtInt(read) + " of " + fmtInt(total) + " " + noun, partial: true };
+  if (read >= total) return { text: "read all " + fmtInt(total) + " " + noun, partial: false };
+
+  /* Says why the line is short, in the words a reader of the fleet page uses: the tile counts deadlocks only on the
+     servers whose deadlock data could be read. */
+  const unread = total - read;
+  return {
+    text: "read " + fmtInt(read) + " of " + fmtInt(total) + " " + noun,
+    partial: true,
+    title:
+      "The deadlock count covers the " + fmtInt(read) + " " + (read === 1 ? "server" : "servers") + " whose deadlock data could be read. " +
+      "The other " + fmtInt(unread) + " " + (unread === 1 ? "server is" : "servers are") +
+      " not counted: " + (unread === 1 ? "its" : "their") +
+      " deadlock collection is off, refused, or has not run lately (for example a server that is offline), " +
+      "so a deadlock there would not show up in this number.",
+  };
 }
 
-function rollup(d) {
+export function rollup(d) {
   /* #3031: every tile's number is programmatically tied to the text that says what it counts. The label and
      the coverage sub-line carry stable ids and the number describes itself with them, so the figure and its
      meaning travel together for a consumer that reaches the number's node on its own rather than browsing
@@ -606,7 +618,7 @@ function rollup(d) {
       el("div", { class: "lbl", id: lblId, text: lbl }),
       /* The sub-line's colour tracks COVERAGE, not the tile's number severity: "read all 12 servers" under a
          red count is good news about a bad number and must not be painted as part of the alarm. */
-      sub ? el("div", { class: sub.partial ? "sub partial" : "sub", id: subId, text: sub.text }) : null,
+      sub ? el("div", { class: sub.partial ? "sub partial" : "sub", id: subId, text: sub.text, title: sub.title || null }) : null,
     ]);
   };
 
