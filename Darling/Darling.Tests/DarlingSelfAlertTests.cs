@@ -450,7 +450,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
         Assert.StartsWith("No successful collection in 30 minutes", fired.CurrentValue, StringComparison.Ordinal);
 
-        /* Still down a minute later: the cooldown holds the standing alert to the one fire. */
+        /* Still down a minute later: a state alert (#5493) sends once per occurrence, so the standing alert stays at the one fire. */
         h.Now = start.AddMinutes(31);
         Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
         SingleCollectionStopped(h);
@@ -623,7 +623,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("Blocking and Deadlock", fired.CurrentValue);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
 
-        /* Still down inside the cooldown — no re-fire. */
+        /* Still down a minute later: a state alert (#5493) sends once per occurrence, no re-fire. */
         h.Now = h.Now.AddMinutes(1);
         await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
         Assert.Single(h.Deliverer.Outcomes);
@@ -649,9 +649,9 @@ public sealed class DarlingSelfAlertTests
     /* ---------------- agent-not-running edge (#1433 Phase 2) ---------------- */
 
     [Fact]
-    public async Task AgentNotRunning_FiresOnce_ThenCooldownSuppresses_ThenReFires()
+    public async Task AgentNotRunning_FiresOnce_ThenQuiet_ThenReFiresOnlyOnTheConnectionRefire()
     {
-        var h = new Harness();
+        var h = new Harness { ConnectionRefireMinutes = 5 };
         var e = h.Build();
 
         await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
@@ -662,12 +662,12 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
         Assert.Equal(Key, fired.ServerKey);
 
-        /* Still stopped inside the cooldown — the EDGE: no re-fire. */
+        /* Still stopped a minute later — the EDGE: one send per occurrence, no re-fire. */
         h.Now = h.Now.AddMinutes(1);
         await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* After the cooldown the standing condition re-fires. */
+        /* #5493: a state alert. With connection_refire_minutes at 5 it re-fires once that interval has passed. */
         h.Now = h.Now.AddMinutes(5);
         await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
@@ -795,10 +795,11 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: null, agentEverSeenRunning: true, Ct);
         Assert.Empty(h.History.Records);
 
-        /* The active flag persisted through the null gap: a fresh stopped reading after the cooldown re-fires
-           (it would have been cleared to a first-fire if null had wrongly reset the state). */
+        /* The standing state persisted through the null gap: a fresh stopped reading ten minutes on is the same
+           occurrence, so it does not alert again (#5493). It would have been a second first-fire if null had
+           wrongly reset the state. */
         await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -1266,20 +1267,20 @@ public sealed class DarlingSelfAlertTests
     }
 
     [Fact]
-    public async Task CustomRuleHealth_StandingCondition_ReFiresOnlyAfterCooldown()
+    public async Task CustomRuleHealth_StandingCondition_ReFiresOnlyOnTheConnectionRefire()
     {
-        var h = new Harness();
+        var h = new Harness { ConnectionRefireMinutes = 5 };
         var e = h.Build();
 
         await e.ApplyCustomRuleHealthAsync(HealthReport(1, 0), Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        // Inside the 5-minute cooldown: no re-fire (fire once on entry, not every sweep).
+        // One minute on, inside connection_refire_minutes (5): no re-fire (fire once on entry, not every sweep).
         h.Now = h.Now.AddMinutes(1);
         await e.ApplyCustomRuleHealthAsync(HealthReport(1, 0), Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        // Cooldown elapsed, still unhealthy: re-fires the standing reminder.
+        // connection_refire_minutes (5) has passed, still unhealthy: re-fires the standing reminder.
         h.Now = h.Now.AddMinutes(5);
         await e.ApplyCustomRuleHealthAsync(HealthReport(2, 0), Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
@@ -3816,9 +3817,9 @@ public sealed class DarlingSelfAlertTests
     }
 
     [Fact]
-    public async Task CompressionJobs_AfterEscalation_NeverRearms_ReFiresOnlyOnCooldown()
+    public async Task CompressionJobs_AfterEscalation_NeverRearms_ReFiresOnlyOnTheConnectionRefire()
     {
-        var h = new Harness();
+        var h = new Harness { ConnectionRefireMinutes = 5 };
         var e = h.Build();
         var rearm = new RearmRecorder();
 
@@ -3827,13 +3828,13 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);  /* escalate (fire) */
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
-        /* Inside the 5-minute cooldown after the escalation: no re-fire, no re-arm. */
+        /* One minute after the escalation, inside connection_refire_minutes (5): no re-fire, no re-arm. */
         h.Now = h.Now.AddMinutes(1);
         await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Single(rearm.Calls);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
-        /* After the cooldown: re-fires (still no re-arm). */
+        /* connection_refire_minutes (5) has passed: re-fires (still no re-arm). */
         h.Now = h.Now.AddMinutes(5);
         await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Single(rearm.Calls);
@@ -3977,7 +3978,7 @@ public sealed class DarlingSelfAlertTests
         /* The scheduler's own retry did not clear it within a check cadence — the jittered backoff fell past
            the check, or the job crashed again and its backoff doubled. Either is a human's to read about in
            the PostgreSQL log; neither is helped by alter_job. One Critical page, then the escalated state's
-           cooldown re-fires, and no re-arm at any point. */
+           connection_refire_minutes re-fires (off here), and no re-arm at any point. */
         var h = new Harness();
         var e = h.Build();
         var rearm = new RearmRecorder();
@@ -3995,8 +3996,15 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("escalated", fired.ShortMessage, StringComparison.Ordinal);
         Assert.DoesNotContain("re-armed", fired.ShortMessage, StringComparison.Ordinal);
 
-        /* Escalated: an hour later, still there, still no re-arm; re-fires only on the cooldown. */
+        /* Escalated: an hour later, still there, still no re-arm. #5493: the escalation page was this occurrence's
+           alert, so nothing more is sent while refire is off. */
         h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* With connection_refire_minutes on, the standing job is paged again once the interval passed. */
+        h.ConnectionRefireMinutes = 30;
         await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1001), rearm.Delegate, Ct);
         Assert.Empty(rearm.Calls);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
@@ -4672,9 +4680,9 @@ public sealed class DarlingSelfAlertTests
     /* ---------------- #991: sync fell behind ---------------- */
 
     [Fact]
-    public async Task AgSyncFellBehind_FiresOnce_ReFiresOnlyOnCooldown_ThenRecovers()
+    public async Task AgSyncFellBehind_FiresOnce_ReFiresOnlyOnTheConnectionRefire_ThenRecovers()
     {
-        var h = new Harness();
+        var h = new Harness { ConnectionRefireMinutes = 5 };
         var e = h.Build();
 
         await e.ApplyAgDatabaseHealthAsync(ServerId, Name, new[] { DatabaseRow(lagSeconds: 600) }, Ct);
@@ -4743,7 +4751,7 @@ public sealed class DarlingSelfAlertTests
     [Fact]
     public async Task AgSyncFellBehind_LaggingDatabaseThatBecomesSuspended_IsNotAnnouncedAsCaughtUp()
     {
-        var h = new Harness();
+        var h = new Harness { ConnectionRefireMinutes = 5 };
         var e = h.Build();
 
         /* Baseline healthy, then it falls behind. */
@@ -6813,21 +6821,21 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     }
 
     [Fact]
-    public async Task JobOverCadence_IsAStandingCondition_ReFiresOnlyOnCooldown_AndWritesOneRecoveryRow()
+    public async Task JobOverCadence_IsAStandingCondition_ReFiresOnlyOnTheConnectionRefire_AndWritesOneRecoveryRow()
     {
-        var h = new Harness();
+        var h = new Harness { ConnectionRefireMinutes = 5 };
         var e = h.Build();
 
         /* Breach: fires once. */
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* Still breaching one minute later — inside the 5-minute cooldown, no re-fire. */
+        /* Still breaching one minute later — inside connection_refire_minutes (5), no re-fire. */
         h.Now = h.Now.AddMinutes(1);
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* Still breaching past the cooldown — re-fires under the SAME metric name. */
+        /* Still breaching past connection_refire_minutes — re-fires under the SAME metric name. */
         h.Now = h.Now.AddMinutes(10);
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);

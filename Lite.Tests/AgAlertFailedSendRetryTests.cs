@@ -26,6 +26,7 @@ namespace Lite.Tests;
 public sealed class AgAlertFailedSendRetryTests
 {
     private const int ServerId = 4242;
+    /* #5493: also the refire interval the sync-behind sweeps below pass (the shape of "Server Unreachable"). */
     private static readonly TimeSpan Cooldown = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan Refire = TimeSpan.FromMinutes(10);
     private static readonly DateTime Start = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
@@ -263,7 +264,7 @@ public sealed class AgAlertFailedSendRetryTests
     }
 
     [Fact]
-    public void ASyncFellBehindWhoseEveryChannelFailed_IsTriedAgainAMinuteLater_NotAfterTheCooldown()
+    public void ASyncFellBehindWhoseEveryChannelFailed_IsTriedAgainAMinuteLater_NotAfterTheRefireInterval()
     {
         var e = Evaluator();
         var behind = new[] { Database(lagSeconds: 900) };
@@ -283,6 +284,30 @@ public sealed class AgAlertFailedSendRetryTests
         Assert.Empty(e.EvaluateDatabases(ServerId, behind, 300, 0, Cooldown));
         At(TimeSpan.FromSeconds(60) + Cooldown);
         Single(e.EvaluateDatabases(ServerId, behind, 300, 0, Cooldown));
+    }
+
+    [Fact]
+    public void ASyncFellBehindWhoseEveryChannelFailed_WithRefireOff_IsTriedAgainAMinuteLater_ThenNeverAgain()
+    {
+        var e = Evaluator();
+        var behind = new[] { Database(lagSeconds: 900) };
+        var first = Single(e.EvaluateDatabases(ServerId, behind, 300, 0, TimeSpan.Zero));
+        e.NoteSent(first, Failed(), Cooldown);
+
+        At(TimeSpan.FromSeconds(59));
+        Assert.Empty(e.EvaluateDatabases(ServerId, behind, 300, 0, TimeSpan.Zero));
+
+        At(TimeSpan.FromSeconds(60));
+        var again = Single(e.EvaluateDatabases(ServerId, behind, 300, 0, TimeSpan.Zero));
+        Assert.StartsWith("Still behind (the previous alert reached no channel", again.DetailText, StringComparison.Ordinal);
+        e.NoteSent(again, Delivered(), Cooldown);
+
+        /* Delivered, and with re-alerting off nothing brings it back. */
+        for (var minute = 2; minute <= 120; minute++)
+        {
+            At(TimeSpan.FromMinutes(minute));
+            Assert.Empty(e.EvaluateDatabases(ServerId, behind, 300, 0, TimeSpan.Zero));
+        }
     }
 
     /* ---------------- a server removed from monitoring ---------------- */
