@@ -332,7 +332,7 @@ VALUES ($1, $2, $3, $4, $5,
             {
                 Assert.NotNull(ex);
                 failed.Add(label);
-            }, ct);
+            }, cancellationToken: ct);
 
         Assert.Equal(new[] { "Maintenance window" }, failed.ToArray());
         Func<FinOpsRecommendation, string> key = r => $"{r.Severity}|{r.Category}|{r.Finding}|{r.Detail}|{r.EstMonthlySavings}";
@@ -404,7 +404,7 @@ VALUES ($1, $2, $3, $4, $5,
 
         var failed = new System.Collections.Generic.List<string>();
         var after = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
-            dataSource, idA, 1000m, TimeoutSeconds, (label, _) => failed.Add(label), ct);
+            dataSource, idA, 1000m, TimeoutSeconds, (label, _) => failed.Add(label), cancellationToken: ct);
 
         Assert.DoesNotContain("VM right-sizing", failed);
         Assert.Contains(after, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU:", StringComparison.Ordinal));

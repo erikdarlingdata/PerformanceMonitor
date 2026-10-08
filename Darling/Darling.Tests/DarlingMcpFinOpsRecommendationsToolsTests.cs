@@ -99,6 +99,24 @@ public sealed class DarlingMcpFinOpsRecommendationsToolsTests
     }
 
     [Fact]
+    public void Envelope_WithASecondaryNote_WritesItBetweenSkippedChecksAndTheRows_AndWithoutOneOmitsTheKey()
+    {
+        var note = AgReplicaScope.SkippedNote(2);
+        var with = Json(DarlingMcpFinOpsRecommendationsTools.Envelope("alpha", 1000m, [], [Rec(1m, "A")], note));
+        Assert.Equal(
+            new[] { "server", "monthly_cost_usd", "cost_reason", "recommendation_count", "skipped_checks", "secondary_databases_note", "recommendations" },
+            with.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(note, with.GetProperty("secondary_databases_note").GetString());
+
+        /* #5558: a server with no secondary copy keeps its old payload, key for key. */
+        var without = Json(DarlingMcpFinOpsRecommendationsTools.Envelope("alpha", 1000m, [], [Rec(1m, "A")], null));
+        Assert.False(without.TryGetProperty("secondary_databases_note", out _));
+        Assert.Equal(
+            new[] { "server", "monthly_cost_usd", "cost_reason", "recommendation_count", "skipped_checks", "recommendations" },
+            without.EnumerateObject().Select(p => p.Name).ToArray());
+    }
+
+    [Fact]
     public void Envelope_WithAMonthlyCost_CarriesItAndNoReason()
     {
         var env = Json(DarlingMcpFinOpsRecommendationsTools.Envelope("alpha", 1000m, [], []));

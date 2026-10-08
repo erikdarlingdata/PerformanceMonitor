@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace PerformanceMonitor.Common;
 
@@ -117,6 +118,22 @@ public static class AgReplicaScope
     /// <summary>The note for a set, or null when it is null or empty.</summary>
     public static string? SkippedNote(IReadOnlyCollection<string>? secondaryDatabases) =>
         secondaryDatabases is null ? null : SkippedNote(secondaryDatabases.Count);
+
+    /// <summary>True when <paramref name="databaseName"/> is in the skipped set (case-insensitive, like the engine's
+    /// database names). A null or empty set, or a null/blank name, is false: fail open.</summary>
+    public static bool IsSkipped(IReadOnlyCollection<string>? secondaryDatabases, string? databaseName)
+    {
+        if (secondaryDatabases is not { Count: > 0 } || string.IsNullOrWhiteSpace(databaseName)) return false;
+        foreach (var name in secondaryDatabases)
+            if (string.Equals(name, databaseName, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    /// <summary>The names that are not a secondary copy on this node, in their original order. The FinOps
+    /// Recommendations list filters its per-database findings with this (#5558). With nothing to skip the input
+    /// comes back unchanged.</summary>
+    public static List<string> WithoutSecondaries(IEnumerable<string> databaseNames, IReadOnlyCollection<string>? secondaryDatabases) =>
+        databaseNames.Where(name => !IsSkipped(secondaryDatabases, name)).ToList();
 
     private static HashSet<string> Empty() => new(StringComparer.OrdinalIgnoreCase);
 }

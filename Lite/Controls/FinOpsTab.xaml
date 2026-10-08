@@ -139,11 +139,16 @@
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
 
-                <!-- No Data Message -->
-                <TextBlock x:Name="RecommendationsNoDataMessage" Grid.Row="1"
-                           Text="No recommendations — all checks passed or insufficient data for analysis."
-                           Margin="10,0" Visibility="Collapsed"
-                           Foreground="{DynamicResource ForegroundMutedBrush}" FontStyle="Italic"/>
+                <!-- Skipped-databases note (#5558) and the no-data message share the row -->
+                <StackPanel Grid.Row="1">
+                    <TextBlock x:Name="RecommendationsSecondaryNoteText" Visibility="Collapsed" TextWrapping="Wrap"
+                               Margin="10,0,10,4" FontSize="11" FontStyle="Italic"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="RecommendationsNoDataMessage"
+                               Text="No recommendations — all checks passed or insufficient data for analysis."
+                               Margin="10,0" Visibility="Collapsed"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" FontStyle="Italic"/>
+                </StackPanel>
 
                 <!-- Recommendations DataGrid -->
                 <DataGrid x:Name="RecommendationsDataGrid"
