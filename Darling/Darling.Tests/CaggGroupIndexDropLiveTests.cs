@@ -318,6 +318,18 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < QueryStoreIntervalPartitionRungTests.LatestRungVersion)
+        {
+            /* V172 (#5571) - the latest Query Store interval table is partitioned; its relkind is the probe's sentinel. */
+            await QueryStoreIntervalPartitionRungTests.RewindTableAsync(connection, "query_store_interval_latest", ct);
+        }
+
+        if (simulatedVersion < QueryStoreIntervalPartitionRungTests.WideRungVersion)
+        {
+            /* V171 (#5571) - the same for the wide table. */
+            await QueryStoreIntervalPartitionRungTests.RewindTableAsync(connection, "query_store_interval_wide", ct);
+        }
+
         if (simulatedVersion < PgIoStatsHourly.RungVersion)
         {
             /* V170 (#5495) - the hourly rollup of pg_io_stats and its state table; the state table is the probe's sentinel. */

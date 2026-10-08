@@ -86,7 +86,9 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
 
         var migrate = source.IndexOf("PgMigrations.MigrateAsync(migrateConnection", System.StringComparison.Ordinal);
-        var launch = source.IndexOf("var queryStoreIndexes = QueryStoreBackgroundIndexes.RunDelayedAsync(", System.StringComparison.Ordinal);
+        /* #5571: the launch is the day-partition task, which runs Phase A and then the index ensures on one task (the
+           VALIDATE and a CREATE INDEX CONCURRENTLY on the legacy table conflict), so the pin names that entry point. */
+        var launch = source.IndexOf("var queryStoreIndexes = QueryStoreIntervalPartitions.RunDelayedAsync(", System.StringComparison.Ordinal);
         var drain = source.IndexOf("await queryStoreIndexes;", System.StringComparison.Ordinal);
         var loopStop = source.IndexOf("PerformanceMonitor Darling collection loop stopped", System.StringComparison.Ordinal);
 

@@ -397,8 +397,12 @@ SET search_path = decoy, pg_catalog;", ct);
     }
 
     [Fact]
-    public async Task ConvertedToAHypertable_WithMigrateData_KeepsTheTrigger_AndLaterInsertsStillMark()
+    public async Task PromotedToDayPartitions_KeepsTheTrigger_OnTheLegacyTableAndTheNewDays_AndLaterInsertsStillMark()
     {
+        /* #5571: collect.query_store_interval_latest is a table partitioned by day, so it cannot be turned into a hypertable
+           any more (create_hypertable refuses a partitioned table). The question this test used to ask of the conversion is
+           now asked of the promotion: the row trigger lives on the parent and PostgreSQL clones it onto every partition
+           (pg_trigger.tgparentid), the legacy table that already holds the rows and each daily partition made later. */
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
@@ -406,42 +410,57 @@ SET search_path = decoy, pg_catalog;", ct);
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
-        /* A fresh scratch database does not inherit the extension; a store without TimescaleDB skips this case. */
-        var timescale = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
-        Assert.SkipUnless(timescale, "TimescaleDB is not available on this store.");
-        await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        var utcNow = DateTime.UtcNow;
+        var today = utcNow.Date;
+        var dBefore = today.AddDays(-12);
+        var dAfter = today.AddDays(-8);
 
-        var today = DateTime.UtcNow.Date;
-        var dBefore = today.AddDays(-8);
-        var dAfter = today.AddDays(-5);
-
-        /* Rows exist before the conversion, so migrate_data moves them into chunks with the trigger already attached. */
+        /* Rows exist before the promotion, in the legacy table, with the trigger already attached. */
         await UpsertAsync(connection, ServerA, new[] { dBefore.AddHours(2), dBefore.AddHours(3) }, 1, 1, ct);
         Assert.Equal(1L, (await BuiltAsync(connection, ServerA, ct))[dBefore]);
 
-        await ExecAsync(connection,
-            "SELECT create_hypertable('collect.query_store_interval_latest', by_range('first_execution_time', INTERVAL '1 day'), if_not_exists => true, migrate_data => true)", ct);
+        /* Promoted as of 12 days ago: the legacy table's bound is T-10, and the create-ahead then fills the days after it. */
+        var promoted = await QueryStoreIntervalPartitions.RunPromotionAsync(
+            connection, QueryStoreIntervalPartitions.Latest, utcNow.AddDays(-12), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
+            TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(50), ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, promoted.Outcome);
+        var created = await QueryStoreIntervalPartitions.CreateAheadAsync(
+            connection, QueryStoreIntervalPartitions.Latest, utcNow, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, created.Outcome);
 
         Assert.Equal(2, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest", ct));
-        Assert.True(await ScalarLongAsync(connection,
-            "SELECT COUNT(*) FROM pg_trigger WHERE tgname = '" + TriggerName + "' AND NOT tgisinternal", ct) >= 1,
-            "the trigger must survive create_hypertable (on the table, and on its chunks)");
+        Assert.Equal(1, await ScalarLongAsync(connection,
+            "SELECT COUNT(*) FROM pg_trigger WHERE tgname = '" + TriggerName + "' AND NOT tgisinternal "
+            + "AND tgrelid = 'collect.query_store_interval_latest'::regclass AND tgparentid = 0", ct));
+        Assert.Equal(1, await ScalarLongAsync(connection,
+            "SELECT COUNT(*) FROM pg_trigger WHERE tgname = '" + TriggerName + "' AND NOT tgisinternal "
+            + "AND tgrelid = 'collect.query_store_interval_latest_legacy'::regclass AND tgparentid <> 0", ct));
+        var dailyPartitions = await ScalarLongAsync(connection,
+            "SELECT COUNT(*) FROM pg_inherits AS i JOIN pg_class AS c ON c.oid = i.inhrelid "
+            + "WHERE i.inhparent = 'collect.query_store_interval_latest'::regclass AND c.relname ~ '_p[0-9]{8}$'", ct);
+        Assert.True(dailyPartitions >= 1, "the promotion made no daily partition");
+        Assert.Equal(dailyPartitions, await ScalarLongAsync(connection,
+            "SELECT COUNT(*) FROM pg_trigger AS t JOIN pg_class AS c ON c.oid = t.tgrelid "
+            + "WHERE t.tgname = '" + TriggerName + "' AND NOT t.tgisinternal AND t.tgparentid <> 0 AND c.relname ~ '_p[0-9]{8}$'", ct));
 
-        /* migrate_data moves each row into its chunk with an INSERT, which fires the trigger: the conversion itself may bump
-           late_seq (once per day for its whole transaction now). That is safe (an extra bump only invalidates a day, and
-           the builder rebuilds it), so the pin is that the marks never go backwards. */
-        var afterMigration = (await BuiltAsync(connection, ServerA, ct))[dBefore];
-        Assert.True(afterMigration >= 1, "the pre-conversion marks must survive create_hypertable, got " + afterMigration);
+        /* The promotion copies and moves no row, so the marks the rows already made are exactly as they were. */
+        var afterPromotion = (await BuiltAsync(connection, ServerA, ct))[dBefore];
+        Assert.Equal(1L, afterPromotion);
 
-        /* Later inserts (new chunks) and re-collections of migrated rows (old chunks) both mark, one bump per transaction. */
+        /* Later inserts (a new daily partition) and re-collections of the old rows (the legacy table) both mark, one bump per transaction. */
         await UpsertAsync(connection, ServerA, new[] { dAfter.AddHours(4) }, 1, 1, ct);
+        Assert.Equal(
+            "query_store_interval_latest_p" + dAfter.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
+            await ScalarStringAsync(connection,
+                "SELECT c.relname FROM collect.query_store_interval_latest AS t JOIN pg_class AS c ON c.oid = t.tableoid WHERE t.first_execution_time = '"
+                + dAfter.AddHours(4).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "'", ct));
         await UpsertAsync(connection, ServerA, new[] { dBefore.AddHours(2) }, executionCount: 2, collectionOffsetSeconds: 500, ct);
 
         var built = await BuiltAsync(connection, ServerA, ct);
         Assert.Equal(1L, built[dAfter]);
         Assert.Equal(1L, built[dAfter.AddDays(1)]);
-        Assert.Equal(afterMigration + 1, built[dBefore]);
-        Assert.Equal(afterMigration + 1, built[dBefore.AddDays(1)]);
+        Assert.Equal(afterPromotion + 1, built[dBefore]);
+        Assert.Equal(afterPromotion + 1, built[dBefore.AddDays(1)]);
     }
 
     [Fact]
@@ -564,8 +583,12 @@ WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time,
         async Task<(long, long)> ReadAsync()
         {
             await ExecAsync(connection, "SELECT pg_stat_force_next_flush()", ct);
+            /* #5571: the parent is partitioned and holds no rows or counters of its own; the updates land in its leaf
+               partitions (the legacy table and the daily ones), so the counters are summed over the leaves. */
             await using var command = new NpgsqlCommand(
-                "SELECT n_tup_upd, n_tup_hot_upd FROM pg_stat_user_tables WHERE schemaname = 'collect' AND relname = 'query_store_interval_latest'", connection);
+                "SELECT COALESCE(SUM(s.n_tup_upd), 0)::bigint, COALESCE(SUM(s.n_tup_hot_upd), 0)::bigint "
+                + "FROM pg_partition_tree('collect.query_store_interval_latest'::regclass) AS p "
+                + "JOIN pg_stat_user_tables AS s ON s.relid = p.relid WHERE p.isleaf", connection);
             await using var reader = await command.ExecuteReaderAsync(ct);
             await reader.ReadAsync(ct);
             return (reader.GetInt64(0), reader.GetInt64(1));

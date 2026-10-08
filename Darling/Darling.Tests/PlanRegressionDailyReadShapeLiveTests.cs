@@ -119,8 +119,12 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
     }
 
     [Fact]
-    public async Task OnAHypertable_TheLiveHalfScansOnlyTheChunksAtOrAboveTheLiveFloor()
+    public async Task OnADayPartitionedStore_TheLiveHalfScansOnlyThePartitionsAtOrAboveTheLiveFloor()
     {
+        /* #5571: query_store_interval_latest is a table partitioned by day, so the old "make it a hypertable" setup is
+           refused ("already partitioned") and the chunk exclusion this test measured is now partition pruning. The
+           store is promoted as of 19 days ago (the legacy bound is T-17, the create-ahead covers the rest up to the 15-day horizon
+           and T+3), so the seeded days land in daily partitions, not in the legacy table (whose rows would be read by its bound alone), and the floor's reach is countable. */
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 read-shape test.");
         var ct = TestContext.Current.CancellationToken;
@@ -129,34 +133,45 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
-        Assert.SkipWhen(!timescaleEnabled, "TimescaleDB is not available on this cluster.");
-        await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
-        /* A one-day chunk, so the 17 seeded days are 17 chunks and the floor's reach is countable. */
-        await ExecAsync(connection,
-            "SELECT create_hypertable('collect.query_store_interval_latest', by_range('first_execution_time', INTERVAL '1 day'), migrate_data => true)", ct);
+        var utcNow = DateTime.UtcNow;
+        var promoted = await QueryStoreIntervalPartitions.RunPromotionAsync(
+            connection, QueryStoreIntervalPartitions.Latest, utcNow.AddDays(-19), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
+            TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(50), ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, promoted.Outcome);
+        var created = await QueryStoreIntervalPartitions.CreateAheadAsync(
+            connection, QueryStoreIntervalPartitions.Latest, utcNow, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, created.Outcome);
 
         var (today, built) = await SeedAndBuildAsync(connection, ct);
         var floor = PgFactCollector.PlanRegressionWindowFloor(today.AddDays(-14));
         var builtDays = built.Select(DateOnly.FromDateTime).ToList();
         Assert.Equal(12, builtDays.Count);
 
-        var chunks = await ScalarAsync(connection,
-            "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_interval_latest'", ct);
-        Assert.True(chunks >= 17, $"the seed made {chunks} chunk(s); the test needs the 17 days in separate chunks");
+        var partitions = await ScalarAsync(connection,
+            "SELECT count(*) FROM pg_inherits AS i JOIN pg_class AS c ON c.oid = i.inhrelid WHERE i.inhparent = 'collect.query_store_interval_latest'::regclass AND c.relname ~ '_p[0-9]{8}$'", ct);
+        var seededHome = await ScalarAsync(connection,
+            "SELECT count(*) FROM collect.query_store_interval_latest_legacy", ct);
+        Assert.True(partitions >= 17, $"the store has {partitions} daily partition(s); the test needs the 17 seeded days in separate ones");
+        Assert.Equal(0, seededHome);
 
         var plan = await ExplainAsync(connection, today, floor, builtDays, ct);
-        var live = ScansOf(plan, "_hyper_").ToList();
+        var live = ScansOf(plan, "query_store_interval_latest_p").ToList();
         Assert.NotEmpty(live);
         var livePlan = live.Select(s => s.Relation).Distinct().ToList();
 
-        /* The live floor is the day before the first open day, T-3; chunks for T-3 through T are 4 (a skewed server's
-           future rows could add more, none are seeded). Excluded chunks do not appear as scans at all. */
+        /* The live floor is the day before the first open day, T-3. A partition that holds only older days must not
+           appear as a scan at all: excluded partitions are pruned. The partitions created ahead (T+1 through T+3) are
+           empty and may be scanned. The rows the scans of T-3 through T return are all the live half asks for. */
+        var scannedBelowFloor = livePlan
+            .Where(r => DateTime.ParseExact(r[^8..], "yyyyMMdd", CultureInfo.InvariantCulture) < floor.Date)
+            .ToList();
         var liveReturned = live.Sum(s => s.RowsReturned);
-        Report("hypertable", await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_interval_latest", ct),
-            live.Sum(s => s.RowsRead), liveReturned, live.Sum(s => s.Blocks), 0, 0, 0, $"{livePlan.Count} chunk(s) scanned of {chunks}");
-        Assert.True(livePlan.Count <= 5, $"the live half scanned {livePlan.Count} of {chunks} chunks; the floor reaches back to T-3 only");
+        Report("day partitions", await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_interval_latest", ct),
+            live.Sum(s => s.RowsRead), liveReturned, live.Sum(s => s.Blocks), 0, 0, 0, $"{livePlan.Count} partition(s) scanned of {partitions}");
+        Assert.True(scannedBelowFloor.Count == 0,
+            $"the live half scanned {scannedBelowFloor.Count} partition(s) older than the floor ({string.Join(",", scannedBelowFloor)}) of {partitions}");
+        Assert.True(livePlan.Count <= 8, $"the live half scanned {livePlan.Count} of {partitions} partitions; the floor reaches back to T-3 only and three more are created ahead");
         Assert.Equal(3 * RowsPerServerDay, liveReturned);
     }
 
