@@ -768,6 +768,23 @@ export function metricBands(c) {
     : "no collector banded yet";
   const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
+  /* #5489: a server whose newest collection is past the fleet's offline mark (is_online === false, the same
+     signal the Collectors chip above and the card's status line read) has no CURRENT reading. The values the
+     read still holds are the last ones collected, days ago: a 0% CPU, "ok" memory and 77 free threads off a
+     12-day-old row read as live health beside a CPU chart that says it has no data. So the five measurement
+     chips read "n/a" in the neutral Unknown tone, and each says when the last collection was. */
+  if (c.is_online === false) {
+    const staleDetail = c.last_collection ? "last collected " + relTime(c.last_collection) : "no recent collection";
+    return el("div", { class: "metric-bands stale" }, [
+      chip("CPU", "n/a", "Unknown", staleDetail),
+      chip("Threads", "n/a", "Unknown", staleDetail),
+      chip("Memory", "n/a", "Unknown", staleDetail),
+      chip("Blocking", "n/a", "Unknown", staleDetail),
+      chip("Deadlocks", "n/a", "Unknown", staleDetail),
+      chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+    ]);
+  }
+
   return el("div", { class: "metric-bands" }, [
     chip("CPU", cpuValue, c.cpu_severity, cpuDetail),
     chip("Threads", threadsValue, c.threads_severity, threadsDetail),

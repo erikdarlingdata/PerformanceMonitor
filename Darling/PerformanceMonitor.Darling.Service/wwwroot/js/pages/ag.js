@@ -161,7 +161,11 @@ function agCard(g) {
 /* Whose view this is, and how fresh. The two collector sweeps land independently, so the database grain gets its
    own "as of" whenever it differs from the replica grain. */
 function viewSubtitle(g) {
-  let text = "As reported by " + g.server_name + " · collected " + relTime(g.collection_time);
+  /* #5489: a group past the fleet's offline mark is a memory of the last snapshot, not a current status — say
+     so ahead of the "as reported by" line, which keeps the time the snapshot was taken. */
+  let text =
+    (g.is_stale ? "Stale: no current data. " : "") +
+    "As reported by " + g.server_name + " · " + (g.is_stale ? "last collected " : "collected ") + relTime(g.collection_time);
   if (g.database_collection_time && g.database_collection_time !== g.collection_time) {
     text += " · databases " + relTime(g.database_collection_time);
   }
