@@ -44,8 +44,8 @@ internal readonly record struct StagedDatabaseWatermark(DateTime? BatchMax, bool
 /// <item>value set and witness null or not above F: miss.</item>
 /// </list>
 ///
-/// <para><b>Assumption:</b> the only writers of <c>query_store_stats</c> are the runner's live path (which
-/// advances this cache), the backfill (which invalidates it) and retention (which drops whole days, never
+/// <para><b>Assumption:</b> the only writers of <c>query_store_stats</c> are the runner's live path (both of its
+/// arms, the enumerated per-item one and the Azure SQL Database per-database one, advance this cache, #5514), the backfill (which invalidates it) and retention (which drops whole days, never
 /// a row newer than the floor). Retention is configured in whole days, so it can never remove a witness
 /// row inside a three-hour floor. A new writer must invalidate this cache.
 /// A point-in-time restore, or an async-replica failover of an external store, can leave the cached value too
