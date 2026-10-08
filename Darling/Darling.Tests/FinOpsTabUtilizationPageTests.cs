@@ -149,7 +149,7 @@ public sealed class FinOpsTabUtilizationPageTests
         Assert.Contains("const BAND_SEV = { good: \"Healthy\", fair: \"Warning\", poor: \"Critical\" };", tab);
         Assert.Contains("sev: BAND_SEV[data.health_band]", tab);
         Assert.Contains("\"N/A\"", tab);
-        Assert.Contains("health_band = FinOpsUtilizationFigures.HealthBand(score)", UtilizationSource());
+        Assert.Contains("health_band = score is int scoreValue ? FinOpsUtilizationFigures.HealthBand(scoreValue) : null", UtilizationSource());
         var figures = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsUtilizationFigures.cs");
         Assert.Contains("BandGood = \"good\"", figures);
         Assert.Contains("BandFair = \"fair\"", figures);

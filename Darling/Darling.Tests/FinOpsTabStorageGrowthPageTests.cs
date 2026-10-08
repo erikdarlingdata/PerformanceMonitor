@@ -97,7 +97,7 @@ public sealed class FinOpsTabStorageGrowthPageTests
     [Fact]
     public void EveryDatabaseColumnKeyIsEmittedByTheDatabaseRow() =>
         // has_sibling_row and has_log_service_file are left out on purpose: the desktop grid shows neither, and the note says what they mean.
-        AssertKeysMatchRow("DATABASE_COLUMNS", "StorageGrowthDatabaseRow", "\n    };", 11, "has_sibling_row", "has_log_service_file");
+        AssertKeysMatchRow("DATABASE_COLUMNS", "StorageGrowthDatabaseRow", "\n    };", 13, "has_sibling_row", "has_log_service_file", "size_7d_ago_note", "size_30d_ago_note");
 
     [Fact]
     public void EveryObjectColumnKeyIsEmittedByTheObjectRow() =>
