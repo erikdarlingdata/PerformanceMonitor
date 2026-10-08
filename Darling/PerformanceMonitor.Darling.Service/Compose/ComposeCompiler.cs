@@ -1419,6 +1419,12 @@ public static class ComposeCompiler
         return partials.Unmapped || partials.Stamped.Count == 0 ? null : new StampPlan(partials.Stamped, primary, overlayValue);
     }
 
+    /// <summary>Whether <see cref="Compile"/> would read the Query Store rollup for this panel and context (#5582 part 3). The runner asks
+    /// before the guard, so the guard weights the rollup hours only for a panel whose text really reads them: a panel the rollup cannot
+    /// serve (a partial with no rollup column, a module-join group) compiles to the wide-table text and counts every hour at 1.0.</summary>
+    internal static bool ReadsStampRollup(PanelPlan plan, ComposeRunContext context) =>
+        TryPlanStamp(plan, ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage), context, StampColumnFor) is not null;
+
     /// <summary>One wide row as the partial <paramref name="partial"/> would be over just that row (the stale and tail arms):
     /// the count is 1, a sum is the value as numeric, a count of a column is whether it is non-NULL, and the minimum and the
     /// maximum are the value. Combining these over any set of rows gives the aggregate over those rows, exactly.</summary>
