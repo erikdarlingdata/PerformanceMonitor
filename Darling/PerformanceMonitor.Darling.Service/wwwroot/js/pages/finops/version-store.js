@@ -10,6 +10,7 @@
    top databases, both from one get_pvs_stats read. A server whose engine has no PVS shows the read's own message. PVS counts off-row versions only, matching the desktop label. */
 
 import { VIZ } from "../../panels.js";
+import { gatedEmptyStrip } from "./gate.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
 import { el, readTool, readErrorStrip, emptyStrip, errorStrip, loadingStrip, mount, fmtNum, localTime, windowFromHours } from "../../util.js";
 
@@ -80,7 +81,7 @@ async function load(server, ctx, body) {
     return;
   }
   if (res.kind === "empty") {
-    mount(body, emptyStrip(res.message));
+    mount(body, gatedEmptyStrip(res, ctx));
     return;
   }
   try {

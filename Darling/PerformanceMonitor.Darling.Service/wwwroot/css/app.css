@@ -500,6 +500,15 @@ table.data tbody tr.band-Offline { background: rgba(168, 174, 186, 0.16); }
 /* The stored-plan panel under a row's Plan button (#4843): the indented XML in a scrollable block. */
 .plan-cell { min-width: 8rem; }
 .plan-panel { margin-top: 6px; max-width: 70vw; }
+/* An open panel is drawn full width under its row, not in the last column (js/plan-row.js): the row is the containing
+   block, the panel sits at its bottom, and the spacer in the cell makes the row tall enough to hold it. left:0/right:0 is
+   the fallback (a cell outside a scrolling grid); plan-row.js overrides left and width inline so the panel covers the
+   grid's visible area when the grid is scrolled sideways. */
+table.data tbody tr:has(> td > .plan-cell.plan-open) { position: relative; }
+table.data tbody tr:has(> td > .plan-cell.plan-open) > td { vertical-align: top; }
+.plan-cell.plan-open > .plan-panel { position: absolute; left: 0; right: 0; bottom: 0; max-width: none; margin-top: 0; padding: 6px 8px; box-sizing: border-box; background: var(--bg); border-top: 1px solid var(--border); white-space: normal; z-index: 1; }
+.plan-cell.plan-open > .plan-panel > pre { max-width: 70vw; }
+.plan-spacer { width: 1px; }
 .plan-panel pre.plan-xml, .plan-panel pre.plan-json { max-height: 28rem; overflow: auto; white-space: pre; overflow-wrap: normal; padding: 6px; border: 1px solid var(--border); }
 /* Column filters (#4843): the header button, the text box and the active-filter strip above a data table. */
 .col-filter-btn { margin-left: 4px; padding: 0 3px; font-size: 11px; line-height: 1.3; background: none; border: 1px solid transparent; color: inherit; opacity: 0.55; cursor: pointer; }

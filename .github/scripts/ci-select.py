@@ -3,10 +3,13 @@
 
 Input: the changed files of a run (and the event). Output: which test jobs run and in what scope.
 
-Two readers use the same code:
+These readers use the same code:
 
 * build.yml's jobs call `lite-scope`, `darling-scope` and `tree-scope` with the area answers
   dorny/paths-filter already computed, and get the decision back as `key=value` lines for $GITHUB_OUTPUT.
+* `map-select` (slice 1 of change 4; nothing in the workflow calls it yet) answers, from a class-to-file map, which
+  test classes a pull request needs. See map_select() for the map's schema. `--replay --map FILE` also replays the
+  corpus against such a map and reports what it would miss (it does not fail on that yet).
 * `--replay` reads .github/ci-history/failures.jsonl (a trimmed record of every run with a real test failure)
   and checks that each failing class would have been selected for that run's changed files. A cut to the rules
   lands only while the replay finds 0 misses. A Guard-tagged test runs it on every pull request.
@@ -21,9 +24,12 @@ Standard library only (the Windows and Linux runners both have Python 3).
 from __future__ import annotations
 
 import argparse
+import datetime
+import gzip
 import json
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -409,6 +415,278 @@ def replay(corpus: str = CORPUS, root: str = ROOT, quiet: bool = False) -> int:
 
 
 # ---------------------------------------------------------------------------------------------------------
+# Selection from a class-to-file map (#5459 change 4, slice 1: nothing in build.yml calls this yet).
+# ---------------------------------------------------------------------------------------------------------
+
+MAP_SCHEMA = 1
+MAP_MAX_AGE_DAYS = 7
+MAP_MAX_DRIFT = 300
+
+# Files whose change can alter any test in ways a call map cannot see: the build and restore configuration.
+# selection_args() adds the root and shared-library areas read from build.yml, so the lists cannot disagree.
+KEEP_FULL = (
+    ".github/workflows/build.yml",
+    "Directory.Build.props",
+    "Directory.Build.targets",
+    "Directory.Packages.props",
+    "global.json",
+    "nuget.config",
+    "NuGet.config",
+    "**/*.csproj",
+    "**/*.props",
+    "**/*.targets",
+    "**/packages.lock.json",
+    "**/xunit.runner.json",
+)
+
+# The documentation allowlist (the `docs` filter in build.yml); selection_args() passes the live one.
+DOC_PATTERNS = (
+    "**/*.md",
+    "LICENSE",
+    "CITATION.cff",
+    ".gitignore",
+    ".gitattributes",
+    "llms.txt",
+    "docs/**/*.{md,svg,png,jpg,jpeg,gif}",
+    "Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}",
+)
+
+
+_TEST_PROJECT_FILE = re.compile(r"(^|/)[^/]*Tests/")
+
+
+def _full(reason: str) -> dict:
+    return {"full": True, "reason": reason, "selected": {}, "why": {}, "seconds": {}, "total": {}}
+
+
+def _ids(value: object, universe: list) -> set[str]:
+    """Paths for a list of file ids. An id is an index into the map's `files`; a string is taken as the path itself."""
+    out: set[str] = set()
+    if value is None:
+        return out
+    if isinstance(value, (int, str)):
+        value = [value]
+    for v in value:  # type: ignore[union-attr]
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            if 0 <= v < len(universe):
+                out.add(universe[v])
+        elif isinstance(v, str):
+            out.add(v)
+    return out
+
+
+def _seconds(entry: dict) -> float:
+    v = entry.get("seconds", 0)
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
+def _parse_time(text: object) -> "datetime.datetime | None":
+    if not isinstance(text, str):
+        return None
+    try:
+        t = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=datetime.timezone.utc)
+
+
+def map_select(test_map: object, changed: list[str], drift: "list[str] | None", discovered: dict,
+               *, event: str = "pull_request", keep_full: "tuple[str, ...] | list[str]" = KEEP_FULL,
+               doc_patterns: "tuple[str, ...] | list[str]" = DOC_PATTERNS,
+               now: "datetime.datetime | None" = None, max_age_days: "float | None" = MAP_MAX_AGE_DAYS,
+               max_drift: int = MAP_MAX_DRIFT) -> dict:
+    """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
+    (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
+
+    Schema 1 of the map (nightly's `test-map.json.gz`):
+
+        {"schema": 1, "sha": "<commit the map was built at>", "built_at": "<ISO 8601 UTC>", "tool": "<producer>",
+         "files": ["<repo path>", ...],                       # the universe; an id below is an index into it
+         "classes": {"<suite>": {"<Class>": {"own": <id or [ids]>,       # the class's own source file(s)
+                                             "files": [<id>, ...],       # every file the class ran code from
+                                             "seconds": <float>}}},      # its last measured run time
+         "text_patterns": {"<Class>": ["<glob>", ...] or "tree"}}        # sources read as text; "tree" = any
+
+    Arguments: `changed` is the pull request's files; `drift` the files changed between the map's commit and the
+    merge base (None when they could not be computed); `discovered` is `{suite: {Class: {"Key=Value", ...}}}` as
+    scan_classes() returns it, which is how a class the map has never seen is found.
+
+    A class is selected when it carries Stage=Guard, its own file changed, it covers a changed file, a text pattern
+    of it matches a changed file, it reads the whole tree and any non-documentation file changed, or the map has
+    never seen it. A file changed since the map counts as changed too (it may have grown new call edges).
+
+    Returns `{"full": bool, "reason": str, "selected": {suite: [Class, ...]}, "why": {suite: {Class: reason}},
+    "seconds": {suite: float}, "total": {suite: int}}`. FULL (never "nothing") whenever the map cannot be trusted:
+    missing, unreadable, wrong schema, too old, drift over `max_drift` files, a keep-full file, a file the map knows
+    nothing about, or any event but a pull request. That includes a new product .cs file: types found by reflection,
+    DI or attribute scanning change what a census class sees without any file it covers changing. The one exception
+    is a new .cs file under a test project (a `*Tests/` or `*.Tests/` directory) while `discovered` holds a class the
+    map has never seen; that class runs as a "new class"."""
+    if event != "pull_request":
+        return _full(f"event {event or '(none)'} always runs everything")
+    if test_map is None:
+        return _full("no test map")
+    if not isinstance(test_map, dict):
+        return _full("test map unreadable")
+    if test_map.get("schema") != MAP_SCHEMA:
+        return _full(f"test map schema {test_map.get('schema')!r}, expected {MAP_SCHEMA}")
+    universe = test_map.get("files")
+    classes = test_map.get("classes")
+    patterns = test_map.get("text_patterns", {})
+    if not isinstance(universe, list) or not isinstance(classes, dict) or not isinstance(patterns, dict):
+        return _full("test map unreadable")
+    if max_age_days is not None:
+        built = _parse_time(test_map.get("built_at"))
+        if built is None:
+            return _full("test map has no readable build time")
+        clock = now or datetime.datetime.now(datetime.timezone.utc)
+        if clock - built > datetime.timedelta(days=max_age_days):
+            return _full(f"test map older than {max_age_days:g} days")
+    if drift is None:
+        return _full("drift since the map's commit unknown")
+    if len(drift) > max_drift:
+        return _full(f"{len(drift)} files changed since the map (over {max_drift})")
+
+    effective = list(dict.fromkeys(list(changed) + list(drift)))
+    for f in effective:
+        if any(matches(p, f) for p in keep_full):
+            return _full(f"{f} is a keep-full file")
+    live = [f for f in effective if not any(matches(p, f) for p in doc_patterns)]
+
+    known: set[str] = {u for u in universe if isinstance(u, str)}
+    parsed: dict[str, dict[str, tuple[set[str], set[str]]]] = {}
+    for suite, entries in classes.items():
+        if not isinstance(entries, dict):
+            return _full("test map unreadable")
+        parsed[suite] = {}
+        for cls, e in entries.items():
+            if not isinstance(e, dict):
+                return _full("test map unreadable")
+            own, covered = _ids(e.get("own"), universe), _ids(e.get("files"), universe)
+            parsed[suite][cls] = (own, covered)
+            known |= own | covered
+    globs: dict[str, "list[str] | str"] = {}
+    for cls, p in patterns.items():
+        if p == "tree" or (isinstance(p, list) and all(isinstance(x, str) for x in p)):
+            globs[cls] = p
+        else:
+            return _full("test map unreadable")
+
+    def text_hit(cls: str) -> bool:
+        g = globs.get(cls)
+        if g == "tree":
+            return bool(live)
+        return isinstance(g, list) and any(matches(p, f) for p in g for f in live)
+
+    new_classes = any(cls not in parsed.get(suite, {}) for suite, found in discovered.items() for cls in found)
+    for f in live:
+        if f in known:
+            continue
+        if any(isinstance(g, list) and any(matches(p, f) for p in g) for g in globs.values()):
+            continue
+        if f.endswith(".cs"):
+            if _TEST_PROJECT_FILE.search(f) and new_classes:
+                continue  # a new test file: its classes are found through `discovered`
+            return _full(f"new file not in the map: {f}")
+        return _full(f"{f} is in no class, no text pattern and not in the map")
+
+    live_set = set(live)
+    selected: dict[str, list[str]] = {}
+    why: dict[str, dict[str, str]] = {}
+    seconds: dict[str, float] = {}
+    total: dict[str, int] = {}
+    for suite in sorted(set(parsed) | set(discovered)):
+        found = discovered.get(suite, {})
+        mapped = parsed.get(suite, {})
+        reasons: dict[str, str] = {}
+        for cls, (own, covered) in mapped.items():
+            if live_set & own:
+                reasons[cls] = "own file changed"
+            elif live_set & covered:
+                reasons[cls] = "covers a changed file"
+            elif text_hit(cls):
+                reasons[cls] = "reads the tree" if globs.get(cls) == "tree" else "text pattern"
+        for cls, traits in found.items():
+            if cls not in mapped:
+                reasons[cls] = "new class"
+            elif "Stage=Guard" in traits:
+                reasons.setdefault(cls, "guard stage")
+        selected[suite] = sorted(reasons)
+        why[suite] = {c: reasons[c] for c in sorted(reasons)}
+        seconds[suite] = round(sum(_seconds(classes[suite][c]) for c in reasons if c in mapped), 3)
+        total[suite] = len(set(mapped) | set(found))
+    return {"full": False, "reason": "", "selected": selected, "why": why, "seconds": seconds, "total": total}
+
+
+def load_map(path: str) -> "dict | None":
+    """The map file (plain or gzip), or None when it is missing or not JSON."""
+    try:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as fh:  # type: ignore[operator]
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def git_drift(map_sha: str, base: str, root: str = ROOT) -> "list[str] | None":
+    """`git diff --no-renames --name-only <map sha>..<base>`: both paths of a rename count. None when git cannot say."""
+    try:
+        out = subprocess.run(["git", "-C", root, "diff", "--no-renames", "--name-only", f"{map_sha}..{base}"],
+                             capture_output=True, text=True, timeout=120, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [ln.strip() for ln in out.split("\n") if ln.strip()]
+
+
+def selection_args(rules: Rules) -> dict:
+    """The keep-full and documentation patterns, read from the same filters the workflow evaluates."""
+    keep = list(KEEP_FULL)
+    for name in ("root", "core", "installer_core"):
+        keep.extend(rules.build.get(name, []))
+    return {"keep_full": tuple(dict.fromkeys(keep)), "doc_patterns": tuple(rules.build["docs"])}
+
+
+def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, quiet: bool = False) -> int:
+    """Like replay(), but asks the map: would each failing class of each corpus row have been selected, taking the map
+    as current (no drift, no age check)? Returns the miss count. Reports only; the caller does not fail on it yet."""
+    extra = selection_args(Rules())
+    accepted = load_accepted()
+    tree = scan_classes(root)
+    rows = checked = misses = full_rows = accepted_seen = 0
+    missed: list[str] = []
+    with open(corpus, encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            rows += 1
+            sel = map_select(test_map, row["changed_files"], [], tree, event=row["event"], max_age_days=None, **extra)
+            full_rows += bool(sel["full"])
+            for cls in row["failed_classes"]:
+                prefix, _, simple = cls.rpartition(".")
+                suite = SUITE_BY_PREFIX.get(prefix)
+                if suite is None or simple not in tree.get(suite, {}):
+                    continue
+                checked += 1
+                if sel["full"] or simple in sel["selected"].get(suite, []):
+                    continue
+                if (row["head_sha"][:10], cls) in accepted:
+                    accepted_seen += 1
+                    continue
+                misses += 1
+                missed.append(f"{row['date']} {row['head_sha'][:10]} {cls} files={len(row['changed_files'])}"
+                              f" e.g. {row['changed_files'][0]}")
+    if not quiet:
+        print(f"map replay: {rows} rows ({full_rows} FULL), {checked} failing classes checked, {accepted_seen} accepted, "
+              f"{misses} misses (reported, not failing yet)")
+        for m in missed[:40]:
+            print("MAP-MISS", m)
+    return misses
+
+
+# ---------------------------------------------------------------------------------------------------------
 # CLI.
 # ---------------------------------------------------------------------------------------------------------
 
@@ -420,6 +698,7 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--replay", action="store_true", help="replay the failure corpus against today's rules")
     ap.add_argument("--corpus", default=CORPUS)
+    ap.add_argument("--map", help="with --replay: also replay the corpus against this class-to-file map (reports only)")
     sub = ap.add_subparsers(dest="cmd")
 
     ls = sub.add_parser("lite-scope", help="how much of the Lite suite a leg runs (workflow step)")
@@ -443,9 +722,40 @@ def main(argv: list[str]) -> int:
     dc.add_argument("--event", default="pull_request")
     dc.add_argument("files", nargs="*")
 
+    ms = sub.add_parser("map-select", help="which classes a pull request runs, from a class-to-file map (not wired in yet)")
+    ms.add_argument("--map", required=True, help="the test map (JSON, or .gz)")
+    ms.add_argument("--event", default="pull_request")
+    ms.add_argument("--base", help="the merge base; the drift is `git diff --no-renames <map sha>..<base>`")
+    ms.add_argument("--drift-file", help="the drift as one path per line, instead of --base (`-` for none)")
+    ms.add_argument("--root", default=ROOT, help="the tree whose test classes are listed (default: this repository)")
+    ms.add_argument("--files-from", help="the changed files as one path per line, in place of the arguments")
+    ms.add_argument("files", nargs="*")
+
     args = ap.parse_args(argv)
     if args.replay:
-        return 1 if replay(args.corpus) else 0
+        misses = replay(args.corpus)
+        if args.map:
+            map_replay(load_map(args.map), args.corpus)  # reports; does not fail the replay yet
+        return 1 if misses else 0
+    if args.cmd == "map-select":
+        files = list(args.files)
+        if args.files_from:
+            with open(args.files_from, encoding="utf-8") as fh:
+                files += [ln.strip() for ln in fh if ln.strip()]
+        test_map = load_map(args.map)
+        drift: "list[str] | None" = None
+        if args.drift_file == "-":
+            drift = []
+        elif args.drift_file:
+            with open(args.drift_file, encoding="utf-8") as fh:
+                drift = [ln.strip() for ln in fh if ln.strip()]
+        elif args.base and isinstance(test_map, dict) and isinstance(test_map.get("sha"), str):
+            drift = git_drift(test_map["sha"], args.base)
+        result = map_select(test_map, files, drift, scan_classes(args.root), event=args.event, **selection_args(Rules()))
+        if result["full"]:
+            print(f"::notice::test map: running everything ({result['reason']})")
+        print(json.dumps(result, indent=1))
+        return 0
     if args.cmd == "lite-scope":
         mode = lite_scope(args.event, _bool(args.lite), _bool(args.core), _bool(args.root), _bool(args.reads),
                           _bool(args.linked))
