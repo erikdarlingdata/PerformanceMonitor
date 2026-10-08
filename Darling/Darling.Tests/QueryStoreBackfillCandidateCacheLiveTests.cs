@@ -195,17 +195,18 @@ VALUES
         await SeedAsync(connection, Server, "busy", floor.AddHours(1), ct);
 
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var now = new DateTime(2026, 6, 15, 12, 0, 0, DateTimeKind.Utc);
+        long now = 1_000;
         var cached = Backfill(postgres, new QueryStoreWriteFence());
-        cached.UtcNowForCandidateCache = () => now;
+        cached.TimestampForCandidateCache = () => now;
+        static long Ticks(TimeSpan span) => (long)(span.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
 
         await cached.GetCandidateDatabasesAsync(Server, floor, NoState, ct);
         await SeedAsync(connection, Server, "restored", floor.AddHours(2), ct);
 
-        now += QueryStoreBackfill.CandidateCacheMaxAge - TimeSpan.FromSeconds(1);
+        now += Ticks(QueryStoreBackfill.CandidateCacheMaxAge - TimeSpan.FromSeconds(1));
         Assert.Equal(new[] { "busy" }, await cached.GetCandidateDatabasesAsync(Server, floor, NoState, ct));
 
-        now += TimeSpan.FromSeconds(1);
+        now += Ticks(TimeSpan.FromSeconds(1));
         Assert.Equal(new[] { "busy", "restored" }, await cached.GetCandidateDatabasesAsync(Server, floor, NoState, ct));
         Assert.Equal(2, cached.CandidateStoreReadsForTests);
     }
@@ -250,6 +251,140 @@ VALUES
         await unfenced.GetCandidateDatabasesAsync(Server, floor, NoState, ct);
 
         Assert.Equal(2, unfenced.CandidateStoreReadsForTests);
+    }
+
+    private static ServerRuntime RuntimeFor(int serverId) => new()
+    {
+        Config = new MonitoredServer { Name = "cache-qs", Host = "cache-qs" },
+        ConnectionString = "Server=cache-qs",
+        Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+        StorageName = "cache-qs",
+        ServerId = serverId,
+        EngineEdition = 3,
+    };
+
+    private static QueryStoreCollector.Row QueryStoreRow(string database, DateTime when) => new()
+    {
+        DatabaseName = database,
+        QueryId = 7,
+        PlanId = 7,
+        ExecutionTypeDesc = "Regular",
+        FirstExecutionTime = when,
+        LastExecutionTime = when,
+        QueryHash = "0x00000007",
+        QueryPlanHash = "0x00000007",
+        ExecutionCount = 1,
+        AvgCpuTimeUs = 10,
+        AvgDurationUs = 20,
+        RuntimeStatsIntervalId = 7,
+    };
+
+    /// <summary>Pin 7. The hand-off the cache depends on, pinned by behavior: a NEW database written through the
+    /// runner's own backfill entry, with the fence wired as the worker wires it (the runner and the backfill share one
+    /// fence), makes the next tick read the store and list it. If the runner stopped handing its database names to
+    /// the fence, the cache would serve the old list until it aged out.</summary>
+    [Fact]
+    public async Task ANewDatabaseWrittenThroughTheRunner_MakesTheNextTickRead_AndIsListed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var floor = At(15, 9);
+        var (scratch, connection) = await CreateStoreAsync(ct);
+        await using var scratchOwner = scratch;
+        await using var connectionOwner = connection;
+
+        await SeedAsync(connection, Server, "busy", floor.AddHours(1), ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var fence = new QueryStoreWriteFence();
+        var deltas = new CollectorDeltaCalculator();
+        var runner = new DarlingCollectorRunner(postgres, deltas, queryStoreWriteFence: fence);
+        var backfill = new QueryStoreBackfill(postgres, runner, deltas, logger: null,
+            hasContinuousAggregates: () => true, writeFence: fence);
+
+        Assert.Equal(new[] { "busy" }, await backfill.GetCandidateDatabasesAsync(Server, floor, NoState, ct));
+        Assert.Equal(new[] { "busy" }, await backfill.GetCandidateDatabasesAsync(Server, floor, NoState, ct));
+        Assert.Equal(1, backfill.CandidateStoreReadsForTests);
+
+        var server = RuntimeFor(Server);
+        var written = floor.AddHours(2);
+        await runner.WriteBackfillBatchAsync(
+            QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { QueryStoreRow("brand_new", written) },
+            server, written, new CollectorContext
+            {
+                ServerId = Server,
+                ServerName = server.StorageName,
+                CollectionTime = written,
+                Deltas = deltas,
+                Target = server.Target,
+            }, ct);
+
+        var list = await backfill.GetCandidateDatabasesAsync(Server, floor, NoState, ct);
+        Assert.Equal(new[] { "brand_new", "busy" }, list);
+        Assert.Equal(2, backfill.CandidateStoreReadsForTests);
+        Assert.Equal(await Backfill(postgres, fence: null).GetCandidateDatabasesAsync(Server, floor, NoState, ct), list);
+    }
+
+    /// <summary>Pin 8. The fence snapshot is taken BEFORE the candidate read. A write that begins and ends after the
+    /// read's statement started (the hook runs just after the rows come back) must leave the entry invalidated; with
+    /// the snapshot taken after the read it would sit at or below the snapshot's sequence and the list would be
+    /// served without the new database.</summary>
+    [Fact]
+    public async Task AWriteLandingAfterTheReadStarted_IsNotMissedByTheKeptList()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var floor = At(15, 9);
+        var (scratch, connection) = await CreateStoreAsync(ct);
+        await using var scratchOwner = scratch;
+        await using var connectionOwner = connection;
+
+        await SeedAsync(connection, Server, "busy", floor.AddHours(1), ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var fence = new QueryStoreWriteFence();
+        var cached = Backfill(postgres, fence);
+        var fired = 0;
+        cached.AfterCandidateReadForTests = async () =>
+        {
+            if (fired++ == 0)
+            {
+                await SeedAsync(connection, Server, "late_arrival", floor.AddHours(2), ct);
+                FencedWrite(fence, Server, "late_arrival");
+            }
+        };
+
+        Assert.Equal(new[] { "busy" }, await cached.GetCandidateDatabasesAsync(Server, floor, NoState, ct));
+        Assert.Equal(new[] { "busy", "late_arrival" }, await cached.GetCandidateDatabasesAsync(Server, floor, NoState, ct));
+        Assert.Equal(2, cached.CandidateStoreReadsForTests);
+    }
+
+    /// <summary>Pin 9. A removed server's cached list and its recorded database names go with it: the next call for
+    /// the id reads again, and the fence holds no name for it.</summary>
+    [Fact]
+    public async Task ForgetServer_DropsTheCachedListAndTheFenceNames()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var floor = At(15, 9);
+        var (scratch, connection) = await CreateStoreAsync(ct);
+        await using var scratchOwner = scratch;
+        await using var connectionOwner = connection;
+
+        await SeedAsync(connection, Server, "busy", floor.AddHours(1), ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var fence = new QueryStoreWriteFence();
+        var cached = Backfill(postgres, fence);
+        FencedWrite(fence, Server, "never_listed");
+        Assert.True(fence.WroteUnknownNameSince(Server, 0, new HashSet<string>(StringComparer.Ordinal)));
+
+        await cached.GetCandidateDatabasesAsync(Server, floor, NoState, ct);
+        await cached.GetCandidateDatabasesAsync(Server, floor, NoState, ct);
+        Assert.Equal(1, cached.CandidateStoreReadsForTests);
+
+        cached.ForgetServer(Server);
+
+        Assert.False(fence.WroteUnknownNameSince(Server, 0, new HashSet<string>(StringComparer.Ordinal)));
+        await cached.GetCandidateDatabasesAsync(Server, floor, NoState, ct);
+        Assert.Equal(2, cached.CandidateStoreReadsForTests);
     }
 }
 
@@ -303,6 +438,7 @@ public sealed class QueryStoreWriteFenceNameTests
         var backfill = worker.IndexOf("new QueryStoreBackfill(", StringComparison.Ordinal);
         Assert.True(backfill > 0);
         Assert.Contains("_queryStoreWriteFence);", worker.Substring(backfill, 1800), StringComparison.Ordinal);
+        Assert.Contains("_queryStoreBackfill?.ForgetServer(id);", worker, StringComparison.Ordinal);
     }
 
     private static string ServiceDirectory([System.Runtime.CompilerServices.CallerFilePath] string here = "")

@@ -24,6 +24,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// landed": the server stays non-quiet, so nothing is reused or stored, until a clean write proves the table
 /// state is known again. A success clears the poison only when it began with no write in flight, no failure ended
 /// during its span, and nothing else is still in flight when it ends; anything less keeps the server poisoned.
+/// This leans on one assumption: a commit that faulted on the client does not become visible minutes after a later clean
+/// write cleared the poison. The candidate-list cache (#5518) shares it and, past it, is bounded by its age limit.
 /// </summary>
 public sealed class QueryStoreWriteFence
 {
@@ -33,7 +35,8 @@ public sealed class QueryStoreWriteFence
     /* #5518: the database names each server's batches have named, with the sequence number of the latest one. A
        reader that caches a list of names (QueryStoreBackfill's per-tick candidate list) asks whether any name
        outside the list was written since it read. The sequence is one counter for the whole fence, so a snapshot
-       of it orders against every server's writes. Bounded by the number of distinct database names. */
+       of it orders against every server's writes. One entry per distinct (server, database) name; ForgetServer drops a
+       removed server's. */
     private readonly Dictionary<int, Dictionary<string, long>> _writtenNames = new();
     private long _nameSequence;
 
@@ -85,6 +88,16 @@ public sealed class QueryStoreWriteFence
                 var clears = inFlight == 0 && s.CleanSpan;
                 _state[serverId] = (s.Generation + 1, inFlight, clears ? false : s.Poisoned, s.CleanSpan);
             }
+        }
+    }
+
+    /// <summary>#5518: drops a removed server's recorded database names, so the ledger holds nothing for a server that
+    /// no longer exists. The write state is a handful of numbers per server id and is left alone.</summary>
+    public void ForgetServer(int serverId)
+    {
+        lock (_gate)
+        {
+            _writtenNames.Remove(serverId);
         }
     }
 

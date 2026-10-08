@@ -615,11 +615,25 @@ public sealed class QueryStoreBackfill
 
     /// <summary>#5518: how long a cached cut-chunk list is trusted with no read. The fence makes the cache exact for
     /// every write this service makes, so this bounds only a row some OTHER writer adds (a restore, a hand-run
-    /// INSERT): the list is then at most this stale, and a database missing from it only waits for the next read.</summary>
+    /// INSERT). The age is counted from when the read began, so such a row can be missed for about an hour: this
+    /// span, plus the wait for the next backfill tick that notices it (one tick, five minutes today). A database
+    /// missing from the list waits for that read; a hole key is never held back, because the hole union runs on every
+    /// tick.
+    ///
+    /// <para>The one case where waiting costs a little more than time: a database CREATED by a writer outside this
+    /// service, with rows inside the cut chunk and no done or hole key yet, can be missing for that span. The backfill's
+    /// floor moves on in the meantime, so up to about an hour of that database's oldest backfill window (about 5% of
+    /// the 23-hour window) is then skipped for good. Every write this service makes is exempt, since the fence names
+    /// the new database before its transaction opens.</para></summary>
     internal static readonly TimeSpan CandidateCacheMaxAge = TimeSpan.FromHours(1);
 
-    /// <summary>The clock the cache ages by; a test replaces it.</summary>
-    internal Func<DateTime> UtcNowForCandidateCache { get; set; } = static () => DateTime.UtcNow;
+    /// <summary>The monotonic clock the cache ages by (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>, so a
+    /// wall-clock step cannot stretch the bound); a test replaces it.</summary>
+    internal Func<long> TimestampForCandidateCache { get; set; } = static () => System.Diagnostics.Stopwatch.GetTimestamp();
+
+    /// <summary>Runs after the candidate read has returned its rows and before the list is kept; a test writes through
+    /// the fence here, which is exactly the race the snapshot taken BEFORE the read closes.</summary>
+    internal Func<Task>? AfterCandidateReadForTests { get; set; }
 
     /// <summary>How many times the candidate list was READ from the store (not served from the cache). For the tests
     /// that pin the cache.</summary>
@@ -627,7 +641,15 @@ public sealed class QueryStoreBackfill
 
     private int _candidateStoreReads;
 
-    private sealed record CandidateCacheEntry(string Sql, List<string> Names, IReadOnlySet<string> NameSet, long Sequence, DateTime ReadAtUtc);
+    /// <summary>#5518: forgets a removed server's cached list and the fence's database names for it, so neither map
+    /// keeps an entry for a server that no longer exists. A re-added server starts from a read.</summary>
+    internal void ForgetServer(int serverId)
+    {
+        _candidateCache.TryRemove(serverId, out _);
+        _writeFence?.ForgetServer(serverId);
+    }
+
+    private sealed record CandidateCacheEntry(string Sql, List<string> Names, IReadOnlySet<string> NameSet, long Sequence, long ReadStartedTimestamp);
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, CandidateCacheEntry> _candidateCache = new();
 
@@ -642,7 +664,7 @@ public sealed class QueryStoreBackfill
         if (_writeFence is null
             || !_candidateCache.TryGetValue(serverId, out var entry)
             || !string.Equals(entry.Sql, sql, StringComparison.Ordinal)
-            || UtcNowForCandidateCache() - entry.ReadAtUtc >= CandidateCacheMaxAge
+            || System.Diagnostics.Stopwatch.GetElapsedTime(entry.ReadStartedTimestamp, TimestampForCandidateCache()) >= CandidateCacheMaxAge
             || _writeFence.WroteUnknownNameSince(serverId, entry.Sequence, entry.NameSet))
         {
             return false;
@@ -669,7 +691,7 @@ public sealed class QueryStoreBackfill
     ///
     /// <para>#5518: the cut-chunk read costs an index search per chunk per database, so on a TimescaleDB store it is
     /// kept per server and served again until a write names a database outside it, the cut chunk moves or
-    /// <see cref="CandidateCacheMaxAge"/> passes (<see cref="TryServeCandidatesFromCache"/>). The hole union below is
+    /// <see cref="CandidateCacheMaxAge"/> (about an hour) passes (<see cref="TryServeCandidatesFromCache"/>). The hole union below is
     /// applied to the cached list every tick, so a new hole key is never held back.</para>
     ///
     /// <para>#4772: a failed read logs one Warning for each run of failures
@@ -699,6 +721,7 @@ public sealed class QueryStoreBackfill
             /* Taken BEFORE the read: a write already in flight can commit after it, so a list read beside one is
                returned but not kept. */
             var nameSnapshot = cacheable ? _writeFence!.NameSnapshot(serverId) : default;
+            var readStartedTimestamp = TimestampForCandidateCache();
             _candidateCache.TryRemove(serverId, out _);
             Interlocked.Increment(ref _candidateStoreReads);
             using var command = new NpgsqlCommand(sql, connection);
@@ -721,12 +744,17 @@ public sealed class QueryStoreBackfill
                 }
             }
 
+            if (AfterCandidateReadForTests is { } afterRead)
+            {
+                await afterRead();
+            }
+
             _readFailures.RecordSuccess(serverId);
 
             if (cacheable && nameSnapshot.Quiet)
             {
                 _candidateCache[serverId] = new CandidateCacheEntry(
-                    sql, [.. databases], new HashSet<string>(databases, StringComparer.Ordinal), nameSnapshot.Sequence, UtcNowForCandidateCache());
+                    sql, [.. databases], new HashSet<string>(databases, StringComparer.Ordinal), nameSnapshot.Sequence, readStartedTimestamp);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
