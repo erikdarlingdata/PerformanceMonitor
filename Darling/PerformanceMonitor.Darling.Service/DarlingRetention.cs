@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
@@ -786,30 +787,30 @@ public static class DarlingRetention
             /* The statement below is illustrative: PurgeOneAsync's adaptive path ignores deleteSql and
                rebuilds the cursored form per attempt (CursoredRowCappedDeleteSql), against this same
                schema-qualified table. */
-            var intervalLatestDeleted = await PurgeOneAsync(
-                postgres, QueryStoreIntervalLatest.TableName,
-                RowCappedDeleteSql(
-                    "collect." + QueryStoreIntervalLatest.TableName, "first_execution_time", IntervalDeleteRowCap),
-                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken,
-                batchSize: IntervalDeleteRowCap,
-                adaptiveRowCapTimeColumn: "first_execution_time",
-                pacer: walPacer);
+            /* #5571: the table is now PARTITIONED by day (V172), so the row-capped purge above targets the renamed
+               pre-partitioning table `collect.query_store_interval_latest_legacy` BY NAME, never the parent: a ctid
+               repeats across partitions, so `ctid IN (SELECT ctid ...)` against the parent can delete live rows of
+               another day. Whole expired days (and the legacy table once it is bounded below the cutoff) are DROPPED,
+               by the same code the hourly step runs, and the DEFAULT partition gets a plain DELETE. All of that is
+               PurgeIntervalTableAsync. */
+            var intervalLatestPartitions = await PurgeIntervalTableAsync(
+                postgres, QueryStoreIntervalPartitions.Latest, utcNow, logger, walPacer, cancellationToken);
+            tablesPurged += intervalLatestPartitions.Purged;
+            totalRowsDeleted += intervalLatestPartitions.RowsDeleted;
+            tablesFailed += intervalLatestPartitions.Failed;
             var intervalPendingDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalLatest.PendingTableName,
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.PendingTableName, "recorded_at"),
                 utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
-            foreach (var deleted in new[] { intervalLatestDeleted, intervalPendingDeleted })
+            if (intervalPendingDeleted is not null)
             {
-                if (deleted is not null)
-                {
-                    tablesPurged++;
-                    totalRowsDeleted += deleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
-                }
+                tablesPurged++;
+                totalRowsDeleted += intervalPendingDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
             }
 
             /* #3953 (V145): the WIDE interval table beside V143's, at its own 9-day horizon
@@ -823,30 +824,26 @@ public static class DarlingRetention
             /* The statement below is illustrative: PurgeOneAsync's adaptive path ignores deleteSql and
                rebuilds the cursored form per attempt (CursoredRowCappedDeleteSql), against this same
                schema-qualified table. */
-            var intervalWideDeleted = await PurgeOneAsync(
-                postgres, QueryStoreIntervalWide.TableName,
-                RowCappedDeleteSql(
-                    "collect." + QueryStoreIntervalWide.TableName, "first_execution_time", IntervalDeleteRowCap),
-                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken,
-                batchSize: IntervalDeleteRowCap,
-                adaptiveRowCapTimeColumn: "first_execution_time",
-                pacer: walPacer);
+            /* #5571: partitioned by day (V171); see the latest table above. The legacy-named row-capped purge, the
+               partition drops and the DEFAULT delete are PurgeIntervalTableAsync. */
+            var intervalWidePartitions = await PurgeIntervalTableAsync(
+                postgres, QueryStoreIntervalPartitions.Wide, utcNow, logger, walPacer, cancellationToken);
+            tablesPurged += intervalWidePartitions.Purged;
+            totalRowsDeleted += intervalWidePartitions.RowsDeleted;
+            tablesFailed += intervalWidePartitions.Failed;
             var intervalWidePendingDeleted = await PurgeOneAsync(
                 postgres, QueryStoreIntervalWide.PendingTableName,
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.PendingTableName, "recorded_at"),
                 utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
-            foreach (var deleted in new[] { intervalWideDeleted, intervalWidePendingDeleted })
+            if (intervalWidePendingDeleted is not null)
             {
-                if (deleted is not null)
-                {
-                    tablesPurged++;
-                    totalRowsDeleted += deleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
-                }
+                tablesPurged++;
+                totalRowsDeleted += intervalWidePendingDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
             }
 
             /* config_alert_log (the fired-alert history) is a plain config-schema registry table, never a
@@ -1246,6 +1243,129 @@ public static class DarlingRetention
     /// finds the real rate on each store.
     /// </summary>
     internal const int IntervalDeleteRowCap = PlanDimDeleteRowCap;
+
+    /// <summary>What <see cref="PurgeIntervalTableAsync"/> adds to the sweep's tallies.</summary>
+    internal readonly record struct IntervalPartitionPurge(int Purged, int RowsDeleted, int Failed);
+
+    /// <summary>
+    /// The plain DELETE on a table's DEFAULT partition (#5571): rows older than the cutoff. Normally 0 rows, because
+    /// create-ahead keeps DEFAULT empty. Named by table, never the parent, so it never touches a daily partition.
+    /// </summary>
+    internal static string DefaultPartitionDeleteSql(QueryStoreIntervalPartitions.IntervalTable table) =>
+        $"DELETE FROM {table.Default} WHERE first_execution_time < $1";
+
+    /// <summary>
+    /// The 24 h retention for one day-partitioned Query Store interval table (#5571), in three independent parts, each
+    /// failure-isolated so one never stops the next:
+    /// <list type="number">
+    /// <item><description><b>Drops.</b> <see cref="QueryStoreIntervalPartitions.DropExpiredAsync"/>, the same code the
+    /// hourly step runs: every whole expired day, and the legacy table only when promotion is DONE and its bound S is
+    /// at or below the cutoff. Before promotion the legacy table holds every row and is never dropped. A lock timeout
+    /// is retried by the next hourly pass, not an error.</description></item>
+    /// <item><description><b>The legacy table's row-capped purge (#5569).</b> It names <c>X_legacy</c>, never the
+    /// parent: a <c>ctid</c> repeats across partitions, so <c>ctid IN (SELECT ctid ...)</c> against the parent could
+    /// delete live rows of another day. Skipped, with no warning, when the legacy table no longer exists.</description></item>
+    /// <item><description><b>The DEFAULT partition</b>, a plain DELETE of rows older than the cutoff, skipped when
+    /// DEFAULT does not exist.</description></item>
+    /// </list>
+    /// The cutoff is <c>utcNow - HorizonDays</c>, the same value the drops use.
+    /// </summary>
+    internal static async Task<IntervalPartitionPurge> PurgeIntervalTableAsync(
+        NpgsqlDataSource postgres,
+        QueryStoreIntervalPartitions.IntervalTable table,
+        DateTime utcNow,
+        ILogger? logger,
+        RetentionWalPacer? pacer,
+        CancellationToken cancellationToken)
+    {
+        var purged = 0;
+        var rows = 0;
+        var failed = 0;
+        var cutoff = utcNow.AddDays(-table.HorizonDays);
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await QueryStoreIntervalPartitions.DropExpiredAsync(
+                connection, table, utcNow, logger ?? NullLogger.Instance, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            failed++;
+            logger?.LogWarning(
+                "Retention could not drop expired partitions of {Table}: {Failure}", table.Parent, DescribePurgeFailure(ex));
+        }
+
+        /* After the drops: a legacy table that was just dropped has nothing left to row-delete. */
+        var legacyExists = await RelationExistsAsync(postgres, table.Legacy, logger, cancellationToken);
+        if (legacyExists is null)
+        {
+            failed++;
+        }
+        else if (legacyExists.Value)
+        {
+            var legacyDeleted = await PurgeOneAsync(
+                postgres, table.Legacy,
+                RowCappedDeleteSql(table.Legacy, "first_execution_time", IntervalDeleteRowCap),
+                cutoff, logger, cancellationToken,
+                batchSize: IntervalDeleteRowCap,
+                adaptiveRowCapTimeColumn: "first_execution_time",
+                pacer: pacer);
+            if (legacyDeleted is not null)
+            {
+                purged++;
+                rows += legacyDeleted.Value;
+            }
+            else if (await RelationExistsAsync(postgres, table.Legacy, logger, cancellationToken) != false)
+            {
+                /* A failed purge counts, unless the hourly step dropped the legacy table between the probe above and the
+                   purge (#5571 review L3): its DELETE then fails with 42P01, and there is nothing left to purge. */
+                failed++;
+            }
+        }
+
+        var defaultExists = await RelationExistsAsync(postgres, table.Default, logger, cancellationToken);
+        if (defaultExists is null)
+        {
+            failed++;
+        }
+        else if (defaultExists.Value)
+        {
+            var defaultDeleted = await PurgeOneAsync(
+                postgres, table.Default, DefaultPartitionDeleteSql(table), cutoff, logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: pacer);
+            if (defaultDeleted is not null)
+            {
+                purged++;
+                rows += defaultDeleted.Value;
+            }
+            else
+            {
+                failed++;
+            }
+        }
+
+        return new IntervalPartitionPurge(purged, rows, failed);
+    }
+
+    /// <summary>Whether a schema-qualified relation exists: true or false, or null (warned) when the probe itself failed.</summary>
+    private static async Task<bool?> RelationExistsAsync(
+        NpgsqlDataSource postgres, string qualifiedName, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand("SELECT to_regclass($1) IS NOT NULL", connection) { CommandTimeout = 30 };
+            command.Parameters.AddWithValue(qualifiedName);
+            return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Retention could not probe for {Table}: {Failure}", qualifiedName, DescribePurgeFailure(ex));
+            return null;
+        }
+    }
 
     /// <summary>
     /// The plan dimension's purge statement: capped by ROW COUNT rather than by a time slice (#2386).

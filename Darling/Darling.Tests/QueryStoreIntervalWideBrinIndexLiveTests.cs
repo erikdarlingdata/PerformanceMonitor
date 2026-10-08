@@ -100,10 +100,14 @@ ORDER BY g;"), ct);
     private static async Task<(long Updated, long Hot)> ReadXactCountersAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, string table, CancellationToken ct)
     {
+        /* #5571: the interval tables are partitioned by day, so the parent holds no rows or counters of its own; an update
+           is counted on the leaf partition that holds the row. The counters are summed over the table's leaves; the store
+           this test migrates is always partitioned (pg_partition_tree returns no row for a plain table). */
         await using var command = new NpgsqlCommand(
-            "SELECT COALESCE(SUM(n_tup_upd), 0)::bigint, COALESCE(SUM(n_tup_hot_upd), 0)::bigint FROM pg_stat_xact_all_tables WHERE schemaname = 'collect' AND relname = @relname",
+            "SELECT COALESCE(SUM(s.n_tup_upd), 0)::bigint, COALESCE(SUM(s.n_tup_hot_upd), 0)::bigint "
+            + "FROM pg_partition_tree(@table::regclass) AS p JOIN pg_stat_xact_all_tables AS s ON s.relid = p.relid WHERE p.isleaf",
             connection, transaction);
-        command.Parameters.AddWithValue("relname", table[(table.IndexOf('.', StringComparison.Ordinal) + 1)..]);
+        command.Parameters.AddWithValue("table", table);
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
         return (reader.GetInt64(0), reader.GetInt64(1));
@@ -345,19 +349,50 @@ WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await EnsureAsync(connection, ct);
-        var oldOid = await ScalarAsync(connection, $"SELECT '{Index}'::regclass::oid", ct);
 
-        /* An interrupted CONCURRENTLY build leaves exactly this catalog state; the rig and CI roles are
-           superuser, so flipping indisvalid reproduces it deterministically. */
-        await ExecAsync(connection, $"UPDATE pg_index SET indisvalid = false WHERE indexrelid = '{Index}'::regclass", ct);
-        Assert.False((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{Index}'::regclass", ct))!);
+        var oldLeafOid = await LeaveAnInterruptedLegacyBuildAsync(connection, Index, ct);
 
         await EnsureAsync(connection, ct);
 
         Assert.True((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{Index}'::regclass", ct))!);
-        Assert.NotEqual(oldOid, await ScalarAsync(connection, $"SELECT '{Index}'::regclass::oid", ct));
-        var definition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{Index}'::regclass)", ct))!;
+        Assert.True((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{Index}_legacy'::regclass", ct))!);
+        Assert.True(await LeafIsAttachedAsync(connection, Index, ct));
+        Assert.NotEqual(oldLeafOid, await ScalarAsync(connection, $"SELECT '{Index}_legacy'::regclass::oid", ct));
+        var definition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{Index}_legacy'::regclass)", ct))!;
         Assert.Contains("USING brin (collection_time)", definition);
         Assert.Contains("autosummarize='on'", definition);
     }
+
+    /// <summary>
+    /// Leaves the catalog state an interrupted <c>CREATE INDEX CONCURRENTLY</c> leaves on a day-partitioned table (#5571):
+    /// the parent's <c>ON ONLY</c> index exists and is INVALID, and the legacy table's own index exists, is INVALID and is not
+    /// attached. (Flipping <c>indisvalid</c> on an attached parent, as the old plain-table test did, is not a state the build
+    /// can leave: nothing re-validates a parent whose children are all attached.) Returns the invalid leaf index's oid, which a
+    /// correct ensure drops and rebuilds. The rig and CI roles are superuser, so the flip is deterministic.
+    /// </summary>
+    internal static async Task<object?> LeaveAnInterruptedLegacyBuildAsync(NpgsqlConnection connection, string indexName, CancellationToken ct)
+    {
+        var shortName = indexName[(indexName.IndexOf('.', StringComparison.Ordinal) + 1)..];
+        var parentDefinition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{indexName}'::regclass)", ct))!;
+        var table = Regex.Match(parentDefinition, @" ON ONLY (?<table>\S+) ", RegexOptions.CultureInvariant).Groups["table"].Value;
+        Assert.NotEqual(string.Empty, table);
+
+        var leafDefinition = parentDefinition.Replace(
+            $"INDEX {shortName} ON ONLY {table} ", $"INDEX {shortName}_legacy ON {table}_legacy ", StringComparison.Ordinal);
+        Assert.NotEqual(parentDefinition, leafDefinition);
+
+        await ExecAsync(connection, $"DROP INDEX {indexName}", ct);
+        await ExecAsync(connection, parentDefinition, ct);
+        await ExecAsync(connection, leafDefinition, ct);
+        await ExecAsync(connection, $"UPDATE pg_index SET indisvalid = false WHERE indexrelid = '{indexName}_legacy'::regclass", ct);
+
+        Assert.False((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{indexName}'::regclass", ct))!);
+        Assert.False((bool)(await ScalarAsync(connection, $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{indexName}_legacy'::regclass", ct))!);
+        return await ScalarAsync(connection, $"SELECT '{indexName}_legacy'::regclass::oid", ct);
+    }
+
+    /// <summary>Whether the legacy leaf's index is attached to the parent index (a <c>pg_inherits</c> row).</summary>
+    internal static async Task<bool> LeafIsAttachedAsync(NpgsqlConnection connection, string indexName, CancellationToken ct) =>
+        (bool)(await ScalarAsync(connection,
+            $"SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhparent = '{indexName}'::regclass AND inhrelid = '{indexName}_legacy'::regclass)", ct))!;
 }

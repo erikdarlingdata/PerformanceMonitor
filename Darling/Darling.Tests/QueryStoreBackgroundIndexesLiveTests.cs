@@ -65,6 +65,12 @@ public sealed class QueryStoreBackgroundIndexesLiveTests
         }
     }
 
+    /* #5571: the interval tables are partitioned by day, and a partitioned parent's relpages is -1 (it holds no pages of
+       its own). The table's size is the sum over its leaf partitions, which is what a pass over the table reads. */
+    private static async Task<long> LeafPagesAsync(NpgsqlConnection connection, string table, CancellationToken ct) =>
+        Convert.ToInt64(await ScalarAsync(connection,
+            $"SELECT COALESCE(SUM(c.relpages), 0) FROM pg_partition_tree('{table}'::regclass) AS p JOIN pg_class AS c ON c.oid = p.relid WHERE p.isleaf", ct), CultureInfo.InvariantCulture);
+
     private static async Task<bool> IndexExistsAsync(NpgsqlConnection connection, string indexName, CancellationToken ct) =>
         (bool)(await ScalarAsync(connection, $"SELECT to_regclass('{indexName}') IS NOT NULL", ct))!;
 
@@ -235,8 +241,16 @@ ANALYZE collect.query_store_interval_wide;", ct);
             Assert.True(await IndexIsValidAsync(connection, name, ct), name);
         }
 
+        foreach (var name in names)
+        {
+            Assert.True(await QueryStoreIntervalWideBrinIndexLiveTests.LeafIsAttachedAsync(connection, name, ct), name + " has no attached legacy leaf index");
+            Assert.True(await IndexIsValidAsync(connection, name + "_legacy", ct), name + "_legacy");
+        }
+
         var latestDefinition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName}'::regclass)", ct))!;
-        Assert.Contains("ON collect.query_store_interval_latest USING btree (server_id, first_execution_time)", latestDefinition);
+        /* #5571: on a partitioned table the parent's index is the ON ONLY shape (pg_get_indexdef prints ONLY for a
+           partitioned index), and each leaf carries an attached child. */
+        Assert.Contains("ON ONLY collect.query_store_interval_latest USING btree (server_id, first_execution_time)", latestDefinition);
 
         var wideDefinition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{QueryStoreBackgroundIndexes.WideServerFirstExecIndexName}'::regclass)", ct))!;
         Assert.Contains("USING btree (server_id, first_execution_time)", wideDefinition);
@@ -282,12 +296,16 @@ ANALYZE collect.query_store_interval_wide;", ct);
 
         /* The premise: two servers, and a table of many pages, so a pass over the table is a real alternative. */
         Assert.Equal(2L, await ScalarAsync(connection, "SELECT count(DISTINCT server_id) FROM collect.query_store_interval_wide", ct));
-        var pages = (int)(await ScalarAsync(connection, "SELECT relpages FROM pg_class WHERE oid = 'collect.query_store_interval_wide'::regclass", ct))!;
+        var pages = await LeafPagesAsync(connection, "collect.query_store_interval_wide", ct);
         Assert.True(pages >= 20, $"the table spans {pages} pages; the pin needs a table whose pass would cost more than an index probe");
 
         var plan = await ExplainPlainTableFloorAsync(connection, 1, ct);
 
         var wideName = QueryStoreBackgroundIndexes.WideServerFirstExecIndexName[(QueryStoreBackgroundIndexes.WideServerFirstExecIndexName.IndexOf('.', StringComparison.Ordinal) + 1)..];
+
+        /* #5571: a plan names the leaf's child of the parent index, not the parent: on the unpromoted store the one leaf is
+           the legacy table, whose child the ensure names <index>_legacy. */
+        wideName += "_legacy";
         Assert.DoesNotContain("Seq Scan", plan.NodeTypes);
         Assert.Contains("Limit", plan.NodeTypes);
         Assert.Equal(new[] { wideName }, plan.IndexScansUnderLimit.Select(scan => scan.Index).Distinct().ToArray());
@@ -400,11 +418,10 @@ WHERE i.indrelid = 'collect.query_store_stats'::regclass
         var oldOids = new Dictionary<string, object?>();
         foreach (var name in names)
         {
-            oldOids[name] = await ScalarAsync(connection, $"SELECT '{name}'::regclass::oid", ct);
-
-            /* An interrupted build leaves exactly this catalog state; the test roles are superuser, so flipping
-               indisvalid reproduces it deterministically. */
-            await ExecAsync(connection, $"UPDATE pg_index SET indisvalid = false WHERE indexrelid = '{name}'::regclass", ct);
+            /* #5571: an interrupted build on a day-partitioned table leaves the parent's ON ONLY index INVALID and the
+               leaf's own index INVALID and unattached; the test roles are superuser, so recreating that state is
+               deterministic. The leaf index is the one the ensure drops and rebuilds. */
+            oldOids[name] = await QueryStoreIntervalWideBrinIndexLiveTests.LeaveAnInterruptedLegacyBuildAsync(connection, name, ct);
             Assert.False(await IndexIsValidAsync(connection, name, ct));
         }
 
@@ -413,7 +430,9 @@ WHERE i.indrelid = 'collect.query_store_stats'::regclass
         foreach (var name in names)
         {
             Assert.True(await IndexIsValidAsync(connection, name, ct), name);
-            Assert.NotEqual(oldOids[name], await ScalarAsync(connection, $"SELECT '{name}'::regclass::oid", ct));
+            Assert.True(await IndexIsValidAsync(connection, name + "_legacy", ct), name + "_legacy");
+            Assert.True(await QueryStoreIntervalWideBrinIndexLiveTests.LeafIsAttachedAsync(connection, name, ct), name);
+            Assert.NotEqual(oldOids[name], await ScalarAsync(connection, $"SELECT '{name}_legacy'::regclass::oid", ct));
         }
     }
 
@@ -550,7 +569,7 @@ CROSS JOIN generate_series(1, {queriesPerDay}) q;", ct);
         /* The premise: a plain table (the ensure builds on a plain table only) of many pages and four servers. */
         Assert.False((bool)(await ScalarAsync(connection, "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_interval_latest')", ct))!);
         Assert.Equal(4L, await ScalarAsync(connection, $"SELECT count(DISTINCT server_id) FROM {Latest}", ct));
-        var pages = (int)(await ScalarAsync(connection, $"SELECT relpages FROM pg_class WHERE oid = '{Latest}'::regclass", ct))!;
+        var pages = await LeafPagesAsync(connection, Latest, ct);
         Assert.True(pages >= 200, $"the table spans {pages} pages; the pin needs a table whose slice walk costs more than a range scan");
 
         var day = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
@@ -564,6 +583,10 @@ CROSS JOIN generate_series(1, {queriesPerDay}) q;", ct);
         NpgsqlParameter[] FloorParameters() => new[] { new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 2 } };
 
         var latestName = QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName[(QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName.IndexOf('.', StringComparison.Ordinal) + 1)..];
+
+        /* #5571: a plan names the leaf's child of the parent index, not the parent: on the unpromoted store the one leaf is
+           the legacy table, whose child the ensure names <index>_legacy. */
+        latestName += "_legacy";
 
         /* The premise: the index is not there yet, so any plan below that names it names it because the ensure built it. */
         Assert.False(await IndexExistsAsync(connection, QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName, ct));

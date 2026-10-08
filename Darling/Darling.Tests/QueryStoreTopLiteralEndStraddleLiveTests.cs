@@ -98,8 +98,12 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
         async Task<(long SeqScan, long IdxScan)> WideTableScanCountsAsync()
         {
             await QuiesceScanStatisticsAsync(connection, ct);
+            /* #5571: the wide table is partitioned by day, so the parent has no counters of its own; a scan of it is counted on
+               the leaf partitions it reads (the legacy table and the daily ones), summed here. */
             await using var command = new NpgsqlCommand(
-                "SELECT COALESCE(seq_scan, 0), COALESCE(idx_scan, 0) FROM pg_stat_user_tables WHERE relname = 'query_store_interval_wide'", connection);
+                "SELECT COALESCE(SUM(s.seq_scan), 0)::bigint, COALESCE(SUM(s.idx_scan), 0)::bigint "
+                + "FROM pg_partition_tree('collect.query_store_interval_wide'::regclass) AS p "
+                + "JOIN pg_stat_user_tables AS s ON s.relid = p.relid WHERE p.isleaf", connection);
             await using var reader = await command.ExecuteReaderAsync(ct);
             if (!await reader.ReadAsync(ct))
             {
