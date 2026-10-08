@@ -377,7 +377,6 @@ SELECT
     ds.vlf_count
 FROM @database_sizes AS ds
 ORDER BY
-    CASE WHEN ds.file_id IS NULL THEN 1 ELSE 0 END,
     ds.database_name,
     ds.file_id
 OPTION(RECOMPILE);";
@@ -465,10 +464,10 @@ OPTION(RECOMPILE);";
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* Ordinals 1, 2 and 5 are NULL on every Azure sibling row (#2643's arm omits what
-               sys.resource_stats cannot measure), and an unguarded read here killed the whole
-               collection — master's own rows included — the moment the first sibling row appeared
-               (#3262). */
+            /* Ordinals 1, 2 and 5 are never NULL in what this statement reads today (#5498 removed the
+               sibling arm that emitted them as NULL), but the guards stay: an unguarded read here once
+               killed the whole collection the moment the first NULL row appeared (#3262), and the store
+               still holds those rows. */
             rows.Add(new Row(
                 reader.GetString(0),
                 reader.IsDBNull(1) ? null : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),

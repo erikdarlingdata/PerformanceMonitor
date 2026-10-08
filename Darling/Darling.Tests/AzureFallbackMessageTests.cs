@@ -56,7 +56,7 @@ public sealed class AzureFallbackMessageTests
 
         Assert.True(firewall > 0, message);
         Assert.True(rule > firewall, message);
-        Assert.Contains("at the server level or on the database", message, StringComparison.Ordinal);
+        Assert.Contains("either a server-level rule or a database-level rule in master", message, StringComparison.Ordinal);
         Assert.True(setDatabase > rule, "Setting a database comes after the firewall, as the master-only case's fix.");
         Assert.Contains("can open a user database but not master", message, StringComparison.Ordinal);
     }

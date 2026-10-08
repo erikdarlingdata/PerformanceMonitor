@@ -7155,7 +7155,7 @@ RETURNING s.state_key";
             throw new InvalidOperationException(
                 $"{reason}, and this connection has no target database to fall back to (it resolves to " +
                 $"master). If the error is 40615, the Azure firewall did not allow this client's IP address: " +
-                $"add a firewall rule for it, at the server level or on the database. If this login can open " +
+                $"add a firewall rule for it, either a server-level rule or a database-level rule in master. If this login can open " +
                 $"a user database but not master, set a database for '{server.Config.DisplayName}' so " +
                 $"database-scoped collectors have something to read.");
         }
