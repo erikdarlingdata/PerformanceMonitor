@@ -413,7 +413,16 @@ internal sealed class SkipCreditFloor
     /// derived on every read, so a clock step moves it with the clock instead of leaving a stamp ahead of the clock (a stamp that
     /// the clock had to catch up to blinded the alert for as long as the step). Null until the loop has ticked once.
     /// </summary>
-    public DateTime? SinceAt(DateTime nowUtc) => Uptime is { } uptime ? nowUtc - uptime : null;
+    public DateTime? SinceAt(DateTime nowUtc)
+    {
+        var uptime = Uptime;
+        if (uptime is null)
+        {
+            return null;
+        }
+
+        return nowUtc - uptime.Value;
+    }
 
     /// <summary>
     /// #5597: a per-server seed stamp (the wall-clock instant a connect body finished seeding) that is ahead of
