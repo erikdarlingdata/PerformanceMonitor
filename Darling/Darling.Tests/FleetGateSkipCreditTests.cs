@@ -302,7 +302,7 @@ public sealed class SkipCreditFloorTests
         var source = ServerConnectBackoffTests.ReadWorkerSource().Replace("\r\n", "\n", StringComparison.Ordinal);
 
         /* The slot record goes through the floor, and no slot is recorded from the raw count. */
-        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));", source, StringComparison.Ordinal);
+        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));", source, StringComparison.Ordinal);
         Assert.DoesNotContain("RecordSlot(CollectorCadence.SkippedSlots(", source, StringComparison.Ordinal);
 
         /* The tick is the first thing in the sweep loop's pass, ahead of the reload and the pause gate. */

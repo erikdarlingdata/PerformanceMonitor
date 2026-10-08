@@ -949,7 +949,7 @@ public sealed class DarlingWorker : BackgroundService
     /* #4732: the fleet collection gate's counts over the last hour (slots run, slots skipped, queue waits), the
        cadence the worker reads them on, and when it writes their log line. Nullable because a test that builds a
        worker without running its constructor never sets it, and the recording sites tolerate that. */
-    private readonly FleetGateStats? _fleetGateStats = new(static () => DateTime.UtcNow);
+    private readonly FleetGateStats? _fleetGateStats;
     private readonly FleetGateLogCadence? _fleetGateLog = new();
     private DateTime _nextFleetGateCheckUtc = DateTime.MinValue;
 
@@ -1416,6 +1416,10 @@ LIMIT 1";
         _baselineCache = baselineCache;
         _readLatency = readLatency;
         _launchMemoryGuard = LaunchMemoryGuard.CreateDefault(logger);
+
+        /* #5597: the gate's counts read the floor's monotonic uptime when each slot is recorded, so which slots the alert leaves out
+           is decided then, not by the wall-clock minute they were stamped in. */
+        _fleetGateStats = new FleetGateStats(static () => DateTime.UtcNow, () => _skipCreditFloor.Uptime);
     }
 
     /// <summary>
@@ -1511,6 +1515,12 @@ LIMIT 1";
         /* #5479: the held-slot watermarks, one per collector, while the memory launch guard holds collection off. Read and
            written ONLY by the sweep loop's own thread (CountHeldSlots), so a plain map is enough. */
         public Dictionary<string, HeldSlotMark> HeldSlotMarks { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>#5597: the UTC ticks at which the connect body finished seeding this server's collector due stamps (0 =
+        /// never). The stamps are seeded from a clock read before the body's on-load snapshots, so a slot that came due
+        /// while that body ran could not have run; the slot count starts at this instant
+        /// (<see cref="SkipCreditFloor.Skipped(DateTime, DateTime, TimeSpan, DateTime)"/>).</summary>
+        public long SeedFinishedTicks;
 
         private ServerClockStamp _clock = ServerClockStamp.Utc;
 
@@ -2389,7 +2399,7 @@ LIMIT 1";
     /// Pure and static, the <see cref="BuildWebTlsCertReport"/> precedent, so the mapping pins in a unit test.
     /// </summary>
     internal static DarlingSelfAlertEvaluator.FleetGateReport BuildFleetGateReport(
-        FleetGateSnapshot snapshot, int gateWidth, DateTime nowUtc)
+        FleetGateSnapshot snapshot, int gateWidth, DateTime nowUtc, int judgedMinutes = FleetGateStats.WindowMinutes)
         => new(
             Run: snapshot.Run,
             Skipped: snapshot.Skipped,
@@ -2397,7 +2407,29 @@ LIMIT 1";
             QueueWaitTotal: snapshot.QueueWaitTotal,
             QueueWaitMax: snapshot.QueueWaitMax,
             GateWidth: gateWidth,
-            WindowEndUtc: nowUtc);
+            WindowEndUtc: nowUtc,
+            JudgedMinutes: judgedMinutes);
+
+    /// <summary>#5597: whether the hourly line is a Warning ("Collection is falling behind"): the alert is standing, or the window the
+    /// alert judges meets its fire threshold. The alert's own judgment (<see cref="DarlingSelfAlertEvaluator.FleetGateReport.IsBehind"/>
+    /// leaves out the minutes right after a start), never the raw counts of the full hour the line prints.</summary>
+    internal static bool FleetGateLogIsBehind(bool alertStanding, DarlingSelfAlertEvaluator.FleetGateReport report) =>
+        alertStanding || report.IsBehind;
+
+    /// <summary>
+    /// #5597: reads the fleet gate twice: the full last hour (what the hourly log line reports, truthfully), and the counts the
+    /// "Collection Falling Behind" alert judges, which leave out the slots recorded in the first
+    /// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/> minutes after the service started (<paramref name="uptime"/>,
+    /// <see cref="SkipCreditFloor.Uptime"/>; a start, never a stall, a pause or a launch-guard release). The one place that decides,
+    /// so the alert and the Warning level of the line cannot disagree.
+    /// </summary>
+    internal static (FleetGateSnapshot Full, DarlingSelfAlertEvaluator.FleetGateReport Report) ReadFleetGate(
+        FleetGateStats stats, TimeSpan? uptime, int gateWidth, DateTime nowUtc)
+    {
+        var full = stats.Snapshot();
+        var judgedMinutes = DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(uptime);
+        return (full, BuildFleetGateReport(stats.SnapshotJudged(), gateWidth, nowUtc, judgedMinutes));
+    }
 
     /// <summary>
     /// #4732: reads the fleet gate's last-hour counts, hands them to the "Collection Falling Behind" self-alert, and
@@ -2414,19 +2446,18 @@ LIMIT 1";
         }
 
         var now = DateTime.UtcNow;
-        var snapshot = _fleetGateStats.Snapshot();
-        var report = BuildFleetGateReport(snapshot, EffectiveSweepWidth, now);
+        var (snapshot, report) = ReadFleetGate(_fleetGateStats, _skipCreditFloor.Uptime, EffectiveSweepWidth, now);
 
         var standing = _selfAlerts is not null
             && await _selfAlerts.EvaluateFleetGateAsync(report, cancellationToken);
-        var behind = standing || report.IsBehind;
+        var behind = FleetGateLogIsBehind(standing, report);
 
         if (!_fleetGateLog.ShouldLog(behind, now))
         {
             return;
         }
 
-        var line = FleetGateLine.Describe(snapshot, report.GateWidth);
+        var line = FleetGateLine.Describe(snapshot, report.GateWidth, FleetGateLine.SpanMinutes(_skipCreditFloor.Uptime));
         if (behind)
         {
             _logger.LogWarning("Collection is falling behind: {Line}", line);
@@ -12634,6 +12665,11 @@ AND   j.hypertable_name = '{relation}'", connection))
                 }
             }
 
+            /* #5597: every due stamp above was seeded from the clock read before the on-load runs, and this body is the
+               server's only body, so a slot that came due while it ran could not have run. Slots count as skipped from
+               here on (RunDueCollectorsAsync). The stamps themselves are not moved: when the first rows land is unchanged. */
+            Interlocked.Exchange(ref server.SeedFinishedTicks, DateTime.UtcNow.Ticks);
+
             /* Phase the first scheduled analysis over a SMALL fixed sub-2.5-minute window (#1553 jitter site 3):
                at a fleet restart every freshly connected server would otherwise become analysis-due in the same
                sweep, and with N=4 concurrency that clusters 4 analysis passes at once. A deterministic per-server
@@ -12966,7 +13002,8 @@ AND   j.hypertable_name = '{relation}'", connection))
                        clock that stepped forward or a pause leaves this stamp hours old, and none of those slots was
                        skipped by a gate that was too narrow. A body that starts late because the gate was full, while the
                        loop keeps ticking, still counts them all. */
-                    _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));
+                    var seeded = new DateTime(SkipCreditFloor.ClampSeedStamp(ref server.SeedFinishedTicks, now), DateTimeKind.Utc);
+                    _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));
                     server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
                 }
 
