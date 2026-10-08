@@ -12,11 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using PerformanceMonitor.Analysis.Baselines;
-using PerformanceMonitor.Collectors;
-using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
-using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -444,35 +440,141 @@ public sealed class RetentionCollectionYieldTests
         Assert.Equal(TimeSpan.FromMinutes(10), CollectionPressure.SettleWindow);
     }
 
-    [Fact]
-    public void Pressure_ASkippedSlotInTheLastFiveMinutesIsBehind_AndAgesOut()
+    /// <summary>The start of the fake hour: well past the settle window, on a half-minute so a minute never straddles a read.</summary>
+    private static readonly DateTime HourStart = new(2026, 10, 8, 10, 0, 30, DateTimeKind.Utc);
+
+    /// <summary>
+    /// Plays one hour a minute at a time and re-checks the signal once a minute (the drain re-checks every 5 s, so
+    /// this is a coarser read of the same buckets). <paramref name="runPerMinute"/> and <paramref name="skippedPerMinute"/>
+    /// give each minute's slots; returns how many of the 60 re-checks read "behind".
+    /// </summary>
+    private static int PlayHour(Func<int, int> runPerMinute, Func<int, int> skippedPerMinute, out FleetGateSnapshot hour)
     {
-        var start = new DateTime(2026, 10, 8, 10, 0, 0, DateTimeKind.Utc);
-        var now = start.AddHours(1);
+        var now = HourStart;
         var stats = new FleetGateStats(() => now);
-        var pressure = new CollectionPressure(stats, () => now, start);
-        Assert.Null(pressure.BehindReason());
+        var pressure = new CollectionPressure(stats, () => now, HourStart.AddHours(-2));
+        var behind = 0;
+        for (var minute = 0; minute < 60; minute++)
+        {
+            now = HourStart.AddMinutes(minute);
+            var skipped = skippedPerMinute(minute);
+            for (var i = 0; i < runPerMinute(minute); i++)
+            {
+                /* The first slot of the minute carries that minute's skips, as a late run does. */
+                stats.RecordSlot(i == 0 ? skipped : 0);
+            }
 
-        stats.RecordSlot(skipped: 1);
-        Assert.Contains("skipped", pressure.BehindReason(), StringComparison.Ordinal);
+            if (pressure.BehindReason() is not null)
+            {
+                behind++;
+            }
+        }
 
-        now = now.AddMinutes(4);
+        hour = stats.Snapshot();
+        return behind;
+    }
+
+    [Fact]
+    public void Pressure_ANormalHourWithThreeHangEpisodes_NeverReadsBehind()
+    {
+        /* The field's normal day: about 3 "skipping relaunch" episodes an hour, each stepping over a few slots, about
+           1,250 slots due an hour (21 a minute). One episode alone never reaches the 5-slot minimum, and the hour
+           stays well under the alert's 5%. The old rule (any skipped slot in 5 minutes) read behind for 15 of these 60 re-checks. */
+        var episodes = new Dictionary<int, int> { [8] = 3, [31] = 4, [52] = 3 };
+        var behind = PlayHour(_ => 21, m => episodes.GetValueOrDefault(m), out var hour);
+
+        Assert.Equal(0, behind);
+        Assert.Equal(10, hour.Skipped);
+        Assert.InRange(hour.Due, 1_200, 1_300);
+        Assert.False(new DarlingSelfAlertEvaluator.FleetGateReport(hour.Run, hour.Skipped, 0, TimeSpan.Zero, TimeSpan.Zero, 1, HourStart).IsBehind);
+    }
+
+    [Fact]
+    public void Pressure_ANormalHourWhereTwoEpisodesLandTogether_ReadsBehindOnlyWhileBothAreInTheWindow()
+    {
+        /* Episodes at minutes 5 and 12 (3 slots each) put 6 skipped slots, 2.8% of about 216 due, in one 10-minute
+           window from minute 12 until the first one ages out at minute 15: 3 of 60 re-checks, not a fifth of them. */
+        var episodes = new Dictionary<int, int> { [5] = 3, [12] = 3, [30] = 3, [45] = 3 };
+        var behind = PlayHour(_ => 21, m => episodes.GetValueOrDefault(m), out _);
+
+        Assert.Equal(3, behind);
+    }
+
+    [Fact]
+    public void Pressure_TheIncidentHour_ReadsBehindThroughout()
+    {
+        /* The pre-fix drain hour: 97 of 1,252 due slots skipped (7.7%). 2 skipped a minute for 37 minutes, then 1. */
+        var behind = PlayHour(m => m < 15 ? 20 : 19, m => m < 37 ? 2 : 1, out var hour);
+
+        Assert.Equal(97, hour.Skipped);
+        Assert.Equal(1_252, hour.Due);
+        Assert.True(hour.SkippedPercent > 7.5);
+        Assert.True(new DarlingSelfAlertEvaluator.FleetGateReport(hour.Run, hour.Skipped, 0, TimeSpan.Zero, TimeSpan.Zero, 1, HourStart).IsBehind);
+        /* Behind from the third minute on (the 5-slot minimum is reached after three minutes of skips at 2 a minute). */
+        Assert.True(behind >= 57, $"the incident hour read behind in only {behind} of 60 re-checks");
+    }
+
+    [Theory]
+    [InlineData(195, 5, true)]    /* 5 of 200 = 2.5% exactly: counts */
+    [InlineData(196, 5, false)]   /* 5 of 201 = 2.49%: under the share */
+    [InlineData(194, 6, true)]    /* 6 of 200 = 3% */
+    [InlineData(203, 5, false)]   /* 5 of 208 = 2.4%: at the field's rate the share, not the minimum, decides */
+    [InlineData(202, 6, true)]    /* 6 of 208 = 2.88% */
+    [InlineData(16, 4, false)]    /* 4 of 20 = 20%: a big share of a thin window, but under the 5-slot minimum */
+    [InlineData(15, 5, true)]     /* 5 of 20 = 25%: at the minimum */
+    [InlineData(0, 0, false)]     /* nothing due */
+    public void IsBehind_NeedsTheMinimumCountAndTheShare(long run, long skipped, bool expected)
+    {
+        Assert.Equal(expected, CollectionPressure.IsBehind(run, skipped));
+    }
+
+    [Fact]
+    public void Pressure_TheSkippedSlotsAgeOutOfTheWindowAfterTenMinutes()
+    {
+        var now = HourStart;
+        var stats = new FleetGateStats(() => now);
+        var pressure = new CollectionPressure(stats, () => now, HourStart.AddHours(-2));
+        for (var i = 0; i < 200; i++)
+        {
+            stats.RecordSlot(0);
+        }
+
+        /* The held-slot path the self-alert also counts (#5479). */
+        stats.RecordSkippedSlots(6);
+        var reason = pressure.BehindReason();
+        Assert.NotNull(reason);
+        Assert.Contains("6 of 206 collector slots were skipped in the last 10 minutes", reason, StringComparison.Ordinal);
+
+        now = now.AddMinutes(9);
         Assert.NotNull(pressure.BehindReason());
 
         now = now.AddMinutes(1);
         Assert.Null(pressure.BehindReason());
-
-        /* A slot that ran on time is not a skip. */
-        stats.RecordSlot(skipped: 0);
-        Assert.Null(pressure.BehindReason());
-
-        /* The held-slot path the self-alert also counts (#5479). */
-        stats.RecordSkippedSlots(3);
-        Assert.NotNull(pressure.BehindReason());
     }
 
     [Fact]
-    public void FleetGateStats_SkippedInLastMinutes_ReadsTheSameBucketsTheSelfAlertReads()
+    public void Pressure_AWorkerBuiltWithoutStatsReadsNoSkips()
+    {
+        var now = HourStart;
+        Assert.Null(new CollectionPressure(stats: null, () => now, HourStart.AddHours(-2)).BehindReason());
+    }
+
+    [Fact]
+    public void Pressure_TheConstantsAreTheDocumentedOnes()
+    {
+        Assert.Equal(10, CollectionPressure.SkipWindowMinutes);
+        Assert.Equal(5, CollectionPressure.SkipMinCount);
+        /* Half the alert's 5%: the drain backs off before the hour reaches the alert. */
+        Assert.Equal(25, CollectionPressure.SkipSharePerMille);
+        Assert.Equal(DarlingSelfAlertEvaluator.FleetGateBehindPercent * 10 / 2, CollectionPressure.SkipSharePerMille);
+        Assert.True(CollectionPressure.SkipMinCount < DarlingSelfAlertEvaluator.FleetGateBehindMinSkipped);
+        /* One wait is half the window: a burst can hold the signal for the whole window, but a batch goes every 5 minutes. */
+        Assert.Equal(300, RetentionCollectionYield.MaxWaitSeconds);
+        Assert.Equal(CollectionPressure.SkipWindowMinutes * 60 / 2, RetentionCollectionYield.MaxWaitSeconds);
+    }
+
+    [Fact]
+    public void FleetGateStats_SlotsInLastMinutes_ReadsTheSameBucketsTheSelfAlertReads()
     {
         var now = new DateTime(2026, 10, 8, 12, 0, 30, DateTimeKind.Utc);
         var stats = new FleetGateStats(() => now);
@@ -481,68 +583,13 @@ public sealed class RetentionCollectionYieldTests
         stats.RecordSlot(5);
         stats.RecordSlot(0);
 
-        Assert.Equal(5, stats.SkippedInLastMinutes(5));
-        Assert.Equal(7, stats.SkippedInLastMinutes(8));
-        Assert.Equal(stats.Snapshot().Skipped, stats.SkippedInLastMinutes(FleetGateStats.WindowMinutes));
-        Assert.Equal(stats.Snapshot().Skipped, stats.SkippedInLastMinutes(10_000));
-        Assert.Equal(0, stats.SkippedInLastMinutes(0));
-        Assert.Equal(0, stats.SkippedInLastMinutes(-3));
-    }
-
-    [Fact]
-    public void Pressure_ABodyRunningHalfAMinuteOrLongerIsBehind()
-    {
-        var start = new DateTime(2026, 10, 8, 10, 0, 0, DateTimeKind.Utc);
-        var now = start.AddHours(1);
-        var pressure = new CollectionPressure(stats: null, () => now, start);
-        Assert.Null(pressure.BehindReason());
-
-        long ticks = 0;
-        pressure.SetBodySource(() => ticks);
-        Assert.Null(pressure.BehindReason());
-
-        ticks = now.AddSeconds(-29).Ticks;
-        Assert.Null(pressure.BehindReason());
-
-        ticks = now.AddSeconds(-30).Ticks;
-        Assert.Contains("collection body has been running for 30 s", pressure.BehindReason(), StringComparison.Ordinal);
-
-        ticks = now.AddSeconds(-95).Ticks;
-        Assert.NotNull(pressure.BehindReason());
-    }
-
-    [Fact]
-    public void Pressure_TheBodyLimitIsHalfTheShortestCadenceAndHalfTheWatchdogsHangRule()
-    {
-        var shortestSeconds = CollectorScheduleDefaults.All.Values.Where(e => e.FrequencyMinutes > 0).Min(e => e.FrequencyMinutes) * 60;
-
-        Assert.Equal(TimeSpan.FromSeconds(shortestSeconds * 0.5), CollectionPressure.BodyRunLimit);
-        /* The hang warning fires at one cadence of execution; the drain gives way at half of it. */
-        Assert.Equal(DarlingWorker.SweepWatchdogSeconds, shortestSeconds);
-        Assert.Equal(TimeSpan.FromSeconds(DarlingWorker.SweepWatchdogSeconds * CollectionPressure.BodyRunShare), CollectionPressure.BodyRunLimit);
-    }
-
-    [Fact]
-    public void Worker_OldestRunningBodyTicks_CountsOnlyBodiesThatAreInFlightAndHoldAPermit()
-    {
-        var worker = MakeWorker();
-        var never = new TaskCompletionSource();
-        ServerLoopStateFor(1, out var running, never.Task, runStarted: 5_000);
-        ServerLoopStateFor(2, out var older, never.Task, runStarted: 2_000);
-        ServerLoopStateFor(3, out var queued, never.Task, runStarted: 0);
-        ServerLoopStateFor(4, out var finished, Task.CompletedTask, runStarted: 1_000);
-        ServerLoopStateFor(5, out var neverLaunched, null, runStarted: 0);
-
-        Assert.Equal(0, worker.OldestRunningBodyTicks());
-
-        worker.SetBodySnapshotForTest(new[] { running, queued, finished, neverLaunched });
-        Assert.Equal(5_000, worker.OldestRunningBodyTicks());
-
-        worker.SetBodySnapshotForTest(new[] { running, older, queued, finished, neverLaunched });
-        Assert.Equal(2_000, worker.OldestRunningBodyTicks());
-
-        worker.SetBodySnapshotForTest(new[] { queued, finished, neverLaunched });
-        Assert.Equal(0, worker.OldestRunningBodyTicks());
+        Assert.Equal((2L, 5L), stats.SlotsInLastMinutes(5));
+        Assert.Equal((3L, 7L), stats.SlotsInLastMinutes(8));
+        var all = stats.Snapshot();
+        Assert.Equal((all.Run, all.Skipped), stats.SlotsInLastMinutes(FleetGateStats.WindowMinutes));
+        Assert.Equal((all.Run, all.Skipped), stats.SlotsInLastMinutes(10_000));
+        Assert.Equal((0L, 0L), stats.SlotsInLastMinutes(0));
+        Assert.Equal((0L, 0L), stats.SlotsInLastMinutes(-3));
     }
 
     [Fact]
@@ -572,7 +619,6 @@ public sealed class RetentionCollectionYieldTests
         Assert.Equal(2, CountOf(source, "collectionPressure: _collectionPressure"));
         Assert.Contains("paceWal: true,\n            collectionPressure: _collectionPressure", source, StringComparison.Ordinal);
         Assert.Contains("runLabel: runLabel,\n                collectionPressure: _collectionPressure", source, StringComparison.Ordinal);
-        Assert.Contains("Volatile.Write(ref _bodySnapshot, sweepTargets);", source, StringComparison.Ordinal);
     }
 
     private static int CountOf(string text, string needle)
@@ -584,29 +630,6 @@ public sealed class RetentionCollectionYieldTests
         }
 
         return count;
-    }
-
-    private static DarlingWorker MakeWorker() =>
-        new(
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWorker>.Instance,
-            Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
-            new McpRuntimeState(),
-            new WebRuntimeState(),
-            new MonitoredServerRegistryState(),
-            new CollectorRuntimeState(),
-            new WebTlsCertificateState(),
-            new BaselineCache(),
-            new ReadLatencyAccumulator());
-
-    private static void ServerLoopStateFor(int id, out DarlingWorker.ServerLoopState state, Task? inFlight, long runStarted)
-    {
-        var host = $"yield-test-{id}";
-        state = new DarlingWorker.ServerLoopState
-        {
-            Config = new MonitoredServer { Name = host, Host = host },
-            InFlightSweep = inFlight,
-            RunStartedTicks = runStarted,
-        };
     }
 
     private static string ReadWorkerSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>

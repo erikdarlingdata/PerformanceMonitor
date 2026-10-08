@@ -1417,48 +1417,15 @@ LIMIT 1";
         _readLatency = readLatency;
         _launchMemoryGuard = LaunchMemoryGuard.CreateDefault(logger);
 
-        /* #5592: the retention drain's "is collection behind" read, built from the fleet gate's own counts and the
-           running bodies the sweep loop snapshots every tick. */
+        /* #5592: the retention drain's "is collection behind" read, built from the fleet gate's own counts. */
         _collectionPressure = new CollectionPressure(_fleetGateStats, static () => DateTime.UtcNow, DateTime.UtcNow);
-        _collectionPressure.SetBodySource(OldestRunningBodyTicks);
     }
 
-    /* #5592: the retention drain's pressure read (see CollectionPressure), and the sweep tick's snapshot of the servers
-       it reads the running bodies from. The snapshot is an array the loop replaces whole each tick (never mutated), so
-       the purge task reads it from its own thread without a lock. */
+    /* #5592: the retention drain's pressure read (see CollectionPressure). */
     private readonly CollectionPressure _collectionPressure;
-    private ServerLoopState[] _bodySnapshot = Array.Empty<ServerLoopState>();
-
-    /// <summary>
-    /// #5592: the UTC ticks at which the longest-running collection body started its run, or 0 when none is running.
-    /// A body counts only while its task is in flight and it holds a fleet permit (<c>RunStartedTicks</c> is 0 while it
-    /// is queued or connecting, and is not cleared when the body ends, so the in-flight check is needed too).
-    /// </summary>
-    internal long OldestRunningBodyTicks()
-    {
-        long oldest = 0;
-        foreach (var server in Volatile.Read(ref _bodySnapshot))
-        {
-            if (server.InFlightSweep is not { IsCompleted: false })
-            {
-                continue;
-            }
-
-            var started = Interlocked.Read(ref server.RunStartedTicks);
-            if (started != 0 && (oldest == 0 || started < oldest))
-            {
-                oldest = started;
-            }
-        }
-
-        return oldest;
-    }
 
     /// <summary>Test hook (#5592): the pressure read the retention drain takes.</summary>
     internal CollectionPressure CollectionPressureForTest => _collectionPressure;
-
-    /// <summary>Test hook (#5592): replaces the sweep tick's snapshot of the servers.</summary>
-    internal void SetBodySnapshotForTest(ServerLoopState[] servers) => Volatile.Write(ref _bodySnapshot, servers);
 
     /// <summary>
     /// #4938: what one daily collector's run-time stamp was computed from, kept beside the stamp in
@@ -3571,9 +3538,6 @@ LIMIT 1";
             {
                 sweepTargets = servers.ToArray();
             }
-
-            /* #5592: the retention drain reads which bodies are running from this snapshot. */
-            Volatile.Write(ref _bodySnapshot, sweepTargets);
 
             /* #5479: the per-server self-alerts (Collection Stopped and its siblings) and the custom-alert rules, evaluated
                by ONE tracked task per pass over this snapshot, launched without awaiting it and skipped while the previous

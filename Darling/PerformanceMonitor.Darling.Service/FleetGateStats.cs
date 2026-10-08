@@ -118,16 +118,17 @@ internal sealed class FleetGateStats
     }
 
     /// <summary>
-    /// The slots skipped over the current minute and the <c>minutes - 1</c> before it (#5592): the same per-minute
-    /// buckets the self-alert is judged on, read over a shorter window, so the retention drain's "is collection
-    /// behind" test counts exactly what "Collection Falling Behind" counts. The window is capped at
+    /// The slots that ran and the slots skipped over the current minute and the <c>minutes - 1</c> before it (#5592):
+    /// the same per-minute buckets the self-alert is judged on, read over a shorter window, so the retention drain's
+    /// "is collection behind" test counts exactly what "Collection Falling Behind" counts, from one read under one
+    /// lock (a share of due slots needs both counts from the same instant). The window is capped at
     /// <see cref="WindowMinutes"/>; 0 or less reads nothing.
     /// </summary>
-    public long SkippedInLastMinutes(int minutes)
+    public (long Run, long Skipped) SlotsInLastMinutes(int minutes)
     {
         if (minutes <= 0)
         {
-            return 0;
+            return (0, 0);
         }
 
         minutes = Math.Min(minutes, WindowMinutes);
@@ -135,16 +136,17 @@ internal sealed class FleetGateStats
         {
             var minute = MinuteOf(_utcNow());
             FoldBucketsAheadOf(minute);
-            long skipped = 0;
+            long run = 0, skipped = 0;
             foreach (var bucket in _buckets)
             {
                 if (bucket.Minute > minute - minutes)
                 {
+                    run += bucket.Run;
                     skipped += bucket.Skipped;
                 }
             }
 
-            return skipped;
+            return (run, skipped);
         }
     }
 

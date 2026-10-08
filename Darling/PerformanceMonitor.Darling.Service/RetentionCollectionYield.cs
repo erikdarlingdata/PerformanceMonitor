@@ -12,7 +12,6 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -28,33 +27,67 @@ public interface ICollectionPressure
 }
 
 /// <summary>
-/// The real signal (#5592): collection is "behind" when any of three things holds. Each one is read from state the
+/// The real signal (#5592): collection is "behind" when either of two things holds. Each one is read from state the
 /// worker already keeps, so there is no second counter beside the one "Collection Falling Behind" (#4732) is judged on.
 /// <list type="number">
-/// <item><description><b>A slot was skipped</b> in the last <see cref="SkipWindowMinutes"/> minutes, read from the
-/// same per-minute buckets as the self-alert (<see cref="FleetGateStats.SkippedInLastMinutes"/>). The self-alert
-/// needs 5% of an hour and 20 slots to fire; a drain that waited for that would already have done the damage, so
-/// the drain waits on the first skipped slot.</description></item>
-/// <item><description><b>A collection body has been running</b> for <see cref="BodyRunLimit"/> or longer: half of
-/// the shortest collector cadence (<see cref="BodyRunShare"/> of the 1-minute tier in
-/// <see cref="CollectorScheduleDefaults"/>). A body that runs past one cadence skips the next slot, and the worker's
-/// own hang rule (<see cref="DarlingWorker.SweepWatchdogSeconds"/>, 60 s of execution) warns at that point, so
-/// half of it is the lead time before a skip. A body that is still queued for the fleet gate does not count: its
-/// run has not started, and the running bodies in front of it already do.</description></item>
-/// <item><description><b>The service is still settling</b>: it started less than <see cref="SettleWindow"/> ago.
-/// The first collections after a start run heavy, and neither arm above can see them in their first minute (the
-/// first bodies are spread over <see cref="DarlingWorker.ColdStartSpreadSeconds"/> seconds, then queue behind the
-/// gate, and a body that is queued is not running). The field store's first skips came 5 minutes after the start and
-/// its relaunch skips 5 to 8 minutes after it, while the drain was still on small tables.</description></item>
+/// <item><description><b>Collection is skipping a real share of its slots</b>: over the last
+/// <see cref="SkipWindowMinutes"/> minutes at least <see cref="SkipMinCount"/> slots were skipped AND they are at least
+/// <see cref="SkipSharePerMille"/> thousandths (2.5%) of the slots that came due, read from the same per-minute
+/// buckets as the self-alert (<see cref="FleetGateStats.SlotsInLastMinutes"/>) with the same two-part test as
+/// <c>FleetGateReport.IsBehind</c>, on a shorter window. The first version waited on any single skipped slot and
+/// on any body running 30 s. Measured on a large field store over a normal day, with the drain's own window left
+/// out, that read "behind" in 513 of 843 five-minute windows (61%): the hang rule (a body past
+/// <see cref="DarlingWorker.SweepWatchdogSeconds"/>, 60 s) warned 58 to 75 times a day, one per hang episode, each
+/// skipping a few slots, and a fleet's per-minute sum of collector run time passed 30 s in 22% of minutes (its p90 is
+/// 47.7 s). A drain that backs off for a normal day never gets its work done. The incident the rule has to stay loud
+/// on skipped 97 of 1,252 due slots in an hour (7.7%), which is about 16 of 208 in ten minutes.
+/// <para>The normal day's own hourly lines (3 days, full hours of 5,000 or more due slots, 90 hours): the share of
+/// slots skipped was 0.00% at the median, 0.20% at the 90th percentile and 4.39% at the 99th, and one hour met the
+/// alert's rule; six more short lines right after a service start did (6.8% to 24.1% of 600 to 1,500 due), so a burst
+/// after a start is real, and the settle arm below covers it.</para>
+/// <list type="bullet">
+/// <item><description><b>Share, 2.5%</b>: half the alert's 5% (<c>DarlingSelfAlertEvaluator.FleetGateBehindPercent</c>),
+/// so the drain backs off before an hour reaches the alert, not after it has fired. It sits about 12 times over a normal
+/// hour's 0.20% (p90) and under the 5% line, so a normal day does not hold the drain and a bad hour does.</description></item>
+/// <item><description><b>Window, 10 minutes.</b> The stats keep whole minutes, so the read covers 9 to 10 minutes. A full
+/// hour on that fleet holds 5,000 or more due slots, so the window holds 800 or more and the share asks for about 20
+/// skipped slots there: a single hang episode (a few slots) cannot reach it, a sustained skip rate can. A shorter window
+/// would hold fewer slots and let the 5-slot minimum below decide; a longer one would average a burst away. Ten minutes is
+/// also the settle window below. At the incident's rate (about 208 due slots in ten minutes) the same share is 6 slots,
+/// and the incident's 16 is well over it.</description></item>
+/// <item><description><b>Minimum, 5 slots</b>: a quarter of the alert's 20 (the window is a sixth of the hour). It only
+/// matters on a small fleet, where 2.5% of a thin window is a fraction of one slot: a single hang (1 to 3 slots) is a
+/// hiccup and must not hold the drain.</description></item>
 /// </list>
+/// A wait from this arm lasts until the skips age out of the window (up to ten minutes), and the drain's own cap
+/// (<see cref="RetentionCollectionYield.MaxWaitSeconds"/>) lets one batch through every five.</description></item>
+/// <item><description><b>The service is still settling</b>: it started less than <see cref="SettleWindow"/> ago.
+/// The first collections after a start run heavy, and the share above cannot see them in their first minutes (the
+/// first bodies are spread over <see cref="DarlingWorker.ColdStartSpreadSeconds"/> seconds, then queue behind the
+/// gate, and a slot is only counted skipped when its run ends). The field store's first skips came 5 minutes after
+/// the start and its relaunch skips 5 to 8 minutes after it, while the drain was still on small tables.</description></item>
+/// </list>
+/// <para>There is no arm for a body that is running long. It was tried at half the 1-minute cadence (30 s) and
+/// dropped: a fleet's per-minute run-time sum passes 30 s in 22% of normal minutes (p50 15.4 s, p90 47.7 s), so any limit
+/// low enough to catch the incident early fires on a normal day, and a limit above the p99 (93.9 s; the p99.9 is 623 s)
+/// would need a persistence rule to be safe and would still only catch the hangs that the skip share counts the moment
+/// the body ends. Even the hang rule's own 60 s is met in 172 of 1,108 five-minute windows (15.5%) of a normal 3 days
+/// (265 warnings; 125 windows with one, 32 with two, 15 with three or more). A body that runs past its cadence skips its
+/// next slot, which is counted here.</para>
 /// </summary>
 internal sealed class CollectionPressure : ICollectionPressure
 {
-    /// <summary>The window a skipped slot counts for. The stats keep whole minutes, so this reads 4 to 5 minutes back.</summary>
-    internal const int SkipWindowMinutes = 5;
+    /// <summary>The window skipped slots are counted over. The stats keep whole minutes, so this reads 9 to 10 minutes back.</summary>
+    internal const int SkipWindowMinutes = 10;
 
-    /// <summary>The share of the shortest collector cadence a body may run before collection counts as behind.</summary>
-    internal const double BodyRunShare = 0.5;
+    /// <summary>The fewest skipped slots in the window that can count as behind, however large a share of a thin window they are.</summary>
+    internal const long SkipMinCount = 5;
+
+    /// <summary>
+    /// The share of due slots (ran plus skipped) that must be skipped, in thousandths: half the self-alert's percentage,
+    /// so the drain backs off before the hour reaches the alert. Integer arithmetic, so 2.5% exactly counts and 2.49% does not.
+    /// </summary>
+    internal const long SkipSharePerMille = DarlingSelfAlertEvaluator.FleetGateBehindPercent * 10 / 2;
 
     /// <summary>How long after the service starts collection counts as settling.</summary>
     internal static readonly TimeSpan SettleWindow = TimeSpan.FromMinutes(10);
@@ -62,7 +95,6 @@ internal sealed class CollectionPressure : ICollectionPressure
     private readonly FleetGateStats? _stats;
     private readonly Func<DateTime> _utcNow;
     private readonly DateTime _startedUtc;
-    private Func<long>? _oldestRunningBodyTicks;
 
     /// <param name="stats">The fleet gate's counts; null reads no skipped slots (a worker built without them).</param>
     /// <param name="utcNow">The clock, injected so a test does not wait.</param>
@@ -75,21 +107,14 @@ internal sealed class CollectionPressure : ICollectionPressure
         _startedUtc = startedUtc;
     }
 
-    /// <summary>The longest a collection body may run before the drain waits: <see cref="BodyRunShare"/> of the shortest cadence.</summary>
-    internal static TimeSpan BodyRunLimit { get; } = ComputeBodyRunLimit();
-
-    /// <summary>
-    /// Supplies the UTC ticks at which the longest-running collection body started its run, or 0 when none is
-    /// running. The worker sets it once; the read is made from the retention task, so the supplier must be safe on
-    /// any thread.
-    /// </summary>
-    internal void SetBodySource(Func<long> oldestRunningBodyTicks) => Volatile.Write(ref _oldestRunningBodyTicks, oldestRunningBodyTicks);
+    /// <summary>The test: at least <see cref="SkipMinCount"/> skipped AND at least <see cref="SkipSharePerMille"/> thousandths of the due slots.</summary>
+    internal static bool IsBehind(long run, long skipped) =>
+        skipped >= SkipMinCount && skipped * 1000 >= (run + skipped) * SkipSharePerMille;
 
     /// <inheritdoc />
     public string? BehindReason()
     {
-        var now = _utcNow();
-        var sinceStart = now - _startedUtc;
+        var sinceStart = _utcNow() - _startedUtc;
         if (sinceStart < SettleWindow)
         {
             return string.Create(
@@ -97,46 +122,15 @@ internal sealed class CollectionPressure : ICollectionPressure
                 $"the service started {Math.Max(0, sinceStart.TotalSeconds):F0} s ago and collection is still settling");
         }
 
-        var skipped = _stats?.SkippedInLastMinutes(SkipWindowMinutes) ?? 0;
-        if (skipped > 0)
+        var (run, skipped) = _stats?.SlotsInLastMinutes(SkipWindowMinutes) ?? (0, 0);
+        if (IsBehind(run, skipped))
         {
             return string.Create(
                 CultureInfo.InvariantCulture,
-                $"{skipped} collector slot(s) were skipped in the last {SkipWindowMinutes} minutes");
-        }
-
-        var oldest = Volatile.Read(ref _oldestRunningBodyTicks)?.Invoke() ?? 0;
-        if (oldest > 0)
-        {
-            var runningFor = now - new DateTime(oldest, DateTimeKind.Utc);
-            if (runningFor >= BodyRunLimit)
-            {
-                return string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"a collection body has been running for {runningFor.TotalSeconds:F0} s (limit {BodyRunLimit.TotalSeconds:F0} s)");
-            }
+                $"{skipped} of {run + skipped} collector slots were skipped in the last {SkipWindowMinutes} minutes ({100.0 * skipped / (run + skipped):F1}%)");
         }
 
         return null;
-    }
-
-    private static TimeSpan ComputeBodyRunLimit()
-    {
-        var shortestMinutes = int.MaxValue;
-        foreach (var entry in CollectorScheduleDefaults.All.Values)
-        {
-            if (entry.FrequencyMinutes > 0)
-            {
-                shortestMinutes = Math.Min(shortestMinutes, entry.FrequencyMinutes);
-            }
-        }
-
-        if (shortestMinutes == int.MaxValue)
-        {
-            shortestMinutes = 1;
-        }
-
-        return TimeSpan.FromSeconds(shortestMinutes * 60 * BodyRunShare);
     }
 }
 
@@ -172,11 +166,12 @@ internal sealed class RetentionCollectionYield
     internal const double RecheckSeconds = 5;
 
     /// <summary>
-    /// The longest one batch waits for collection before it goes anyway. It equals the skipped-slot window
-    /// (<see cref="CollectionPressure.SkipWindowMinutes"/> minutes), so a single skipped slot ages out of the window
-    /// within one wait, and a fleet that is behind for reasons of its own still gets a batch every few minutes.
+    /// The longest one batch waits for collection before it goes anyway: half of the skipped-slot window
+    /// (<see cref="CollectionPressure.SkipWindowMinutes"/> minutes). A burst of skips can hold the signal for the whole
+    /// window, so a wait that lasted for it would stall the pass for ten minutes at a time; at five, a fleet that is
+    /// behind for reasons of its own still gets a batch every five minutes, and a normal burst is mostly waited out.
     /// </summary>
-    internal const double MaxWaitSeconds = CollectionPressure.SkipWindowMinutes * 60;
+    internal const double MaxWaitSeconds = 300;
 
     /// <summary>The pause after a batch, as a multiple of the batch's own run time. 1 means the drain deletes at most half the time.</summary>
     internal const double PauseFactor = 1.0;
@@ -188,8 +183,14 @@ internal sealed class RetentionCollectionYield
     /// The default wall budget of one pass. The daily purge and <c>purge_now</c> both run the same chores behind the
     /// purge in the same task (findings cleanup, the log sweep, the module-map refresh, the chunk-interval
     /// reconcile), and the first drain in the field held them for 40 minutes. Thirty minutes is under that, and
-    /// about 2% of the 24-hour cadence. At the pause factor of 1 the field store's backlog needs about 70 minutes of
-    /// batches and pauses, so it takes 3 daily passes, 4 when collection pushes back.
+    /// about 2% of the 24-hour cadence. At the pause factor of 1 the field store's backlog (17.78 M rows in the wide
+    /// table, 356 batches, about 29 minutes of batches; 18.0 M rows in all, 40 minutes unpaced) needs 58 to 80 minutes of
+    /// batches and pauses. A wait only happens while collection is behind. On a normal day that is a few percent of the
+    /// time (1 of 90 full hours met the alert's rule, and the share rule is behind for at most the 10 minutes after
+    /// the skips that trip it; the six post-start bursts are the settle window's), so take 5%: a pass gets
+    /// 30 x (1 - 0.05) = 28.5 minutes of work and the first drain takes 58 / 28.5 = 2.0 to 80 / 28.5 = 2.8, so 3 daily
+    /// passes, 4 when collection pushes back. It would take more than 7 only if collection were behind more than 62%
+    /// of the time (1 - 80 / (7 x 30)), so the pass has no floor on its waits.
     /// </summary>
     internal static readonly TimeSpan DefaultWallBudget = TimeSpan.FromMinutes(30);
 
