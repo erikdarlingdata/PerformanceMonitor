@@ -375,6 +375,7 @@ public sealed class StatementFilterAlertTests
     public async Task Engine_AFourMegabyteReport_ReachesTheDelivererFilteredNotWithheldWhole()
     {
         await StatementFilterWarmUp.EnsureAsync();
+        using var pinned = UnspendableBudget();
         var h = BlockingHarness(out _);
         /* One report with a 4 MB tail of harmless elements: the walk reads all of it, withholds only the
            canary statement, and does not run out of budget. */
@@ -393,24 +394,84 @@ public sealed class StatementFilterAlertTests
     }
 
     [Fact]
-    public void Apply_AFourMegabyteReport_FinishesInsideTheBudget()
+    public void Apply_AFourMegabyteReport_ComesBackFilteredNotWithheldWhole()
     {
         StatementFilterWarmUp.Ensure();
+        using var pinned = UnspendableBudget();
         var report = ReportXml().Replace(
             "</blocked-process-report>",
             string.Concat(Enumerable.Repeat("<note>" + new string('x', 400) + "</note>", 10_000)) + "</blocked-process-report>",
             StringComparison.Ordinal);
         var context = new AlertContext { AttachmentXml = report };
 
-        var stopwatch = Stopwatch.StartNew();
         var filtered = AlertStatementFilter.Apply(context)!;
-        stopwatch.Stop();
 
-        /* The budget is 1.5 s, and a document that crosses it is withheld whole, so a result that still holds
-           the plain statement proves the walk finished inside it. */
-        Assert.True(stopwatch.ElapsedMilliseconds < 1950, "took " + stopwatch.ElapsedMilliseconds + " ms");
+        /* #5459: this asserted `took < 1950 ms` under the real 1.5 s + 0.5 s per MB wall-clock budget, so a slow runner
+           withheld the document whole and failed it. The budget is pinned so it cannot run out; the proof that a
+           document past the budget is withheld is Apply_ABudgetAlreadySpent_WithholdsTheDocumentWholeAndEveryValue. */
         Assert.Contains(StatementScrubCanary.PlainStatement, filtered.AttachmentXml!, StringComparison.Ordinal);
+        Assert.True(filtered.AttachmentXml!.Length > 4_000_000, "the report was withheld whole: " + filtered.AttachmentXml.Length);
         AssertNoSecret(filtered.AttachmentXml!);
+    }
+
+    /// <summary>A budget that cannot run out on a slow runner (#5459): one hour, which is above the 10 s cap a budget
+    /// grows to, so it stays one hour. Every clean value and document comes back as it went in.</summary>
+    internal static IDisposable UnspendableBudget() =>
+        AlertStatementFilter.UseBudget(() => new SensitiveStatements.JudgeBudget(TimeSpan.FromHours(1)));
+
+    /// <summary>A budget that is already spent when the filter first looks at it (#5459): an hour of elapsed time is
+    /// charged up front, which no document can earn back (the cap is 10 s). The real judge still runs, so nothing is
+    /// faked except the time the budget has already been charged.</summary>
+    private static SensitiveStatements.JudgeBudget SpentBudget()
+    {
+        var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
+        budget.AddElapsed(TimeSpan.FromHours(1));
+        Assert.True(budget.Spent);
+        return budget;
+    }
+
+    [Fact]
+    public void Apply_ABudgetAlreadySpent_WithholdsTheDocumentWholeAndEveryValue()
+    {
+        // #5459: the other half of the pinned budget. Past the budget a value is withheld unjudged, never passed through.
+        StatementFilterWarmUp.Ensure();
+        var report = ReportXml().Replace(
+            "</blocked-process-report>",
+            string.Concat(Enumerable.Repeat("<note>" + new string('x', 400) + "</note>", 10_000)) + "</blocked-process-report>",
+            StringComparison.Ordinal);
+        var context = new AlertContext { AttachmentXml = report };
+        var item = new AlertDetailItem { Heading = "Plain" };
+        item.Fields.Add(("Query Text", StatementScrubCanary.PlainStatement));
+        context.Details.Add(item);
+
+        SensitiveStatements.JudgeBudget? made = null;
+        using (AlertStatementFilter.UseBudget(() => made = SpentBudget()))
+        {
+            var filtered = AlertStatementFilter.Apply(context)!;
+
+            Assert.Equal(Marker, filtered.AttachmentXml);
+            var field = Assert.Single(Assert.Single(filtered.Details).Fields);
+            Assert.Equal(Marker, field.Value);
+            Assert.DoesNotContain(StatementScrubCanary.PlainStatement, string.Join(Environment.NewLine, Everything(filtered)), StringComparison.Ordinal);
+        }
+
+        Assert.NotNull(made);
+        Assert.True(made!.Unjudged > 0, "nothing was counted unjudged");
+        Assert.Equal(0, made.Named);
+    }
+
+    [Fact]
+    public void ApplyFinding_ABudgetAlreadySpent_WithholdsThePlainProse()
+    {
+        StatementFilterWarmUp.Ensure();
+        var alert = new FindingAlert("Analysis: High CPU", "SRV", "1", "1", "101", new AlertContext(), 0.9, 0.5, "plain prose", true);
+
+        using (AlertStatementFilter.UseBudget(SpentBudget))
+        {
+            Assert.Equal(Marker, AlertStatementFilter.Apply(alert).DetailText);
+        }
+
+        Assert.Equal("plain prose", AlertStatementFilter.Apply(alert).DetailText);
     }
 
     /// <summary>A report with a 4 MB tail of harmless elements, made different per <paramref name="distinct"/>
@@ -444,6 +505,7 @@ public sealed class StatementFilterAlertTests
     {
         // #5477: the budget grows with the distinct documents it judges, so the third report is not starved by the first two.
         await StatementFilterWarmUp.EnsureAsync();
+        using var pinned = UnspendableBudget();
         var h = ThreeIncidentHarness();
 
         await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
@@ -471,12 +533,19 @@ public sealed class StatementFilterAlertTests
         Assert.Equal(3, context.Incidents!.Count);
         Assert.Same(context.AttachmentXml, context.Incidents[0].Attachment!.Xml);
 
-        var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
-        var filtered = AlertStatementFilter.ApplyCore(context, budget)!;
-
+        // #5459: the filtered result is read under a budget that cannot run out (a slow runner withheld the third report).
+        var pinned = new SensitiveStatements.JudgeBudget(TimeSpan.FromHours(1));
+        var filtered = AlertStatementFilter.ApplyCore(context, pinned)!;
         Assert.Equal(3, filtered.Incidents!.Count(i => i.Attachment!.Xml.Length > 4_000_000));
+
+        // The accounting is read off a budget that starts where production's does. Earning and the memo do not depend on
+        // whether the time ran out, so a slow runner changes neither number.
+        var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
+        AlertStatementFilter.ApplyCore(context, budget);
+
         // Three distinct reports: the alert-level copy of the first one was a memo hit, not a second walk.
         Assert.Equal(3, budget.DocumentPasses);
+        Assert.Equal(3, pinned.DocumentPasses);
         // And the budget earned 0.5 s per MB of each of them (a little under 2.0 s each, so about 7.4 s), not 1.5 s in all.
         Assert.InRange(budget.Limit, TimeSpan.FromSeconds(7.25), TimeSpan.FromSeconds(8.5));
     }
