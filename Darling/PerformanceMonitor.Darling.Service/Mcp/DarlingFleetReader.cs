@@ -597,7 +597,8 @@ CROSS JOIN LATERAL
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest
-WHERE s.server_id = ANY($1)";
+WHERE s.server_id = ANY($1)
+AND   s.server_id <> 0";
 
     /// <summary>How far back <see cref="FleetLastCollectionSql"/> looks for a server's newest collection: two
     /// days, deliberately far wider than <see cref="ServerHealthThresholds.OfflineThreshold"/> (the statement
