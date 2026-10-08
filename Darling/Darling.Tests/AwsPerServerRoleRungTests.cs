@@ -40,11 +40,13 @@ public sealed class AwsPerServerRoleRungTests
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("aws-per-server-role", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
+        /* No longer the top rung: the PostgreSQL I/O hourly rollup rung (V170) landed above it. */
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Equal(PreviousVersion, versions.OrderByDescending(v => v).ElementAt(1));
+        Assert.Equal(PreviousVersion, RungVersion - 1);
+        Assert.Contains(PreviousVersion, versions);
     }
 
     [Fact]
@@ -99,20 +101,23 @@ public sealed class AwsPerServerRoleRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A newer rung's sentinel (V170's) is the last argument. */
+        Assert.Equal(ProbeOrdinal + 1, arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        var behind = (object[])all.Clone();
+        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
@@ -123,8 +128,8 @@ public sealed class AwsPerServerRoleRungTests
         Assert.True(v168 >= 0, "the V168 arm is gone, so this pin is comparing against nothing");
         Assert.True(v169 < v168, "the V169 arm sits below V168's, so a current store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[v169..], StringComparison.Ordinal);
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            viewer[v169..v168], StringComparison.Ordinal);
     }
 
     /* ---- the column ACL -------------------------------------------------------------------------------- */
