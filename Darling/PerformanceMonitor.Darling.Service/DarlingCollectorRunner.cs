@@ -4877,8 +4877,8 @@ public sealed class DarlingCollectorRunner
                the caller's own clamp rather than a second round trip. Every OTHER caller passes null, which
                used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
                measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
-               the SAME partitioning column first (chunk exclusion prunes everything older), and only on a
-               miss fall back to the true unbounded MAX below. The value is identical either way — see
+               the SAME partitioning column first (chunk exclusion prunes everything older), then, on a miss,
+               the week before it (#5515), and only on a second miss fall back to the true unbounded MAX below. The value is identical either way — see
                RecentWatermarkWindow's remarks for why a hit can never differ from the unbounded answer. */
             var autoWindow = collectedSince is null;
             var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
@@ -4901,10 +4901,25 @@ public sealed class DarlingCollectorRunner
 
             if (autoWindow)
             {
-                /* The probe found no row in the window — a gap wider than RecentWatermarkWindow, or a
-                   genuinely empty table. Either way only the true unbounded MAX answers correctly; a null
-                   here would read as first-run, which is not scoped to the window the way it is for
-                   query_store's clamped callers. */
+                /* #5515: the probe found no row in RecentWatermarkWindow, which is every cycle's answer for a
+                   quiet server (no job run or trace event for hours). Before the whole slice, try the week:
+                   the SAME bounded statement with an older bound, so the chunks of seven days answer a server
+                   whose newest row is that recent, where the unbounded MAX opened every chunk in retention,
+                   compressed ones included (5,426 blocks a call on job_history). */
+                using var widened = new NpgsqlCommand(sql, connection);
+                widened.CommandTimeout = CommandTimeoutSeconds;
+                widened.Parameters.AddWithValue(serverId);
+                widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                    DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+                if (widenedResult is DateTime widenedDt)
+                {
+                    return widenedDt;
+                }
+
+                /* Still no row: a gap wider than the week, or a genuinely empty table. Either way only the true
+                   unbounded MAX answers correctly; a null here would read as first-run, which is not scoped to
+                   the window the way it is for query_store's clamped callers. */
                 using var fallback = new NpgsqlCommand(BuildServerWatermarkSql(tableName, columnName, bounded: false), connection);
                 fallback.CommandTimeout = CommandTimeoutSeconds;
                 fallback.Parameters.AddWithValue(serverId);
@@ -6811,6 +6826,22 @@ RETURNING s.state_key";
                 if (result is not null && result != DBNull.Value)
                 {
                     return Convert.ToInt64(result);
+                }
+            }
+
+            /* #5515: the week between the recent window and the whole slice, as in GetLastCollectedTimeAsync. The
+               same bounded statement with an older bound. */
+            using (var widened = new NpgsqlCommand(
+                BuildServerWatermarkInstanceIdSql(tableName, columnName, bounded: true), connection))
+            {
+                widened.CommandTimeout = CommandTimeoutSeconds;
+                widened.Parameters.AddWithValue(serverId);
+                widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                    DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+                if (widenedResult is not null && widenedResult != DBNull.Value)
+                {
+                    return Convert.ToInt64(widenedResult);
                 }
             }
 

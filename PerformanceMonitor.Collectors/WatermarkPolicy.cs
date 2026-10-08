@@ -130,7 +130,7 @@ public static class WatermarkPolicy
     /// one recent, almost-certainly-uncompressed chunk instead of the whole retained history. If the probe
     /// finds a row, it IS the true unbounded MAX: nothing outside the window can be newer than something
     /// inside it. Only when the probe finds NOTHING — a gap wider than the window, or a genuinely empty
-    /// table — does the caller re-run the true unbounded MAX. That fallback is what makes the technique
+    /// table — does the caller try <see cref="WidenedWatermarkWindow"/> (#5515) and then re-run the true unbounded MAX. That fallback is what makes the technique
     /// exact rather than approximate: unlike <see cref="ClampCatchup"/>, nothing here ever substitutes a
     /// floor for a real answer.</para>
     ///
@@ -142,4 +142,20 @@ public static class WatermarkPolicy
     /// fleet.</para>
     /// </summary>
     public static readonly TimeSpan RecentWatermarkWindow = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// The second rung of the probe-then-confirm ladder (#5515). A server with no job run or trace event in
+    /// <see cref="RecentWatermarkWindow"/> (a quiet server) missed the first probe and went straight to the
+    /// unbounded MAX, which opens every chunk of the server's slice in retention, compressed ones included
+    /// (about 5,400 and 3,800 blocks a call for job_history and default_trace_events on the 43-server store).
+    /// The ladder tries this window between the two. A server whose newest row is under a week old is answered
+    /// by the chunks of that week, and only a server quiet for longer, or with no row at all, still pays the
+    /// unbounded read, once, because the runner's watermark cache keeps the answer afterwards.
+    ///
+    /// <para>The answer is the same one the unbounded MAX gives, by the argument <see cref="RecentWatermarkWindow"/>
+    /// already makes: the probe bounds <c>collection_time</c>, the partitioning column, and a row outside the
+    /// window cannot hold a newer value than a row inside it. A miss here is not a first run either, so the
+    /// unbounded read still follows it.</para>
+    /// </summary>
+    public static readonly TimeSpan WidenedWatermarkWindow = TimeSpan.FromDays(7);
 }
