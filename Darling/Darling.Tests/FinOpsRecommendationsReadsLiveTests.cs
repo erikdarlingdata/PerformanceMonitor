@@ -167,18 +167,32 @@ public sealed class FinOpsRecommendationsReadsLiveTests
         Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idB, cutoff, TimeoutSeconds, ct));
         Assert.Null(await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idC, cutoff, TimeoutSeconds, ct));
 
-        /* Reserved capacity: the same 30 samples. Sum of one cycle of ten = 40 + 42 + 66 + 23 + 48 = 219, so the
-           mean is 657 / 30 = 21.9. Squared deviations from 21.9 over one cycle: 7.22 + 1.62 + 0.03 + 1.21 + 8.82 =
-           18.9, so 56.7 over three; the sample variance is 56.7 / 29 = 1.95517 and the deviation sqrt = 1.39828. */
+        /* Reserved capacity: the same 31 samples (three full cycles of ten and a 31st of 20, the 24-hour CPU rule needs
+           the oldest sample 23 hours old). Sum = 3 * 219 + 20 = 677, so the mean is 677 / 31 = 21.8387096774193548.
+           Sum of squares = 3 * 4815 + 400 = 14845, so the squared deviations total 14845 - 677^2 / 31 = 60.19355, the
+           sample variance is 60.19355 / 30 = 2.00645 and the deviation sqrt = 1.41649. */
         foreach (var id in new[] { idA, idB })
         {
             var reserved = await DarlingFinOpsRecommendationsReader.GetReservedCapacityAsync(dataSource, id, cutoff, TimeoutSeconds, ct);
             Assert.NotNull(reserved);
-            Assert.Equal(21.9m, reserved!.Value.AvgCpuPct);
-            Assert.InRange(reserved.Value.StddevCpuPct, 1.39827m, 1.39829m);
+            Assert.InRange(reserved!.Value.AvgCpuPct, 21.83870m, 21.83872m);
+            Assert.InRange(reserved.Value.StddevCpuPct, 1.41649m, 1.41650m);
         }
 
         Assert.Null(await DarlingFinOpsRecommendationsReader.GetReservedCapacityAsync(dataSource, idC, cutoff, TimeoutSeconds, ct));
+
+        /* The 7-day CPU rule keeps a 24-hour span, and the seed's 31 samples cover only 22.5 hours, so the Hardware CPU row
+           is (rightly) silent on them. One more sample for server A two days back gives the rule a watched week; every
+           figure below is read again AFTER it, so the checks above are unaffected. */
+        await using (var extra = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await extra.OpenAsync(ct);
+            await using var older = new NpgsqlCommand(
+                "CREATE TEMP TABLE older_cpu AS SELECT * FROM cpu_utilization_stats WHERE server_id = " + idA + " LIMIT 1;" +
+                "UPDATE older_cpu SET collection_id = 999002, collection_time = now() AT TIME ZONE 'UTC' - interval '2 days';" +
+                "INSERT INTO cpu_utilization_stats SELECT * FROM older_cpu", extra);
+            await older.ExecuteNonQueryAsync(ct);
+        }
 
         /* The viewer's rows are the independent check on the builders: the Storage values through the builders give
            the same rows the viewer returns. Server A is a 16-core server with 98304 MB of physical memory. */
@@ -366,14 +380,17 @@ VALUES ($1, $2, $3, $4, $5,
         var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
         var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, cancellationToken: ct);
 
-        /* Rows older than 24 hours raise a division by zero when the CPU column is projected. The 24-hour utilization
-           read never touches them; the 7-day P95 read does, so only the inner fallback of the VM check fires. */
+        /* Rows older than 30 hours raise a division by zero when the 7-day P95 statement (the only one that orders the CPU
+           column with PERCENTILE_CONT) projects them. The 24-hour utilization read never touches them, and since the CPU
+           sample-span rule (the 7-day span read the Hardware CPU row needs) now reads the same view over 7 days, the poison
+           is scoped to the P95 statement by its text: a poison on every read of the column would also fail the span read and
+           withhold the CPU row for a reason this test is not about. So only the inner fallback of the VM check fires. */
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
             await connection.OpenAsync(ct);
             await using var cols = new NpgsqlCommand(
                 "SELECT string_agg(CASE WHEN column_name = 'sqlserver_cpu_utilization' " +
-                "THEN 'CASE WHEN collection_time < now() - interval ''30 hours'' THEN (sqlserver_cpu_utilization / 0)::int ELSE sqlserver_cpu_utilization END AS sqlserver_cpu_utilization' " +
+                "THEN 'CASE WHEN collection_time < now() - interval ''30 hours'' AND current_query() LIKE ''%PERCENTILE_CONT%'' THEN (sqlserver_cpu_utilization / 0)::int ELSE sqlserver_cpu_utilization END AS sqlserver_cpu_utilization' " +
                 "ELSE quote_ident(column_name) END, ', ' ORDER BY ordinal_position) FROM information_schema.columns " +
                 "WHERE table_schema = current_schema() AND table_name = 'cpu_utilization_stats'", connection);
             var list = (string)(await cols.ExecuteScalarAsync(ct))!;

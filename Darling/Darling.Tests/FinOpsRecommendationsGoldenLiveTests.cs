@@ -153,8 +153,8 @@ public sealed class FinOpsRecommendationsGoldenLiveTests
         await Config(c, ct, now.AddHours(-3), "app_dev_a", false);
         await Config(c, ct, now.AddHours(-3), "qa1_a", false);
 
-        /* Feeds CPU right-sizing, the VM CPU advice and the reserved-capacity check: 30 samples about 45 minutes apart
-           over the last 22 hours, mean just above 20% with a spread well under 15% of the mean. */
+        /* Feeds CPU right-sizing, the VM CPU advice and the reserved-capacity check: 31 samples about 45 minutes apart
+           over the last 22.5 hours (the oldest is 23.5 hours old), mean just above 20% with a spread well under 15% of the mean. */
         int[] cpu = { 20, 22, 24, 21, 23, 22, 20, 24, 22, 21 };
         for (var i = 0; i < 31; i++)
         {
