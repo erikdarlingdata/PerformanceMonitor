@@ -92,6 +92,55 @@ public sealed class ScratchPostgresQuiesceLiveTests
         Assert.True(clock.Elapsed < ScratchPostgres.QuiesceCap, $"took {clock.Elapsed}, past the cap {ScratchPostgres.QuiesceCap}.");
     }
 
+    /// <summary>
+    /// #5549: the backend that ran a scratch database's CREATE DATABASE and DROP DATABASE must end with its
+    /// connection. The admin string is the caller's <c>DARLING_TEST_PG</c>, so a pooled admin connection went back
+    /// into the pool every live test draws from, and on CI the next test's <c>CALL run_job</c> ran on the backend
+    /// that had just run the drop. The base string here carries its own application name, so its pool and its
+    /// sessions belong to this test alone: once the scratch database is gone, none of them may still be open.
+    /// </summary>
+    [Fact]
+    public async Task TheCreateAndTheDrop_LeaveNoBackendOpenInTheCallersPool()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live scratch-pool test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var tag = "w5549-" + Guid.NewGuid().ToString("N")[..12];
+        var tagged = new NpgsqlConnectionStringBuilder(baseConnectionString) { ApplicationName = tag }.ConnectionString;
+
+        var scratch = await ScratchPostgres.CreateAsync(tagged, ct);
+        await scratch.DisposeAsync();
+
+        await using var probe = new NpgsqlConnection(baseConnectionString);
+        await probe.OpenAsync(ct);
+        var left = -1L;
+        var lastQuery = "";
+        /* An unpooled connection's backend leaves pg_stat_activity a moment after the close, not at it. A pooled one
+           stays for the pool's idle lifetime (300 seconds by default), far past this wait. */
+        for (var poll = 0; poll < 25; poll++)
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT count(*), coalesce(max(query), '') FROM pg_stat_activity WHERE application_name = $1", probe);
+            command.Parameters.AddWithValue(tag);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            await reader.ReadAsync(ct);
+            left = reader.GetInt64(0);
+            lastQuery = reader.GetString(1);
+            if (left == 0)
+            {
+                break;
+            }
+
+            await reader.DisposeAsync();
+            await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+        }
+
+        Assert.True(left == 0,
+            $"{left} backend(s) from the caller's pool are still open after the scratch database's create and drop; the last one ran: {lastQuery}");
+    }
+
     private static async Task<long> ScalarAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);

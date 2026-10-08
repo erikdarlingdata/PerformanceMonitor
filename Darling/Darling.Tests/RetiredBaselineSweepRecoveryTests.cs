@@ -130,6 +130,12 @@ $fn$", ct);
             await setup.OpenAsync(ct);
             await PgMigrations.MigrateAsync(setup, ct);
 
+            /* run_job is qualified with the extension's schema. A pooled connection opened before a fresh store's
+               migration has no search path to it, and the old test swallowed that 42883 with every other error, so on
+               a fresh database its refresh job never ran at all. */
+            var runJob = await ScalarAsync<string>(setup,
+                "SELECT format('%I.run_job', n.nspname) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'timescaledb'", ct);
+
             for (var i = 0; i < 5; i++)
             {
                 await CreateRetiredFixtureAsync(setup, ct);
@@ -144,7 +150,7 @@ $fn$", ct);
                 await runner.OpenAsync(ct);
 
                 /* The refresh runs for real and finishes before any drop starts (#5549). */
-                await ExecuteAsync(runner, $"CALL run_job({jobId})", ct);
+                await ExecuteAsync(runner, $"CALL {runJob}({jobId})", ct);
 
                 /* The next refresh, in flight: the lock its materialization writes hold until it commits. */
                 using var inFlight = await runner.BeginTransactionAsync(ct);
