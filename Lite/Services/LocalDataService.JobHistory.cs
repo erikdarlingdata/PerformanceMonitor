@@ -244,18 +244,31 @@ ORDER BY server_id";
     /// each with its run time converted to UTC through <paramref name="clock"/>. Not yet held to the exact window.</summary>
     private async Task<List<JobHistoryRow>> ReadJobHistoryForServerAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc)
     {
-        var items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, limit, windowEndUtc);
-        if (windowEndUtc is not { } end || limit <= 0 || items.Count < limit)
+        var readLimit = limit;
+        var items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc);
+        if (windowEndUtc is not { } end || limit <= 0)
         {
             return items;
         }
 
         /* #5562: the SQL end bound is the server-local end widened by an hour (a daylight-saving change next to the end
-           moves the stored wall clock by an hour against the instant), so a run in that margin can sit among the newest
-           rows and displace a run inside the window from the cap. The margin rows are the newest ones, so they are all in
-           the first read: count them and read again with that many more rows, and the cap lands on the window. */
-        var outside = items.Count(r => r.RunDateTimeUtc is { } runUtc && runUtc >= end);
-        return outside == 0 ? items : await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, limit + outside, windowEndUtc);
+           moves the stored wall clock by an hour against the instant), so runs in that margin can sit among the newest rows
+           and displace runs inside the window from the cap. The margin runs are the newest ones: while the read came back
+           full and holds fewer than <c>limit</c> runs inside the window, read again with room for the missing
+           ones, so the cap lands on the window. A read that came back short has reached the oldest row, so it is complete. */
+        while (items.Count >= readLimit)
+        {
+            var inside = items.Count(r => r.RunDateTimeUtc is { } runUtc && runUtc < end);
+            if (inside >= limit)
+            {
+                break;
+            }
+
+            readLimit += limit - inside;
+            items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc);
+        }
+
+        return items;
     }
 
     private async Task<List<JobHistoryRow>> ReadJobHistoryForServerOnceAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc)
