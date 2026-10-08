@@ -330,6 +330,50 @@ VALUES ($1, $2, $3, 'newest-snapshot-e2e', 'SQLServer:SQL Statistics', $4, '', $
     }
 
     /// <summary>
+    /// The one accepted difference from the full read (#5516): a file seen only in snapshots strictly between the
+    /// two probed ones (the oldest in the lookback and the one just before the newest) is not carried by the cheap
+    /// path, where the full read carried it as a ghost for up to 24 hours. Pinned so a change to it is deliberate:
+    /// if the probe ever closes the gap the cheap total will include the file and this test will say so.
+    /// </summary>
+    [Fact]
+    public async Task TheDatabaseSizeFact_DoesNotCarryAFileSeenOnlyBetweenTheProbedSnapshots_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live newest-snapshot size test.");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await OpenAsync(ct);
+        await using var scratchLease = scratch;
+        await using var connectionLease = c;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var end = Now();
+        DateTime At(int minutesAgo) => end.AddMinutes(-minutesAgo);
+
+        /* File A is in every snapshot, including the oldest in the lookback (23 h ago) and the second newest. File G
+           lives in two middle snapshots only: in neither probed snapshot, and not in the newest. */
+        const int hole = -516_009;
+        await FileIoAsync(c, hole, At(1380), "Db", "A", 100, ct);
+        foreach (var m in new[] { 720, 690, 600, 300, 30, 0 })
+        {
+            await FileIoAsync(c, hole, At(m), "Db", "A", 100, ct);
+        }
+
+        foreach (var m in new[] { 720, 690 })
+        {
+            await FileIoAsync(c, hole, At(m), "Staging", "G", 5000, ct);
+        }
+
+        var context = Context(hole, end);
+        var old = await OldDatabaseSizeAsync(c, context, ct);
+        var (cheap, droppedOut) = await NewestDatabaseSizeAsync(c, context, ct);
+
+        Assert.Equal(5000 + 100, old);
+        Assert.Equal(100, cheap);
+        Assert.False(droppedOut, "the probe sees neither snapshot with the file, so the full read is not asked");
+        Assert.Equal(100, await ShippedDatabaseSizeFactAsync(postgres, context));
+    }
+
+    /// <summary>
     /// The perfmon read returns the same rows as the window function it replaced, including a counter that is
     /// absent from the newest snapshot or unusable there (interval 0): the older usable row is still the answer.
     /// </summary>
@@ -410,6 +454,7 @@ VALUES ($1, $2, $3, 'newest-snapshot-e2e', 'SQLServer:SQL Statistics', $4, '', $
     /// <summary>
     /// The point of #5516: a window of minute snapshots. The old shapes touch every snapshot's blocks; the new
     /// ones touch the newest. Block counts, not timings, so the assertion is stable.
+    /// The rows seeded here are uncompressed: what the older COMPRESSED chunks cost the old shapes is not measured.
     /// </summary>
     [Fact]
     public async Task TheNewestSnapshotReads_TouchAFractionOfTheBlocksTheFullWindowReadsDo_AgainstDevPostgres()

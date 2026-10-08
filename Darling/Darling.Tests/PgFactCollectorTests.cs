@@ -490,7 +490,7 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
     /// #3527: delta_cntr_value spans one COLLECTION INTERVAL, not one second — read raw, the
     /// PERFMON_*_SEC facts overstate by the cadence (60x at 60s, 300x at 5min). The query must
     /// select the row's measured sample_interval_seconds (#2234) for the division and filter
-    /// interval &lt;= 0 rows (no delta was knowable: first sighting, reset, gap) so rn = 1 lands on
+    /// interval &lt;= 0 rows (no delta was knowable: first sighting, reset, gap) so the newest row per counter (LIMIT 1) lands on
     /// the newest row a rate can honestly be derived from.
     /// </summary>
     [Fact]

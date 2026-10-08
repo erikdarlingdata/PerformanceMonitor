@@ -111,7 +111,11 @@ SELECT
     /// Sums the latest size_mb across the database files seen within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see>
     /// of the window's end (#3896) — a file not seen in that span belongs to a database that no longer exists.
     /// The sum comes from the newest snapshot alone (#5516); when a file in the probed older snapshots is
-    /// missing from it, <see cref="DatabaseSizeSql"/> decides, so the answer never differs from the full read.
+    /// missing from it, <see cref="DatabaseSizeSql"/> decides. The one accepted difference from the full read: a file
+    /// seen only in snapshots strictly between the two probed ones (the oldest in the lookback and the one just
+    /// before the newest) is not carried as a ghost, where the full read carried it for up to 24 hours. That
+    /// answer can also reappear when the lookback's oldest snapshot later falls inside the file's life; the total
+    /// has no scoring weight, and #3896 treats such a ghost as not a database anyway.
     /// </summary>
     private async Task CollectDatabaseSizeFactAsync(AnalysisContext context, List<Fact> facts)
     {
