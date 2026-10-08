@@ -1094,6 +1094,10 @@ SELECT COALESCE
             }
 
             await ExecuteAsync(connection, CreateDefaultSql(table), ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+
+            /* #5594: the day partitions and DEFAULT cloned the parent's BRIN index with its autosummarize option (on when V171
+               made the parent). The LOCK TABLE above holds every partition, so turning the whole family off waits for nothing. */
+            await QueryStoreIntervalBrin.TurnOffInTransactionAsync(connection, transaction, table.Parent, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             logger.LogInformation(
                 "Query Store interval table {Table}: promoted. {Legacy} is bounded below {Bound:O}; {Days} day partition(s) and DEFAULT created.",
@@ -1317,6 +1321,11 @@ SELECT COALESCE
                     ShortTimeoutSeconds,
                     transaction,
                     cancellationToken).ConfigureAwait(false);
+
+                /* #5594: the attach cloned the parent's BRIN index with the parent's autosummarize, which is on when V171 made
+                   the parent. The partitioned parent index cannot be altered, so the new leaf's copy is turned off here, in the
+                   transaction that makes it, while nothing else can hold it. */
+                await QueryStoreIntervalBrin.TurnOffInTransactionAsync(connection, transaction, name, cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 created++;
                 drainedTotal += drained;
@@ -1459,6 +1468,26 @@ SELECT COALESCE
         var failed = 0;
         foreach (var table in tables)
         {
+            /* #5594: first, before any partition work, so the cancel loop ends even when the rest of the pass finds nothing to
+               do or fails. Its own catch: a BRIN step that cannot run (a lock, a permission) is counted as a failure but never
+               stops the table's partitions from being maintained. */
+            try
+            {
+                var brin = await QueryStoreIntervalBrin.TurnOffAutosummarizeAsync(connection, table, logger, cancellationToken).ConfigureAwait(false);
+                if (brin.Outcome == StepOutcome.Done)
+                {
+                    changed += brin.Count;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failed++;
+                logger.LogWarning(
+                    "Query Store interval table {Table}: turning BRIN autosummarize off failed ({Message}); the partitions are still maintained and the next pass retries.",
+                    table.Parent, ex.Message);
+                await ReopenAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            }
+
             try
             {
                 var result = await RunMaintenanceAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
@@ -1474,22 +1503,30 @@ SELECT COALESCE
                     "Query Store interval table {Table}: partition maintenance failed ({Message}); the other table still runs and the next pass retries.",
                     table.Parent, ex.Message);
 
-                if (connection.State != System.Data.ConnectionState.Open)
-                {
-                    try
-                    {
-                        await connection.CloseAsync().ConfigureAwait(false);
-                        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (Exception reopen) when (reopen is not OperationCanceledException)
-                    {
-                        logger.LogWarning("Query Store interval partition maintenance could not reopen its connection: {Message}", reopen.Message);
-                    }
-                }
+                await ReopenAsync(connection, logger, cancellationToken).ConfigureAwait(false);
             }
         }
 
         return new PassResult(changed, failed);
+    }
+
+    /* A failure that closed the connection leaves the next table (and the next step) nothing to run on, so it is reopened. */
+    private static async Task ReopenAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        if (connection.State == System.Data.ConnectionState.Open)
+        {
+            return;
+        }
+
+        try
+        {
+            await connection.CloseAsync().ConfigureAwait(false);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception reopen) when (reopen is not OperationCanceledException)
+        {
+            logger.LogWarning("Query Store interval partition maintenance could not reopen its connection: {Message}", reopen.Message);
+        }
     }
 
     /// <summary>
@@ -1526,7 +1563,12 @@ SELECT COALESCE
                 return await AnalyzeIfDueAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
             },
             token => QueryStoreBackgroundIndexes.RunDelayedAsync(postgres, logger, TimeSpan.Zero, specs, token),
-            cancellationToken);
+            cancellationToken,
+            async (table, token) =>
+            {
+                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                return await QueryStoreIntervalBrin.SummarizeNewRangesAsync(connection, table, logger, token).ConfigureAwait(false);
+            });
 
     /// <summary><see cref="RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/> with the three actions injected, so the order, the repetition and the isolation run without a store.</summary>
     internal static async Task RunDelayedAsync(
@@ -1537,7 +1579,8 @@ SELECT COALESCE
         Func<IntervalTable, CancellationToken, Task<StepResult>> promote,
         Func<IntervalTable, CancellationToken, Task<StepResult>> analyze,
         Func<CancellationToken, Task> ensureIndexes,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<IntervalTable, CancellationToken, Task<StepResult>>? summarize = null)
     {
         try
         {
@@ -1577,6 +1620,16 @@ SELECT COALESCE
                 foreach (var table in tables)
                 {
                     await TryStepAsync(logger, table, "analyze", analyze, quiet: true, cancellationToken).ConfigureAwait(false);
+                }
+
+                /* #5594: the BRIN indexes are summarized here, hourly, because autosummarize is off and a VACUUM only summarizes
+                   when it finishes. Never the waiter that cancels an autovacuum (see QueryStoreIntervalBrin). */
+                if (summarize is not null)
+                {
+                    foreach (var table in tables)
+                    {
+                        await TryStepAsync(logger, table, "BRIN summarize", summarize, quiet: true, cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 await Task.Delay(interval, cancellationToken).ConfigureAwait(false);

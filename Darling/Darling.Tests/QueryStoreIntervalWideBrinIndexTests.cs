@@ -58,7 +58,10 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
         var sql = QueryStoreIntervalWideBrinIndex.CreateSql;
         Assert.Contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS", sql);
         Assert.Contains("USING brin (collection_time)", sql);
-        Assert.Contains("autosummarize = on", sql);
+        /* #5594: off. An autosummarize work item waits for the table's lock and cancels a running autovacuum. */
+        Assert.Contains("autosummarize = off", sql);
+        Assert.DoesNotContain("autosummarize = on", sql);
+        Assert.Contains("autosummarize = off", QueryStoreIntervalWideBrinIndex.Spec.IndexDefinition);
         Assert.Contains("ix_query_store_interval_wide_collection_time_brin", sql);
         Assert.Contains("DROP INDEX CONCURRENTLY IF EXISTS", QueryStoreIntervalWideBrinIndex.DropSql);
     }

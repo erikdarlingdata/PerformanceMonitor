@@ -95,7 +95,7 @@ public static class QueryStoreBackgroundIndexes
     /// <param name="BelowMinimumReason">Why a server below the floor must not build it, for the log.</param>
     /// <param name="IndexDefinition">
     /// What follows <c>ON &lt;table&gt;</c> in the index's definition (<c>(server_id, first_execution_time)</c>,
-    /// <c>USING brin (collection_time) WITH (autosummarize = on)</c>). The partitioned path (#5571) builds the parent
+    /// <c>USING brin (collection_time) WITH (autosummarize = off)</c>). The partitioned path (#5571) builds the parent
     /// <c>ON ONLY</c> and each leaf's child from it. Empty for a spec that is never aimed at a partitioned table.
     /// </param>
     public sealed record IndexSpec(
