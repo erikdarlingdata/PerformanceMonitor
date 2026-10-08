@@ -108,8 +108,9 @@ const FIELD_WORDS = [
   [/\bsession_missing\b/g, "session missing"],
 ];
 
-/* The rewrites that name one known internal token each (a hints pointer, a window parameter, a health field). They never
-   touch anything else, so they are safe on text the service did not write, such as a collector's Last Error. */
+/* The rewrites that name one known internal token each (a hints pointer, a window parameter, a denial flag). They are the
+   parameter names the service's own sentences write, never a field or table name: those can be real object names in a
+   store error (pg_wraparound_stats, last_error), so they stay out of this list and are rewritten only by plainText. */
 function namedTokenText(text) {
   let t = text;
 
@@ -130,9 +131,6 @@ function namedTokenText(text) {
   t = t.replace(/\bhours_back\b/g, "the time range");
 
   t = t.replace(/\bCheck list_servers\b/g, "Check the server list");
-  t = t.replace(/\bpg_wraparound_stats\b/g, "the freeze-headroom collector");
-
-  for (const [re, words] of FIELD_WORDS) t = t.replace(re, words);
   return t;
 }
 
@@ -154,6 +152,11 @@ export function plainText(text) {
   if (text.includes(ENGINE_GATE_MARK)) return NOT_COLLECTED_LINE;
   let t = text;
   t = namedTokenText(t);
+
+  /* The health sentence's collector and field names, said as the page's own words (#5492). Not in the named path: a Last
+     Error can quote a real relation or column called the same thing. */
+  t = t.replace(/\bpg_wraparound_stats\b/g, "the freeze-headroom collector");
+  for (const [re, words] of FIELD_WORDS) t = t.replace(re, words);
 
   /* A collector's measurement counts: shred_gated=1 events_read=0 report_xml_empty=0. A run of two or more pairs, or a
      lone pair whose label a collector really writes; any other lone pair, such as timeout=30 in a driver message, stays. */

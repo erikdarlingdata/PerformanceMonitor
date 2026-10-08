@@ -124,11 +124,13 @@ public sealed class WebPlainTextTests
             "latest run: shred_gated=1 events_read=0 report_xml_empty=0",
             "latest run: events_read=4",
             "latest noted run: shred_gated_1 events_read_0 (3 of 5 runs)",
+            "pg_wraparound_stats failed; last_error has the text",
         ], out _);
         Assert.Equal("use Collection Health to find where it stopped", o[0]);
         Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[1]);
         Assert.Equal("latest run: events read: 4", o[2]);
         Assert.Equal("latest noted run: shred gated: 1, events read: 0 (3 of 5 runs)", o[3]);
+        Assert.Equal("the freeze-headroom collector failed; Last Error has the text", o[4]);
     }
 
     [Fact]
@@ -138,10 +140,17 @@ public sealed class WebPlainTextTests
         [
             "Could not find 'dbo.get_orders' (timeout=30); widen hours_back or use get_collection_health",
             "latest run: events_read=4 shred_gated=1 and last_error shows it",
+            "relation \"pg_wraparound_stats\" does not exist",
+            "column \"last_error\" of relation \"x\" does not exist",
+            "denied_since_last_success is true; move as_of or widen days_back",
         ];
         var (_, named, _, _) = RunDoc(inputs, out _);
         Assert.Equal("Could not find 'dbo.get_orders' (timeout=30); widen the time range or use get_collection_health", named[0]);
-        Assert.Equal("latest run: events_read=4 shred_gated=1 and Last Error shows it", named[1]);
+        /* Round-2 L1: a Last Error can quote a real relation or column, so field and table names are not rewritten here. */
+        Assert.Equal("latest run: events_read=4 shred_gated=1 and last_error shows it", named[1]);
+        Assert.Equal("relation \"pg_wraparound_stats\" does not exist", named[2]);
+        Assert.Equal("column \"last_error\" of relation \"x\" does not exist", named[3]);
+        Assert.Equal("a denial is newer than the last success; move the end date or widen the date range", named[4]);
     }
 
     [Fact]
