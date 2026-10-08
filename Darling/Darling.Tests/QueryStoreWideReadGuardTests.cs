@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// every path that runs a composed panel: the shared runner (behind the web endpoint) and the MCP tool
 /// <c>run_custom_view_panel</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreWideReadGuardTests
 {
     private static readonly DateTime Start = new(2026, 8, 1, 0, 0, 0, DateTimeKind.Unspecified);
