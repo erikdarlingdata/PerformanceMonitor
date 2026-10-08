@@ -370,8 +370,14 @@ public partial class ViewerServerTab : UserControl
         }
     }
 
+    /// <summary>Walk finding D15: the clock and phase record of the inner-tab load in flight. Loads are overlap-guarded
+    /// (<see cref="RefreshActiveInnerTabAsync"/>), so one field serves them; a loader that wants its store reads in the
+    /// slow-load line wraps each in <c>_loadTimer?.Track(...)</c>.</summary>
+    private ViewerLoadTimer? _loadTimer;
+
     private async Task LoadInnerTabAsync(int tabIndex)
     {
+        var timer = _loadTimer = new ViewerLoadTimer();
         try
         {
             switch (tabIndex)
@@ -471,6 +477,15 @@ public partial class ViewerServerTab : UserControl
         catch (Exception ex)
         {
             StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+        }
+        finally
+        {
+            /* Walk finding D15: a slow load (over ViewerLoadTimer.SlowLoadThresholdMs) names its tab and where the time went. */
+            var slow = timer.Finish($"inner tab {tabIndex}");
+            if (slow is not null)
+            {
+                ViewerLogger.Warn("SlowLoad", $"[{_server.DisplayName}] {slow}");
+            }
         }
     }
 

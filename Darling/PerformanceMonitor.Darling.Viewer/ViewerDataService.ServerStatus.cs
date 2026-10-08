@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -118,6 +119,20 @@ WHERE s.server_id <> 0";
     /// one caller's.</summary>
     private async Task<long?> FetchStoreSizeBytesAsync()
     {
+        /* Walk finding D15: the status-bar field is display only, so it reads the size the service already records on its
+           hourly self-metrics sweep (the #3209 shape the service's own disk check reads) and measures the live directory
+           only for a store that has not swept yet. pg_database_size took a mean of 4.4 s (worst 39.9 s) on a large store,
+           every five minutes, for a number the field rounds to a whole MB or one GB decimal. */
+        await using (var recorded = _dataSource.CreateCommand(StoreSelfMetrics.LatestStoreSizeSql))
+        {
+            recorded.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            var recordedBytes = await recorded.ExecuteScalarAsync(CancellationToken.None);
+            if (recordedBytes is not null && recordedBytes != DBNull.Value)
+            {
+                return Convert.ToInt64(recordedBytes);
+            }
+        }
+
         await using var command = _dataSource.CreateCommand(StoreSizeSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         var result = await command.ExecuteScalarAsync(CancellationToken.None);

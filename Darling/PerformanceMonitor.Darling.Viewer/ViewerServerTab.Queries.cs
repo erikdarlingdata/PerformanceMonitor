@@ -173,21 +173,38 @@ public partial class ViewerServerTab
         }
     }
 
+    /// <summary>Walk finding D15: hands a started store read to the load's phase clock (<see cref="ViewerLoadTimer"/>) and back
+    /// unchanged. Outside a timed load (a slicer drag, a test) it is the task itself.</summary>
+    private Task<T> Timed<T>(string phase, Task<T> read) => _loadTimer?.Track(phase, read) ?? read;
+
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc)
     {
-        var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
-        var read = dataReadTask.Result;
-        var rows = read.Rows;
-        _queryStatsFilterMgr!.UpdateData(rows);
-        SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-        /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
-           ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
-           tier disclosure are independent facts, so both may show at once (a window aged past raw AND
-           routed to hourly). */
-        UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
-        await LoadQueryStatsSlicerAsync(startUtc, endUtc);
+        _loadTimer?.Surface = "Queries > Top Queries by Duration";
+        var floorTask = Timed("data start", _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc));
+        var dataReadTask = Timed("grid read", _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        /* Walk finding D15: the slicer's read does not depend on the grid's, so it starts beside it and is awaited after the grid
+           is bound. It used to start only once the grid read was in, which put its whole round trip behind the grid's. */
+        var slicerTask = Timed("slicer read", _dataService.GetQueryStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        try
+        {
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
+            var read = dataReadTask.Result;
+            var rows = read.Rows;
+            _queryStatsFilterMgr!.UpdateData(rows);
+            SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+            /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
+               ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
+               tier disclosure are independent facts, so both may show at once (a window aged past raw AND
+               routed to hourly). */
+            UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
+            await LoadQueryStatsSlicerAsync(startUtc, endUtc, slicerTask);
+        }
+        catch
+        {
+            await ViewerDataService.ObserveAsync(slicerTask);
+            throw;
+        }
+
         await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
     }
 
@@ -229,34 +246,57 @@ public partial class ViewerServerTab
 
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
-        var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
-        var read = dataReadTask.Result;
-        var rows = read.Rows;
-        _procStatsFilterMgr!.UpdateData(rows);
-        SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-        /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
-           banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
-        UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
-        await LoadProcStatsSlicerAsync(startUtc, endUtc);
+        _loadTimer?.Surface = "Queries > Top Procedures by Duration";
+        var floorTask = Timed("data start", _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc));
+        var dataReadTask = Timed("grid read", _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        var slicerTask = Timed("slicer read", _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        try
+        {
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
+            var read = dataReadTask.Result;
+            var rows = read.Rows;
+            _procStatsFilterMgr!.UpdateData(rows);
+            SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+            /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
+               banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
+            UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
+            await LoadProcStatsSlicerAsync(startUtc, endUtc, slicerTask);
+        }
+        catch
+        {
+            await ViewerDataService.ObserveAsync(slicerTask);
+            throw;
+        }
+
         await RefreshProcStatsComparisonAsync(startUtc, endUtc);
     }
 
     private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc)
     {
-        var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, startUtc, endUtc);
+        _loadTimer?.Surface = "Queries > Query Store by Duration";
+        var floorTask = Timed("data start", _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, startUtc, endUtc));
         /* #3953 clause 4: only a genuine custom range is a literal end the gate must honor against
            applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
            the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
            ordinary read (M1) — null tells the gate this end is open. */
-        var dataReadTask = _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
-        await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
-        var (rows, widePlan) = dataReadTask.Result;
-        _queryStoreFilterMgr!.UpdateData(rows);
-        SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-        UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan);
-        await LoadQueryStoreSlicerAsync(startUtc, endUtc);
+        var dataReadTask = Timed("grid read", _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null));
+        /* Walk finding D15: the slicer's read starts beside the grid's (see LoadTopQueriesAsync). */
+        var slicerTask = Timed("slicer read", _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+        try
+        {
+            await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
+            var (rows, widePlan) = dataReadTask.Result;
+            _queryStoreFilterMgr!.UpdateData(rows);
+            SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+            UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Store"), startUtc, widePlan: widePlan);
+            await LoadQueryStoreSlicerAsync(startUtc, endUtc, slicerTask);
+        }
+        catch
+        {
+            await ViewerDataService.ObserveAsync(slicerTask);
+            throw;
+        }
+
         await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
     }
 
@@ -461,9 +501,9 @@ public partial class ViewerServerTab
 
     // ── Slicers (Lite's ServerTab.Slicers.cs; the slicer sends UTC bounds, the viewer reads take naive UTC) ──
 
-    private async Task LoadQueryStatsSlicerAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadQueryStatsSlicerAsync(DateTime startUtc, DateTime endUtc, Task<List<TimeSliceBucket>> read)
     {
-        var data = await _dataService.GetQueryStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var data = await read;
         _queryStatsSlicerData = data;
         _queryStatsSlicerMetric = "TotalCpu";
         if (data.Count == 0)
@@ -491,9 +531,9 @@ public partial class ViewerServerTab
         }
     }
 
-    private async Task LoadProcStatsSlicerAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadProcStatsSlicerAsync(DateTime startUtc, DateTime endUtc, Task<List<TimeSliceBucket>> read)
     {
-        var data = await _dataService.GetProcStatsSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var data = await read;
         _procStatsSlicerData = data;
         _procStatsSlicerMetric = "TotalCpu";
         if (data.Count == 0)
@@ -521,9 +561,9 @@ public partial class ViewerServerTab
         }
     }
 
-    private async Task LoadQueryStoreSlicerAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadQueryStoreSlicerAsync(DateTime startUtc, DateTime endUtc, Task<List<TimeSliceBucket>> read)
     {
-        var data = await _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var data = await read;
         _queryStoreSlicerData = data;
         _queryStoreSlicerMetric = "TotalCpu";
         if (data.Count == 0)
