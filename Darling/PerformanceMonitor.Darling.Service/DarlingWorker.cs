@@ -436,16 +436,6 @@ public sealed class DarlingWorker : BackgroundService
         new("composer performance tuning", StoreObjectConvergenceStage.Tuning, StoreObjectChangeSignal.InPlace,
             (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, ct),
             (connection, logger, ct) => PgTableTuning.ApplyAsync(connection, logger, hourly: true, ct)),
-
-        /* #5574: LAST on purpose. perfmon_stats chunks compressed before the segmentby change (server_id alone) are
-           re-grouped by counter, newest first, inside the 30-day trend reach, for at most two minutes of a pass, so the
-           cheap steps above are never made to wait behind it. Hourly only: the start path would hold the service's
-           start for those minutes, and a store that has not converged is served by the next :30 tick. It follows the
-           "compression policies" step in the same pass, which is what moves the hypertable to the new setting first
-           (the re-group does nothing until it has). Counted as a change per chunk re-grouped. */
-        new("perfmon chunk re-group", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
-            (connection, logger, ct) => Task.FromResult(0),
-            (connection, logger, ct) => TimescaleSupport.RegroupPerfmonChunksAsync(connection, logger, ct)),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
@@ -4020,6 +4010,13 @@ LIMIT 1";
         if (_selfAlertPass is { IsCompleted: false })
         {
             inFlightSweeps.Add(_selfAlertPass);
+        }
+
+        /* #5574: the perfmon_stats re-group loop ends on the same cancellation; its chunk in flight rolls back or is left
+           for the compression policy, and the loop never faults. */
+        if (_perfmonRegroupDrain?.Completion is { IsCompleted: false } regroupRun)
+        {
+            inFlightSweeps.Add(regroupRun);
         }
 
         /* #4938: the daily runs detached from those bodies join the wait inside DrainInFlightAsync. */
@@ -10071,6 +10068,18 @@ AND   j.hypertable_name = '{relation}'", connection))
                 await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token, hourly: true);
             }
 
+            /* #5574: the perfmon_stats chunk re-group, AFTER the whole list because the "compression policies" step is what
+               moves the hypertable to the new grouping first (the re-group does nothing until it has). It is a background
+               loop on its own connection and the service's stopping token, not a step: the rewrite of a large store's chunk
+               takes minutes, and a step would hold this pass (and the sweep loop that awaits it) for them. Starting it costs
+               nothing here (no database work, and nothing when a run is already going); a converged store's run is two
+               catalog reads and it ends. Hourly only: the start path does not call it, so a restart is not held, and the
+               first :30 tick starts it. TimescaleDB-gated like the steps that need it. */
+            if (timescaleAvailable)
+            {
+                StartPerfmonRegroupDrain(cancellationToken);
+            }
+
             LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -10089,6 +10098,16 @@ AND   j.hypertable_name = '{relation}'", connection))
                 "Store object convergence could not run after {ElapsedMs} ms — every store object stays exactly as it is (a missing rollup family stays missing, a missing baseline relation keeps returning nothing) until the next hour retries or the service restarts: {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
         }
+    }
+
+    /// <summary>The perfmon_stats chunk re-group loop (#5574); null until the first hourly pass on a store with TimescaleDB.</summary>
+    private PerfmonRegroupDrain? _perfmonRegroupDrain;
+
+    /// <summary>Starts the re-group loop unless one is running. Never throws and does no database work on this thread.</summary>
+    private void StartPerfmonRegroupDrain(CancellationToken stoppingToken)
+    {
+        _perfmonRegroupDrain ??= new PerfmonRegroupDrain(token => _postgres!.OpenConnectionAsync(token), _logger);
+        _perfmonRegroupDrain.StartIfIdle(stoppingToken);
     }
 
     /// <summary>
