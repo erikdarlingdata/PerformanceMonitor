@@ -43,6 +43,7 @@ public partial class JobHistoryTab : UserControl
     public JobHistoryTab()
     {
         InitializeComponent();
+        RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened; '1mo' is the old 30 days, '90d' or '1y' can be typed */
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
@@ -417,9 +418,7 @@ public partial class JobHistoryTab : UserControl
 
     private int GetSelectedHoursBack()
     {
-        if (TimeRangeComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
-            return int.TryParse(tagStr, out var hours) ? hours : 24;
-        return 24;
+        return LiteTimeRange.HoursBackOf(RangePicker, 24);
     }
 
     private int? GetSelectedServerId()
@@ -538,6 +537,12 @@ public partial class JobHistoryTab : UserControl
     #region Event Handlers
 
     private async void Filter_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (IsLoaded)
+            await LoadJobsAsync();
+    }
+
+    private async void RangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (IsLoaded)
             await LoadJobsAsync();

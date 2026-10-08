@@ -466,9 +466,7 @@ public sealed class RefreshCoordinatorTests
     }
 
     [Theory]
-    [InlineData("TimeRangeCombo_SelectionChanged")]
-    [InlineData("CustomDateRange_Changed")]
-    [InlineData("CustomTimeCombo_Changed")]
+    [InlineData("RangePicker_RangeChanged")]
     public void TheTimeRangeHandlers_DoNotDropAChangeBecauseARefreshIsRunning(string handler)
     {
         var body = Body("ServerTab.TimeRange.cs", handler);

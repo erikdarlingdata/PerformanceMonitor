@@ -60,19 +60,15 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// The current toolbar window as (hoursBack, fromUtc, toUtc) -- the single derivation shared by the data refresh and
     /// the per-chart Revert / double-click axis re-pin, so both read the same window. A preset leaves from/to null
-    /// (charts fall back to now - hoursBack); a custom range is the pair of naive-UTC instants the tab holds
-    /// (#4766), handed to every read as it is: no clock takes part, so the read, the slicer and the alert badge all
-    /// see the same two instants whichever display zone the pickers show.
+    /// (charts fall back to now - hoursBack); any other range (a calendar period, a sub-hour span, a typed or
+    /// picked range, 'since') is the pair of naive-UTC instants it resolves to (#4766, #5562), handed to every read as
+    /// it is: no clock takes part, so the read, the slicer and the alert badge all see the same two instants whichever
+    /// display zone the picker shows. A fixed range holds its instants itself, so a display-mode switch changes only the text.
     /// </summary>
     private (int hoursBack, DateTime? fromUtc, DateTime? toUtc) GetCurrentWindowUtc()
     {
-        /* A range the pickers show but the tab has not yet held (their defaults, filled before any edit) is taken from them once. */
-        if (IsCustomRange && !_customRange.IsCustom)
-        {
-            CaptureCustomRangeEdit(null);
-        }
-
-        return CurrentWindowUtc(GetHoursBack(), IsCustomRange, _customRange);
+        /* #5562: resolved against the clock now, so a live range slides; the one pure mapping is LiteTimeRange.WindowFor. */
+        return LiteTimeRange.WindowFor(CurrentRange());
     }
 
     /// <summary>
@@ -156,6 +152,10 @@ public partial class ServerTab : UserControl
 
     private async Task RunRefreshPassAsync(RefreshScope scope, CancellationToken ct)
     {
+        /* #5562: a live range slides and the collector's cadence can be edited, so the picker's text and notes are
+           redrawn at the start of every pass. */
+        RefreshRangeNotes();
+
         if (scope == RefreshScope.VisibleTab)
         {
             /* The window and the selected tab are read now, at the pass's own start, so a replay loads whatever is
@@ -183,8 +183,8 @@ public partial class ServerTab : UserControl
             if (ct.IsCancellationRequested) return;
 
             /* The server's zone can change under the held range (its clock was just read again, or another tab switched
-               the display mode), so the pickers are shown again from the held instants before the window is read. */
-            RenderCustomRange();
+               the display mode), so the picker is drawn again in the current zone before the window is read. */
+            RangePicker.Refresh();
 
             /* The window is the held range as UTC instants (#4766): every read below takes the same two instants. */
             var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
@@ -611,6 +611,13 @@ public partial class ServerTab : UserControl
             () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc, includeAlsoCovered: includeAlsoCovered, cancellationToken: ct)),
             $"[{_server.DisplayName}] {relation}", startUtc, endUtc, ct);
         ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());
+
+        /* #5562: the picker's 'Data starts ...' note takes its start from the probe this tab already awaited (the Queries
+           grid's, the primary surface), else the archive's static retention edge. No new query. */
+        if (relation == QueryWindowRelation.QueryStats)
+        {
+            RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(floor, DateTime.UtcNow);
+        }
     }
 
     /// <summary>

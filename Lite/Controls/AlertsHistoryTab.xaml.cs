@@ -62,6 +62,7 @@ public partial class AlertsHistoryTab : UserControl
     public AlertsHistoryTab()
     {
         InitializeComponent();
+        RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened */
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
@@ -253,9 +254,7 @@ public partial class AlertsHistoryTab : UserControl
 
     private int GetSelectedHoursBack()
     {
-        if (TimeRangeComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
-            return int.TryParse(tagStr, out var hours) ? hours : 24;
-        return 24;
+        return LiteTimeRange.HoursBackOf(RangePicker, 24);
     }
 
     private int? GetSelectedServerId()
@@ -358,7 +357,7 @@ public partial class AlertsHistoryTab : UserControl
 
     #region Event Handlers
 
-    private async void TimeRangeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void RangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (IsLoaded)
             await LoadAlertsAsync();

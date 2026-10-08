@@ -80,6 +80,13 @@ public partial class FinOpsTab : UserControl
     public FinOpsTab()
     {
         InitializeComponent();
+        /* #5562: every list opened on the last 24 hours (1d); the heatmap on 30 days (1mo). */
+        var day = TimeRangePresets.FromLegacyHours(24)!;
+        ResourceUsageTimeRangePicker.Value = day;
+        WaitStatsTimeRangePicker.Value = day;
+        ExpensiveQueriesTimeRangePicker.Value = day;
+        HighImpactTimeRangePicker.Value = day;
+        ObjectHeatmapWindowPicker.Value = TimeRangePresets.FromLegacyHours(720)!;
         InitializeFilterManagers();
         IsVisibleChanged += (_, _) => ReloadUnfinishedSizeGridsOnShow();
     }
@@ -549,9 +556,7 @@ public partial class FinOpsTab : UserControl
         empty.Width = new GridLength(Math.Max(100 - clamped, 0.1), GridUnitType.Star);
     }
 
-    private int HoursBackFromIndex(System.Windows.Controls.ComboBox combo) => combo.SelectedIndex switch { 0 => 1, 1 => 4, 2 => 12, 3 => 24, 4 => 168, _ => 24 };
-
-    private async void ResourceUsageTimeRange_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    private async void ResourceUsageTimeRange_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded || _dataService == null) return;
         var serverId = GetSelectedServerId();
@@ -566,7 +571,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var hoursBack = HoursBackFromIndex(ResourceUsageTimeRangeCombo);
+            var hoursBack = LiteTimeRange.HoursBackOf(ResourceUsageTimeRangePicker, 24);
             var data = await Task.Run(() => _dataService.GetDatabaseResourceUsageAsync(serverId, hoursBack));
             if (_loads.Superseded(nameof(LoadDatabaseResourcesAsync), gen)) return;
             _dbResourcesFilterMgr!.UpdateData(data);
@@ -957,7 +962,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var hoursBack = HoursBackFromIndex(HighImpactTimeRangeCombo);
+            var hoursBack = LiteTimeRange.HoursBackOf(HighImpactTimeRangePicker, 24);
             var data = await Task.Run(() => _dataService.GetHighImpactQueriesAsync(serverId, hoursBack));
             if (_loads.Superseded(nameof(LoadHighImpactQueriesAsync), gen)) return;
             _highImpactFilterMgr!.UpdateData(data);
@@ -977,7 +982,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var hoursBack = HoursBackFromIndex(WaitStatsTimeRangeCombo);
+            var hoursBack = LiteTimeRange.HoursBackOf(WaitStatsTimeRangePicker, 24);
             var data = await Task.Run(() => _dataService.GetWaitCategorySummaryAsync(serverId, hoursBack));
             if (_loads.Superseded(nameof(LoadWaitCategorySummaryAsync), gen)) return;
 
@@ -1009,7 +1014,7 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var hoursBack = HoursBackFromIndex(ExpensiveQueriesTimeRangeCombo);
+            var hoursBack = LiteTimeRange.HoursBackOf(ExpensiveQueriesTimeRangePicker, 24);
             var data = await Task.Run(() => _dataService.GetExpensiveQueriesAsync(serverId, hoursBack));
             if (_loads.Superseded(nameof(LoadExpensiveQueriesAsync), gen)) return;
 
@@ -1135,7 +1140,7 @@ public partial class FinOpsTab : UserControl
         }
     }
 
-    private async void WaitStatsTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void WaitStatsTimeRange_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded || _dataService == null) return;
         var serverId = GetSelectedServerId();
@@ -1143,7 +1148,7 @@ public partial class FinOpsTab : UserControl
         await LoadWaitCategorySummaryAsync(serverId);
     }
 
-    private async void ExpensiveQueriesTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void ExpensiveQueriesTimeRange_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded || _dataService == null) return;
         var serverId = GetSelectedServerId();
@@ -1157,7 +1162,7 @@ public partial class FinOpsTab : UserControl
         if (serverId != 0) await LoadHighImpactQueriesAsync(serverId);
     }
 
-    private async void HighImpactTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void HighImpactTimeRange_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded || _dataService == null) return;
         var serverId = GetSelectedServerId();

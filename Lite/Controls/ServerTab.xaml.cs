@@ -168,7 +168,7 @@ public partial class ServerTab : UserControl
     /// Raised after each data refresh with alert counts for tab badge display.
     /// </summary>
     public event Action<int, int, DateTime?>? AlertCountsChanged; /* blockingCount, deadlockCount, latestEventTimeUtc */
-    public event Action<int>? ApplyTimeRangeRequested; /* selectedIndex */
+    public event Action<TimeRangeSpec>? ApplyTimeRangeRequested; /* the range to hold on the other tabs (#5562) */
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
@@ -196,15 +196,13 @@ public partial class ServerTab : UserControl
         ConnectionStatusText.Text = "Connecting...";
 
         /* Apply default time range from settings */
-        TimeRangeCombo.SelectedIndex = App.DefaultTimeRangeHours switch
-        {
-            1 => 0,
-            4 => 1,
-            12 => 2,
-            24 => 3,
-            168 => 4,
-            _ => 1
-        };
+        /* #5562: the shared picker. The zone is read lazily (display mode, this tab's own server clock), so a mode switch
+           or a refreshed clock needs only RangePicker.Refresh(). The saved default is default_time_range, else
+           default_time_range_hours through FromLegacyHours; Value does not raise RangeChanged, so this restore neither
+           persists nor refreshes. */
+        RangePicker.ZoneProvider = GetPickerZone;
+        RangePicker.Value = App.DefaultTimeRange;
+        RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(null, DateTime.UtcNow);
 
         /* #3479: restore the auto-refresh toggle and interval the same way the time range is restored
            above — from the App-level setting, before _refreshTimer exists. Setting these fires their
@@ -245,9 +243,6 @@ public partial class ServerTab : UserControl
 
         /* Show warning on Running Jobs tab if login lacks msdb access, except where the collector cannot run at all */
         RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
-
-        /* Initialize time picker ComboBoxes */
-        InitializeTimeComboBoxes();
 
         /* Sync time display mode picker */
         var modeTag = ServerTimeHelper.CurrentDisplayMode.ToString();
@@ -509,11 +504,10 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Returns true if the custom date range is selected and both dates are set.
+    /// Returns true when the held range carries its own instants (#5562): a sub-hour span, a calendar period, a typed or
+    /// picked range, 'since'. False for a rolling range of whole hours, which is read as "the last N hours".
     /// </summary>
-    private bool IsCustomRange => TimeRangeCombo.SelectedIndex == 5
-        && FromDatePicker?.SelectedDate != null
-        && ToDatePicker?.SelectedDate != null;
+    private bool IsCustomRange => LiteTimeRange.HasExplicitInstants(CurrentRange());
 
     /// <summary>
     /// When the user switches main tabs or sub-tabs, refresh only the visible sub-tab.

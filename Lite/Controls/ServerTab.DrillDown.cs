@@ -204,30 +204,21 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Sets the time range combo to Custom and populates the date/time pickers
+    /// Holds the drilled window as the toolbar's range (a fixed range on the picker)
     /// so the user can navigate other tabs at the same time window.
     /// </summary>
     private void SetDrillDownTimeRange(DateTime fromUtc, DateTime toUtc)
     {
-        /* The drill's window is held as the instants it names (#4766) and the pickers show it in the display zone. */
-        _customRange.Set(fromUtc, toUtc);
+        /* The drill's window is held as the instants it names (#4766, #5562): a fixed range, which the picker shows in the
+           display zone. The model refuses anything under 5 minutes, so a narrower drill is centred and held at 5 minutes
+           (the drilled grid itself still reads the exact pair it was handed). */
+        (fromUtc, toUtc) = LiteTimeRange.AtLeastMinimumSpan(fromUtc, toUtc);
 
-        // Switch to Custom without triggering a refresh
+        // Hold it without triggering a refresh (Value raises no RangeChanged; the flag covers a handler that might)
         _suppressRangeRefresh = true;
         try
         {
-            TimeRangeCombo.SelectedIndex = 5; // Custom
-            RenderCustomRange();
-
-            // Make pickers visible
-            var visibility = Visibility.Visible;
-            FromDatePicker.Visibility = visibility;
-            FromHourCombo.Visibility = visibility;
-            FromMinuteCombo.Visibility = visibility;
-            ToLabel.Visibility = visibility;
-            ToDatePicker.Visibility = visibility;
-            ToHourCombo.Visibility = visibility;
-            ToMinuteCombo.Visibility = visibility;
+            RangePicker.Value = TimeRangeSpec.FixedRange(fromUtc, toUtc);
         }
         finally
         {

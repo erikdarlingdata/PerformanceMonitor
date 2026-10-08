@@ -103,10 +103,10 @@ public sealed class QueriesTabWindowRoundTripTests
             var toInstant = Utc(to);
 
             var zone = PerformanceMonitorLite.Controls.ServerTab.PickerZone(mode, clock);
-            var held = new PerformanceMonitor.Ui.CustomRangeState();
-            held.Set(fromInstant, toInstant);
-            Assert.NotNull(held.Render(zone));
-            var (_, heldFrom, heldTo) = PerformanceMonitorLite.Controls.ServerTab.CurrentWindowUtc(24, true, held);
+            /* #5562: the range the tab holds is a fixed range on the shared picker; the zone only words it. */
+            var spec = PerformanceMonitor.Ui.TimeRangeSpec.FixedRange(fromInstant, toInstant);
+            Assert.True(spec.TryResolve(toInstant.AddDays(1), zone, out var resolved, out _));
+            var (_, heldFrom, heldTo) = PerformanceMonitorLite.Helpers.LiteTimeRange.WindowFor(resolved!);
             var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, heldFrom, heldTo);
 
             Assert.Equal(Range(fromInstant, toInstant), Range(start, end));

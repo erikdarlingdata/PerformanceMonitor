@@ -59,7 +59,7 @@ public partial class MainWindow : Window
     /// </summary>
     internal static string ConnectedStatusText(string displayName, string? suffix) =>
         string.IsNullOrEmpty(suffix) ? $"Connected to {displayName}" : $"Connected to {displayName} - {suffix}";
-    private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<int> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
+    private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<PerformanceMonitor.Ui.TimeRangeSpec> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
     /* Server tab badge state for the non-blocking/deadlock conditions (#754/#749), keyed by the
        ServerConnection GUID (the same key as _openServerTabs). The alert sweep sets these; both the
        blocking/deadlock tab refresh and the sweep funnel through UpdateTabBadge, so the badge
@@ -1177,7 +1177,7 @@ public partial class MainWindow : Window
         {
             Dispatcher.Invoke(() => UpdateTabBadge(tabHeader, serverId, blockingCount, deadlockCount, latestEventTime));
         };
-        Action<int> timeRangeHandler = (selectedIndex) =>
+        Action<PerformanceMonitor.Ui.TimeRangeSpec> timeRangeHandler = (range) =>
         {
             Dispatcher.Invoke(() =>
             {
@@ -1185,7 +1185,7 @@ public partial class MainWindow : Window
                 {
                     if (tab.Content is ServerTab st && st != serverTab)
                     {
-                        st.SetTimeRangeIndex(selectedIndex);
+                        st.SetTimeRange(range);
                     }
                 }
             });
@@ -1220,6 +1220,12 @@ public partial class MainWindow : Window
 
         serverTab.AlertCountsChanged += alertHandler;
         serverTab.ApplyTimeRangeRequested += timeRangeHandler;
+        /* #5562: the picker's 'collected every N minutes' note names this server's ACTUAL cadence for the tab's main
+           collector, read from the schedule each time (it can be edited while the tab is open). */
+        serverTab.SetSampleIntervalSource(() => PerformanceMonitorLite.Helpers.LiteTimeRange.SampleIntervalFor(
+            _scheduleManager.GetScheduleForServer(server.Id, ServerTab.MainCollectorName) is { Enabled: true } schedule
+                ? schedule.FrequencyMinutes
+                : null));
         serverTab.ManualRefreshRequested += refreshHandler;
         /* #1319: persist the per-server view database filter (no credential side effects). The handler
            captures only the long-lived _serverManager, so it needs no explicit unsubscribe. */
