@@ -455,7 +455,12 @@ WHERE ch.hypertable_schema = 'collect'
 AND   ch.hypertable_name = 'query_store_stats';";
 
     /// <summary>The table's floor <c>H</c> for one server: its oldest interval. Always this read (#5541): the purge
-    /// deletes oldest first on <c>first_execution_time</c>, so every deleted row is below the remaining minimum.</summary>
+    /// deletes oldest first on <c>first_execution_time</c>, so every deleted row is below the remaining minimum.
+    /// <b>Cost after a drain (#5581):</b> the read walks the index from the oldest entry, so right after a large
+    /// drain it makes a heap fetch for every dead entry vacuum has not removed and no read has marked yet (19.6 s
+    /// and 854,535 fetches for one server on a large store, 15 ms on the re-run). The retention pass runs this
+    /// constant once per server after such a drain (<c>QueryStoreIntervalFloorWarmUp</c>) so a user's first read
+    /// does not pay it; change this statement and that warm-up follows, because it executes this constant.</summary>
     public const string PlainTableFloorSql = @"
 SELECT
     MIN(t.first_execution_time)

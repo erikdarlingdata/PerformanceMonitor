@@ -346,6 +346,10 @@ AND   ch.hypertable_name = 'query_store_stats';";
     /// The table's floor <c>H</c> for one server: its oldest interval. Always this read (#5541), whether or not the
     /// table is ever converted to a hypertable, because it is exact: the purge deletes oldest first on
     /// <c>first_execution_time</c>, so every deleted row is below the remaining minimum.
+    /// <b>Cost after a drain (#5581):</b> the read walks the index from the oldest entry, so right after a large
+    /// drain it makes a heap fetch for every dead entry vacuum has not removed and no read has marked yet. The
+    /// retention pass runs this constant once per server after such a drain (<c>QueryStoreIntervalFloorWarmUp</c>),
+    /// so a user's first read does not pay it; it executes this constant, never a copy.
     /// </summary>
     public const string PlainTableFloorSql = @"
 SELECT

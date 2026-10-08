@@ -817,7 +817,9 @@ public static class DarlingRetention
                days. Same batched-DELETE shape, same pending-replay horizon reasoning, failure-isolated like every
                sibling. The purge deletes row by row on first_execution_time, so the table floor the read gate
                checks (MIN(first_execution_time)) advances as it runs, and reads below raw's floor stop 26 h
-               above it (L = max(window start, filled_since, table floor + 26 h, the purge-edge margin)). */
+               above it (L = max(window start, filled_since, table floor + 26 h, the purge-edge margin)). The floor
+               read is not free right after a big drain, though: it walks past every not-yet-marked dead index
+               entry (#5581), which QueryStoreIntervalFloorWarmUp pays at the end of this pass. */
             /* #5569: the same row-capped adaptive drain as the latest table above, for the same reason (a
                whole day of the wide table timed out on every pass and removed nothing). */
             /* The statement below is illustrative: PurgeOneAsync's adaptive path ignores deleteSql and
@@ -1105,6 +1107,17 @@ public static class DarlingRetention
                 runLabel: runLabel);
             await DarlingObservability.LogRetentionRunAsync(
                 postgres, status, summary.TotalPurged, sw.ElapsedMilliseconds, message, logger, cancellationToken);
+
+            /* #5581: the interval drains above removed the oldest rows of every server, and the read gate's floor
+               read (MIN(first_execution_time) per server) walks the index from exactly that end, paying a heap
+               fetch for each dead entry until a read marks it. Run the shipped floor reads once now, one server
+               at a time, so the first real read after the drain finds the entries already marked. It runs here,
+               after the last table's purge and after the run-record, so it never sits between two purges and the
+               record's duration is the purge's own; it never throws and never counts as a failed purge. A drain
+               that deleted nothing skips it (a null count is a drain that failed part way, whose committed
+               batches left dead entries all the same). */
+            await QueryStoreIntervalFloorWarmUp.RunAfterDrainAsync(
+                postgres, intervalWideDeleted, intervalLatestDeleted, logger, cancellationToken);
 
             return summary;
         }
