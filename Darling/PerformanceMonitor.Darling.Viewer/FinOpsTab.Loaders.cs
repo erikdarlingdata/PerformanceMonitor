@@ -337,9 +337,10 @@ public partial class FinOpsTab
         /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
            Database is the database's own. */
         data.HealthScore = data.ComputeHealthScore();
-        /* A window with no CPU sample has no CPU term (ComputeHealthScore leaves it out), and the tooltip says so. */
-        FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;
-        FinOpsHealthScoreText.Text = $"Health: {data.HealthScore}";
+        /* A window with no CPU sample has no score: the memory and storage terms alone would read a full 100 next to "No Data".
+           It shows a dash on a gray badge, and the tooltip says why. */
+        FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;
+        FinOpsHealthScoreText.Text = data.HealthScoreText;
         FinOpsHealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         FinOpsHealthScoreBorder.Visibility = Visibility.Visible;
     }
@@ -493,8 +494,9 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsIdleDatabasesAsync()
     {
-        var data = await _dataService.GetIdleDatabasesAsync(_server.ServerId);
+        var (covered, data) = await _dataService.GetIdleDatabaseReadAsync(_server.ServerId);
         _finopsIdleDbsFilterMgr!.UpdateData(data);
+        FinOpsIdleDatabasesNoDataMessage.Text = DarlingFinOpsOptimizationReader.IdleDatabasesEmptyText(covered);
         FinOpsIdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsIdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
     }
@@ -592,7 +594,7 @@ public partial class FinOpsTab
                 if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
             }
 
-            item.HealthScore = FinOpsInventoryFigures.HealthScore(item.AvgCpuPct);
+            item.HealthScore = FinOpsInventoryFigures.HealthScoreOrNull(item.AvgCpuPct);
         }
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);

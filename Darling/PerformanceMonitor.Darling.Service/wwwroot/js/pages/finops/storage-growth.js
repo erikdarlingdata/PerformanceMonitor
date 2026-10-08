@@ -53,8 +53,8 @@ function accessText(v) {
 const DATABASE_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "current_size_mb", label: "Current (MB)", format: "num2" },
-  { key: "size_7d_ago_mb", label: "7 days ago (MB)", format: "num2" },
-  { key: "size_30d_ago_mb", label: "30 days ago (MB)", format: "num2" },
+  { key: "size_7d_ago_mb", label: "7 days ago (MB)", format: "num2", nullKey: "size_7d_ago_note" },
+  { key: "size_30d_ago_mb", label: "30 days ago (MB)", format: "num2", nullKey: "size_30d_ago_note" },
   { key: "growth_7d_mb", label: "Growth 7 days (MB)", format: "num2" },
   { key: "growth_30d_mb", label: "Growth 30 days (MB)", format: "num2" },
   { key: "daily_growth_rate_mb", label: "Daily rate (MB)", format: "num2" },

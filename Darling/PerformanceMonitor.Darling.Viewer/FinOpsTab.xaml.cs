@@ -60,6 +60,9 @@ public partial class FinOpsTab : UserControl
         /* Register the FinOps grids' column-filter managers into _filterManagers (defined below), after
            InitializeComponent so the named grids exist. Body lives in FinOpsTab.Loaders.cs. */
         InitializeFinOpsTab();
+
+        /* Headers show in full with their unit: each column is at least as wide as its own header (the fixed widths cut "Current Size M"). */
+        Loaded += (_, _) => DataGridHeaderFit.Apply(this);
     }
 
     /// <summary>The selector's currently-selected server. Entry points guard on a valid selection before any loader runs, so the loaders read this non-null.</summary>

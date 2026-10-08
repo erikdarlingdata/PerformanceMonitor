@@ -91,9 +91,20 @@ public sealed class DarlingMcpFinOpsInventoryToolsTests
     {
         var metrics = new ServerMetricsDto(cpu is double c ? (decimal)c : null, 10m, 0, "RIGHT_SIZED");
         var row = Row(Dto(), metrics);
-        var expectedScore = FinOpsInventoryFigures.HealthScore(metrics.AvgCpuPct);
-        Assert.Equal(expectedScore, row.GetProperty("health_score").GetInt32());
-        Assert.Equal(FinOpsUtilizationFigures.HealthBand(expectedScore), row.GetProperty("health_band").GetString());
+        var expectedScore = FinOpsInventoryFigures.HealthScoreOrNull(metrics.AvgCpuPct);
+        if (expectedScore is not int score)
+        {
+            /* No CPU sample: a dash (null score and band) with the note, never a score built from the memory and storage defaults. */
+            Assert.Null(cpu);
+            // The wire writes no null fields, so a missing key and a null are the same dash.
+            Assert.False(row.TryGetProperty("health_score", out var scoreField) && scoreField.ValueKind != System.Text.Json.JsonValueKind.Null);
+            Assert.False(row.TryGetProperty("health_band", out var bandField) && bandField.ValueKind != System.Text.Json.JsonValueKind.Null);
+            Assert.Equal(FinOpsHealthCalculator.NoScoreNote, row.GetProperty("health_score_note").GetString());
+            return;
+        }
+
+        Assert.Equal(score, row.GetProperty("health_score").GetInt32());
+        Assert.Equal(FinOpsUtilizationFigures.HealthBand(score), row.GetProperty("health_band").GetString());
         Assert.Equal(band, row.GetProperty("health_band").GetString());
     }
 

@@ -86,10 +86,14 @@ public sealed class ServerInventoryFleetMetricsTests
         Assert.Contains("FILTER (WHERE ad.database_name IS NULL)", sql, StringComparison.Ordinal);
         Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
 
-        /* Only two binds now: cpu cutoff, idle cutoff — server_id is gone. */
+        /* Four binds: cpu cutoff, idle cutoff, the idle-coverage start and the days it must cover — server_id is gone. A server without
+           a query-stats sample on each of those days has no idle_dbs row, so its count is NULL (a dash), not a count from unwatched days. */
         Assert.Contains("$1", sql, StringComparison.Ordinal);
         Assert.Contains("$2", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$3", sql, StringComparison.Ordinal);
+        Assert.Contains("$3", sql, StringComparison.Ordinal);
+        Assert.Contains("$4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$5", sql, StringComparison.Ordinal);
+        Assert.Contains("JOIN idle_coverage ic ON ic.server_id = s.server_id", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -109,7 +113,7 @@ public sealed class ServerInventoryFleetMetricsTests
         Assert.Contains("execution_count_sum > 0", sql, StringComparison.Ordinal);
         Assert.Contains("bucket >=", sql, StringComparison.Ordinal);
         var unionCount = System.Text.RegularExpressions.Regex.Matches(sql, "UNION").Count;
-        Assert.Equal(2, unionCount); // three arms, two UNIONs joining them
+        Assert.Equal(3, unionCount); // activity: three arms, two UNIONs; idle coverage: the rollup days UNION the raw days after the watermark
 
         /* The two edge literals: the ceiling hour of the idle cutoff (05:00 — 04:27 rounds UP to the next
            whole hour, since the partial hour [04:27, 05:00) is exactly the slice the rollup can't answer)

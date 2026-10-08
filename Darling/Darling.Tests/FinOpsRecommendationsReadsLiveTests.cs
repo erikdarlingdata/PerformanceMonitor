@@ -94,9 +94,9 @@ public sealed class FinOpsRecommendationsReadsLiveTests
 
         /* Coverage: server A's oldest query_stats row is 8 days old, at or before the 7-day cutoff, so true.
            Servers B and C have no query_stats rows, so false. */
-        Assert.True(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdA, cutoff, TimeoutSeconds, ct));
-        Assert.False(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdB, cutoff, TimeoutSeconds, ct));
-        Assert.False(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdC, cutoff, TimeoutSeconds, ct));
+        Assert.True(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdA, TimeoutSeconds, ct));
+        Assert.False(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdB, TimeoutSeconds, ct));
+        Assert.False(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdC, TimeoutSeconds, ct));
     }
 
     [Fact]
