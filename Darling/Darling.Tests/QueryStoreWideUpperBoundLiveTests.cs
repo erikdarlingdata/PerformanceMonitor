@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// still running, a row collected exactly at each edge, a row whose first execution is just past the end because the
 /// monitored server's clock runs ahead, an interval that spans a whole day past the end of a window placed by its start),
 /// and each statement returns exactly what the same statement returns with the new bound cut out. One row sits past the
-/// slack on purpose: the bound is live, and it is the only row the new text drops.
+/// slack on purpose, and each bound has a row one minute outside it: the bounds are live, and those are the only rows the new text drops.
 /// </summary>
 /* #1776 own-store: reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and then
    works entirely inside it, the same shape as QueryStoreBackgroundIndexesLiveTests. */
@@ -51,35 +51,45 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         (1, W0.AddHours(1), W0.AddHours(-20)),         // began before the window, still running
         (2, W0, W0.AddHours(-25).AddMinutes(-30)),     // collected exactly at the start, inside the 26 h floor
         (3, W1, W1.AddHours(-1)),                      // collected exactly at the end
-        (4, W1, W1.AddMinutes(59)),                    // monitored clock 59 minutes ahead: inside the slack
+        (4, W1, W1.AddHours(12).AddMinutes(-1)),       // monitored clock 11 h 59 min ahead: inside the 12 h slack
         (5, W1.AddMinutes(-1), W1.AddMinutes(30)),
         (6, W0.AddMinutes(-1), W0.AddHours(-1)),       // collected just before the window
         (7, W1.AddMinutes(1), W1),                     // collected just after the window
         (8, W1.AddDays(3), W1.AddDays(3)),             // newer rows the old range walked and filtered out
         (9, W0.AddHours(5), W0.AddHours(4)),           // ordinary
         (10, new DateTime(2026, 9, 11, 12, 0, 0), new DateTime(2026, 9, 11, 11, 0, 0)),  // the middle day
-        (11, W1, W1.AddMinutes(61)),                   // past the slack: the one row the bound drops
+        (11, W1, W1.AddHours(12).AddMinutes(1)),       // past the slack: dropped by every upper bound
+        (12, S.AddMinutes(-1), S.AddHours(12).AddMinutes(-1)),  // collected just before the long-window read's first edge, first execution inside the slack past it
+        (13, S.AddMinutes(-1), S.AddHours(12).AddMinutes(1)),   // the same, one minute past the slack: only the long-window read's first edge drops it
     };
 
     /* (query_id, interval start, first_execution_time, collection_time) for TrendServer; start null is a legacy row. */
     private static readonly (int Q, DateTime? Start, DateTime F, DateTime C)[] TrendRows =
     {
         (21, W0, W0, W0.AddMinutes(30)),                                        // starts at the window start
-        (22, W0.AddMinutes(10), W0.AddMinutes(10).AddMinutes(-59), W0.AddHours(1)),  // first execution 59 minutes before its start
+        (22, W0.AddMinutes(10), W0.AddMinutes(-59), W0.AddHours(1)),            // first execution 59 minutes below the window start: inside the 1 h floor
         (23, W1, W1.AddHours(24), W1.AddHours(25)),                             // starts at the end, spans the whole day
         (24, W1.AddMinutes(-10), W1.AddHours(23).AddMinutes(50), W1.AddHours(24)),
         (25, W0.AddMinutes(-1), W0.AddMinutes(-1), W0.AddMinutes(10)),          // starts just before the window
         (26, W1.AddMinutes(1), W1.AddMinutes(1), W1.AddMinutes(5)),             // starts just after the window
         (27, W0.AddHours(1), W0.AddHours(1), W0.AddHours(1)),
+        (30, W0.AddMinutes(20), W0.AddMinutes(-61), W0.AddHours(1)),            // first execution 61 minutes below the window start: past the floor, dropped
         (28, null, W0.AddHours(1), W0.AddHours(2)),                             // legacy rows
-        (29, null, W1.AddMinutes(59), W1),
+        (29, null, W1.AddHours(12).AddMinutes(-1), W1.AddMinutes(-5)),
+        (31, null, W1.AddHours(12).AddMinutes(1), W1.AddMinutes(-3)),           // legacy, one minute past the slack: dropped
     };
 
-    private static readonly int[] ExpectedTop = { 1, 2, 3, 4, 5, 9, 10 };
-    private static readonly int[] ExpectedDaily = { 1, 2, 3, 4, 5, 9 };
+    private static readonly int[] ExpectedTop = { 1, 2, 3, 4, 5, 9, 10, 12, 13 };
+    private static readonly int[] ExpectedDaily = { 1, 2, 3, 4, 5, 9, 12 };
     private static readonly DateTime[] ExpectedTrendPoints =
     {
-        W0, W0.AddMinutes(10), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1,
+        W0, W0.AddMinutes(10), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1,
+    };
+
+    /* What the same trend statement returns with its new bounds cut out: the two rows the bounds exist to drop come back. */
+    private static readonly DateTime[] OldTrendPoints =
+    {
+        W0, W0.AddMinutes(10), W0.AddMinutes(20), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1.AddMinutes(-3), W1,
     };
 
     [Fact]
@@ -109,7 +119,7 @@ public sealed class QueryStoreWideUpperBoundLiveTests
             @"\s*AND\s+first_execution_time <= \$3 \+ interval '\d+ minutes'");
         var dailyIds = await DailyIdsAsync(connection, dailyNew, ct);
         Assert.Equal(ExpectedDaily, dailyIds);
-        Assert.Equal(ExpectedDaily.Append(11).OrderBy(q => q), await DailyIdsAsync(connection, dailyOld, ct));
+        Assert.Equal(ExpectedDaily.Append(11).Append(13).OrderBy(q => q), await DailyIdsAsync(connection, dailyOld, ct));
 
         /* ---- The Queries grid's table read: a closed end, and the open end a preset window binds as NULL. ---- */
         var gridNew = ViewerDataService.QueryStoreTopTableSql;
@@ -144,13 +154,13 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         /* ---- The duration trend's table read: both arms. ---- */
         var trendNew = ViewerDataService.QueryStoreDurationTrendTableSql;
         var trendOld = trendNew
-            .Replace($"first_execution_time >= $2 - {QueryStoreIntervalWide.FirstExecUpperSlackSql}", $"first_execution_time >= $2 - {QueryStoreIntervalWide.PurgeEdgeMarginSql}", StringComparison.Ordinal);
+            .Replace($"first_execution_time >= $2 - {QueryStoreIntervalWide.IntervalStartSlackSql}", $"first_execution_time >= $2 - {QueryStoreIntervalWide.PurgeEdgeMarginSql}", StringComparison.Ordinal);
         trendOld = Cut(Cut(trendOld, @"\s*AND\s+first_execution_time <= \$3 \+ interval '\d+ minutes'"),
             @"\s*AND\s+first_execution_time <= \$4 \+ interval '\d+ minutes'");
         Assert.NotEqual(trendNew, trendOld);
         var points = await TrendPointsAsync(connection, trendNew, ct);
         Assert.Equal(ExpectedTrendPoints, points);
-        Assert.Equal(points, await TrendPointsAsync(connection, trendOld, ct));
+        Assert.Equal(OldTrendPoints, await TrendPointsAsync(connection, trendOld, ct));
     }
 
     /// <summary>The statement with one regex match cut out; the match must exist, or the "old" text would silently equal the new.</summary>

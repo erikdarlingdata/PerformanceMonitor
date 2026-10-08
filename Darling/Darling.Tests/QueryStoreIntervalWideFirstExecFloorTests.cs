@@ -106,7 +106,7 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         /* Arm 1 (#5523) is placed by interval_start_time_utc, so its range comes from the window: the first execution
            lies inside the interval, which starts in [$2, $3] and spans at most a day. The collector-derived floor
            (PurgeEdgeMarginSql) is arm 2's alone, which is placed by collection_time, and that arm takes the upper twin. */
-        Assert.Contains("first_execution_time >= $2 - " + QueryStoreIntervalWide.FirstExecUpperSlackSql, arms[0], StringComparison.Ordinal);
+        Assert.Contains("first_execution_time >= $2 - " + QueryStoreIntervalWide.IntervalStartSlackSql, arms[0], StringComparison.Ordinal);
         Assert.Contains("first_execution_time <= $3 + " + QueryStoreIntervalWide.IntervalStartFirstExecMarginSql, arms[0], StringComparison.Ordinal);
         Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, arms[0], StringComparison.Ordinal);
         Assert.Contains(Floor("$2"), arms[1], StringComparison.Ordinal);
@@ -122,6 +122,7 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
 
         Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
         Assert.DoesNotContain(QueryStoreIntervalWide.FirstExecUpperSlackSql, ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain(QueryStoreIntervalWide.IntervalStartSlackSql, ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -156,17 +157,24 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
     }
 
     [Fact]
-    public void TheUpperSlack_IsTheDailyBuildersHour_AndItsSqlFormsAreNeverShorter()
+    public void TheUpperSlack_IsNeverShorterThanTheDailyBuilders_AndItsSqlFormsAreNeverShorter()
     {
-        /* One hour since #5094 (the builder's own SkewSlack); the reads must not give up a row the builder keeps. */
-        Assert.Equal(QueryStoreTopDaily.SkewSlack, QueryStoreIntervalWide.FirstExecUpperSlack);
+        /* The reads were exact before #5523 and the daily summary is documented as approximate, so the reads' slack (twelve
+           hours: clock set to local time, a long collection cycle) may be longer than the builder's hour but never shorter. */
+        Assert.True(QueryStoreIntervalWide.FirstExecUpperSlack >= QueryStoreTopDaily.SkewSlack);
+        Assert.Equal(TimeSpan.FromHours(12), QueryStoreIntervalWide.FirstExecUpperSlack);
 
         var slack = Regex.Match(QueryStoreIntervalWide.FirstExecUpperSlackSql, @"^interval '(?<m>\d+) minutes'$");
         Assert.True(slack.Success, QueryStoreIntervalWide.FirstExecUpperSlackSql);
         Assert.True(TimeSpan.FromMinutes(long.Parse(slack.Groups["m"].Value, System.Globalization.CultureInfo.InvariantCulture)) >= QueryStoreIntervalWide.FirstExecUpperSlack);
 
-        /* An interval placed by its start can hold a first execution a whole interval later, plus the slack. */
-        Assert.Equal(QueryStoreIntervalWide.IntervalSpanMargin + QueryStoreIntervalWide.FirstExecUpperSlack, QueryStoreIntervalWide.IntervalStartFirstExecMargin);
+        /* An interval placed by its start can hold a first execution a whole interval later, plus its own hour of slack
+           (both columns are the monitored clock, so no cross-clock skew applies to it). */
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreIntervalWide.IntervalStartSlack);
+        var floor = Regex.Match(QueryStoreIntervalWide.IntervalStartSlackSql, @"^interval '(?<m>\d+) minutes'$");
+        Assert.True(floor.Success, QueryStoreIntervalWide.IntervalStartSlackSql);
+        Assert.True(TimeSpan.FromMinutes(long.Parse(floor.Groups["m"].Value, System.Globalization.CultureInfo.InvariantCulture)) >= QueryStoreIntervalWide.IntervalStartSlack);
+        Assert.Equal(QueryStoreIntervalWide.IntervalSpanMargin + QueryStoreIntervalWide.IntervalStartSlack, QueryStoreIntervalWide.IntervalStartFirstExecMargin);
         var start = Regex.Match(QueryStoreIntervalWide.IntervalStartFirstExecMarginSql, @"^interval '(?<m>\d+) minutes'$");
         Assert.True(start.Success, QueryStoreIntervalWide.IntervalStartFirstExecMarginSql);
         Assert.True(TimeSpan.FromMinutes(long.Parse(start.Groups["m"].Value, System.Globalization.CultureInfo.InvariantCulture)) >= QueryStoreIntervalWide.IntervalStartFirstExecMargin);

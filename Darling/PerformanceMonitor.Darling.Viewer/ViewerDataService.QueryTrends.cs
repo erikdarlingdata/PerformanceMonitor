@@ -330,7 +330,7 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window
     /// end (naive UTC; $3 binds arm 1's placement filter, $4 binds arm 2's collection-time filter — both are
     /// the caller's unclamped <c>endUtc</c>), $5 database filter.
-    /// <para><b>The <c>first_execution_time</c> floor (#4605), on both arms.</b> Neither the unique key (it leads
+    /// <para><b>The <c>first_execution_time</c> floor (#4605), on arm 2.</b> Neither the unique key (it leads
     /// with <c>server_id</c>) nor <c>idx_query_store_interval_wide_first_exec</c> serves <c>collection_time</c> or
     /// <c>interval_start_time_utc</c>, so both arms walked all of the server's rows. <c>first_execution_time</c>
     /// is a key column of that unique key, so <c>first_execution_time &gt;= $2 - </c>
@@ -338,12 +338,15 @@ public sealed partial class ViewerDataService
     /// row: every stored row has
     /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c>, and
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). Arm 2 keeps that floor.
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). Arm 2 keeps that floor.</para>
     /// <para><b>Arm 1's range comes from the window itself (#5523).</b> Its rows are placed by
     /// <c>interval_start_time_utc</c> in [$2, $3], and <c>first_execution_time</c> lies inside the interval (the monitored
-    /// server's clock for both), so <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>
+    /// server's clock for both), so <c>first_execution_time &gt;= $2 - </c><see cref="QueryStoreIntervalWide.IntervalStartSlackSql"/>
     /// and <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.IntervalStartFirstExecMarginSql"/>
-    /// (an interval spans at most a day, plus the slack) hold for every row it returns. The collector-derived
+    /// (an interval spans at most a day, plus the hour of slack) hold for every row it returns. The floor is safe because
+    /// <c>first_execution_time</c> is an end time inside the interval: Microsoft's documentation of
+    /// <c>sys.query_store_runtime_stats.first_execution_time</c> says "First execution time for the query plan within the
+    /// aggregation interval. This is the end time of the query execution." The collector-derived
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> floor ran 26 hours below $2, so the
     /// <c>(server_id, first_execution_time)</c> scan read a day of the server's rows more than the window holds. Arm 2 is
     /// placed by <c>collection_time</c> in [$2, $4], so it takes the upper twin of the other table reads,
@@ -364,7 +367,7 @@ public sealed partial class ViewerDataService
             AND   interval_start_time_utc >= $2
             AND   interval_start_time_utc <= $3
             AND   interval_start_time_utc IS NOT NULL
-            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.IntervalStartSlackSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
 

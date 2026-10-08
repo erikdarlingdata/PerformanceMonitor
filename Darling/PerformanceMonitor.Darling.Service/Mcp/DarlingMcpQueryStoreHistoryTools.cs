@@ -101,8 +101,9 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     /// <c>first_execution_time</c> floor is the grid's own (#4605): it filters index entries before the heap and drops
     /// no row. Its upper twin (#5523), <c>first_execution_time &lt;= $5 + </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>,
     /// closes the range <c>ix_query_store_interval_wide_server_first_exec</c> scans, so a window that ended days ago does not
-    /// walk the server's newer rows; it drops a row only for a monitored-server clock more than the slack ahead of the
-    /// service's. A static readonly because the interval literal is derived from a TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.
+    /// walk the server's newer rows; it drops a row only for a monitored-server clock more than the slack (twelve hours)
+    /// ahead of the service's, or a collection cycle longer than that
+    /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary). A static readonly because the interval literal is derived from a TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.
     /// </summary>
     internal static readonly string HistoryTableSql = $$"""
         SELECT plan_id, collection_time, execution_count,

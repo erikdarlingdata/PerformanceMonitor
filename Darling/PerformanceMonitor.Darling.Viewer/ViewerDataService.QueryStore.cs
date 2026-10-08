@@ -200,7 +200,8 @@ public sealed partial class ViewerDataService
     /// <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>, so the
     /// <c>(server_id, first_execution_time)</c> btree scans a range finite at both ends instead of everything newer than
     /// the window start. An open end (NULL) reads to now, as before. It drops a row only for a monitored-server clock more
-    /// than the slack ahead of the service's (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary).</para>
+    /// than the slack (twelve hours) ahead of the service's, or a collection cycle longer than that
+    /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary).</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (

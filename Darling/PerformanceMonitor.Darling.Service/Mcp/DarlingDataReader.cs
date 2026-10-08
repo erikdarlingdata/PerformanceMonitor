@@ -2586,8 +2586,9 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> closes the range that
     /// <c>ix_query_store_interval_wide_server_first_exec</c> scans. The floor alone ran from the window start to now, so
     /// a window that ended days ago walked every newer row of the server (109,362 blocks a call on a 43-server
-    /// store). It drops a row only when the monitored server's clock runs more than the slack ahead of the service's
-    /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary).</para>
+    /// store). The slack is twelve hours. It drops a row only when the monitored server's clock runs more than that ahead of
+    /// the service's, or a collection cycle runs longer than that (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s
+    /// summary).</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (
