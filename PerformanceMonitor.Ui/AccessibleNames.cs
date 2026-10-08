@@ -38,8 +38,12 @@ public static class AccessibleNames
         }
 
         s_registered = true;
-        EventManager.RegisterClassHandler(typeof(TabItem), FrameworkElement.LoadedEvent, new RoutedEventHandler(OnTabItemLoaded));
-        EventManager.RegisterClassHandler(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader), FrameworkElement.LoadedEvent, new RoutedEventHandler(OnColumnHeaderLoaded));
+        /* SizeChanged, not Loaded: WPF raises Loaded straight to an instance's own handlers and never runs class handlers for it,
+           so a class handler on LoadedEvent never ran and the headers kept the type name of their panel (release walk). Every
+           element gets its first SizeChanged when it is first laid out, before a screen reader can ask for its name. */
+        EventManager.RegisterClassHandler(typeof(TabItem), FrameworkElement.SizeChangedEvent, new RoutedEventHandler(OnTabItemLoaded));
+        EventManager.RegisterClassHandler(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader), FrameworkElement.SizeChangedEvent, new RoutedEventHandler(OnColumnHeaderLoaded));
+        EventManager.RegisterClassHandler(typeof(DataGridCell), FrameworkElement.SizeChangedEvent, new RoutedEventHandler(OnCellSized));
     }
 
     /// <summary>The name this class set itself, so a later change of the header text can replace it while a name set by hand never is.</summary>
@@ -58,7 +62,7 @@ public static class AccessibleNames
 
     private static void OnTabItemLoaded(object sender, RoutedEventArgs e)
     {
-        if (sender is TabItem tab)
+        if (sender is TabItem tab && tab.GetValue(WatcherProperty) is null)
         {
             Name(tab, tab.Header);
         }
@@ -66,9 +70,60 @@ public static class AccessibleNames
 
     private static void OnColumnHeaderLoaded(object sender, RoutedEventArgs e)
     {
-        if (sender is System.Windows.Controls.Primitives.DataGridColumnHeader header)
+        /* SizeChanged fires on every resize: an element a watcher already keeps current is left alone. */
+        if (sender is System.Windows.Controls.Primitives.DataGridColumnHeader header && header.GetValue(WatcherProperty) is null)
         {
             Name(header, header.Content);
+        }
+    }
+
+    /// <summary>
+    /// A grid cell whose text is empty (a Retries column on a job that never retried) is named by UI Automation from the
+    /// row's type name: "Item: PerformanceMonitor...ViewerJobHistoryRow, Column Display Index: 7". The cell is named
+    /// "&lt;column&gt;: blank" instead, and the name is dropped again if the cell's text fills in. A cell that has text, or
+    /// a name set by hand (a cell style), is left alone.
+    /// </summary>
+    private static void OnCellSized(object sender, RoutedEventArgs e)
+    {
+        if (sender is not DataGridCell cell || cell.Content is not TextBlock text)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(text.Text))
+        {
+            /* The text filled in while no watcher was attached (the cell was unloaded): drop the blank name. */
+            if (cell.GetValue(AutoNameProperty) is string stale && AutomationProperties.GetName(cell) == stale)
+            {
+                cell.ClearValue(AutomationProperties.NameProperty);
+                cell.ClearValue(AutoNameProperty);
+            }
+
+            return;
+        }
+
+        var title = cell.Column is null ? null : VisibleText(cell.Column.Header);
+
+        if (string.IsNullOrWhiteSpace(title) || !SetAuto(cell, title + ": blank"))
+        {
+            return;
+        }
+
+        if (cell.GetValue(WatcherProperty) is null)
+        {
+            var descriptor = DependencyPropertyDescriptor.FromProperty(TextBlock.TextProperty, typeof(TextBlock));
+            EventHandler handler = (_, _) =>
+            {
+                if (!string.IsNullOrEmpty(text.Text) && cell.GetValue(AutoNameProperty) is string auto && AutomationProperties.GetName(cell) == auto)
+                {
+                    cell.ClearValue(AutomationProperties.NameProperty);
+                    cell.ClearValue(AutoNameProperty);
+                }
+            };
+            descriptor.AddValueChanged(text, handler);
+            cell.SetValue(WatcherProperty, new Watcher { Source = text, Handler = handler });
+            cell.Unloaded -= OnUnloaded;
+            cell.Unloaded += OnUnloaded;
         }
     }
 

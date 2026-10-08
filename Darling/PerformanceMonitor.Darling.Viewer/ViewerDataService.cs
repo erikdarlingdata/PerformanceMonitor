@@ -82,6 +82,11 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public int ServerId { get; }
     public string ServerName { get; }
     public string DisplayName { get; }
+
+    /// <summary>What a screen reader announces for a server in a list or drop-down box (the item's text is the item's name in UI
+    /// Automation): the display name, not the type name ("PerformanceMonitor.Darling.Viewer.DarlingServer").</summary>
+    public override string ToString() => DisplayName;
+
     public bool IsEnabled { get; }
     public int? SqlMajorVersion { get; }
     public decimal MonthlyCostUsd { get; }
