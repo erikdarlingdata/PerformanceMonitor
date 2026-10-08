@@ -172,16 +172,14 @@ public sealed class QueryStoreIntervalWideGridLiveTests
             return (reader.GetInt64(0), reader.GetInt64(1));
         }
 
-        /* #5459: EVERY backend that touched the wide table during setup must have reported its pending stats before
-           "before" is taken. Flushing "this connection and whichever pooled one the pool hands back" covers only
-           those two: the runner's pool can hold other connections that did the seed's scans, and one of them
-           reporting late (its throttled report fires up to a second after it goes idle) lands a seed scan AFTER
-           "before" as a phantom round trip (Expected (0, 9), Actual (1, 9)). A backend reports everything it has
-           pending as it exits, before it leaves pg_stat_activity, so the seeding data source is closed and its
-           backends are waited out: a state, not a duration. */
-        await postgres.DisposeAsync();
-        await WaitUntilNoOtherClientBackendsAsync(connection, ct);
+        /* Force EVERY backend that touched the wide table during setup to report its pending stats now,
+           rather than waiting on the once-per-second throttle, so "before" reflects setup's scans and not a
+           partial, still-pending view of them. */
         await ForceStatsFlushAsync(connection, ct);
+        await using (var setupFlush = await postgres.OpenConnectionAsync(ct))
+        {
+            await ForceStatsFlushAsync(setupFlush, ct);
+        }
 
         var shortWindowEnd = WindowStart.AddHours(6);
         var before = await ScanCountsAsync();
@@ -193,16 +191,16 @@ public sealed class QueryStoreIntervalWideGridLiveTests
 
         /* End to end through the viewer, the same surface the review named: no extra connection or transaction
            against the wide table for a short-window grid read. */
-        var viewer = new ViewerDataService(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
         await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, shortWindowEnd);
 
         /* The viewer reads through its OWN pooled NpgsqlDataSource, a backend this test cannot call
-           pg_stat_force_next_flush() on directly. Closing it and waiting out its backends makes each one report
-           what it has pending as it exits (see the setup flush above), so a real regression (the mutation below)
-           is visible in THIS read, with no sleep standing in for the once-per-second pending-stats throttle.
-           Then force THIS test's own backend's stats to report before re-reading. */
-        await viewer.DisposeAsync();
-        await WaitUntilNoOtherClientBackendsAsync(connection, ct);
+           pg_stat_force_next_flush() on directly, so a short settle stands in for it here (the same fallback wait
+           used when a backend's pending statistics cannot be flushed directly) — long enough to clear PostgreSQL's once-per-second pending-stats throttle
+           (PGSTAT_MIN_INTERVAL) so a real regression (the mutation below) is visible in THIS read rather than
+           sitting pending on that backend. Then force THIS test's own backend's stats to report before
+           re-reading. */
+        await Task.Delay(TimeSpan.FromSeconds(1.1), ct);
         await ForceStatsFlushAsync(connection, ct);
         var after = await ScanCountsAsync();
         Assert.Equal(before, after);
@@ -503,31 +501,6 @@ AND   hypertable_name = 'query_store_stats';";
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         return connection;
-    }
-
-    /// <summary>Returns once no client backend other than <paramref name="connection"/>'s own is left in the
-    /// connection's database. A backend flushes its pending cumulative stats as it exits, before it leaves
-    /// <c>pg_stat_activity</c>, so after this every counter the closed data sources' backends held is visible.
-    /// Fails, saying so, if one is still there after 30 s. A guard against a hang, never a timing expectation.</summary>
-    private static async Task WaitUntilNoOtherClientBackendsAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        var elapsed = System.Diagnostics.Stopwatch.StartNew();
-        while (true)
-        {
-            await using (var command = new NpgsqlCommand(
-                @"SELECT count(*) FROM pg_stat_activity
-                  WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()", connection))
-            {
-                if ((long)(await command.ExecuteScalarAsync(ct))! == 0)
-                {
-                    return;
-                }
-            }
-
-            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(30),
-                "another client backend was still connected to the scratch database 30 s after its data source closed");
-            await Task.Delay(25, ct);
-        }
     }
 
     /// <summary>Forces THIS connection's own pending cumulative-stats counters to report immediately
