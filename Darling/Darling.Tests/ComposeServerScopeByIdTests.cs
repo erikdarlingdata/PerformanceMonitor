@@ -200,7 +200,7 @@ public sealed class ComposeServerScopeByIdTests
     [Fact]
     public void BothRunners_LookUpUnregisteredNames_BeforeTheyCompile_AndHandThemOn()
     {
-        var web = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         var lookup = web.IndexOf("await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken", StringComparison.Ordinal);
         var snapshot = web.IndexOf("await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate", StringComparison.Ordinal);
         var context = web.IndexOf("new ComposeRunContext(serverScope, start, end", StringComparison.Ordinal);
@@ -209,7 +209,7 @@ public sealed class ComposeServerScopeByIdTests
         Assert.Contains("UnregisteredServers: unregisteredServers", web[context..(context + 700)], StringComparison.Ordinal);
         Assert.Single(Regex.Matches(web, @"ComposeServerScope\.FindUnregisteredAsync\("));
 
-        var alerts = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs");
+        var alerts = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs");
         Assert.Equal(2, Regex.Matches(alerts, @"ComposeServerScope\.FindUnregisteredAsync\(").Count);
         var sweep = alerts.IndexOf("ComposeServerScope.FindUnregisteredAsync(_viewer", StringComparison.Ordinal);
         var loop = alerts.IndexOf("foreach (var (row, def, _) in applicable)", StringComparison.Ordinal);
