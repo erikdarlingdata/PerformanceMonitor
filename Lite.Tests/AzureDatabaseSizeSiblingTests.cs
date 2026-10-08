@@ -125,7 +125,8 @@ public class AzureDatabaseSizeSiblingTests
     [Fact]
     public void TheSiblingArmMapsAllocatedToTotal_AndStorageToUsed()
     {
-        var arm = SiblingArm();
+        /* The self-query marker (F14) sits after SELECT in the collector's text; this pin is about the projection's columns. */
+        var arm = SiblingArm().Replace("/* PerformanceMonitorLite */ ", "", StringComparison.Ordinal);
 
         Assert.Contains("total_size_mb = CONVERT(decimal(19,2), rs.allocated_storage_in_megabytes)", arm, StringComparison.Ordinal);
         Assert.Contains("used_size_mb = CONVERT(decimal(19,2), rs.storage_in_megabytes)", arm, StringComparison.Ordinal);
