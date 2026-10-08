@@ -24,13 +24,15 @@ import {
 } from "./viewer-local.js";
 import { favoriteStar, alertBadge } from "./viewer-local-ui.js";
 import { sidebarRows } from "./fleet-groups.js";
+import { byDisplayName, rememberFleet } from "./server-order.js";
 
 const INDENT_REM = 0.75; // per group depth
 const BASE_PAD_REM = 1.25; // .server-item's own left padding
 
 let searchTerm = "";
 
-const byName = (a, b) => a.display_name.localeCompare(b.display_name);
+/* The order every server pick list on the web shares (server-order.js): display name, favourites first. */
+const byName = byDisplayName;
 
 /**
  * Builds the search box and the group-by-tag toggle into `host`. Called once at start-up. `repaint` is the app's
@@ -107,6 +109,7 @@ function groupHeader(g) {
  * current route (null when the route is not a server page).
  */
 export function paintServerList(container, fleet, activeParam) {
+  rememberFleet(fleet.cards);
   const refocus = focusedGroupId(container);
   const grouped = isSidebarGrouped();
   const model = sidebarRows(fleet.cards || [], fleet.tags || [], {

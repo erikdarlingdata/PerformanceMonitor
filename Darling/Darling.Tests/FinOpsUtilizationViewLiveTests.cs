@@ -159,15 +159,17 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
         using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameD, ct: ct);
         var r = doc.RootElement;
         Assert.Equal(JsonValueKind.Null, r.GetProperty("verdict").ValueKind);
-        Assert.Equal(ServerHardwareScope.HealthScoreWithoutCpuNote, r.GetProperty("health_score_note").GetString());
+        /* #5492: a server with no CPU sample in the last 24 hours has NO health score (a dash), not a score computed from memory and storage
+           alone. Its memory and storage inputs are unchanged: buffer pool 2000/8192 is 0.24 -> memory 60, and no database size snapshot ->
+           free 100% -> storage 100, which the old rule scored (60 * 30 + 100 * 30) / 60 = 80 (good). The note says why there is no score. */
+        Assert.Equal(FinOpsHealthCalculator.NoScoreNote, r.GetProperty("health_score_note").GetString());
         Assert.Contains("no verdict", r.GetProperty("verdict_reason").GetString(), StringComparison.Ordinal);
-
-        /* Hand-computed: buffer pool 2000/8192 is 0.24 -> memory 60; no database size snapshot -> free 100% -> storage 100;
-           no CPU, so (60 * 30 + 100 * 30) / 60 = 80, which is the good band. */
-        Assert.Equal(80, r.GetProperty("health_score").GetInt32());
-        Assert.Equal("good", r.GetProperty("health_band").GetString());
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("health_score").ValueKind);
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("health_band").ValueKind);
+        Assert.Equal(100m, r.GetProperty("free_space_pct").GetDecimal());
         var dto = (await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerIdD, 30, ct))!;
-        Assert.Equal(FinOpsUtilizationFigures.HealthScore(dto, 100m), r.GetProperty("health_score").GetInt32());
+        Assert.False(FinOpsUtilizationFigures.HasCpuSample(dto));
+        Assert.Null(FinOpsUtilizationFigures.HealthScoreOrNull(dto, 100m));
     });
 
     [Fact]

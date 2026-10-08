@@ -23,6 +23,8 @@
 
 import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
+import { orderServers } from "../server-order.js";
+import { isPostgresRow } from "./finops/gate.js";
 import { tab as utilization } from "./finops/utilization.js";
 import { tab as database_resources } from "./finops/database-resources.js";
 import { tab as storage_growth } from "./finops/storage-growth.js";
@@ -110,7 +112,7 @@ function serverPicker(rows, server, tabId) {
   const sel = el(
     "select",
     { class: "range-select-inline finops-server-select", "aria-label": "Server" },
-    rows.map((r) => el("option", { value: r.server_name, text: r.display_name || r.server_name }))
+    rows.map((r) => el("option", { value: r.server_name, text: (r.display_name || r.server_name) + (isPostgresRow(r) ? " (PostgreSQL)" : "") }))
   );
   sel.value = server;
   sel.addEventListener("change", () => {
@@ -121,11 +123,16 @@ function serverPicker(rows, server, tabId) {
 }
 
 /**
- * Resolve the hash or stored value to a registry row, by key or by display name; the first row when neither
- * matches. Everything downstream (select value, build, storage, tab links) continues with the row's server_name.
+ * Resolve the hash or stored value to a registry row, by key or by display name. When neither matches, the first row in
+ * the sidebar's order that is not PostgreSQL, because most FinOps panels read SQL Server data and a first visit opening
+ * on a PostgreSQL target showed a page of "not collected"; the first row only when every target is PostgreSQL.
+ * Everything downstream (select value, build, storage, tab links) continues with the row's server_name.
  */
 function resolveRow(rows, wanted) {
-  return rows.find((r) => r.server_name === wanted) || rows.find((r) => r.display_name === wanted) || rows[0];
+  return rows.find((r) => r.server_name === wanted)
+    || rows.find((r) => r.display_name === wanted)
+    || rows.find((r) => !isPostgresRow(r))
+    || rows[0];
 }
 
 function sameServers(a, b) {
@@ -151,7 +158,8 @@ export function renderFinops(main, server, tabId, opts) {
   const paint = (rows) => {
     const head = el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]);
     const body = el("div", { class: "finops-body" });
-    const chosen = resolveRow(rows, wanted).server_name;
+    const row = resolveRow(rows, wanted);
+    const chosen = row.server_name;
     storedSet(SERVER_KEY, chosen);
     storedSet(TAB_KEY, active.id);
     head.appendChild(el("div", { class: "spacer" }));
@@ -160,7 +168,7 @@ export function renderFinops(main, server, tabId, opts) {
     mount(main, [head, body]);
     mount(body, [
       tabBar(chosen, active),
-      el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal })]),
+      el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal, postgres: isPostgresRow(row) })]),
     ]);
   };
 
@@ -193,7 +201,7 @@ export function renderFinops(main, server, tabId, opts) {
     /* An empty registry answers with prose, which the read classifies as an error; it is the empty case. */
     if (res.kind === "error" && /^No servers are registered/.test(res.message || "")) return showEmpty();
     if (res.kind === "error") return show(errorStrip(res.message));
-    const rows = res.kind === "data" ? serverRows(res.data) : [];
+    const rows = res.kind === "data" ? orderServers(serverRows(res.data)) : [];
     if (rows.length === 0) return showEmpty();
     const unchanged = hadCache && lastRows !== null && sameServers(lastRows, rows);
     lastRows = rows;

@@ -45,14 +45,15 @@ public sealed class DarlingMcpFinOpsInventoryTools
     internal const int MaxLimit = 200;
 
     private const string InventoryGuide =
-        " server_inventory: health_score 0-100 weights CPU 40%, memory 30% and storage 30%, using the 24-hour average CPU; memory and storage are fixed defaults (80 and 100), and with no CPU sample the CPU term is left out. health_band is good at 80 and above, fair at 60 and above, else poor. annual_cost_usd is monthly × 12; 0 means no budget is set. license_warning flags Standard edition over 24 CPUs or 128 GB. On Azure SQL Database, memory and sockets are the host's and are null. sqlserver_start_time_local is the server's own clock, not UTC. Servers without a collected properties snapshot are not listed. A field with no value is left out of its row. hardware_note host_scoped is spelled out in hardware_note_legend. truncated means total_servers > servers_returned; raise limit (max 200).";
+        " server_inventory: health_score 0-100 weights CPU 40%, memory 30% and storage 30%, using the 24-hour average CPU; memory and storage are fixed defaults (80 and 100), and with no CPU sample there is no score (health_score_note says why). health_band is good at 80 and above, fair at 60 and above, else poor. annual_cost_usd is monthly × 12; 0 means no budget is set. license_warning flags Standard edition over 24 CPUs or 128 GB. On Azure SQL Database, memory and sockets are the host's and are null. Times are UTC except sqlserver_start_time_local, the server's own clock. Servers without a collected properties snapshot are not listed. A server that was removed from the configuration is left out of the rows and of total_servers unless include_removed is true. A field with no value is left out of its row. hardware_note host_scoped is spelled out in hardware_note_legend. truncated means total_servers > servers_returned; raise limit (max 200).";
 
     [McpServerTool(Name = "get_finops_inventory"), Description(
-        "FinOps Server Inventory for the whole fleet: one row per server with a collected properties snapshot. Fixed windows: CPU over the last 24 hours, idle databases over the last 7 days; times UTC except sqlserver_start_time_local (the server's own clock); no server_name, hours_back or as_of. Views: server_inventory. An unknown view is refused with the valid list. <<GUIDE>>" + InventoryGuide)]
+        "FinOps Server Inventory for the whole fleet: one row per server with a collected properties snapshot. Fixed windows: CPU 24 hours, idle databases 7 days; no server_name, hours_back or as_of. Views: server_inventory. An unknown view is refused with the valid list. <<GUIDE>>" + InventoryGuide)]
     public static async Task<string> GetFinOpsInventory(
         NpgsqlDataSource postgres,
         [Description("Which view to read. Valid: server_inventory.")] string view,
         [Description("Most servers returned (1-200, default 34).")] int limit = DefaultLimit,
+        [Description("Also list removed servers.")] bool include_removed = false,
         CancellationToken cancellationToken = default)
     {
         /* An abandoned request answers nothing, not even a refusal. */
@@ -68,11 +69,14 @@ public sealed class DarlingMcpFinOpsInventoryTools
         try
         {
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
-            var inventory = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var inventory = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(
+                postgres, McpCommandDeadlines.ReadSeconds, include_removed, cancellationToken);
             if (inventory.Count == 0)
             {
                 return McpHelpers.Status("empty",
-                    "No registered server has a collected server_properties snapshot yet, so there is no inventory to show.");
+                    include_removed
+                        ? "No registered server has a collected server_properties snapshot yet, so there is no inventory to show."
+                        : "No configured server has a collected server_properties snapshot yet, so there is no inventory to show.");
             }
 
             var metrics = await DarlingFinOpsInventoryReader.GetServerMetricsAsync(
@@ -117,7 +121,7 @@ public sealed class DarlingMcpFinOpsInventoryTools
     {
         var note = NoteFor(s);
         var denied = s.HardwareUnavailableReason != null;
-        var score = FinOpsInventoryFigures.HealthScore(m.AvgCpuPct);
+        var score = FinOpsInventoryFigures.HealthScoreOrNull(m.AvgCpuPct);
         var annual = FinOpsCost.Annual(s.MonthlyCost);
         return new
         {
@@ -137,7 +141,8 @@ public sealed class DarlingMcpFinOpsInventoryTools
             storage_total_gb = m.StorageTotalGb is decimal gb ? Math.Round(gb, 1, MidpointRounding.AwayFromZero) : (decimal?)null,
             idle_db_count = m.IdleDbCount,
             health_score = score,
-            health_band = FinOpsUtilizationFigures.HealthBand(score),
+            health_band = score is int scoreValue ? FinOpsUtilizationFigures.HealthBand(scoreValue) : null,
+            health_score_note = score is null ? FinOpsHealthCalculator.NoScoreNote : null,
             monthly_cost_usd = s.MonthlyCost,
             annual_cost_usd = annual,
             license_warning = FinOpsInventoryFigures.LicenseWarning(s.Edition, s.EngineEdition, s.CpuCount, s.PhysicalMemoryMb),

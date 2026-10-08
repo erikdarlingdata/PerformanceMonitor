@@ -22,6 +22,7 @@
  */
 
 import { VIZ } from "../panels.js";
+import { orderServers } from "../server-order.js";
 import { el, mount, clear, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime } from "../util.js";
 
 /** The window choices: the house presets, in hours. */
@@ -307,7 +308,7 @@ export function renderJobHistory(main) {
   (async () => {
     const res = await readTool("list_servers", {}, controller.signal);
     if (mine !== pageSeq || res.kind !== "data") return;
-    knownServers = serverRows(res.data).filter(isSqlServerTarget);
+    knownServers = orderServers(serverRows(res.data).filter(isSqlServerTarget));
     fill(server.sel, serverOptions(), state.server);
   })();
   load();

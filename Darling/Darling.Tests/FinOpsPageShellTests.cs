@@ -123,7 +123,9 @@ public sealed class FinOpsPageShellTests
         var start = src.IndexOf("export function renderFinops(", StringComparison.Ordinal);
         var body = src.Substring(start);
         Assert.Contains("rows.find((r) => r.display_name === wanted)", src);
-        Assert.Contains("const chosen = resolveRow(rows, wanted).server_name;", body);
+        // The row is kept (not just its name) because the tabs read the chosen row's engine for the PostgreSQL-target rules.
+        Assert.Contains("const row = resolveRow(rows, wanted);", body);
+        Assert.Contains("const chosen = row.server_name;", body);
         Assert.DoesNotContain("known(", src);
         Assert.Contains("opts.poll === true", body);
         Assert.DoesNotContain("keepPainted", body);
@@ -140,7 +142,7 @@ public sealed class FinOpsPageShellTests
             "the previous render's controller must be aborted on the line right before the new one is created");
         Assert.True(ctrlIdx >= 0 && ctrlIdx < Array.FindIndex(lines, l => l.Contains("await ")),
             "the controller must be created unconditionally before the first await");
-        Assert.Contains("{ signal: controller.signal }", body);
+        Assert.Contains("{ signal: controller.signal, postgres: isPostgresRow(row) }", body);
         Assert.Contains("aria-current", src);
         Assert.DoesNotContain("role: \"tab", src);
         Assert.DoesNotContain("aria-selected", src);
@@ -165,7 +167,8 @@ public sealed class FinOpsPageShellTests
                 "*.js")
             .Select(Path.GetFileNameWithoutExtension)
             // database-box.js is the shared Database box the Index Analysis and Locking tabs import (#5231), not a tab.
-            .Where(name => name != "database-box")
+            // gate.js is the helper the tabs share for their empty and not-collected states on a PostgreSQL target, also not a tab.
+            .Where(name => name != "database-box" && name != "gate")
             .OrderBy(x => x, StringComparer.Ordinal).ToArray();
         Assert.Equal(TabIds.OrderBy(x => x, StringComparer.Ordinal).ToArray(), onDisk);
 

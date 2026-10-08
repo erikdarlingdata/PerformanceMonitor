@@ -218,6 +218,8 @@ try {
   await wait(20);
   const slowWasLive = slowSignal != null && !slowSignal.aborted;
   c3.abort();
+  /* The read is shared (apiGetJoined): the page's abort reaches the request once its caller has stopped waiting, a tick later. */
+  await wait(10);
   out.slowReadAbortedByRebuild = slowWasLive && slowSignal.aborted;
   out.pollListenersAfterAbort = keydownListeners.size;
   // A close the reader chose is forgotten: the next build opens nothing.

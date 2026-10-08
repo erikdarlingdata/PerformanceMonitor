@@ -28,6 +28,7 @@ import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emp
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { mutePrefillParams } from "../mute-context.js";
+import { orderServers } from "../server-order.js";
 import { getSession } from "../views-api.js";
 
 /* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
@@ -448,7 +449,7 @@ function serverRowsOf(data) {
 async function loadServerNames() {
   const res = await readTool("list_servers", {});
   if (res.kind === "error" || res.kind === "empty") return;
-  serverNames = serverRowsOf(res.data)
+  serverNames = orderServers(serverRowsOf(res.data))
     .map((r) => ({ name: r.server_name, label: r.display_name || r.server_name }))
     .filter((r) => r.name);
 }
