@@ -2985,8 +2985,12 @@ public sealed class DarlingCollectorRunner
 
                         /* #5514: a batch was staged, so its write may or may not have committed: drop this key and
                            let the next cycle read the store. A fault before the stage wrote nothing, and the key
-                           stays: a database that fails every cycle (offline, a login that cannot reach it) must
-                           not turn back into a store read every cycle. */
+                           stays. That matters for a PARTIAL failure: a database that fails every cycle (offline, a
+                           login that cannot reach it) beside healthy siblings must not turn back into a store read
+                           every cycle. When EVERY database fails (a one-database registration, the common shape)
+                           the loop rethrows and RunAsync's catch drops all of this server's query_store keys
+                           anyway, so there the kept key buys nothing. Correctness is the same either way: a kept
+                           key is equal to the store or stale-low, never ahead. */
                         if (stagedDatabaseWatermark is not null)
                         {
                             _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
@@ -3032,8 +3036,12 @@ public sealed class DarlingCollectorRunner
 
                         /* #5514: a batch was staged, so its write may or may not have committed: drop this key and
                            let the next cycle read the store. A fault before the stage wrote nothing, and the key
-                           stays: a database that fails every cycle (offline, a login that cannot reach it) must
-                           not turn back into a store read every cycle. */
+                           stays. That matters for a PARTIAL failure: a database that fails every cycle (offline, a
+                           login that cannot reach it) beside healthy siblings must not turn back into a store read
+                           every cycle. When EVERY database fails (a one-database registration, the common shape)
+                           the loop rethrows and RunAsync's catch drops all of this server's query_store keys
+                           anyway, so there the kept key buys nothing. Correctness is the same either way: a kept
+                           key is equal to the store or stale-low, never ahead. */
                         if (stagedDatabaseWatermark is not null)
                         {
                             _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
