@@ -179,9 +179,12 @@ export function renderFindings(server, res) {
   if (res.kind !== "data") return [];
   const data = res.data || {};
   const groups = groupFindings(data.findings);
-  if (!groups.length) return [keptWindowStrip(res), emptyStrip("No findings in this window.")];
+  /* #5558: databases left out because this node holds only a secondary copy of them in an availability group. */
+  const replicaNote = typeof data.secondary_replica_note === "string" && data.secondary_replica_note ? noticeStrip(data.secondary_replica_note) : null;
+  if (!groups.length) return [keptWindowStrip(res), replicaNote, emptyStrip("No findings in this window.")];
   return [
     keptWindowStrip(res),
+    replicaNote,
     typeof data.truncation_note === "string" && data.truncation_note ? noticeStrip(data.truncation_note) : null,
     typeof data.findings_truncated_note === "string" && data.findings_truncated_note ? noticeStrip(data.findings_truncated_note) : null,
     ...groups.map((g) => groupNode(server, g)),

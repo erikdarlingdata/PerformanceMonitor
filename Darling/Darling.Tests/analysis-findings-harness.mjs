@@ -121,6 +121,15 @@ try {
       const root = await run("srv-a", { findings: sample, truncated: true, truncation_note: "READ-CAP-NOTE", findings_truncated: true, findings_truncated_note: "PAGE-NOTE" });
       return { text: root.textContent };
     },
+    replicaNote: async () => {
+      /* #5558: the secondary-copy note shows with a list and with an empty chain list, and is absent when the read carries none. */
+      const note = "REPLICA-NOTE";
+      const withFindings = await run("srv-a", { findings: sample, secondary_replica_note: note });
+      const noFindings = await run("srv-a", { findings: [], secondary_replica_note: note });
+      const without = await run("srv-a", { findings: sample });
+      const nullNote = await run("srv-a", { findings: sample, secondary_replica_note: null });
+      return { withFindings: withFindings.textContent, noFindings: noFindings.textContent, without: without.textContent, nullNote: nullNote.textContent };
+    },
     signal: async () => {
       const ac = new AbortController();
       await run("srv-a", null, { hours: 24, label: "x", signal: ac.signal });

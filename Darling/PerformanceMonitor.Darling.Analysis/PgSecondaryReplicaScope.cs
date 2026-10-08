@@ -112,11 +112,13 @@ public static class PgSecondaryReplicaScope
         return value is DateTime at ? DateTime.SpecifyKind(at, DateTimeKind.Utc) : null;
     }
 
-    /// <summary>The note for the viewer, web and MCP (current role), or null when nothing is skipped.</summary>
+    /// <summary>The note for the viewer, web and MCP, or null when nothing is skipped. The role is the current one,
+    /// or the role at <paramref name="asOfUtc"/> for an AsOf read of stored findings.</summary>
     public static async Task<string?> NoteAsync(
-        NpgsqlDataSource postgres, int serverId, Microsoft.Extensions.Logging.ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, Microsoft.Extensions.Logging.ILogger? logger, CancellationToken cancellationToken,
+        DateTime? asOfUtc = null)
     {
-        var set = await ReadAsync(postgres, serverId, DateTime.UtcNow, logger, cancellationToken);
+        var set = await ReadAsync(postgres, serverId, asOfUtc ?? DateTime.UtcNow, logger, cancellationToken);
         return AgReplicaScope.SkippedNote(set);
     }
 

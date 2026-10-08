@@ -404,6 +404,20 @@ public sealed class RecommendationsViewModel
     /// </summary>
     public string WindowEmptyMessage { get; }
 
+    /// <summary>
+    /// #5558: the one-sentence note shown above a Loaded or Empty list when the monitored node holds a secondary copy
+    /// of some databases in an availability group (their per-database findings are the primary's), or null for none.
+    /// </summary>
+    public string? ReplicaNote { get; private set; }
+
+    /// <summary>Sets <see cref="ReplicaNote"/> and returns this view-model, so a caller can chain it onto a factory.
+    /// Only the Loaded and Empty states show it; the others replace the whole list area with their own message.</summary>
+    public RecommendationsViewModel WithReplicaNote(string? note)
+    {
+        ReplicaNote = string.IsNullOrWhiteSpace(note) ? null : note;
+        return this;
+    }
+
     /// <summary>Total card count across all sections.</summary>
     public int TotalCount => Sections.Sum(s => s.Count);
 

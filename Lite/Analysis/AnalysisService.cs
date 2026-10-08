@@ -1167,6 +1167,14 @@ ORDER BY event_time";
         }
     }
 
+    /// <summary>#5558: the shared one-sentence note when this node holds a secondary copy of any database in an
+    /// availability group as of <paramref name="asOfUtc"/> (now when null), else null. Read-back surfaces that list stored
+    /// findings (get_analysis_findings) carry it so a short list is not mistaken for a clean bill of health. A failed
+    /// read is "no note", never an error.</summary>
+    internal Task<string?> GetSecondaryReplicaNoteAsync(
+        int serverId, DateTime? asOfUtc = null, CancellationToken cancellationToken = default) =>
+        SecondaryReplicaScope.NoteAsync(_duckDb, serverId, asOfUtc, cancellationToken);
+
     /// <summary>
     /// The insufficient-history message for <paramref name="serverId"/>, or null when it has enough history
     /// OR when the span could not be read: a failed read says nothing about history, so it must not be

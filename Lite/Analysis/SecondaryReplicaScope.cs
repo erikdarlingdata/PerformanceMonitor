@@ -26,6 +26,9 @@ namespace PerformanceMonitorLite.Analysis;
 /// </summary>
 internal static class SecondaryReplicaScope
 {
+    /// <summary>The set a pass that reads only node-local facts carries: nothing is skipped, and no AG read is paid for.</summary>
+    internal static IReadOnlySet<string> NoneSkipped { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Fills the set once per context. Never throws except an abandonment (#2443): a read fault logs and
     /// leaves the pass unfiltered.</summary>
     internal static async Task EnsureAsync(DuckDbInitializer duckDb, AnalysisContext context)
@@ -129,10 +132,12 @@ AND   collection_time = $2";
     }
 
     /// <summary>The note for the tabs (Recommendations, FinOps): the shared sentence when this node holds a secondary
-    /// copy of any database right now, else null. Reads the current role, like the tab it sits on.</summary>
-    internal static async Task<string?> NoteAsync(DuckDbInitializer duckDb, int serverId, CancellationToken cancellationToken = default)
+    /// copy of any database as of <paramref name="asOfUtc"/> (now when null), else null. A tab reads the current role;
+    /// an AsOf read of stored findings passes its anchor, so the note names the role at that time.</summary>
+    internal static async Task<string?> NoteAsync(
+        DuckDbInitializer duckDb, int serverId, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
-        var set = await ReadAsync(duckDb, serverId, DateTime.UtcNow, cancellationToken);
+        var set = await ReadAsync(duckDb, serverId, asOfUtc ?? DateTime.UtcNow, cancellationToken);
         return AgReplicaScope.SkippedNote(set);
     }
 }

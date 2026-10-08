@@ -842,11 +842,16 @@ public sealed class McpAnalysisTools
                 resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit + 1, asOfUtc: anchor);
             var (findings, truncated) = McpHelpers.BoundPage(fetched, FindingOccurrences.WindowCoveringLimit);
 
+            /* #5558: databases skipped because this node holds only a secondary copy of them in an availability group
+               (their per-database findings are the primary's). Null when none; the same sentence on every surface. */
+            var secondaryReplicaNote = await analysisService.GetSecondaryReplicaNoteAsync(resolved.ServerId, anchor);
+
             if (findings.Count == 0)
             {
                 return McpHelpers.Status(
                     "empty",
-                    "No findings in the requested time range. Run analyze_server to generate new findings.");
+                    "No findings in the requested time range. Run analyze_server to generate new findings."
+                    + (secondaryReplicaNote is null ? "" : " " + secondaryReplicaNote));
             }
 
             /* #2000: collapse to one entry per (story_path_hash, incident_id). Measured 27.9x
@@ -888,6 +893,7 @@ public sealed class McpAnalysisTools
                 finding_count = groups.Count,
                 total_finding_count = totalFindingCount,
                 total_occurrences = findings.Count,
+                secondary_replica_note = secondaryReplicaNote,
                 // No silent caps: a read the window-covering limit CUT has had its OLDEST rows dropped by
                 // the store's newest-first LIMIT, so occurrence stats may under-report — say so instead of
                 // letting first_seen quietly lie. truncated is the #3594 flag (observed above); the note
