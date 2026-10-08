@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -45,8 +46,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// off the sweep loop, every hour until shutdown) does the long work: a VALIDATE, which never starts when S is closer than
 /// <see cref="ValidateGuard"/> (it re-arms first), and the promotion retries. S is the later of <see cref="ArmBound"/> and
 /// the day after the legacy table's newest first_execution_time, read under the arm's own lock through the legacy
-/// first-execution index. A VALIDATE that fails with 23514 drops its CHECK and logs that newest time; the next hourly step
-/// arms again. No day partition is created below S (<see cref="CreateAheadDays"/> starts at the newest upper bound,
+/// first-execution index; a maximum more than one retention horizon past the normal S is not armed over (see
+/// <see cref="IsLegacyMaxBeyondHorizon"/>: the table stays unpartitioned, with one warning, until that row is gone). A
+/// VALIDATE that fails with 23514 drops its CHECK and logs that newest time; when the time could be read the same
+/// background pass arms again with a later S, and when it could not the next pass does. No day partition is created below S (<see cref="CreateAheadDays"/> starts at the newest upper bound,
 /// which is S while only the legacy table bounds it), and the legacy table is dropped only when S is at or below the cutoff.</para>
 ///
 /// <para><b>Locks.</b> Arm: ACCESS EXCLUSIVE on legacy for the ADD CONSTRAINT, 5 s lock_timeout, 55P03 retried three
@@ -107,11 +110,12 @@ public static class QueryStoreIntervalPartitions
     public static readonly TimeSpan AnalyzeEvery = TimeSpan.FromHours(24);
 
     /// <summary>
-    /// A VALIDATE never starts when S is closer than this: its command deadline plus an hour. The VALIDATE then has
-    /// finished (or timed out) with an hour to spare before the CHECK becomes a wall, and the re-arm that has to follow a
-    /// failed one is not racing S (#5571 review H1).
+    /// A VALIDATE never starts when S is closer than this: its deadline plus <see cref="ReArmWithin"/> (14 h). A VALIDATE
+    /// that starts is then over before the re-arm window opens, so no hourly convergence pass ever queues its ACCESS
+    /// EXCLUSIVE lock behind a running VALIDATE (which stalls the upserts for the whole lock wait), and the re-arm that has
+    /// to follow a failed one is not racing S (#5571 review H1, round 2 L1).
     /// </summary>
-    public static readonly TimeSpan ValidateGuard = TimeSpan.FromSeconds(ValidateTimeoutSeconds) + TimeSpan.FromHours(1);
+    public static readonly TimeSpan ValidateGuard = TimeSpan.FromSeconds(ValidateTimeoutSeconds) + ReArmWithin;
 
     /// <summary>How often the background loop runs Phase A again (and the daily ANALYZE check) until shutdown.</summary>
     public static readonly TimeSpan BackgroundInterval = TimeSpan.FromHours(1);
@@ -348,6 +352,31 @@ public static class QueryStoreIntervalPartitions
         var afterMax = DayStart(legacyMax.Value).AddDays(1);
         return afterMax > normal ? afterMax : normal;
     }
+
+    /// <summary>
+    /// Whether the legacy table's newest first_execution_time is too far ahead to arm over: S would land more than one
+    /// retention horizon (<paramref name="horizonDays"/>) past the normal bound, or the maximum is so close to the end of
+    /// <see cref="DateTime"/> that <see cref="ArmBoundFor"/> ignores it (the CHECK could then never validate). A
+    /// promoted table is never re-armed, so one such row would keep every new row in the legacy table for as long as it
+    /// is dated ahead, and deleting it afterwards would not help. The arm waits until the row is gone instead
+    /// (#5571 review round 2 M1). A maximum inside the horizon is armed over, with S the day after it.
+    /// </summary>
+    public static bool IsLegacyMaxBeyondHorizon(DateTime utcNow, DateTime? legacyMax, int horizonDays)
+    {
+        if (!legacyMax.HasValue)
+        {
+            return false;
+        }
+
+        return legacyMax.Value > DateTime.MaxValue.AddDays(-ArmDays - 1)
+            || ArmBoundFor(utcNow, legacyMax) > ArmBound(utcNow).AddDays(horizonDays);
+    }
+
+    /// <summary>The table name and maximum last warned about by <see cref="ArmCoreAsync"/> (a row dated too far ahead), so the hourly pass logs it once per start and again only when the maximum changes.</summary>
+    private static readonly ConcurrentDictionary<string, DateTime> FarFutureMaxWarned = new(StringComparer.Ordinal);
+
+    /// <summary>Forget what was warned about; for tests only.</summary>
+    internal static void ResetFarFutureMaxWarnings() => FarFutureMaxWarned.Clear();
 
     /// <summary>
     /// The day partitions the promotion creates: every day from S through today plus <see cref="DaysAhead"/>, with no
@@ -697,6 +726,14 @@ SELECT COALESCE
                 }
 
                 var legacyMax = await ReadLegacyMaxAsync(connection, table, transaction, logger, cancellationToken).ConfigureAwait(false);
+                if (IsLegacyMaxBeyondHorizon(utcNow, legacyMax, table.HorizonDays))
+                {
+                    await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                    WarnFarFutureMax(logger, table, legacyMax!.Value, utcNow);
+                    return new StepResult(
+                        StepOutcome.NotReady, $"{table.Legacy} holds a row dated {Literal(legacyMax.Value)}, too far ahead to arm over");
+                }
+
                 var normal = ArmBound(utcNow);
                 var s = ArmBoundFor(utcNow, legacyMax);
                 if (reArm)
@@ -737,6 +774,23 @@ SELECT COALESCE
         }
     }
 
+    private static void WarnFarFutureMax(ILogger logger, IntervalTable table, DateTime legacyMax, DateTime utcNow)
+    {
+        var seen = FarFutureMaxWarned.TryGetValue(table.Parent, out var last) && last == legacyMax;
+        FarFutureMaxWarned[table.Parent] = legacyMax;
+        if (seen)
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "Query Store interval table {Table}: {Legacy} holds a row with first_execution_time {Max:O}, more than {Horizon} days past the normal "
+            + "legacy bound {Normal:O}. The table stays unpartitioned until that row is gone: arming over it would keep every new row in the legacy "
+            + "table for that long, and a promoted table is never re-armed. Delete the row (or let the retention horizon reach it); the first "
+            + "hourly pass after that arms the table.",
+            table.Parent, table.Legacy, legacyMax, table.HorizonDays, ArmBound(utcNow));
+    }
+
     /// <summary>
     /// The hourly convergence step for a table that is not promoted (#5571 review H1), cheap and bounded by 5 s lock
     /// waits, with no VALIDATE and no sleeping: no CHECK, arm; a valid CHECK, one promote; and when the table is still
@@ -766,13 +820,25 @@ SELECT COALESCE
         StepResult? promoteResult = null;
         if (state.CheckValid)
         {
-            var promote = await PromoteAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
-            if (promote.Outcome is StepOutcome.Done or StepOutcome.NothingToDo)
+            try
             {
-                return promote;
-            }
+                var promote = await PromoteAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
+                if (promote.Outcome is StepOutcome.Done or StepOutcome.NothingToDo)
+                {
+                    return promote;
+                }
 
-            promoteResult = promote;
+                promoteResult = promote;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* A promote that fails for any reason but a lock wait must not skip the re-arm below: at S a valid CHECK refuses
+                   every current row (#5571 review round 2 L3). */
+                logger.LogWarning(
+                    "Query Store interval table {Table}: the promotion failed ({Message}); the CHECK is re-armed if S is close, and the next pass tries again.",
+                    table.Parent, ex.Message);
+                promoteResult = new StepResult(StepOutcome.Refused, $"the promotion failed: {ex.Message}");
+            }
         }
 
         if (state.CheckBound.HasValue && ShouldReArm(state.CheckBound.Value, utcNow))
@@ -786,11 +852,13 @@ SELECT COALESCE
     /// <summary>
     /// Phase A step 2, run only by the background loop, never by a convergence step. Validates the legacy CHECK: a heap
     /// read of the legacy table under SHARE UPDATE EXCLUSIVE, so upserts and reads continue. It never starts when S is
-    /// closer than <see cref="ValidateGuard"/> (the command deadline plus an hour): the result is
-    /// <see cref="StepOutcome.ReArmFirst"/>. A lock timeout (autovacuum, a concurrent index build) returns
+    /// closer than <see cref="ValidateGuard"/> (the command deadline plus <see cref="ReArmWithin"/>): the result is
+    /// <see cref="StepOutcome.ReArmFirst"/>. The transaction also sets <c>statement_timeout</c> to the deadline, so the
+    /// server ends an orphaned VALIDATE itself. A lock timeout (autovacuum, a concurrent index build) returns
     /// <see cref="StepOutcome.RetryLater"/>. A 23514 means the legacy table holds a row at or after S: the CHECK is
     /// dropped, the table's newest <c>first_execution_time</c> is logged, and the result is
-    /// <see cref="StepOutcome.Refused"/>; the next hourly step re-arms with a later S.
+    /// <see cref="StepOutcome.Refused"/> when that time was read (the loop re-arms with a later S at once), or
+    /// <see cref="StepOutcome.RetryLater"/> when it was not (a second VALIDATE would fail the same way).
     /// </summary>
     public static async Task<StepResult> ValidateAsync(
         NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
@@ -822,6 +890,11 @@ SELECT COALESCE
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
             await ExecuteAsync(connection, LockTimeoutSql, ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            /* The server enforces the deadline too: a VALIDATE orphaned by a killed service or a lost cancel request would
+               otherwise keep its SHARE UPDATE EXCLUSIVE lock, and every re-arm would hit a lock timeout (#5571 review round 2 L2). */
+            await ExecuteAsync(
+                connection, $"SET LOCAL statement_timeout = '{ValidateTimeoutSeconds}s';", ShortTimeoutSeconds, transaction, cancellationToken)
+                .ConfigureAwait(false);
             await ExecuteAsync(connection, ValidateSql(table), ValidateTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -882,8 +955,16 @@ SELECT COALESCE
             table.Parent, s, table.Legacy,
             legacyMax.HasValue ? legacyMax.Value.ToString("O", CultureInfo.InvariantCulture) : "unknown",
             dropped
-                ? "The CHECK was dropped; the next hourly step arms it again with a later S."
+                ? "The CHECK was dropped; the next arm uses a later S when the newest row can be read."
                 : "The CHECK could not be dropped (lock timeout); the next pass tries again.");
+
+        /* With the maximum unknown the re-arm would use the normal S and the VALIDATE would fail the same way, so the background
+           loop must not run Phase A a second time in this pass: one heap read per pass, not two (#5571 review round 2 L4). */
+        if (!legacyMax.HasValue)
+        {
+            return new StepResult(StepOutcome.RetryLater, dropped ? "a legacy row is at or after S, newest unknown; the check was dropped" : "a legacy row is at or after S, newest unknown");
+        }
+
         return new StepResult(StepOutcome.Refused, dropped ? "a legacy row is at or after S; the check was dropped" : "a legacy row is at or after S");
     }
 

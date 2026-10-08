@@ -64,24 +64,52 @@ public sealed class QueryStoreIntervalPartitionsTests
     }
 
     [Fact]
-    public void AValidate_NeverStartsWithinItsDeadlinePlusAnHourOfS_AndTheReArmComesFirst()
+    public void AValidate_NeverRunsIntoTheReArmWindow_ItsGuardIsItsDeadlinePlusTheWindow()
     {
-        Assert.Equal(TimeSpan.FromHours(3), QueryStoreIntervalPartitions.ValidateGuard);
-        Assert.True(QueryStoreIntervalPartitions.ValidateGuard < QueryStoreIntervalPartitions.ReArmWithin);
+        /* #5571 review round 2 L1: derived from the two values, not typed. */
+        var deadline = TimeSpan.FromSeconds(QueryStoreIntervalPartitions.ValidateTimeoutSeconds);
+        Assert.Equal(deadline + QueryStoreIntervalPartitions.ReArmWithin, QueryStoreIntervalPartitions.ValidateGuard);
+        Assert.Equal(TimeSpan.FromHours(14), QueryStoreIntervalPartitions.ValidateGuard);
 
         var s = Day(10, 10);
-        Assert.True(QueryStoreIntervalPartitions.CanStartValidate(s, new DateTime(2026, 10, 9, 21, 0, 0, DateTimeKind.Utc)));
-        Assert.False(QueryStoreIntervalPartitions.CanStartValidate(s, new DateTime(2026, 10, 9, 21, 0, 1, DateTimeKind.Utc)));
+        Assert.True(QueryStoreIntervalPartitions.CanStartValidate(s, new DateTime(2026, 10, 9, 10, 0, 0, DateTimeKind.Utc)));
+        Assert.False(QueryStoreIntervalPartitions.CanStartValidate(s, new DateTime(2026, 10, 9, 10, 0, 1, DateTimeKind.Utc)));
 
-        /* Every instant at which a VALIDATE is refused is also an instant at which the CHECK is re-armed. */
-        for (var minutes = 0; minutes <= 24 * 60; minutes += 5)
+        /* A VALIDATE that starts at any instant the guard allows, and runs its whole deadline, ends before the hourly pass would
+           queue a re-arm behind it. */
+        for (var minutes = 0; minutes <= 48 * 60; minutes += 5)
         {
             var now = s.AddMinutes(-minutes);
-            if (!QueryStoreIntervalPartitions.CanStartValidate(s, now))
+            if (QueryStoreIntervalPartitions.CanStartValidate(s, now))
             {
-                Assert.True(QueryStoreIntervalPartitions.ShouldReArm(s, now));
+                Assert.False(QueryStoreIntervalPartitions.ShouldReArm(s, now + deadline), $"a VALIDATE started {minutes} min before S ends inside the re-arm window");
             }
         }
+    }
+
+    [Fact]
+    public void ALegacyMax_MoreThanOneHorizonPastTheNormalS_IsNotArmedOver_ButOneWithinItIs()
+    {
+        /* #5571 review round 2 M1. Now = 10-08, normal S = 10-10, the wide horizon is 9 days, so the last S that is armed over is 10-19. */
+        Assert.Equal(9, Wide.HorizonDays);
+        var now = new DateTime(2026, 10, 8, 14, 0, 0, DateTimeKind.Utc);
+        Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, null, Wide.HorizonDays));
+        Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, new DateTime(2026, 10, 8, 13, 0, 0), Wide.HorizonDays));
+        Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, new DateTime(2026, 10, 14, 5, 0, 0), Wide.HorizonDays));
+
+        var last = new DateTime(2026, 10, 18, 23, 59, 59, 999, DateTimeKind.Unspecified).AddTicks(9990);   /* 23:59:59.999999 */
+        Assert.Equal(Day(10, 19), QueryStoreIntervalPartitions.ArmBoundFor(now, last));
+        Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, last, Wide.HorizonDays));
+        Assert.True(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, Day(10, 19), Wide.HorizonDays));
+        Assert.True(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, new DateTime(2027, 10, 8), Wide.HorizonDays));
+
+        /* The end of the representable range cannot be armed over either: the CHECK could never validate. */
+        Assert.True(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, DateTime.MaxValue, Wide.HorizonDays));
+        Assert.True(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, DateTime.MaxValue.AddDays(-2), Wide.HorizonDays));
+
+        /* The latest table has its own horizon. */
+        Assert.True(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, Day(10, 19), 3));
+        Assert.False(QueryStoreIntervalPartitions.IsLegacyMaxBeyondHorizon(now, Day(10, 12), 3));
     }
 
     [Fact]

@@ -158,7 +158,10 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
         Assert.True(scannedData < storedData, $"{label} ({mode}) scanned {scannedData} of {storedData} partitions; nothing was pruned");
         if (mode == "force_generic_plan")
         {
-            Assert.True(scan.SubplansRemoved > 0 || scan.Relations.Count < leaves.Count, $"{label} generic plan removed no subplans");
+            /* EXPLAIN of a generic plan reports pruning done at executor start as "Subplans Removed". The plan keeps every leaf
+               and removes the unreachable ones at run time, so this is the one number that proves the generic plan prunes (a
+               leaf-count comparison against the scanned relations always holds once the checks above have passed). */
+            Assert.True(scan.SubplansRemoved > 0, $"{label} generic plan removed no subplans");
         }
     }
 

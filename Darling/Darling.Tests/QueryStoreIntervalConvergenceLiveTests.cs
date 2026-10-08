@@ -259,7 +259,7 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
     }
 
     [Fact]
-    public async Task AValidate_NeverStartsWithinItsDeadlinePlusAnHourOfS()
+    public async Task AValidate_NeverStartsWithinItsDeadlinePlusTheReArmWindowOfS()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
@@ -424,9 +424,161 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         Assert.Equal(before, logger.Lines.Count(l => l.Message.Contains("analyzed the parent", StringComparison.Ordinal)));
     }
 
+    private static int FarMaxWarnings(ListLogger logger) =>
+        logger.Lines.Count(l => l.Level == LogLevel.Warning && l.Message.Contains("stays unpartitioned until that row is gone", StringComparison.Ordinal));
+
     [Fact]
-    public async Task TwoDropsOfTheSamePartition_BothSucceed()
+    public async Task ALegacyRowDatedMoreThanOneHorizonAhead_IsNotArmedOver_WarnsOncePerMaximum_AndTheArmGoesAheadOnceItIsGone()
     {
+        /* #5571 review round 2 M1. A promoted table is never re-armed, so S must not follow a far-future row. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+        QueryStoreIntervalPartitions.ResetFarFutureMaxWarnings();
+
+        /* The normal S is 10-10 and the wide horizon is nine days: a row at 10-19 00:00 would put S at 10-20, one day past the limit. */
+        var far = new DateTime(2026, 10, 19, 0, 0, 0, DateTimeKind.Unspecified);
+        await InsertAsync(connection, Wide, far, 1, ct);
+
+        var arm = await QueryStoreIntervalPartitions.ArmAsync(connection, Wide, Now, logger, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.NotReady, arm.Outcome);
+        Assert.False((await StateAsync(connection, ct)).CheckPresent);
+        Assert.Equal(1, FarMaxWarnings(logger));
+        Assert.True(logger.Lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains("2026-10-19T00:00:00", StringComparison.Ordinal)), logger.Dump());
+
+        /* Every hourly pass reads the maximum again and still does not arm, and says nothing more while the maximum is the same. */
+        for (var hour = 1; hour <= 3; hour++)
+        {
+            var pass = await QueryStoreIntervalPartitions.RunMaintenancePassAsync(connection, OnlyWide, Now.AddHours(hour), logger, ct);
+            Assert.Equal(0, pass.Failed);
+            Assert.False((await StateAsync(connection, ct)).CheckPresent);
+        }
+
+        Assert.Equal(1, FarMaxWarnings(logger));
+
+        /* A different maximum is a new fact: it is warned about once. */
+        await InsertAsync(connection, Wide, new DateTime(2026, 10, 20, 5, 0, 0, DateTimeKind.Unspecified), 2, ct);
+        await QueryStoreIntervalPartitions.RunMaintenancePassAsync(connection, OnlyWide, Now.AddHours(4), logger, ct);
+        Assert.Equal(2, FarMaxWarnings(logger));
+        Assert.True(logger.Lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains("2026-10-20T05:00:00", StringComparison.Ordinal)), logger.Dump());
+        await QueryStoreIntervalPartitions.RunMaintenancePassAsync(connection, OnlyWide, Now.AddHours(5), logger, ct);
+        Assert.Equal(2, FarMaxWarnings(logger));
+        Assert.False((await StateAsync(connection, ct)).CheckPresent);
+
+        /* The row is deleted: the first pass after that arms, with no restart. */
+        await ExecAsync(connection, $"DELETE FROM {Wide.Parent} WHERE first_execution_time >= timestamp '2026-10-19 00:00:00'", ct);
+        var armed = await QueryStoreIntervalPartitions.RunMaintenancePassAsync(connection, OnlyWide, Now.AddHours(6), logger, ct);
+        Assert.Equal(0, armed.Failed);
+        var state = await StateAsync(connection, ct);
+        Assert.True(state.CheckPresent);
+        Assert.Equal(FirstS, state.CheckBound);
+        Assert.Equal(2, FarMaxWarnings(logger));
+    }
+
+    [Fact]
+    public async Task ALegacyRowOneMicrosecondInsideTheHorizon_IsArmedOver_AndTheValidatePasses()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+        QueryStoreIntervalPartitions.ResetFarFutureMaxWarnings();
+
+        /* 10-18 23:59:59.999999 puts S at 10-19, exactly the normal S plus nine days. */
+        await InsertAsync(connection, Wide, new DateTime(2026, 10, 19, 0, 0, 0, DateTimeKind.Unspecified).AddTicks(-10), 1, ct);
+
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, (await QueryStoreIntervalPartitions.ArmAsync(connection, Wide, Now, logger, ct)).Outcome);
+        Assert.Equal(new DateTime(2026, 10, 19, 0, 0, 0, DateTimeKind.Unspecified), (await StateAsync(connection, ct)).CheckBound);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, (await QueryStoreIntervalPartitions.ValidateAsync(connection, Wide, Now, logger, ct)).Outcome);
+        Assert.Equal(0, FarMaxWarnings(logger));
+    }
+
+    [Fact]
+    public async Task APromotionThatFailsForAnyReasonButALock_DoesNotSkipTheReArm_WhenSIsClose()
+    {
+        /* #5571 review round 2 L3. Left alone, the valid CHECK would refuse every current row at S. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+
+        await QueryStoreIntervalPartitions.ArmAsync(connection, Wide, Now, logger, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, (await QueryStoreIntervalPartitions.ValidateAsync(connection, Wide, Now, logger, ct)).Outcome);
+
+        /* A stray table with the first day partition's name: the promotion's CREATE TABLE ... PARTITION OF fails with 42P07, not 55P03. */
+        await ExecAsync(connection, $"CREATE TABLE {Wide.DayPartition(FirstS)} (id integer)", ct);
+        var close = FirstS.AddHours(-11);
+        await Assert.ThrowsAsync<PostgresException>(() => QueryStoreIntervalPartitions.PromoteAsync(connection, Wide, close, logger, ct));
+
+        var step = await QueryStoreIntervalPartitions.ConvergeUnpromotedAsync(connection, Wide, close, logger, ct);
+
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, step.Outcome);
+        var state = await StateAsync(connection, ct);
+        Assert.False(state.Promoted);
+        Assert.Equal(QueryStoreIntervalPartitions.ArmBound(close), state.CheckBound);
+        Assert.True(logger.Lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains("the promotion failed", StringComparison.Ordinal)), logger.Dump());
+    }
+
+    [Fact]
+    public async Task AValidateThatFailsWith23514_WhenTheLegacyMaxCannotBeRead_IsRetryLater_AndTheLoopValidatesOncePerPass()
+    {
+        /* #5571 review round 2 L4. With the maximum unknown a second Phase A in the same pass would read the whole heap again for nothing. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+
+        await InsertAsync(connection, Wide, new DateTime(2026, 10, 12, 7, 30, 0, DateTimeKind.Unspecified), 1, ct);
+        await ExecAsync(connection, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'collect.idx_query_store_interval_wide_first_exec_legacy'::regclass", ct);
+        await ExecAsync(connection, QueryStoreIntervalPartitions.AddCheckSql(Wide, FirstS), ct);
+
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var loop = QueryStoreIntervalPartitions.RunDelayedAsync(
+            logger,
+            TimeSpan.Zero,
+            TimeSpan.FromHours(1),
+            OnlyWide,
+            async (table, token) =>
+            {
+                await using var own = new NpgsqlConnection(scratch.ConnectionString);
+                await own.OpenAsync(token);
+                return await QueryStoreIntervalPartitions.RunPromotionAsync(own, table, Now, logger, TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(50), token);
+            },
+            (table, token) => Task.FromResult(new QueryStoreIntervalPartitions.StepResult(QueryStoreIntervalPartitions.StepOutcome.NothingToDo, "test")),
+            token => Task.CompletedTask,
+            stop.Token);
+
+        /* The analyze step is the last thing a pass does. */
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (!logger.Lines.Any(l => l.Message.Contains("analyze step ended", StringComparison.Ordinal)) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(100, ct);
+        }
+
+        await stop.CancelAsync();
+        await loop;
+
+        Assert.True(logger.Lines.Any(l => l.Message.Contains("promotion step ended RetryLater", StringComparison.Ordinal)), logger.Dump());
+        Assert.Equal(1, logger.Lines.Count(l => l.Level == LogLevel.Warning && l.Message.Contains("could not be validated", StringComparison.Ordinal)));
+        Assert.False((await StateAsync(connection, ct)).CheckPresent);
+    }
+
+    [Fact]
+    public async Task ADropThatLosesTheRaceForTheLegacyTable_WaitsOnTheLock_ThenSucceedsWithoutAFailure()
+    {
+        /* #5571 review round 2 L5. The product lists the expired partitions (reads that finish before the race starts), then its DROP waits on the
+           parent's lock. A second connection that already holds a lock on the parent is granted its own DROP ahead of that waiter, commits,
+           and the product's DROP finds the table gone: DROP TABLE IF EXISTS looks the name up again after the wait, where a plain DROP TABLE fails
+           with 42P01. */
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -436,14 +588,34 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         var logger = new ListLogger();
 
         await PromoteAsync(connection, Wide, Now.AddDays(-30), logger, ct);
+        Assert.True(await ExistsAsync(connection, Wide.Legacy, ct));
 
-        /* Both read the list of expired partitions; one drops the legacy table; the other's DROP finds it gone (L3). */
-        var stale = await QueryStoreIntervalPartitions.ReadPartitionsAsync(other, Wide, ct);
-        Assert.Contains(stale, p => p.Name == Wide.Legacy);
-        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, (await QueryStoreIntervalPartitions.DropExpiredAsync(connection, Wide, Now, logger, ct)).Outcome);
-        await using var late = new NpgsqlCommand($"DROP TABLE IF EXISTS {Wide.Legacy}", other);
-        await late.ExecuteNonQueryAsync(ct);
-        Assert.Contains("DROP TABLE IF EXISTS", ProductSource.Read("PerformanceMonitor.Darling.Storage", "QueryStoreIntervalPartitions.cs"), StringComparison.Ordinal);
+        /* Dropping a partition takes the parent's lock first. ACCESS SHARE on the parent does not block the product's reads, and blocks its DROP. */
+        await using var hold = await other.BeginTransactionAsync(ct);
+        await ExecAsync(other, $"LOCK TABLE ONLY {Wide.Parent} IN ACCESS SHARE MODE", ct);
+
+        var product = QueryStoreIntervalPartitions.DropExpiredAsync(connection, Wide, Now, logger, ct);
+
+        /* Wait until the product's DROP is queued behind the uncommitted one; the lock wait is 5 s, so this must be well inside it. */
+        var waitUntil = DateTime.UtcNow.AddSeconds(3);
+        long waiting = 0;
+        while (waiting == 0 && DateTime.UtcNow < waitUntil)
+        {
+            await Task.Delay(50, ct);
+            waiting = await CountAsync(other, "SELECT count(*) FROM pg_locks WHERE NOT granted", ct);
+        }
+
+        Assert.True(waiting > 0, "the product's DROP never queued behind the first one");
+        Assert.False(product.IsCompleted, "the product's DROP did not wait for the lock");
+
+        /* The second drop jumps the queue (it already holds a lock on the parent), so it wins the race. */
+        await ExecAsync(other, $"DROP TABLE {Wide.Legacy}", ct);
+        await hold.CommitAsync(ct);
+        var result = await product;
+
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, result.Outcome);
+        Assert.False(await ExistsAsync(connection, Wide.Legacy, ct));
+        Assert.False(logger.HasAtLeast(LogLevel.Warning), logger.Dump());
     }
 
     /* The source text of the product file the pins below read. */
@@ -559,5 +731,38 @@ public sealed class QueryStoreIntervalConvergencePinTests
         Assert.Contains("ROLLBACK TO SAVEPOINT legacy_max", read, StringComparison.Ordinal);
         Assert.Contains("RESET statement_timeout", read, StringComparison.Ordinal);
         Assert.Equal("collect.idx_query_store_interval_wide_first_exec_legacy", QueryStoreIntervalPartitions.Wide.LegacyFirstExecIndex);
+    }
+
+    [Fact]
+    public void TheRound2Fixes_AreInTheProductText()
+    {
+        var source = Source();
+        var arm = Between(source, "internal static async Task<StepResult> ArmCoreAsync(", "private static void WarnFarFutureMax(");
+        var validate = Between(source, "public static async Task<StepResult> ValidateAsync(", "private static async Task<StepResult> DropViolatedCheckAsync(");
+        var converge = Between(source, "public static async Task<StepResult> ConvergeUnpromotedAsync(", "/// Phase A step 2, run only by the background loop");
+        var dropViolated = Between(source, "private static async Task<StepResult> DropViolatedCheckAsync(", "Task<StepResult> PromoteAsync(");
+
+        /* M1: a far-future legacy maximum is never armed over; the transaction ends before the CHECK is added. */
+        Assert.True(
+            arm.IndexOf("IsLegacyMaxBeyondHorizon(", StringComparison.Ordinal) is var m1 && m1 > arm.IndexOf("ReadLegacyMaxAsync(", StringComparison.Ordinal)
+            && m1 < arm.IndexOf("AddCheckSql(", StringComparison.Ordinal),
+            "the horizon test sits between the maximum read and the ADD CONSTRAINT");
+        Assert.Contains("RollbackAsync", arm[arm.IndexOf("IsLegacyMaxBeyondHorizon(", StringComparison.Ordinal)..arm.IndexOf("AddCheckSql(", StringComparison.Ordinal)], StringComparison.Ordinal);
+
+        /* L1: the guard is derived from the deadline and the re-arm window. */
+        Assert.Contains("ValidateGuard = TimeSpan.FromSeconds(ValidateTimeoutSeconds) + ReArmWithin;", source, StringComparison.Ordinal);
+
+        /* L2: the server enforces the VALIDATE deadline, set before the VALIDATE runs. */
+        var timeout = validate.IndexOf("SET LOCAL statement_timeout = '{ValidateTimeoutSeconds}s'", StringComparison.Ordinal);
+        Assert.True(timeout > 0 && timeout < validate.IndexOf("ValidateSql(table)", StringComparison.Ordinal), "statement_timeout is set before the VALIDATE");
+
+        /* L3: a promote that throws does not skip the re-arm that follows it. */
+        var promoteAt = converge.IndexOf("PromoteAsync(", StringComparison.Ordinal);
+        Assert.True(promoteAt > 0 && converge.IndexOf("catch (Exception ex) when (ex is not OperationCanceledException)", promoteAt, StringComparison.Ordinal) > promoteAt, "the promote is in a try with a catch");
+        Assert.True(converge.IndexOf("catch (", promoteAt, StringComparison.Ordinal) < converge.IndexOf("ShouldReArm(", promoteAt, StringComparison.Ordinal));
+
+        /* L4: an unknown maximum is RetryLater, so the loop does not re-run Phase A. */
+        Assert.Contains("if (!legacyMax.HasValue)", dropViolated, StringComparison.Ordinal);
+        Assert.Contains("StepOutcome.RetryLater", dropViolated, StringComparison.Ordinal);
     }
 }
