@@ -167,4 +167,60 @@ AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
 AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}", ct);
         Assert.InRange(otherBytes, otherCensusBytes - 1_000_000, otherCensusBytes + 1_000_000);
     }
+
+    /// <summary>
+    /// A store below the rung still sizes its two interval tables (#5571, review L4). <c>pg_partition_tree</c> returns NO
+    /// row for a plain table, not the table as its own leaf, so the sweep's COALESCE and <c>NOT EXISTS</c> fallbacks are
+    /// what size it; without them the row would read NULL bytes and rows. The test turns the two migrated parents back
+    /// into plain tables and sweeps.
+    /// </summary>
+    [Fact]
+    public async Task APlainIntervalTable_IsStillSizedByItsOwnBytesAndRows()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var now = DateTime.UtcNow;
+        var today = DateTime.SpecifyKind(now.Date, DateTimeKind.Unspecified);
+        await SeedWideAsync(connection, today.AddDays(-1).AddHours(12), 120, ct);
+        await SeedLatestAsync(connection, today.AddDays(-1).AddHours(12), 120, ct);
+
+        foreach (var table in QueryStoreIntervalPartitions.All)
+        {
+            var plain = $"collect.zz_plain_{table.Name}";
+            await ExecAsync(connection, $@"
+CREATE TABLE {plain} AS SELECT * FROM {table.Parent};
+DROP TABLE {table.Parent} CASCADE;
+ALTER TABLE {plain} RENAME TO {table.Name};
+ANALYZE {table.Parent};", ct);
+            Assert.Equal(0, await LongAsync(connection, $"SELECT count(*) FROM pg_partition_tree('{table.Parent}'::regclass)", ct)); /* why the fallback is live */
+        }
+
+        var written = await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, now, null, null, null, ct);
+        Assert.True(written > 0);
+
+        foreach (var table in QueryStoreIntervalPartitions.All)
+        {
+            var expectedBytes = await LongAsync(connection, $"SELECT pg_total_relation_size('{table.Parent}'::regclass)", ct);
+            var expectedRows = await LongAsync(connection, $"SELECT reltuples::bigint FROM pg_class WHERE oid = '{table.Parent}'::regclass", ct);
+            Assert.True(expectedBytes > 0);
+            Assert.Equal(120, expectedRows);
+
+            await using var command = new NpgsqlCommand(
+                "SELECT total_bytes, row_count FROM collect.store_metrics WHERE object_name = $1 AND object_kind = $2 ORDER BY metric_time DESC LIMIT 1", connection);
+            command.Parameters.AddWithValue(table.Parent);
+            command.Parameters.AddWithValue(StoreSelfMetrics.TableObjectKind);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct), $"no {table.Parent} row");
+            Assert.False(reader.IsDBNull(0) || reader.IsDBNull(1), $"{table.Parent} was sized NULL");
+            Assert.Equal(expectedBytes, reader.GetInt64(0));
+            Assert.Equal(expectedRows, reader.GetInt64(1));
+        }
+    }
 }

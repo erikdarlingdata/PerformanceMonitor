@@ -101,8 +101,8 @@ ORDER BY g;"), ct);
         NpgsqlConnection connection, NpgsqlTransaction transaction, string table, CancellationToken ct)
     {
         /* #5571: the interval tables are partitioned by day, so the parent holds no rows or counters of its own; an update
-           is counted on the leaf partition that holds the row. The counters are summed over the table's leaves (for a table
-           that is not partitioned, pg_partition_tree returns the table itself as its one leaf). */
+           is counted on the leaf partition that holds the row. The counters are summed over the table's leaves; the store
+           this test migrates is always partitioned (pg_partition_tree returns no row for a plain table). */
         await using var command = new NpgsqlCommand(
             "SELECT COALESCE(SUM(s.n_tup_upd), 0)::bigint, COALESCE(SUM(s.n_tup_hot_upd), 0)::bigint "
             + "FROM pg_partition_tree(@table::regclass) AS p JOIN pg_stat_xact_all_tables AS s ON s.relid = p.relid WHERE p.isleaf",
