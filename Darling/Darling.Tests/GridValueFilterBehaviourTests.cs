@@ -193,6 +193,16 @@ public sealed class GridValueFilterBehaviourTests
     }
 
     [Fact]
+    public void TheFreeTextReasonColumns_AreMarkedWithNoList()
+    {
+        // The stored-caveat "reason" (server-tabs.js) and the mute rule's typed "reason" are prose that the name rule does
+        // not catch (a key ending in "reason"), so each column carries the opt-out itself. A source pin: those descriptors
+        // sit inside page modules that cannot be loaded without a server.
+        Assert.Contains("{ key: \"reason\", label: \"Reason\", wrap: true, valueList: false }", ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"), System.StringComparison.Ordinal);
+        Assert.Contains("{ key: \"reason\", label: \"Reason\", valueList: false }", ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "mute-rules.js"), System.StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheList_HoldsTheRawValue_NotTheTextTheCellDraws_AndABlankIsABlankRawValue()
     {
         var r = Run("rawValues");
