@@ -28,6 +28,7 @@ namespace PerformanceMonitor.Darling.Tests;
 /// deleted</c> (#5416) and is the inferred cause of a PostgreSQL backend crash in CI (#5549). These pins hold the SQL
 /// text and the call order in the source; the live classes below prove the behaviour.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AggregateJobQuiescePinTests
 {
     [Fact]
@@ -253,14 +254,38 @@ public sealed class AggregateJobQuiesceLiveTests
             sweep = Task.Run(() => TimescaleSupport.DropRetiredBaselineAggregatesAsync(
                 sweeper, log, DateTime.UtcNow, new TimescaleSupport.AggregateJobQuiesceOptions(TimeSpan.FromSeconds(120), TimeSpan.FromMilliseconds(100)), ct), ct);
 
+            var workerPid = await ScalarAsync<int>(connection, $"SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type LIKE '% [{refreshJob}]'", ct);
+
             /* The jobs are stopped while the worker runs... */
             Assert.True(await WaitForAsync(async () => (await JobStatesAsync(connection, jobIds, ct)).Values.All(scheduled => !scheduled), TimeSpan.FromSeconds(30), ct),
                 $"the sweep never stopped the jobs: {log.Joined}");
-            /* ...and the sweep keeps waiting on the worker: well past the two looks it needs when nothing runs. */
-            await Task.Delay(TimeSpan.FromSeconds(2), ct);
-            Assert.False(sweep.IsCompleted, $"the sweep finished while a worker was running: {log.Joined}");
-            Assert.True(await RelationExistsAsync(connection, Retired, ct), "the aggregate must still exist while its worker runs");
-            Assert.True(await WorkerCountAsync(connection, jobIds, ct) > 0, "the worker is still running");
+
+            /* ...and for as long as THAT worker is alive the aggregate must stay and the sweep must keep waiting. The
+               invariant is checked on every look (the relation is read first, so a drop that landed under a live worker
+               cannot be missed by a later read), not only after a fixed delay, because TimescaleDB's own scheduler may
+               end a worker whose job was just stopped: the sweep waits for the exit either way, and once the worker is
+               gone nothing is left to hold it. Looked at for two seconds, the window in which an early drop would show. */
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+            var workerEndedOnItsOwn = false;
+            while (DateTime.UtcNow < deadline)
+            {
+                var existsBefore = await RelationExistsAsync(connection, Retired, ct);
+                var alive = await ScalarAsync<long>(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {workerPid} AND backend_type LIKE '% [{refreshJob}]'", ct) > 0;
+                Assert.False(!existsBefore && alive, $"the aggregate was dropped under a running job worker: {log.Joined}");
+                if (!alive)
+                {
+                    workerEndedOnItsOwn = true;
+                    break;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
+            }
+
+            if (!workerEndedOnItsOwn)
+            {
+                Assert.False(sweep.IsCompleted, $"the sweep finished while a worker was running: {log.Joined}");
+                Assert.True(await RelationExistsAsync(connection, Retired, ct), "the aggregate must still exist while its worker runs");
+            }
 
             await ExecuteAsync(gate, $"SELECT pg_advisory_unlock({GateKey})", ct);
             gateOpen = true;
