@@ -70,8 +70,12 @@ public sealed class FinOpsInventoryToolParityLiveTests
                 "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, $6, 1)",
                 CollectionIdGenerator.Next(), now.AddHours(-1 - i), idA, Alpha, now.AddHours(-1 - i), cpu[i]);
         await DarlingMcpTestData.ExecAsync(c, ct,
-            "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, total_size_mb) VALUES ($1, $2, $3, $4, 'UserDbBusy', 2048)",
+            "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, total_size_mb, used_size_mb) VALUES ($1, $2, $3, $4, 'UserDbBusy', 2048, 1024)",
             CollectionIdGenerator.Next(), now.AddHours(-3), idA, Alpha);
+        /* A memory row with the physical memory and buffer pool the health score reads (a server with no memory row has no score). */
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, buffer_pool_mb) VALUES ($1, $2, $3, $4, 65536, 40000)",
+            CollectionIdGenerator.Next(), now.AddHours(-2), idA, Alpha);
         await InsertPropertiesAsync(c, idA, Alpha, now.AddHours(-5), "Enterprise Edition", "16.0.4100.1", 3, 8, 65536L, 2, 4, "Windows Server 2022", ct);
         await InsertPropertiesAsync(c, idB, Beta, now.AddHours(-6), "Azure SQL Database (Standard)", "12.0.2000.8", 5, 2, 913000L, null, null, null, ct);
         await InsertPropertiesAsync(c, idG, Gamma, now.AddHours(-7), "Standard Edition", "15.0.4000.1", 2, 4, 16384L, 1, 4, "Windows Server 2019", ct);
@@ -137,7 +141,12 @@ public sealed class FinOpsInventoryToolParityLiveTests
         Assert.Equal(new[] { Alpha, Gamma, Beta }, servers.EnumerateArray().Select(s => s.GetProperty("server").GetString()).ToArray());
 
         var alpha = servers[0];
-        Assert.Equal("good", alpha.GetProperty("health_band").GetString());
+        /* The inventory row's score is the Utilization view's score for the same server: p95 of the four CPU samples, 40000 of 65536 MB in the
+           buffer pool, half of the 2048 MB free. */
+        var alphaUtil = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(postgres, ServerIdHelper.GetDeterministicHashCode(Alpha), 30, ct);
+        var alphaScore = FinOpsUtilizationFigures.HealthScoreOrNull(alphaUtil!, FinOpsUtilizationFigures.FreeSpacePct(2048m, 1024m));
+        Assert.Equal(alphaScore, alpha.GetProperty("health_score").GetInt32());
+        Assert.Equal(FinOpsUtilizationFigures.HealthBand(alphaScore!.Value), alpha.GetProperty("health_band").GetString());
         Assert.Equal(38.8m, alpha.GetProperty("avg_cpu_pct").GetDecimal());
         Assert.Equal(1234.5m * 12, alpha.GetProperty("annual_cost_usd").GetDecimal());
 
@@ -145,7 +154,6 @@ public sealed class FinOpsInventoryToolParityLiveTests
         Assert.False(gamma.TryGetProperty("avg_cpu_pct", out _));
         // No CPU sample is a dash, not a score: the property is left out rather than carrying a made-up number.
         Assert.False(gamma.TryGetProperty("health_score", out _));
-        Assert.Null(FinOpsInventoryFigures.HealthScoreOrNull(null));
 
         var beta = servers[2];
         Assert.Equal("stopped", beta.GetProperty("monitoring").GetString());

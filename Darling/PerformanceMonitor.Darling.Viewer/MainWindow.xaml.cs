@@ -168,6 +168,11 @@ public partial class MainWindow : Window
     /// </summary>
     private List<ServerSummaryItem> _overviewCards = new();
 
+    /// <summary>The fleet totals and registered fleet size of the last Overview refresh, held so the search box can
+    /// rebuild the roll-up from the cards it leaves without another store read (null before the first refresh).</summary>
+    private FleetTotals? _overviewTotals;
+    private int _overviewRegisteredCount;
+
     /// <summary>
     /// True while the Overview grid is filtered to servers that need attention (#2424) — the destination the
     /// "+N more need attention" line finally has. Deliberately NOT persisted to ViewerAppSettings the way
@@ -1632,7 +1637,9 @@ public partial class MainWindow : Window
         /* #2753: TotalServers must be the registered fleet size (list.Count, the same source the sidebar's
            "Servers: N" reads), not cards.Count — cards silently drops any server whose per-server summary
            read failed this cycle, which made the Overview's total wobble against the stable sidebar count. */
-        ApplyFleetRollup(FleetRollup.Build(cards, totals, totalServerCount: list.Count));
+        _overviewTotals = totals;
+        _overviewRegisteredCount = list.Count;
+        ApplyFleetRollup(OverviewCardView.BuildRollup(cards, totals, list.Count, OverviewSearchBox?.Text));
 
         StatusText.Text = $"overview — refreshed {DateTime.Now:HH:mm:ss}";
     }
@@ -1663,6 +1670,7 @@ public partial class MainWindow : Window
     private void ClearOverviewCards()
     {
         _overviewCards = new List<ServerSummaryItem>();
+        _overviewTotals = null;
         OverviewItemsControl.ItemsSource = null;
         FleetRollupContainer.Visibility = Visibility.Collapsed;
         ApplyOverviewAttentionCount(shown: 0);
@@ -1685,6 +1693,14 @@ public partial class MainWindow : Window
 
         OverviewItemsControl.ItemsSource = shown;
         ApplyOverviewAttentionCount(shown.Count);
+
+        /* D9: the roll-up above the grid (Needs Attention rows, band counts, "Monitoring N servers") follows the
+           search too, so it never counts servers the grid just hid. Before the first refresh there is no totals read
+           to rebuild from; the refresh builds it. */
+        if (_overviewTotals is { } totals)
+        {
+            ApplyFleetRollup(OverviewCardView.BuildRollup(_overviewCards, totals, _overviewRegisteredCount, OverviewSearchBox?.Text));
+        }
     }
 
     /// <summary>Live name/tag filter over the Overview cards (#5352). A cheap in-memory pass over the held

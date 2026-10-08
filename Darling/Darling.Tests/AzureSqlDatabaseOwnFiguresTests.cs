@@ -492,15 +492,13 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
             "FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;",
             tab, StringComparison.Ordinal);
 
-        // The CPU term's rule moved to Storage with the inventory figures (#4843).
-        Assert.Contains("item.HealthScore = FinOpsInventoryFigures.HealthScoreOrNull(item.AvgCpuPct);", tab, StringComparison.Ordinal);
+        // The inventory score is the fleet read's, the Utilization view's own rule: no CPU sample is a dash, never a default.
+        Assert.Contains("item.HealthScore = row.HealthScore;", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("item.AvgCpuPct ?? 0m", tab, StringComparison.Ordinal);
 
-        var figures = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsInventoryFigures.cs");
-        Assert.Contains(
-            "int? cpuScore = avgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;",
-            figures, StringComparison.Ordinal);
-        Assert.DoesNotContain("avgCpuPct ?? 0m", figures, StringComparison.Ordinal);
+        var reader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsInventoryReader.cs");
+        Assert.Contains("return FinOpsUtilizationFigures.HealthScore(", reader, StringComparison.Ordinal);
+        Assert.Contains("if (reader.IsDBNull(1) || reader.IsDBNull(16)) return null;", reader, StringComparison.Ordinal);
     }
 
     [Fact]

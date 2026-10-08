@@ -72,12 +72,18 @@ public partial class SettingsWindow : Window
     private void LoadServerScheduleSummary()
     {
         var servers = _serverManager.GetAllServers();
-        var rows = servers.Select(s => new ServerScheduleRow
+        var rows = servers.Select(s =>
         {
-            ServerId = s.Id,
-            ServerName = s.DisplayName,
-            Preset = _scheduleManager.GetActivePresetForServer(s.Id),
-            Status = _scheduleManager.HasServerOverride(s.Id) ? "Customized" : "Default"
+            /* One read per row, so Preset, Status and the tooltip all describe the same schedule list. */
+            var summary = _scheduleManager.GetServerScheduleSummary(s.Id);
+            return new ServerScheduleRow
+            {
+                ServerId = s.Id,
+                ServerName = s.DisplayName,
+                Preset = summary.Preset,
+                Status = summary.Status,
+                PresetDetail = summary.PresetDetail
+            };
         }).ToList();
 
         ServerScheduleGrid.ItemsSource = rows;
@@ -154,6 +160,7 @@ public partial class SettingsWindow : Window
         public string ServerName { get; set; } = "";
         public string Preset { get; set; } = "";
         public string Status { get; set; } = "";
+        public string PresetDetail { get; set; } = "";
     }
 
     private void UpdateCollectionStatus()

@@ -593,9 +593,7 @@ public partial class FinOpsTab
         var includeRemoved = FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked);
         var servers = await _dataService.GetServerInventoryAsync(includeRemoved);
 
-        /* Overlay each server's collected metrics + compute the health score (mirrors Lite's
-           LoadServerInventoryAsync minus the live query). memScore/storScore use Lite's inventory-path
-           defaults (buffer-pool ratio / file-level free space aren't in the inventory read).
+        /* Overlay each server's collected metrics + health score (mirrors Lite's LoadServerInventoryAsync minus the live query).
            #4227: ONE fleet round trip for every server's metrics, not one per server — the fan-out lanes
            this loop used to need (#3016) existed only to bound how many PER-SERVER reads ran concurrently,
            and there is now exactly one read total. */
@@ -609,9 +607,10 @@ public partial class FinOpsTab
                 if (row.StorageTotalGb.HasValue) item.StorageTotalGb = row.StorageTotalGb;
                 if (row.IdleDbCount.HasValue) item.IdleDbCount = row.IdleDbCount;
                 if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
-            }
 
-            item.HealthScore = FinOpsInventoryFigures.HealthScoreOrNull(item.AvgCpuPct);
+                /* The Utilization view's own score for this server (same p95 CPU, buffer pool and free space); null (a dash) with no CPU sample. */
+                item.HealthScore = row.HealthScore;
+            }
         }
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);

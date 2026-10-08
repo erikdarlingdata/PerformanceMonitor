@@ -55,7 +55,7 @@ public sealed class McpToolGuideHeadsFinOpsInventoryTests
         var served = McpToolGuideTests.Served("get_finops_inventory");
         Assert.DoesNotContain("health_band", served.Served, StringComparison.Ordinal);
         Assert.Contains("health_band is good at 80 and above, fair at 60 and above, else poor", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("24-hour average CPU", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("the same score the Utilization view shows for that server", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("Servers without a collected properties snapshot are not listed", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("annual_cost_usd is monthly", served.Tail!, StringComparison.Ordinal);
         // Round-2 L2 (#5492): a server with no CPU sample gets no score, not a score without the CPU term.

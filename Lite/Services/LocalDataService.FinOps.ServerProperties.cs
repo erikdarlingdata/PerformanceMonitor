@@ -188,7 +188,8 @@ SELECT
     }
 
     /// <summary>One fleet server's overlay metrics — <see cref="GetServerMetricsAsync"/>'s per-server result.</summary>
-    public readonly record struct ServerMetricsRow(decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus);
+    public readonly record struct ServerMetricsRow(
+        decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus, int? HealthScore = null);
 
     /// <summary>
     /// Collected metrics (CPU, storage, idle DBs, provisioning status) for EVERY server in the local DuckDB, in
@@ -233,16 +234,20 @@ cpu_24h AS (
     WHERE collection_time >= $1
     GROUP BY server_id
 ),
-/* Only the worker counts are consumed now: memory_ratio used to feed this read's own CASE, and that
-   CASE was the #2246 bug. The verdict comes from ProvisioningVerdict, so the division would be dead. */
+/* The worker counts feed the verdict (memory_ratio used to feed this read's own CASE, and that CASE was the #2246 bug), and the
+   physical memory and buffer pool of the same newest row feed the health score, exactly as the Utilization read takes them
+   (GetUtilizationEfficiencyAsync). mem_time is NULL for a server with no memory row, which has no Utilization card and so no score. */
 mem_latest AS (
     SELECT
         s.server_id,
         latest.max_workers_count,
-        latest.current_workers_count
+        latest.current_workers_count,
+        latest.total_physical_memory_mb,
+        latest.buffer_pool_mb,
+        latest.collection_time AS mem_time
     FROM known_servers s
     LEFT JOIN LATERAL (
-        SELECT max_workers_count, current_workers_count
+        SELECT max_workers_count, current_workers_count, total_physical_memory_mb, buffer_pool_mb, collection_time
         FROM v_memory_stats
         WHERE server_id = s.server_id
         ORDER BY collection_time DESC
@@ -281,7 +286,11 @@ size_latest AS (
 storage_totals AS (
     SELECT
         sl.server_id,
-        SUM(vd.total_size_mb) / 1024.0 AS total_storage_gb
+        SUM(vd.total_size_mb) / 1024.0 AS total_storage_gb,
+        /* The allocated and free totals the Utilization tab scores storage from (DatabaseSizeRow.AllocatedTotalMb and FreeTotalMb over the
+           same newest snapshot): a row with no total adds nothing to either, a row with no used size has no free space. */
+        COALESCE(SUM(vd.total_size_mb), 0) AS alloc_mb,
+        COALESCE(SUM(CASE WHEN vd.total_size_mb IS NOT NULL AND vd.used_size_mb IS NOT NULL THEN vd.total_size_mb - vd.used_size_mb END), 0) AS free_mb
     FROM size_latest sl
     JOIN v_database_size_stats vd
       ON vd.server_id = sl.server_id
@@ -340,7 +349,12 @@ SELECT
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
     props.engine_edition,
-    props.edition
+    props.edition,
+    m.total_physical_memory_mb,
+    m.buffer_pool_mb,
+    m.mem_time,
+    st.alloc_mb,
+    st.free_mb
 FROM known_servers s
 LEFT JOIN LATERAL (
     SELECT engine_edition, edition
@@ -378,10 +392,33 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
                 reader.IsDBNull(1) ? null : Convert.ToDecimal(reader.GetValue(1)),
                 reader.IsDBNull(2) ? null : Convert.ToDecimal(reader.GetValue(2)),
                 reader.IsDBNull(3) ? null : Convert.ToInt32(reader.GetValue(3)),
-                status);
+                status,
+                FleetHealthScoreFor(reader));
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// The Server Inventory health score for one fleet-read row: the SAME score the Utilization tab shows for that server, from the same
+    /// inputs over the same window (<see cref="FinOpsHealthCalculator.Score"/>): the 24-hour p95 CPU, the newest memory row's buffer pool over
+    /// its physical memory, and the free share of the newest database-size snapshot. This used to be built from the 24-hour AVERAGE CPU and a
+    /// fixed memory and storage term, so every server of similar CPU read the same number beside a Utilization score that differed.
+    /// Null (a dash) when the window holds no CPU sample or the server has no memory row (no Utilization card either). Ordinals: 1 avg CPU,
+    /// 5 p95 CPU, 14 physical memory, 15 buffer pool, 16 memory row time, 17 allocated MB, 18 free MB.
+    /// </summary>
+    internal static int? FleetHealthScoreFor(System.Data.Common.DbDataReader reader)
+    {
+        if (reader.IsDBNull(1) || reader.IsDBNull(16)) return null;
+
+        var allocatedMb = reader.IsDBNull(17) ? 0m : Convert.ToDecimal(reader.GetValue(17));
+        var freeMb = reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18));
+        return FinOpsHealthCalculator.Score(
+            hasCpuSample: true,
+            p95CpuPct: reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
+            physicalMemoryMb: reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14)),
+            bufferPoolMb: reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15)),
+            freeSpacePct: FinOpsHealthCalculator.FreeSpacePct(allocatedMb, freeMb));
     }
 
     /// <summary>
