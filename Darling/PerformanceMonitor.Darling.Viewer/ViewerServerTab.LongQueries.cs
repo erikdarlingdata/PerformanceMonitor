@@ -53,12 +53,12 @@ public partial class ViewerServerTab
     /// <summary>Sets the "trace is off" note and the empty grid text from the trace check (see <see cref="TraceEnabledOrNullAsync"/>); never throws.</summary>
     private async Task ApplyTraceNoteAsync(Task<bool> check)
     {
-        if (await TraceEnabledOrNullAsync(check) is bool enabled)
+        if (await TraceEnabledOrNullAsync(check) is bool traceEnabled)
         {
-            LongQueriesDisabledWarning.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
+            LongQueriesDisabledWarning.Visibility = traceEnabled ? Visibility.Collapsed : Visibility.Visible;
             /* Release walk V12a: the empty grid says why it is empty (the trace is opt-in and off), not the generic "No data". */
             PerformanceMonitor.Ui.EmptyState.SetText(LongQueryCompletionsGrid,
-                PerformanceMonitor.Ui.LongQueriesEmptyText.Text(enabled, LongQueriesSwitchLocation));
+                PerformanceMonitor.Ui.LongQueriesEmptyText.Text(traceEnabled, LongQueriesSwitchLocation));
         }
     }
 

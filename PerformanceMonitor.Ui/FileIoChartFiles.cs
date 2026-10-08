@@ -34,7 +34,7 @@ public static class FileIoChartFiles
     public static IReadOnlyList<IGrouping<string, T>> WriteChartFiles<T>(IEnumerable<T> points, Func<T, string> fileKey, Func<T, long> reads, Func<T, long> writes)
         => Top(points, fileKey, writes, reads);
 
-    private static IReadOnlyList<IGrouping<string, T>> Top<T>(IEnumerable<T> points, Func<T, string> fileKey, Func<T, long> primary, Func<T, long> secondary)
+    private static List<IGrouping<string, T>> Top<T>(IEnumerable<T> points, Func<T, string> fileKey, Func<T, long> primary, Func<T, long> secondary)
         => points
             .GroupBy(fileKey)
             .Select(g => (Group: g, Primary: g.Sum(primary), Secondary: g.Sum(secondary)))
