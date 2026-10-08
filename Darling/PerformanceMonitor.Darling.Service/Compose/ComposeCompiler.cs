@@ -532,7 +532,8 @@ public static class ComposeCompiler
            three arms share (`s.`), because the rollup rows and the wide rows both carry server_id and the registry row carries the name. */
         var stampRelation = stampPlan is null
             ? null
-            : new StampRelation(stampPlan.Partials, stampThroughParam!, hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam) : null);
+            : new StampRelation(stampPlan.Partials, stampThroughParam!, hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam) : null,
+                hasServerScope ? ServerScope("b.", serverScopeParam!, null) : null);
 
         /* In stamp mode every value is the combine form over the relation's partial columns (single scan: over rank_base's). */
         string PrimaryValue() => singleScan
@@ -1338,7 +1339,7 @@ public static class ComposeCompiler
 
     /// <summary>The names the stamp relation is spelled with: its partial columns, the bound <c>$stampThrough</c>, and the server
     /// scope predicate over the registry alias <c>s</c> (null for the fleet).</summary>
-    private sealed record StampRelation(IReadOnlyList<StampPartial> Partials, string ThroughParam, string? ScopeSql);
+    private sealed record StampRelation(IReadOnlyList<StampPartial> Partials, string ThroughParam, string? ScopeSql, string? LedgerScopeSql);
 
     /// <summary>
     /// Whether this compile reads the Query Store rollup (#5582 part 3), and the combine-form values it reads it with. Null (the
@@ -1451,11 +1452,19 @@ public static class ComposeCompiler
             + $"AND EXISTS (SELECT 1 FROM {built} AS b WHERE b.server_id = f.server_id AND b.hour = date_trunc('hour', f.collection_time) AND b.built_seq = b.late_seq)"
             + scopeAndFilters;
 
+        /* OFFSET 0 is an optimisation fence (#5582 part 3, found on a live plan): without it the planner pulls the lateral subquery up
+           into a plain join and may start from the wide table, scanning every wide row of the window and probing the ledger once per
+           row, which is the read this rollup exists to avoid. With it the ledger's stale pairs drive, and the wide table is probed once
+           per stale pair, so no stale pair means no wide read at all. */
         var stale = $"SELECT {Head}{rowPartials} FROM {built} AS b "
             + $"CROSS JOIN LATERAL (SELECT w.* FROM {wide} AS w WHERE w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour' "
-            + $"AND w.collection_time >= {wideStartParam} AND w.collection_time < {through}) AS f "
+            + $"AND w.collection_time >= {wideStartParam} AND w.collection_time < {through} OFFSET 0) AS f "
             + $"JOIN {servers} AS s ON s.server_id = f.server_id "
             + $"WHERE b.hour >= date_trunc('hour', {wideStartParam}) AND b.hour < {through} AND b.built_seq IS DISTINCT FROM b.late_seq"
+            /* The server scope on the LEDGER row too (#5582 part 3, found on a live plan): spelled only over the registry join it is applied
+               after the lateral, so every stale pair of every server cost a wide-table probe and a scoped panel paid for servers it never
+               asked about. On b it is applied before the lateral; the scope over s stays for the unregistered-name spelling. */
+            + (stamp.LedgerScopeSql is null ? string.Empty : " AND " + stamp.LedgerScopeSql)
             + scopeAndFilters;
 
         var tail = $"SELECT {Head}{rowPartials} FROM {wide} AS f JOIN {servers} AS s ON s.server_id = f.server_id "
