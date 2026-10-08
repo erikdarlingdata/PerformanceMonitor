@@ -117,6 +117,37 @@ internal sealed class FleetGateStats
         }
     }
 
+    /// <summary>
+    /// The slots skipped over the current minute and the <c>minutes - 1</c> before it (#5592): the same per-minute
+    /// buckets the self-alert is judged on, read over a shorter window, so the retention drain's "is collection
+    /// behind" test counts exactly what "Collection Falling Behind" counts. The window is capped at
+    /// <see cref="WindowMinutes"/>; 0 or less reads nothing.
+    /// </summary>
+    public long SkippedInLastMinutes(int minutes)
+    {
+        if (minutes <= 0)
+        {
+            return 0;
+        }
+
+        minutes = Math.Min(minutes, WindowMinutes);
+        lock (_lock)
+        {
+            var minute = MinuteOf(_utcNow());
+            FoldBucketsAheadOf(minute);
+            long skipped = 0;
+            foreach (var bucket in _buckets)
+            {
+                if (bucket.Minute > minute - minutes)
+                {
+                    skipped += bucket.Skipped;
+                }
+            }
+
+            return skipped;
+        }
+    }
+
     /// <summary>The counts over the current minute and the 59 before it.</summary>
     public FleetGateSnapshot Snapshot()
     {
