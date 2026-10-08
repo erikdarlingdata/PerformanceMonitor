@@ -1676,8 +1676,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Edge-applies capture-down (mirrors the Dashboard's <c>_activeCaptureDownAlert</c>): gated on
     /// blocking OR deadlock alerts being enabled (the alerts this protects — if the operator wants those,
-    /// they need to know when the data feeding them stops existing). Fire once on entry, re-fire only after
-    /// the cooldown, write ONE "Capture Restored" row on recovery.
+    /// they need to know when the data feeding them stops existing). A state alert (#5493): fire once on entry,
+    /// repeat only per <c>connection_refire_minutes</c> (or to send again an alert no channel took), write ONE
+    /// "Capture Restored" row on recovery.
     /// </summary>
     /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
     /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
@@ -4842,7 +4843,8 @@ internal sealed class DarlingSelfAlertEvaluator
                (still cooldown-limited), one resolution on recovery. This is THE self-alert with a
                real measurement, which is what makes the gate fit here and deliberately NOT on the
                state-only siblings (Collection Stopped / Agent Not Running / Capture Down) — those
-               have no level to worsen, and their per-cooldown "still broken" reminder is wanted. */
+               have no level to worsen, and since #5489/#5493 they are state alerts that send one alert per
+               occurrence (ConnectionAlertPolicy), not a per-cooldown reminder. */
             double? lastAlertedPercent =
                 _lastAlertedDiskPressurePercent.TryGetValue(DiskKey, out var lastPct) ? lastPct : (double?)null;
             if (LowDiskAlertGate.ShouldAlert(percentFree, lastAlertedPercent)
@@ -7529,7 +7531,7 @@ WHERE c.is_enabled";
                 /* #3591: an hour on and the scheduler's own retry has not cleared it. Either the jittered backoff
                    landed just past this check, or the job crashed AGAIN and its backoff doubled — both are worth a
                    human reading the PostgreSQL log, and neither is helped by alter_job (which would reset the
-                   backoff once more). Escalate: page once now, re-fire on the cooldown, never re-arm. */
+                   backoff once more). Escalate: page once now (#5493: a repeat only per connection_refire_minutes), never re-arm. */
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
                 _lastPolicyJobAlert[key] = now;
                 fired++;
