@@ -185,6 +185,13 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
+    /// What the Running Jobs tab says in place of "No SQL Agent jobs are running." when the read itself failed: an empty
+    /// list from a read that never answered would be a claim nobody checked.
+    /// </summary>
+    internal static string RunningJobsReadFailedText(Exception ex) =>
+        $"The running jobs could not be read: {ex.Message}";
+
+    /// <summary>
     /// Whether the Running Jobs tab shows its "grant the login access to msdb" warning. It shows when the login lacks
     /// msdb access and the running_jobs collector can run here. On an Azure SQL Database or an AWS RDS instance the
     /// collector does not run at all, so no grant could help, and the not-collected note is all the tab says.

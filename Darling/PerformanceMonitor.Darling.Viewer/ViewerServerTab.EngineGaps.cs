@@ -178,11 +178,27 @@ public partial class ViewerServerTab
     /// Fills a surface's message element once its data is bound, with what <see cref="EngineGapStateFromRuns"/> says for this
     /// server.
     /// </summary>
-    private async Task ShowEngineGapAsync(TextBlock message, string collectorName, int rowCount)
+    /// <param name="keepsOwnEmptyText">Whether the element has its own words to show when the surface is empty and no note applies
+    /// (the Trace Flags grid: "No trace flags are enabled"). The note's sentence replaces them where it applies.</param>
+    private async Task ShowEngineGapAsync(TextBlock message, string collectorName, int rowCount, bool keepsOwnEmptyText = false)
     {
         var (text, visibility) = await EngineGapStateAsync(collectorName, rowCount);
-        message.Text = text;
-        message.Visibility = visibility;
+
+        if (!keepsOwnEmptyText)
+        {
+            message.Text = text;
+            message.Visibility = visibility;
+            return;
+        }
+
+        if (!_ownNoDataText.ContainsKey(message))
+        {
+            _ownNoDataText[message] = message.Text;
+        }
+
+        var gapShows = visibility == Visibility.Visible;
+        message.Text = gapShows ? text : _ownNoDataText[message];
+        message.Visibility = gapShows || rowCount == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>The words each change grid's empty-state element started with, so a note that stops applying hands them back.</summary>

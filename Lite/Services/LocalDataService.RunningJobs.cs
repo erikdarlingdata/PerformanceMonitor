@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Services;
@@ -17,11 +18,71 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets the latest snapshot of running jobs for a server.
-    /// Returns only the most recent collection_time's data.
+    /// Gets the latest snapshot of running jobs for a server, and only while that snapshot is the
+    /// collector's CURRENT answer.
+    /// <para>The collector writes no row when no job is running, so "the newest snapshot ever written"
+    /// can be weeks old: the tab then listed a job that ended days ago as running now. The collector's own
+    /// latest SUCCESSFUL run (<c>v_collection_log</c>, which records a SUCCESS with zero rows for a run that
+    /// found nothing) decides: a run that stored rows means the newest snapshot is that run's, and a run that
+    /// stored none means nothing is running, unless a snapshot newer than that log row exists (a run whose
+    /// rows are stored but whose log row is not written yet). A store with no such log row (retention) keeps
+    /// the newest snapshot, as before. Darling's twin is <c>ViewerDataService.RunningJobsSql</c>.</para>
+    /// <para>The snapshot must also be recent: one older than the alert read's #1812 bound (<see cref="RunningJobsCurrency.Cutoff"/>,
+    /// three missed cycles at the effective running_jobs cadence) is not listed, whatever the log says. Without that, a server that
+    /// went offline while a job ran (only failed runs after it), a lost msdb login or a collector switched off left the job reading
+    /// as running for days.</para>
     /// </summary>
     public async Task<List<RunningJobRow>> GetRunningJobsAsync(int serverId)
+        => (await ReadRunningJobsAsync(serverId)).Jobs;
+
+    /// <summary>
+    /// The running_jobs collector's schedule cadence for a server, in minutes: the schedule the app runs it on, else the shipped
+    /// default. The #1812 freshness bound is taken at this cadence (<see cref="RunningJobsCurrency"/>).
+    /// </summary>
+    private int RunningJobsCadenceMinutes(int serverId)
     {
+        var resolved = CollectorFrequencyMinutes?.Invoke(serverId, "running_jobs") ?? 0;
+        if (resolved > 0)
+        {
+            return resolved;
+        }
+
+        return PerformanceMonitor.Collectors.CollectorScheduleDefaults.All.TryGetValue("running_jobs", out var schedule)
+            ? schedule.FrequencyMinutes
+            : 2;
+    }
+
+    /// <summary>
+    /// The running jobs, and when they are not current the time of the last good collection. <see cref="LastGoodCollection"/> is
+    /// set only when <see cref="Jobs"/> is empty because the collector's last good collection is older than the freshness bound
+    /// (#1812), so a tab or tool can say collection is not current instead of "no jobs are running".
+    /// </summary>
+    public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection);
+
+    /// <summary>The newest collection time for the running_jobs collector: its latest SUCCESS run (a run that found nothing logs
+    /// SUCCESS with zero rows) or its newest snapshot, whichever is later. Darling's twin is <c>ViewerDataService.RunningJobsLastGoodCollectionSql</c>.</summary>
+    internal const string RunningJobsLastGoodCollectionSql = @"
+SELECT MAX(t)
+FROM
+(
+    SELECT MAX(collection_time) AS t
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collector_name = 'running_jobs'
+    AND   status = 'SUCCESS'
+    UNION ALL
+    SELECT MAX(collection_time)
+    FROM v_running_jobs
+    WHERE server_id = $1
+) AS x";
+
+    /// <summary>
+    /// <see cref="GetRunningJobsAsync"/> with the not-current verdict: when no job is listed because the collector's last good
+    /// collection is older than the freshness bound, <see cref="RunningJobsRead.LastGoodCollection"/> carries its time.
+    /// </summary>
+    public async Task<RunningJobsRead> ReadRunningJobsAsync(int serverId)
+    {
+        var cutoff = RunningJobsCurrency.Cutoff(DateTime.UtcNow, RunningJobsCadenceMinutes(serverId));
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -37,38 +98,81 @@ SELECT
     successful_run_count,
     is_running_long,
     percent_of_average
-FROM v_running_jobs
+FROM v_running_jobs AS j
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
     FROM v_running_jobs
     WHERE server_id = $1
 )
+AND   collection_time >= $2
+AND   (
+    NOT EXISTS
+    (
+        SELECT 1
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = 'running_jobs'
+        AND   status = 'SUCCESS'
+    )
+    OR EXISTS
+    (
+        SELECT 1
+        FROM
+        (
+            SELECT collection_time, rows_collected
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'running_jobs'
+            AND   status = 'SUCCESS'
+            ORDER BY collection_time DESC
+            LIMIT 1
+        ) AS last_run
+        WHERE last_run.rows_collected IS NULL
+        OR    last_run.rows_collected > 0
+        OR    j.collection_time > last_run.collection_time
+    )
+)
 ORDER BY current_duration_seconds DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
 
         var items = new List<RunningJobRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using (var reader = await command.ExecuteReaderAsync())
         {
-            items.Add(new RunningJobRow
+            while (await reader.ReadAsync())
             {
-                CollectionTime = reader.GetDateTime(0),
-                JobName = reader.GetString(1),
-                JobId = reader.GetString(2),
-                JobEnabled = reader.GetBoolean(3),
-                StartTime = reader.GetDateTime(4),
-                CurrentDurationSeconds = ToInt64(reader.GetValue(5)),
-                AvgDurationSeconds = ToInt64(reader.GetValue(6)),
-                P95DurationSeconds = ToInt64(reader.GetValue(7)),
-                SuccessfulRunCount = ToInt64(reader.GetValue(8)),
-                IsRunningLong = reader.GetBoolean(9),
-                PercentOfAverage = reader.IsDBNull(10) ? null : Convert.ToDecimal(reader.GetValue(10))
-            });
+                items.Add(new RunningJobRow
+                {
+                    CollectionTime = reader.GetDateTime(0),
+                    JobName = reader.GetString(1),
+                    JobId = reader.GetString(2),
+                    JobEnabled = reader.GetBoolean(3),
+                    StartTime = reader.GetDateTime(4),
+                    CurrentDurationSeconds = ToInt64(reader.GetValue(5)),
+                    AvgDurationSeconds = ToInt64(reader.GetValue(6)),
+                    P95DurationSeconds = ToInt64(reader.GetValue(7)),
+                    SuccessfulRunCount = ToInt64(reader.GetValue(8)),
+                    IsRunningLong = reader.GetBoolean(9),
+                    PercentOfAverage = reader.IsDBNull(10) ? null : Convert.ToDecimal(reader.GetValue(10))
+                });
+            }
         }
 
-        return items;
+        if (items.Count > 0)
+        {
+            return new RunningJobsRead(items, null);
+        }
+
+        /* Nothing listed: it reads as "not current" only when the collector's last good collection is older than the bound. A healthy
+           collector that found no job logs a recent SUCCESS, so this stays null for it. */
+        using var lastGood = connection.CreateCommand();
+        lastGood.CommandText = RunningJobsLastGoodCollectionSql;
+        lastGood.Parameters.Add(new DuckDBParameter { Value = serverId });
+        var last = await lastGood.ExecuteScalarAsync();
+        DateTime? lastGoodTime = last is null or DBNull ? null : Convert.ToDateTime(last);
+        return new RunningJobsRead(items, RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff));
     }
 
     /// <summary>

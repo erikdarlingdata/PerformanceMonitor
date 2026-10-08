@@ -131,6 +131,7 @@ export function rollupTextId(lbl, part, used) {
 /* ─────────────────────────── state strips ─────────────────────────── */
 
 export function errorStrip(message) {
+  readErrors++;
   return el("div", { class: "strip error", role: "alert" }, [message]);
 }
 export function emptyStrip(message) {
@@ -533,6 +534,19 @@ export function buildQuery(params) {
    fleet reads is timed for as long as it ran. apiSend is deliberately NOT counted: a mutation is not a "page read"
    a poll tick should wait out. */
 let inFlightReads = 0;
+
+/* How many red error strips the page has drawn since it loaded (errorStrip counts each one). The page scheduler compares it before
+   and after a render, so the footer's "Updated" time moves only when the render ended without a red strip. It is counted where
+   the strip is drawn, not where a read fails: a read refused for a window wider than it takes (readWithinKeptHistory) is asked
+   again for the widest window, and a retry that answers draws data and a notice, so that first refusal is no fault of the page.
+   readErrorStrip turns the same refusal into a notice and does not call errorStrip. Aborted reads and a signed-out session
+   draw no strip and never count. */
+let readErrors = 0;
+
+/** The running count of red error strips drawn — see the counter comment above. */
+export function readErrorCount() {
+  return readErrors;
+}
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
 export function hasInFlightReads() {

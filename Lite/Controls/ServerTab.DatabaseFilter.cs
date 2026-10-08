@@ -27,6 +27,7 @@ namespace PerformanceMonitorLite.Controls;
 public partial class ServerTab : UserControl
 {
     private int _databaseFilterTotalCount;
+    private List<string>? _databaseFilterCollectedNames;
     private bool _databaseFilterDirty;
 
     private async void DatabaseFilterButton_Click(object sender, RoutedEventArgs e)
@@ -49,6 +50,7 @@ public partial class ServerTab : UserControl
     private async Task PopulateDatabaseFilterPickerAsync()
     {
         List<string> names;
+        var readSucceeded = true;
         try
         {
             names = await Task.Run(() => _dataService.GetCollectedDatabaseNamesAsync(_serverId));
@@ -57,9 +59,12 @@ public partial class ServerTab : UserControl
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] GetCollectedDatabaseNamesAsync failed: {ex.Message}");
             names = new List<string>();
+            readSucceeded = false;
         }
 
         _databaseFilterTotalCount = names.Count;
+        /* #5554: kept for the Select All rule; a failed read leaves it null, so a sticky filter is never widened to All. */
+        _databaseFilterCollectedNames = readSucceeded ? names : null;
 
         var union = new List<string>(names);
         foreach (var sel in _selectedDatabases)
@@ -129,13 +134,12 @@ public partial class ServerTab : UserControl
 
     private void SyncSelectedDatabasesFromItems()
     {
+        /* Release walk V12c: every box ticked (Select All, or the last box ticked by hand) is "All", not a real filter that
+           names every database collected so far and leaves out the next one. */
         _selectedDatabases.Clear();
-        foreach (var item in _databaseFilterItems)
+        foreach (var name in DatabaseFilterSelection.Stored(_databaseFilterItems.Select(i => (i.DisplayName, i.IsSelected)).ToList(), _databaseFilterCollectedNames))
         {
-            if (item.IsSelected)
-            {
-                _selectedDatabases.Add(item.DisplayName);
-            }
+            _selectedDatabases.Add(name);
         }
         _databaseFilterDirty = true;
         UpdateDatabaseFilterLabel();

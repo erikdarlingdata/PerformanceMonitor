@@ -81,9 +81,9 @@ public sealed class DarlingMcpPgStatementTools
                         + "not installed by default, and on some clusters it exists only in the application "
                         + "database, not in postgres. Also expect an empty window from a SINGLE snapshot: the "
                         + "counters here are per-interval deltas, so the first collection after a restart has "
-                        + "nothing to difference against and the window fills on the second. Otherwise the "
-                        + "store has not recorded this server's engine yet, and a target it cannot classify may "
-                        + "not be a PostgreSQL one at all — check list_servers.");
+                        + "nothing to difference against and the window fills on the second. If the server is "
+                        + "offline, nothing is being collected from it. Otherwise the store has not yet learned "
+                        + "that it is a PostgreSQL server — check list_servers.");
             }
 
             var evictions = await DarlingPgStatementReader.GetEvictionInfoAsync(

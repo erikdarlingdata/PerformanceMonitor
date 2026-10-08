@@ -85,7 +85,9 @@ public sealed class OverviewLanesUtcFrameTests
         Assert.Contains("(d.CollectionTime.ToOADate(), d.WaitTimeMsPerSecond)", refresh, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Matches(refresh, Regex.Escape("(d.Time.ToOADate(), (double)d.Count)")).Count);
         Assert.Contains("(d.CollectionTime.ToOADate(), d.BufferPoolMb)", refresh, StringComparison.Ordinal);
-        Assert.Contains("(g.Key.ToOADate(), g.Average(x => x.AvgReadLatencyMs))", refresh, StringComparison.Ordinal);
+        // The I/O lane plots the group's own instant (g.Key); the read-weighted latency (IoLatencyWeighting) only
+        // changes the Y value, so the X guarantee is unchanged.
+        Assert.Contains("(g.Key.ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads))))", refresh, StringComparison.Ordinal);
 
         Assert.Contains("var zone = serverClock.AsTimeZone();", refresh, StringComparison.Ordinal);
         Assert.Equal(5, Regex.Matches(refresh, Regex.Escape("TimeWindows.GhostX(")).Count);

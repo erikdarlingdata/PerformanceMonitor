@@ -23,6 +23,12 @@
                        FontSize="12" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
             <ScottPlot:WpfPlot Grid.Column="1" x:Name="CpuChart"/>
+            <!-- Release walk V12d: said when Compare found nothing in the comparison window, so a missing dashed line is explained. -->
+            <TextBlock Grid.Column="1" x:Name="ComparisonEmptyBanner" Visibility="Collapsed" IsHitTestVisible="False"
+                       HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,4,12,0"
+                       Padding="8,1" FontSize="11" FontWeight="Bold"
+                       Foreground="{DynamicResource ForegroundBrush}"
+                       Background="#22FFAA00"/>
         </Grid>
 
         <!-- Lane 2: Wait Stats -->

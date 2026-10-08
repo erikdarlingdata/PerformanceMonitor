@@ -440,12 +440,98 @@ function importPanel() {
    view's declared default. */
 const viewScopeMemory = new Map();
 
-function seedState(id, defaultHours, variables) {
+/* The server scope a view is saved with (the morning walk, W4): its server-dimension variable's default, the same
+   variable the editor greys measures by. The control opened on "All servers (fleet)" whatever the view saved, and the
+   run body's explicit server "All" beat the variable on the service side, so a view saved for one server read the
+   whole fleet. Only a concrete name that is in the fleet counts; "All", blank, a "$other" reference, several
+   variables, or a name the fleet does not list keep the whole fleet. A comma or semicolon list is several servers. */
+function savedServerScope(variables, fleet) {
+  const serverVars = (variables || []).filter((v) => v && v.dimension === "server" && String(v.default || "").trim());
+  if (serverVars.length !== 1) return "All";
+  const raw = String(serverVars[0].default).trim();
+  if (raw.charAt(0) === "$" || raw.toLowerCase() === "all") return "All";
+  const names = [];
+  for (const part of raw.split(/[,;]/)) {
+    const want = part.trim();
+    const o = want ? (fleet || []).find((x) => x.value === want || x.label === want) : null;
+    if (o && !names.includes(o.value)) names.push(o.value);
+  }
+  return names.length ? names : "All";
+}
+
+/* The server a view's PANELS are set to (W4b of the release walk). A view can carry no server variable and instead filter
+   every composed panel to one server ({dimension:"server", op:"eq", value:"SQL2025"} on each). The service ANDs a panel's
+   filters with the scope, so such a view already read only that server while the picker said "All servers (fleet)", and
+   picking another server meant every panel filtered to the first one and drew nothing. A view counts only when EVERY composed
+   panel has exactly one server "eq" filter, all naming the same server (case ignored) and that server is in the fleet; a
+   mixed view, a panel with any server filter other than that one "eq" (an "in", a "neq", a second "eq"), or a name the fleet
+   does not list keeps the old behaviour. */
+function serverFilters(p) {
+  return (Array.isArray(p.filters) ? p.filters : []).filter((f) => f && f.dimension === "server");
+}
+
+function serverEqFilters(p) {
+  return (Array.isArray(p.filters) ? p.filters : []).filter(
+    (f) => f && f.dimension === "server" && f.op === "eq" && typeof f.value === "string" && f.value.trim()
+  );
+}
+
+function panelFilterServer(panels, fleet) {
+  const composed = (panels || []).filter((p) => p && typeof p === "object" && p.source != null);
+  if (!composed.length) return null;
+  let name = null;
+  for (const p of composed) {
+    const eq = serverEqFilters(p);
+    /* The one "eq" must be the panel's ONLY server filter: panelUnderScope drops just the eq, so a leftover "in" or "neq" would
+       still be ANDed with the picked server into an empty panel. */
+    if (eq.length !== 1 || serverFilters(p).length !== 1) return null;
+    const v = eq[0].value.trim().toLowerCase();
+    if (name !== null && name !== v) return null;
+    name = v;
+  }
+  const o = (fleet || []).find((x) => String(x.value).toLowerCase() === name || String(x.label).toLowerCase() === name);
+  return o ? { value: o.value, label: o.label } : null;
+}
+
+/* True while the scope is exactly the server the panels are set to, the one case their own filter and the scope agree. */
+function onPanelServer(state, panelServer) {
+  return !!panelServer && Array.isArray(state.server) && state.server.length === 1 && state.server[0] === panelServer.value;
+}
+
+/* A panel as it runs under the picked scope. Choosing a server other than the one the panels are set to (or "All servers")
+   REPLACES that setting for every panel: the panel's server filter is dropped so the scope decides, rather than the two
+   being ANDed into an empty panel. Any other panel, and any scope that still matches, runs as saved. */
+function panelUnderScope(p, state, panelServer) {
+  if (!panelServer || onPanelServer(state, panelServer) || !p || typeof p !== "object" || p.source == null) return p;
+  const kept = (Array.isArray(p.filters) ? p.filters : []).filter((f) => !serverEqFilters({ filters: [f] }).length);
+  return { ...p, filters: kept };
+}
+
+/* "Your pick" is said only when the reader picked the server: state.picked is set by the server picker and remembered with the
+   scope. A scope the view's own server variable chose is the view's setting, and the note says so. */
+function panelServerNote(state, panelServer) {
+  if (!panelServer) return "";
+  if (onPanelServer(state, panelServer)) {
+    return "This view sets its server: every panel is set to " + panelServer.label + ". Pick another server, or All servers, to replace that for every panel.";
+  }
+  if (state.picked) return "Showing your pick instead of " + panelServer.label + ", the server this view's panels are set to.";
+  /* The view's own server variable can be "All" (or blank): then the scope is every server, not a server it names. */
+  const allServers = state.server === "All" || state.server === "" || state.server == null || (Array.isArray(state.server) && state.server.length === 0);
+  return allServers
+    ? "Showing all servers, as this view's own setting says, instead of " + panelServer.label + ", the server this view's panels are set to."
+    : "Showing the server this view's own setting names instead of " + panelServer.label + ", the server this view's panels are set to.";
+}
+
+function seedState(id, defaultHours, variables, fleet, panelServer) {
   const cached = viewScopeMemory.get(String(id));
   if (cached) {
-    return { server: cached.server, hours: cached.hours, values: { ...cached.values } };
+    return { server: cached.server, hours: cached.hours, values: { ...cached.values }, picked: cached.picked === true };
   }
-  const state = { server: "All", hours: defaultHours, values: {} };
+  const state = { server: savedServerScope(variables, fleet), hours: defaultHours, values: {}, picked: false };
+  /* An explicit server variable decides first, "All" included: the panels' server seeds the scope only when the view has no
+     server variable at all. */
+  const hasServerVariable = (variables || []).some((v) => v && v.dimension === "server");
+  if (state.server === "All" && panelServer && !hasServerVariable) state.server = [panelServer.value];
   for (const v of variables) {
     if (v.dimension !== "server" && v.default) state.values[v.name] = v.default;
   }
@@ -453,7 +539,7 @@ function seedState(id, defaultHours, variables) {
 }
 
 function rememberScope(id, state) {
-  viewScopeMemory.set(String(id), { server: state.server, hours: state.hours, values: { ...state.values } });
+  viewScopeMemory.set(String(id), { server: state.server, hours: state.hours, values: { ...state.values }, picked: !!state.picked });
 }
 
 export async function renderView(main, id) {
@@ -515,7 +601,9 @@ export async function renderView(main, id) {
   const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
   const hasComposed = panels.some((p) => p && p.source != null);
 
-  const state = seedState(id, defaultHours, variables);
+  const panelServer = panelFilterServer(panels.filter((p) => p && p.source != null), fleet);
+  const state = seedState(id, defaultHours, variables, fleet, panelServer);
+  const scopeNote = panelServer && hasComposed ? el("div", { class: "meta view-scope-note", text: panelServerNote(state, panelServer) }) : null;
 
   function currentScope() {
     return {
@@ -528,14 +616,15 @@ export async function renderView(main, id) {
 
   const gridBox = el("div", { class: "panel-grid" });
   function renderGrid() {
-    mount(gridBox, panels.map((p, i) => panelOrError(p, readSet, sourceSet, currentScope(), undefined, i)));
+    if (scopeNote) scopeNote.textContent = panelServerNote(state, panelServer);
+    mount(gridBox, panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i)));
   }
 
   /* The chrome is only meaningful when a composed panel can re-scope; a pure v1 read view skips it. */
   const onChange = () => { rememberScope(id, state); renderGrid(); };
   const controls = hasComposed ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
 
-  mount(main, [head, status, controls, gridBox]);
+  mount(main, [head, status, controls, scopeNote, gridBox]);
   renderGrid();
   /* Clear any stale AbortSignal left by the previous page (e.g. server.js's per-render panelAbort) so it
      cannot bleed into SUBSEQUENT view renders — the onChange scope re-render and any poll-triggered
@@ -632,6 +721,9 @@ export async function renderNotebookDoc(main, opts) {
      (compose.js buildRunBody). With no scope_server the scope names none, and each panel cell says so. Saved mode
      keeps its scope bar exactly as before. */
   let controls = null;
+  let scopeNote = null;
+  let refreshScopeNote = () => {};
+  let cellUnderScope = (cell) => cell;
   let currentScope = () => ({ server: "All", hours: 24, variables: [], values: {} });
   if (isAlert) {
     const scopeServer = opts.scopeServer || "";
@@ -642,7 +734,13 @@ export async function renderNotebookDoc(main, opts) {
     const variables = Array.isArray(def.variables) ? def.variables.filter((v) => v && v.name) : [];
     const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
     const hasPanels = cells.some((c) => c && c.type === "panel" && c.source != null);
-    const state = seedState(opts.view.id, defaultHours, variables);
+    const panelServer = panelFilterServer(cells.filter((c) => c && c.type === "panel"), fleet);
+    const state = seedState(opts.view.id, defaultHours, variables, fleet, panelServer);
+    cellUnderScope = (cell) => (cell && cell.type === "panel" ? panelUnderScope(cell, state, panelServer) : cell);
+    if (panelServer && hasPanels) {
+      scopeNote = el("div", { class: "meta view-scope-note", text: panelServerNote(state, panelServer) });
+      refreshScopeNote = () => { scopeNote.textContent = panelServerNote(state, panelServer); };
+    }
     currentScope = () => ({
       server: state.server,
       hours: state.hours,
@@ -663,11 +761,12 @@ export async function renderNotebookDoc(main, opts) {
       const scope = currentScope();
       mount(docBox, cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter)));
     } else {
-      mount(docBox, cells.map((cell) => renderCell(cell, readSet, sourceSet, currentScope())));
+      refreshScopeNote();
+      mount(docBox, cells.map((cell) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope())));
     }
   }
 
-  mount(main, [head, status, controls, docBox]);
+  mount(main, [head, status, controls, scopeNote, docBox]);
   renderDoc();
 }
 
@@ -1023,6 +1122,7 @@ function buildServerScopePicker(fleet, state, onChange) {
     const rows = [
       checkRow("All servers (fleet)", isAll(), () => {
         state.server = "All";
+        state.picked = true;
         redraw();
         onChange();
       }),
@@ -1032,6 +1132,7 @@ function buildServerScopePicker(fleet, state, onChange) {
       rows.push(
         checkRow(o.label, on, () => {
           toggle(o.value, !on);
+          state.picked = true;
           redraw();
           onChange();
         })
