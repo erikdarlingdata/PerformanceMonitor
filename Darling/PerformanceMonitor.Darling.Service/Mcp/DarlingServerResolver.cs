@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Hosting;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -102,6 +103,7 @@ ORDER BY server_name";
         {
             /* #5097: the slow-read record names the server a read resolved; one site covers every server-scoped tool. */
             ReadScope.NoteServer(answer.resolved.ServerId);
+            DarlingWebFailureLog.NoteResolvedServer(answer.resolved.ServerName);
         }
 
         return answer;

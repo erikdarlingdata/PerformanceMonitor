@@ -44,7 +44,8 @@ public sealed class DarlingMcpJobTools
 
         try
         {
-            var rows = await DarlingJobReader.GetRunningJobsAsync(postgres, resolved.ServerId, cancellationToken);
+            var read = await DarlingJobReader.ReadRunningJobsAsync(postgres, resolved.ServerId, cancellationToken);
+            var rows = read.Jobs;
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs", cancellationToken)
                     /* #2546: the msdb case. "No running SQL Agent jobs found" is an affirmative claim about
@@ -69,6 +70,12 @@ public sealed class DarlingMcpJobTools
                         postgres, resolved.ServerId, resolved.ServerName, "running_jobs",
                         CollectorRuntimePrecondition.RunningJobsPossibleCauses,
                         cancellationToken)
+                    /* The freshness bound (#1812): the last good collection is older than three missed cycles, so "none found" would be
+                       a claim about now that the store cannot back (an offline server, a lost msdb login or a switched-off collector
+                       all look like this). It says when collection last worked. */
+                    ?? (read.LastGoodCollection is DateTime lastGood
+                        ? McpHelpers.Status("unavailable", PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGood))
+                        : null)
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
 
             var jobs = rows.Select(r => new

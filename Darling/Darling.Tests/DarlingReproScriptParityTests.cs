@@ -28,7 +28,7 @@ public sealed class DarlingReproScriptParityTests
         "<ColumnReference Column=\"@CustomerId\" ParameterDataType=\"int\" ParameterCompiledValue=\"(42)\" />" +
         "</ParameterList></QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>";
 
-    /// <summary>The builder stamps "Generated: {DateTime.Now}" in the header; drop that line so a second tick between two builds cannot fail a byte comparison.</summary>
+    /// <summary>The builder stamps "Generated: {DateTime.UtcNow} UTC" in the header; drop that line so a second tick between two builds cannot fail a byte comparison.</summary>
     private static string? NoClock(string? s) =>
         s is null ? null : System.Text.RegularExpressions.Regex.Replace(s, @"^.*Generated:.*$", "", System.Text.RegularExpressions.RegexOptions.Multiline);
 

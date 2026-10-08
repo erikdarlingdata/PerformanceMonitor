@@ -23,7 +23,7 @@
 
 import { VIZ } from "../panels.js";
 import { orderServers } from "../server-order.js";
-import { el, mount, clear, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime } from "../util.js";
+import { el, mount, clear, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, localTime, makeActivatable } from "../util.js";
 
 /** The window choices: the house presets, in hours. */
 export const WINDOWS = [
@@ -57,8 +57,29 @@ export const JOB_HISTORY_COLUMNS = [
   { key: "duration_formatted", label: "Duration", sortValue: (r) => r.duration_seconds },
   { key: "retries", label: "Retries", format: "int" },
   { key: "last_success", label: "Last Success", format: "time" },
-  { key: "message", label: "Message", wrap: true },
+  { key: "message", label: "Message", wrap: true, render: messageCell },
 ];
+
+/* The Message column (the morning walk, W2). A failed step's message can run to thousands of characters and sat in a
+   column the table squeezed to about 90 px, so each row grew 150-250 px tall. The cell now has a readable width and
+   shows the first few lines only; the whole message opens in the detail pane when the row is clicked. */
+function messageCell(r) {
+  const text = r && r.message != null ? String(r.message) : "";
+  return el("div", { class: "jh-message", title: text || null, text });
+}
+
+/* A run has no id in the read, so the open row is found again after a rebuild by what identifies it. */
+function runKey(r) {
+  return [r.run_time, r.server, r.job_name, r.step].join("|");
+}
+
+/* The run whose detail pane is open; kept at module scope so the 60 s rebuild reopens the same pane. */
+let openRunKey = null;
+
+function selectionInside(node) {
+  const sel = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+  return !!sel && !sel.isCollapsed && String(sel).length > 0 && !!sel.anchorNode && node.contains(sel.anchorNode);
+}
 
 /* The filter state, kept across the 60 s rebuild. `jobDraft` is the job text as typed, applied on Enter or when
    the box loses focus; `job` is the text the last read used. */
@@ -292,12 +313,44 @@ export function renderJobHistory(main) {
       }
       for (const r of data.runs || []) if (r.category) seenCategories.add(r.category);
       fill(category.sel, categoryOptions(), state.category);
+      /* The detail pane (W2): a click, or Enter, on a run opens its whole message above the grid. */
+      const pane = el("div", { class: "jh-detail" });
+      const closeDetail = () => {
+        openRunKey = null;
+        mount(pane, []);
+      };
+      const openDetail = (r) => {
+        openRunKey = runKey(r);
+        const parts = [r.status, r.run_time ? localTime(r.run_time) : null, r.duration_formatted ? "took " + r.duration_formatted : null].filter(Boolean);
+        mount(pane, [
+          el("div", { class: "jh-detail-head" }, [
+            el("strong", { text: "Job run: " + [r.job_name, r.step].filter(Boolean).join(" / ") + (r.server ? " on " + r.server : "") }),
+            el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: closeDetail }),
+          ]),
+          el("div", { class: "muted", text: parts.join(" · ") }),
+          el("pre", { class: "jh-detail-message", text: r.message ? String(r.message) : "No message was recorded for this run." }),
+        ]);
+      };
+      const reopen = openRunKey ? (data.runs || []).find((r) => runKey(r) === openRunKey) : null;
+      if (reopen) openDetail(reopen);
+      else openRunKey = null;
+      const onRow = (r, tr) => {
+        if (!r) return;
+        tr.style.cursor = "pointer";
+        tr.setAttribute("title", "Show this run's whole message");
+        makeActivatable(tr, (e) => {
+          // A click that ends a text selection inside the row is the reader copying, not picking.
+          if (e && e.type === "click" && selectionInside(tr)) return;
+          openDetail(r);
+        });
+      };
       mount(body, [
         kept,
         noticeFor(retainedNote(data)),
         noticeFor(limitNote(data)),
         el("div", { class: "muted", text: (data.runs || []).length + " runs shown" }),
-        VIZ.table(data, { id: "job-history", rowsKey: "runs", columns: JOB_HISTORY_COLUMNS, rowClass: runRowClass, emptyText: "No job runs matched in the requested time range." }),
+        pane,
+        VIZ.table(data, { id: "job-history", rowsKey: "runs", columns: JOB_HISTORY_COLUMNS, rowClass: runRowClass, onRow, emptyText: "No job runs matched in the requested time range." }),
       ]);
     } catch (e) {
       if (ticket === loadSeq && e?.name !== "AbortError") mount(body, errorStrip("Could not render job history: " + (e && e.message ? e.message : String(e))));
