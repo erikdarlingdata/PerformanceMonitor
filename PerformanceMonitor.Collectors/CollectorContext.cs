@@ -285,6 +285,13 @@ public sealed class CollectorContext
     private readonly object _scrubGate = new();
 
     /// <summary>
+    /// Test seam (#5459): makes the session <see cref="BeginStatementScrub"/> hands out, so a test can pin a budget that
+    /// cannot run out on a slow runner, or one that is already spent, instead of the wall-clock 15 seconds. Production
+    /// never sets it, so every read gets the usual <c>new Session()</c>.
+    /// </summary>
+    internal Func<SensitiveStatements.Session>? ScrubSessionFactory { get; set; }
+
+    /// <summary>
     /// Starts the statement filter's session for ONE read call (#4348). A collector wraps each statement or plan
     /// string with the session at the line where the string first enters a row; the session judges under one
     /// 15-second budget that every string of the call shares (the limit is per session, not per string). The context adds every session's counters into the four <c>statement_scrub_*</c>
@@ -292,7 +299,7 @@ public sealed class CollectorContext
     /// </summary>
     public SensitiveStatements.Session BeginStatementScrub()
     {
-        var session = new SensitiveStatements.Session();
+        var session = ScrubSessionFactory?.Invoke() ?? new SensitiveStatements.Session();
         lock (_scrubGate)
         {
             _scrubSessions.Add(new ScrubTally(session));

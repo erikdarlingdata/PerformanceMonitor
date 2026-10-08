@@ -20,8 +20,15 @@
             </ContextMenu>
         </ResourceDictionary>
     </Window.Resources>
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-    <Grid Margin="16">
+    <!-- Save and Close sit in a footer row BELOW the scroll area, so they stay visible when the work-area clamp makes the
+         window shorter than the form (Lite click-through review). -->
+    <Grid>
+    <Grid.RowDefinitions>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Margin="16,16,16,0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -192,8 +199,8 @@
                           Foreground="{DynamicResource ForegroundBrush}"
                           ToolTip="Off = the classic behavior: the first sighting of a server is a silent baseline, even when it is down."/>
                 <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
-                            ToolTip="0 = off (one alert per outage). Re-alerts use the same 'Server Unreachable' metric name, so webhook automation keyed on it re-triggers.">
-                    <TextBlock Text="Re-alert while still down every" VerticalAlignment="Center"
+                            ToolTip="0 = off (one alert per occurrence). Covers a server that is unreachable, AG Sync Fell Behind, and the other alerts for a lasting problem. Each repeat uses that alert's own metric name, so webhook automation keyed on it re-triggers.">
+                    <TextBlock Text="Re-alert while a problem lasts every" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="ConnectionRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
@@ -234,7 +241,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBlock Text="measured as" VerticalAlignment="Center" Margin="8,0,4,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="AlertCpuModeBox" Width="220" VerticalAlignment="Center">
+                    <ComboBox x:Name="AlertCpuModeBox" MinWidth="220" VerticalAlignment="Center">
                         <ComboBoxItem Content="Total non-idle CPU (SQL + other processes)" Tag="Total"/>
                         <ComboBoxItem Content="SQL Server only (scheduler %)" Tag="SqlOnly"/>
                     </ComboBox>
@@ -259,14 +266,11 @@
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <!-- #3539 A4: the alert grades wait ACCUMULATED over a rolling ten-minute window against fixed,
                          fleet-calibrated bars shared with the PostgreSQL edition (PoisonWaitEvaluator). The ms box was the
-                         retired per-wait-average bar; it stays so saved settings round-trip, disabled and labelled so nobody
-                         tunes a number nothing reads. The preview line below the section states the live bars. -->
-                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) — accumulated wait over a 10-minute window; legacy avg-ms bar (no longer used):" VerticalAlignment="Center"
-                              Foreground="{DynamicResource ForegroundBrush}"/>
-                    <TextBox x:Name="AlertPoisonWaitThresholdBox" Width="45" Text="500" Margin="6,0,0,0" VerticalAlignment="Center" IsEnabled="False"
-                             ToolTip="Retired. The Poison Wait alert no longer judges an average ms per wait; it fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL). Kept so existing settings round-trip."/>
-                    <TextBlock Text="ms" VerticalAlignment="Center" Margin="2,0,0,0"
-                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                         retired per-wait-average bar; its box is gone from the window (nothing reads it), and the saved
+                         value is left as it is on save. The preview line below the section states the live bars. -->
+                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) — accumulated wait over a 10-minute window" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"
+                              ToolTip="The Poison Wait alert fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL)."/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
@@ -341,7 +345,8 @@
                     <TextBlock Text="GB (ADR databases only)" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
-                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                <!-- A WrapPanel, not a StackPanel: this row is wider than the window, so its tail wrapped off the right edge. -->
+                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file growing over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertFileGrowthRiseMbBox" Width="60" Text="10240" Margin="6,0,0,0" VerticalAlignment="Center"/>
@@ -353,7 +358,7 @@
                     <TextBox x:Name="AlertFileGrowthVolumePercentBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="% of its volume (0 disables either gate)" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                </StackPanel>
+                </WrapPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
@@ -819,11 +824,13 @@
             </Grid>
         </Border>
 
-        <!-- Buttons -->
-        <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="_Save" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
-            <Button Content="_Close" Click="CloseButton_Click" IsCancel="True"/>
-        </StackPanel>
     </Grid>
     </ScrollViewer>
+
+    <!-- Buttons -->
+    <StackPanel x:Name="FooterButtons" Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="16,12,16,16">
+        <Button Content="_Save" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+        <Button Content="_Close" Click="CloseButton_Click" IsCancel="True"/>
+    </StackPanel>
+    </Grid>
 </Window>

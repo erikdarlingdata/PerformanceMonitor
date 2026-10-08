@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// across the SKUs, and still carries the #3524 prose, because that prose is now true of exactly the case it
 /// is emitted for.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AnalysisWindowEmptyRuleParityTests
 {
     private const string PassEntry = "public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)";

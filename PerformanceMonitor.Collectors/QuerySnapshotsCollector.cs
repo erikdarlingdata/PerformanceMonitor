@@ -93,7 +93,7 @@ BEGIN TRY
     IF OBJECT_ID(N'msdb.dbo.cdc_jobs') IS NOT NULL
     BEGIN
         INSERT @cdc_capture_jobs (job_id)
-        EXEC sys.sp_executesql N'SELECT cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
+        EXEC sys.sp_executesql N'SELECT /* PerformanceMonitorLite */ cj.job_id FROM msdb.dbo.cdc_jobs AS cj WHERE cj.job_type = N''capture'';';
         SET @cdc_readable = 1;
     END;
 END TRY

@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// service over the batch-request spike fixture; Darling's gated <c>PgTargetAnomalyTests</c> e2e asserts
 /// the planted TPS spike through the real <c>get_analysis_facts</c>. This file is the shape both rest on.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AnalysisFactsReadRunsDetectorParityTests
 {
     private const string ReadEntry = "public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(";

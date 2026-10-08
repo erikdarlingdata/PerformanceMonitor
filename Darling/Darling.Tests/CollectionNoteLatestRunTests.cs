@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// window's. A note that carries counts is labelled as the latest run's and takes no run-count qualifier;
 /// a plain note keeps its qualifiers exactly.
 /// </summary>
+[Trait("Reads", "Lite")]
 public class CollectionNoteLatestRunTests
 {
     private const string Counts = "shred_gated=2 events_read=0 report_xml_empty=0 report_xml_unparsed=0 events_stored=0";

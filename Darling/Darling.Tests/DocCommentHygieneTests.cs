@@ -79,6 +79,7 @@ namespace Darling.Tests;
 /// kind of guard.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class DocCommentHygieneTests
 {
     /// <summary>

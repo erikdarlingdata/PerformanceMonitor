@@ -30,7 +30,7 @@ public sealed class MemoryClerksCollector : CollectorDefinitionBase<MemoryClerks
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP (25)
+SELECT /* PerformanceMonitorLite */ TOP (25)
     clerk_type = mc.type,
     memory_mb = CONVERT(decimal(18,2), SUM(mc.pages_kb) / 1024.0)
 FROM sys.dm_os_memory_clerks AS mc

@@ -632,6 +632,14 @@ jobs:
               - 'Lite/**/*.csproj'
               # #4966: Darling.Tests' CommentFilterAdoptionTests reads this Lite.Tests file, so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/DataStartBannerQueriesTabTests.cs'
+            # #5459 cut 3a: the part of `darling` that is NOT a Lite file. A diff that reaches `darling` through
+            # these (or core, root, a release) runs the whole Darling suite; a diff that reaches it only through the
+            # Lite entries above runs the Stage=Guard classes and the classes tagged Reads=Lite, which are the ones
+            # that read a Lite file (LiteReadsTraitGuardTests derives the tag from the source, and pins that
+            # `darling` minus this filter is Lite paths only). The decision lives in .github/scripts/ci-select.py.
+            darling_full:
+              - 'Darling/**/!(*.md)'
+              - '.github/workflows/nightly.yml'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
@@ -875,9 +883,12 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           GATE: ${{ steps.darling-gate.outputs.darling }}
+          FULL: ${{ steps.filter.outputs.darling_full }}
+          CORE: ${{ steps.filter.outputs.core }}
+          ROOT: ${{ steps.filter.outputs.root }}
         run: |
           set -euo pipefail
-          python .github/scripts/ci-select.py darling-scope --event "${EVENT_NAME}" --gate "${GATE:-false}" | tee -a "$GITHUB_OUTPUT"
+          python .github/scripts/ci-select.py darling-scope --event "${EVENT_NAME}" --gate "${GATE:-false}"             --full "${FULL:-false}" --core "${CORE:-false}" --root "${ROOT:-false}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Run Darling tests
         id: darling-tests
@@ -2226,6 +2237,14 @@ jobs:
           filters: |
             workflow:
               - '.github/workflows/build.yml'
+            # #5459 cut 3c: a change made ONLY of Lite files (lite_tree_count == all_count) needs just the Darling
+            # classes that read Lite, not the whole suite. Counts rather than booleans, as the build job's docs
+            # fast path does it: "every changed file is a Lite file" is a count comparison, never a path predicate.
+            lite_tree:
+              - 'Lite/**'
+              - 'Lite.Tests/**'
+            all:
+              - '**'
 
       # Names the arm that decided, out loud, either way. A job reporting success having quietly run
       # nothing is indistinguishable from one that ran everything, and that indistinguishability is
@@ -2268,6 +2287,27 @@ jobs:
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Whole-tree guards skipped::The build job's 'Run Darling tests' step reported '${DARLING_TESTS}', so the suite has already run on this commit."
+          fi
+
+      # #5459 cut 3c: when the whole suite would run here for a change made only of Lite files, run the Guard stage and
+      # the classes tagged Reads=Lite instead (the rule is ci-select.py's tree_scope; the replay checks it). build.yml
+      # itself changing keeps the whole suite: that arm exists to exercise this job's own gate.
+      - name: Decide the whole-tree guards scope
+        id: scope
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW: ${{ steps.filter.outputs.workflow }}
+          ALL_COUNT: ${{ steps.filter.outputs.all_count }}
+          LITE_COUNT: ${{ steps.filter.outputs.lite_tree_count }}
+        run: |
+          set -euo pipefail
+          if [ "${WORKFLOW:-}" = "true" ]; then
+            echo "scope=full" >> "$GITHUB_OUTPUT"
+            echo "filter=" >> "$GITHUB_OUTPUT"
+          else
+            python .github/scripts/ci-select.py tree-scope --event "${EVENT_NAME}" --all-count "${ALL_COUNT:-0}" --lite-count "${LITE_COUNT:-0}" | tee -a "$GITHUB_OUTPUT"
           fi
 
       # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
@@ -2343,10 +2383,17 @@ jobs:
         env:
           # 'true' only when this job used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
           GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
+          # Empty for the whole suite; `-trait Stage=Guard -trait Reads=Lite` for a Lite-only change (cut 3c).
+          SCOPE_FILTER: ${{ steps.scope.outputs.filter }}
         run: |
+          $scopeArgs = @($env:SCOPE_FILTER -split ' ' | Where-Object { $_ })
+          # The Guard job already ran the Guard classes when its build was used: leave them out, whatever else runs.
           $guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })
-          # The whole suite, unchanged by #5459 change 5: CrossAppGuardCiGateTests pins this invocation line whole,
-          # because the exemptions in DarlingTestsBackstopped rest on this job running every class.
+          # The whole suite, with no Cost=Slow skip (#5459 change 5 leaves this job alone): CrossAppGuardCiGateTests pins
+          # this invocation because the exemptions in DarlingTestsBackstopped rest on this job running every class.
+          # The reads-lite scope (#5505) only narrows it for a Lite-only change.
+          if ($scopeArgs.Count -gt 0 -and $env:GUARD_BUILD_USED -eq 'true') { $scopeArgs = @('-trait', 'Reads=Lite') }
+          $guardFilter = @($scopeArgs) + @($guardFilter)
           dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter
 
   # The Lite suite on pull requests and pushes: four shards cut over CLASS NAMES (#3887), balanced

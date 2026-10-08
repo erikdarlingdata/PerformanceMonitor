@@ -47,6 +47,7 @@ namespace Darling.Tests;
 /// have to be written into the table in its raw <c>&amp;#x0394;</c> form; no pinned header has one today.
 /// </summary>
 [Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class ViewerGridPayloadColumnOrderPinTests
 {
     /// <summary>A grid whose payload columns are pinned: where the anchor sits, and what must follow it.</summary>

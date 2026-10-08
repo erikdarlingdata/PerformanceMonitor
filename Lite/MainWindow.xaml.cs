@@ -48,6 +48,17 @@ public partial class MainWindow : Window
     private SystemTrayService? _trayService;
     private WindowResumeGuard? _resumeGuard;
     private readonly Dictionary<string, TabItem> _openServerTabs = new();
+
+    /* What the status bar says after the server's first collection ("Data loaded", or the collection error), by server id.
+       Switching to a server's tab words the status bar from this, so "Data loaded" is not lost on the way back (F19). */
+    private readonly Dictionary<string, string> _serverStatusSuffix = new();
+
+    /// <summary>
+    /// The status bar text for a connected server tab: "Connected to X", plus " - Data loaded" (or the collection error)
+    /// once the server's first collection has finished. One wording for the moment the tab opens and every later switch to it.
+    /// </summary>
+    internal static string ConnectedStatusText(string displayName, string? suffix) =>
+        string.IsNullOrEmpty(suffix) ? $"Connected to {displayName}" : $"Connected to {displayName} - {suffix}";
     private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<int> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
     /* Server tab badge state for the non-blocking/deadlock conditions (#754/#749), keyed by the
        ServerConnection GUID (the same key as _openServerTabs). The alert sweep sets these; both the
@@ -589,7 +600,8 @@ public partial class MainWindow : Window
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
             ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;
-            StatusText.Text = $"Connected to {serverTab.Server.DisplayNameWithIntent}";
+            _serverStatusSuffix.TryGetValue(serverTab.Server.Id, out var statusSuffix);
+            StatusText.Text = ConnectedStatusText(serverTab.Server.DisplayNameWithIntent, statusSuffix);
         }
 
         /* Refresh alerts tab when selected */
@@ -874,6 +886,8 @@ public partial class MainWindow : Window
         try
         {
             var summaries = new List<ServerSummaryItem>();
+            /* Each server's clock is read once per refresh, however many cards share its storage id. */
+            var refreshClocks = new Dictionary<int, ServerClock>();
             foreach (var server in servers)
             {
                 try
@@ -884,6 +898,7 @@ public partial class MainWindow : Window
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
+                        summary.Clock = await ReadOverviewClockAsync(serverId, refreshClocks);
                         summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
@@ -902,6 +917,12 @@ public partial class MainWindow : Window
             _overviewSummaries = summaries;
             ApplyOverviewView();
 
+            /* A FinOps tab left open while a collection for its server finishes reloads, as it does on a show. */
+            foreach (var summary in summaries)
+            {
+                FinOpsContent.NoteCollection(summary.ServerId, summary.LastCollectionTime);
+            }
+
             /* Alerts run over the WHOLE fleet, never the filtered view — a search box narrowing what's on
                screen must not silence alerts for the servers it hides. */
             foreach (var summary in summaries)
@@ -913,6 +934,35 @@ public partial class MainWindow : Window
         {
             AppLogger.Info("Overview", $"RefreshOverviewAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The clock one Overview card converts its Last Collect time on, so the card follows "Show timestamps in" like the
+    /// Alert History and Job History rows do: the server's own collected clock, else its open tab's, else the machine's
+    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>). A failed clock read leaves the card on
+    /// the next clock in the chain rather than dropping the card.
+    /// </summary>
+    private async Task<ServerClock> ReadOverviewClockAsync(int serverId, Dictionary<int, ServerClock> refreshClocks)
+    {
+        if (refreshClocks.TryGetValue(serverId, out var cached))
+        {
+            return cached;
+        }
+
+        ServerClock? collected = null;
+        try
+        {
+            var dataService = _dataService;
+            collected = dataService == null ? null : await Task.Run(() => dataService.GetServerClockAsync(serverId));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("Overview", $"Server clock read failed for server {serverId}, its card takes its open tab's or the machine's clock: {ex.Message}");
+        }
+
+        var clock = ServerTimeHelper.ClockForServer(collected, OpenTabClockFor(serverId));
+        refreshClocks[serverId] = clock;
+        return clock;
     }
 
     private void ServerListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
@@ -1190,14 +1240,16 @@ public partial class MainWindow : Window
             try
             {
                 await Task.Run(() => _collectorService.RunAllCollectorsForServerAsync(server));
-                StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Data loaded";
+                _serverStatusSuffix[server.Id] = "Data loaded";
+                StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, "Data loaded");
                 serverTab.RefreshData();
                 UpdateCollectorHealth();
                 _ = RefreshOverviewAsync();
             }
             catch (Exception ex)
             {
-                StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Collection error: {ex.Message}";
+                _serverStatusSuffix[server.Id] = $"Collection error: {ex.Message}";
+                StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, _serverStatusSuffix[server.Id]);
             }
         }
         else
@@ -1523,6 +1575,7 @@ public partial class MainWindow : Window
 
             ServerTabControl.Items.Remove(tab);
             _openServerTabs.Remove(serverId);
+            _serverStatusSuffix.Remove(serverId);
 
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);

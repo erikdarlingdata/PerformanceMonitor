@@ -87,7 +87,9 @@ public partial class ServerTab : UserControl
             _activeQueriesSlicerData = data;
             _activeQueriesSlicerMetric = "Sessions";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, queryFrom, queryTo, DateTime.UtcNow);
-            if (data.Count > 0)
+            if (data.Count == 0)
+                ActiveQueriesSlicer.ShowEmpty("No active query samples in the selected time window.");
+            else
                 ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
         }
         catch (Exception ex)
@@ -130,7 +132,9 @@ public partial class ServerTab : UserControl
             _queryStatsSlicerData = data;
             _queryStatsSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
-            if (data.Count > 0)
+            if (data.Count == 0)
+                QueryStatsSlicer.ShowEmpty("No query statistics in the selected time window.");
+            else
                 QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
         catch (Exception ex)
@@ -171,7 +175,9 @@ public partial class ServerTab : UserControl
             _queryStoreSlicerData = data;
             _queryStoreSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
-            if (data.Count > 0)
+            if (data.Count == 0)
+                QueryStoreSlicer.ShowEmpty("No Query Store data in the selected time window.");
+            else
                 QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
         catch (Exception ex)
@@ -211,7 +217,9 @@ public partial class ServerTab : UserControl
             _procStatsSlicerData = data;
             _procStatsSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
-            if (data.Count > 0)
+            if (data.Count == 0)
+                ProcStatsSlicer.ShowEmpty("No procedure statistics in the selected time window.");
+            else
                 ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
         }
         catch (Exception ex)

@@ -5,7 +5,7 @@ Input: the changed files of a run (and the event). Output: which test jobs run a
 
 Two readers use the same code:
 
-* build.yml's jobs call `lite-scope` (and, from the cut that adds it, `darling-scope`) with the area answers
+* build.yml's jobs call `lite-scope`, `darling-scope` and `tree-scope` with the area answers
   dorny/paths-filter already computed, and get the decision back as `key=value` lines for $GITHUB_OUTPUT.
 * `--replay` reads .github/ci-history/failures.jsonl (a trimmed record of every run with a real test failure)
   and checks that each failing class would have been selected for that run's changed files. A cut to the rules
@@ -170,6 +170,7 @@ class Rules:
         for name, pats in self.lite_shards.items():
             out[name] = bool(self._hits(pats, files))
         out["workflow"] = any(matches(p, f) for p in self.tree["workflow"] for f in files)
+        out["lite_tree_count"] = len(self._hits(self.tree["lite_tree"], files))  # type: ignore[assignment]
         return out
 
 
@@ -177,18 +178,47 @@ class Rules:
 # The decisions.
 # ---------------------------------------------------------------------------------------------------------
 
-def darling_scope(event: str, runs: bool, shards_run: bool) -> str:
-    """What the build job's no-store "Run Darling tests" step runs: full, guard (only the Stage=Guard classes) or none.
+def darling_scope(event: str, runs: bool, shards_run: bool, full_paths: bool = True) -> str:
+    """What the build job's no-store "Run Darling tests" step runs: full, guard (only the Stage=Guard classes),
+    reads-lite (the Guard classes plus the Reads=Lite ones) or none.
 
     The PostgreSQL shards run every Darling.Tests class, with a live store, whenever the Darling gate
     (.github/darling-paths-filter.yml) matches. The no-store pass would repeat their non-live classes, so while the
     shards run it keeps only the Guard stage (cut 3b of #5459; the replay finds no failing class it stops covering).
-    A release always runs the whole suite."""
+    A release always runs the whole suite.
+
+    Cut 3a of #5459: the step also fires for a Lite file alone (Darling.Tests reads Lite source in its parity guards,
+    so a Lite-only change has to reach the suite). On a pull request that reaches it ONLY through those Lite paths
+    (`full_paths` false: no Darling file, shared library or root build file changed) the classes that read Lite are
+    the only ones the change can affect, so it runs the Guard stage and the classes tagged Reads=Lite, the mirror of
+    Lite's `reads` mode for a Darling-only change. Push and merge-queue runs keep the whole suite, as Lite's do."""
     if not runs:
         return "none"
     if event != "release" and shards_run:
         return "guard"
+    if event == "pull_request" and not full_paths:
+        return "reads-lite"
     return "full"
+
+
+def tree_scope(event: str, all_count: int, lite_count: int) -> str:
+    """What darling-tree-guards runs once it has decided to run: full, or reads-lite (cut 3c of #5459).
+
+    The job runs the Darling suite when the build job's Darling step was skipped, which for a change made entirely
+    of Lite files (a Lite.Tests edit, a Lite file type the `darling` filter does not name) leaves only the classes
+    that read Lite to run. Every changed file must be under Lite/ or Lite.Tests/, and only a pull request narrows."""
+    if event == "pull_request" and all_count > 0 and lite_count == all_count:
+        return "reads-lite"
+    return "full"
+
+
+def scope_filter(scope: str) -> str:
+    """The Darling.Tests runner arguments for a scope ('' is the whole suite)."""
+    if scope == "guard":
+        return "-trait Stage=Guard"
+    if scope == "reads-lite":
+        return "-trait Stage=Guard -trait Reads=Lite"
+    return ""
 
 
 def lite_scope(event: str, lite: bool, core: bool, root: bool, reads: bool, linked: bool) -> str:
@@ -230,11 +260,13 @@ def decide(files: list[str], event: str, rules: Rules) -> dict:
         "build_installer_tests": build_installer,
         "build_dashboard_tests": build_dashboard,
         "build_darling_tests": build_darling,
-        "darling_scope": darling_scope(event, build_darling, pg_run),
+        "darling_scope": darling_scope(
+            event, build_darling, pg_run, release or a["darling_full"] or a["core"] or a["root"]),
         "darling_pg": pg_run,
         "darling_linux": release or a["gate_darling"],
         "lite_mode": mode,
         "tree_guards": tree_run,
+        "tree_scope": tree_scope(event, all_count, a["lite_tree_count"]) if tree_run else "none",
     }
 
 
@@ -309,8 +341,11 @@ def class_selected(suite: str, traits: set[str], d: dict) -> bool:
         if guard and d["guard_run"]:
             return True
         # The build job's no-store pass runs the whole suite (full) or only the Guard stage; the shards run every class.
-        return d["darling_scope"] == "full" or d["darling_pg"] or d["tree_guards"] \
-            or (d["darling_scope"] == "guard" and guard)
+        reads_lite = "Reads=Lite" in traits
+        return d["darling_scope"] == "full" or d["darling_pg"] \
+            or (d["tree_guards"] and (d["tree_scope"] == "full" or reads_lite)) \
+            or (d["darling_scope"] == "guard" and guard) \
+            or (d["darling_scope"] == "reads-lite" and (guard or reads_lite))
     if suite == "lite":
         if guard and d["guard_run"]:
             return True
@@ -538,6 +573,13 @@ def main(argv: list[str]) -> int:
     ds = sub.add_parser("darling-scope", help="what the build job's no-store Darling pass runs (workflow step)")
     ds.add_argument("--event", required=True)
     ds.add_argument("--gate", default="false", help="the Darling PostgreSQL gate's answer (darling-paths-filter.yml)")
+    for k in ("full", "core", "root"):
+        ds.add_argument(f"--{k}", default="true", help="a path that runs the whole Darling suite changed")
+
+    ts = sub.add_parser("tree-scope", help="what darling-tree-guards runs once it runs (workflow step)")
+    ts.add_argument("--event", required=True)
+    ts.add_argument("--all-count", type=int, default=0)
+    ts.add_argument("--lite-count", type=int, default=0)
 
     sk = sub.add_parser("slow-skip", help="the Cost=Slow classes a pull request run leaves out (workflow step)")
     sk.add_argument("--suite", required=True, choices=sorted(SUITE_DIRS))
@@ -562,9 +604,15 @@ def main(argv: list[str]) -> int:
         print(f"run={'true' if run else 'false'}")
         return 0
     if args.cmd == "darling-scope":
-        scope = darling_scope(args.event, True, args.event != "release" and _bool(args.gate))
+        scope = darling_scope(args.event, True, args.event != "release" and _bool(args.gate),
+                              _bool(args.full) or _bool(args.core) or _bool(args.root))
         print(f"scope={scope}")
-        print("filter=" + ("-trait Stage=Guard" if scope == "guard" else ""))
+        print("filter=" + scope_filter(scope))
+        return 0
+    if args.cmd == "tree-scope":
+        scope = tree_scope(args.event, args.all_count, args.lite_count)
+        print(f"scope={scope}")
+        print("filter=" + scope_filter(scope))
         return 0
     if args.cmd == "slow-skip":
         index = SlowIndex()
