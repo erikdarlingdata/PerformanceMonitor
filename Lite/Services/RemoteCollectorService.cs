@@ -1306,7 +1306,7 @@ public partial class RemoteCollectorService
     {
         var (exclusionClause, exclusionParams) = BuildDatabaseExclusionFilter(applyExclusions ? server.ExcludedDatabases : null, "name");
         return (
-            $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
+            $"SELECT /* PerformanceMonitorLite */ name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
             exclusionParams);
     }
 

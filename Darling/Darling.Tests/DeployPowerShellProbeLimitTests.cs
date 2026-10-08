@@ -21,6 +21,7 @@ public sealed class DeployPowerShellProbeLimitTests
     [Theory]
     [InlineData("DarlingDeployStaleFileTests.cs")]
     [InlineData("DarlingDeployRollbackRetentionTests.cs")]
+    [InlineData("DarlingEncryptPasswordStreamTests.cs")]
     public void TheProbeHelper_WaitsOnTheNamedOneHundredEightySecondLimit(string file)
     {
         var source = RepoFile.ReadRepoFile("Darling", "Darling.Tests", file);
@@ -31,5 +32,8 @@ public sealed class DeployPowerShellProbeLimitTests
 
         var oldLiteral = "WaitForExit(" + "60_000)";
         Assert.DoesNotContain(oldLiteral, source, StringComparison.Ordinal);
+        /* #5459: the encrypt-password test used to wait 120 s on its PowerShell child. */
+        var olderLiteral = "WaitForExit(" + "120_000)";
+        Assert.DoesNotContain(olderLiteral, source, StringComparison.Ordinal);
     }
 }

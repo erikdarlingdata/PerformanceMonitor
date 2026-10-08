@@ -57,6 +57,7 @@ namespace Darling.Tests;
 /// would let a Darling site vanish and a Lite one appear and still add up, which is the one-sided-port
 /// regression #2992 found nothing guarding against.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpPayloadClockFrameDisciplineTests
 {
     /// <summary>The Postgres de-skew, spelled exactly as every Darling read carries it. Anchored on the

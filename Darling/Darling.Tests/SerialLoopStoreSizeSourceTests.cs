@@ -49,6 +49,7 @@ namespace Darling.Tests;
 /// evades it. Narrower in function coverage, wider in reach; the two overlap deliberately.</item>
 /// </list></para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class SerialLoopStoreSizeSourceTests
 {
     /// <summary>

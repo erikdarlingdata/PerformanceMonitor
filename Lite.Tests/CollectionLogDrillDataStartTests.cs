@@ -213,13 +213,13 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         var windowRow = new CollectionLogRow { CollectionTime = Naive(first), Clock = Eastern() };
         var unstampedRow = new CollectionLogRow { CollectionTime = Naive(first) };
         Assert.Equal("Showing since 2026-09-15 09:30:00", NoteFor(load, Eastern()).Text);
-        Assert.Equal("09/15/2026 09:30", windowRow.CollectionTimeFormatted);
+        Assert.Equal("2026-09-15 09:30:00", windowRow.CollectionTimeFormatted);
         Assert.Equal("Showing since 2026-09-15 19:00:00", NoteFor(load, clock: null).Text);
-        Assert.Equal("09/15/2026 19:00", unstampedRow.CollectionTimeFormatted);
+        Assert.Equal("2026-09-15 19:00:00", unstampedRow.CollectionTimeFormatted);
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
         Assert.Equal("Showing since 2026-09-15 13:30:00", NoteFor(load, Eastern()).Text);
-        Assert.Equal("09/15/2026 13:30", windowRow.CollectionTimeFormatted);
+        Assert.Equal("2026-09-15 13:30:00", windowRow.CollectionTimeFormatted);
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
         var local = DisplayZone.Format(Naive(first), TimeZoneInfo.Local, "yyyy-MM-dd HH:mm:ss");

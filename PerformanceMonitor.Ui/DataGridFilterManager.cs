@@ -54,6 +54,9 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
     {
         _unfilteredData = newData;
 
+        /* An empty grid says so (Lite click-through F15) instead of showing a bare header row. */
+        EmptyState.Show(_dataGrid, newData.Count == 0);
+
         if (!HasActiveFilters())
         {
             SetItemsSourcePreservingSort(newData);

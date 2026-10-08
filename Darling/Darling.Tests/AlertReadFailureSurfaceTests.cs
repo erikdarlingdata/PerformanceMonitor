@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// down), and the counts are asserted in both directions so a walk that silently stopped reaching cannot
 /// report clean.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AlertReadFailureSurfaceTests
 {
     /* ---------------- the counter's own behaviour ---------------- */

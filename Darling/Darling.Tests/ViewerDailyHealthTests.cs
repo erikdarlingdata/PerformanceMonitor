@@ -457,7 +457,7 @@ public sealed class ViewerDailyHealthRowTests
            formatted local time round-trips back to the stored instant on any machine. */
         var storedUtc = new DateTime(2026, 7, 3, 3, 30, 0, DateTimeKind.Unspecified);
         var row = new CollectionLogRow { CollectionTime = storedUtc };
-        var expected = storedUtc.ToLocalTime().ToString("g");
+        var expected = storedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         Assert.Equal(expected, row.CollectionTimeFormatted);
     }
 }

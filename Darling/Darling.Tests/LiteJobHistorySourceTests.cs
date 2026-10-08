@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// to the newest batch's <c>collection_time</c> rather than a plain unscoped MAX, and (b) the pre-insert
 /// natural-key dedupe runs before the appender opens, by textual order in the method body. Runs on macOS.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class LiteJobHistorySourceTests
 {
     /// <summary>Extracts one method's body by brace-matching from its signature line, so the anchors below

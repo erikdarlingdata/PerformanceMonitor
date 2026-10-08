@@ -32,3 +32,10 @@ a75333e8e2 PerformanceMonitorLite.Tests.ScenarioTests
 411d87afbe PerformanceMonitorLite.Tests.FinOpsTests
 eca647c2f4 PerformanceMonitorLite.Tests.QueryStoreRegressionsToolTests
 eca647c2f4 PerformanceMonitorLite.Tests.SignificantWaitsToolTests
+# A Darling class failed on a pull request whose recorded changes are Lite files only (cut 3a/3c of #5459). The
+# class source names no Lite path (LiteReadsTraitGuardTests derives the Reads=Lite tag from it, and these carry
+# none; the one 'Lite' in PlanSync4512CancellationTests is a doc comment), so no Lite edit can reach what it
+# tests: each is a timing or live-store test that failed on a first attempt, not a selection gap.
+c3a18e1785 Darling.Tests.PgTargetWaitTests
+67bf55c45a Darling.Tests.ClipboardTextRetryBudgetTests
+48216212d0 Darling.Tests.PlanSync4512CancellationTests
