@@ -162,13 +162,13 @@ public sealed class QueryStoreComposeStampTests
     public void TheBuildOrder_IsStaleHoursFirst_ThenMissingHoursNewestFirst_AfterTheLag()
     {
         var plan = QueryStoreComposeStamp.PlanSql;
-        Assert.Contains("ORDER BY p.stale DESC, p.hour DESC", plan, StringComparison.Ordinal);
-        /* The cap is per kind (stale, never built); ChooseBuilds splits one tick's builds between the two. */
-        Assert.Contains("row_number() OVER (PARTITION BY u.stale ORDER BY u.hour DESC)", plan, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY p.stale DESC, p.blocked, p.hour DESC", plan, StringComparison.Ordinal);
+        /* The cap is per kind (stale, never built) and per blocked (an hour an open writer would defer); ChooseBuilds splits one tick's builds between the two kinds. */
+        Assert.Contains("row_number() OVER (PARTITION BY u.stale, u.blocked ORDER BY u.hour DESC)", plan, StringComparison.Ordinal);
         Assert.Contains("WHERE p.rn <= $2", plan, StringComparison.Ordinal);
         Assert.Contains("b.built_seq IS DISTINCT FROM b.late_seq", plan, StringComparison.Ordinal);
         /* The build lag is read off the STORE's clock, the one the row trigger's WHEN uses; the service's clock is only the retention floor. */
-        Assert.Contains("date_trunc('hour', (now() AT TIME ZONE 'UTC') - interval '3 hours')", plan, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', coalesce($3::timestamp, now() AT TIME ZONE 'UTC') - interval '3 hours')", plan, StringComparison.Ordinal);
         Assert.DoesNotContain("$1::timestamp - interval", plan, StringComparison.Ordinal);
         Assert.Contains("greatest($1::timestamp,", plan, StringComparison.Ordinal);
         Assert.Contains("filled_since", plan, StringComparison.Ordinal);
@@ -203,16 +203,70 @@ public sealed class QueryStoreComposeStampTests
     }
 
     [Fact]
-    public void TheOpenWriterGuard_IsTheWritingTransactionsOfThisDatabase_ThatBeganBeforeTheTriggerMarginEnded()
+    public void TheOpenWriterGuard_IsTheWritersOfTheWideTable_NotEveryTransactionWithAnXid()
     {
         var sql = QueryStoreComposeStamp.OpenWriterSql;
-        Assert.Contains("FROM pg_stat_activity", sql, StringComparison.Ordinal);
-        Assert.Contains("datname = current_database()", sql, StringComparison.Ordinal);
-        Assert.Contains("backend_xid IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("pid <> pg_backend_pid()", sql, StringComparison.Ordinal);
-        Assert.Contains("(xact_start AT TIME ZONE 'UTC') < $1 + interval '2 hours'", sql, StringComparison.Ordinal);
+        /* A writer of the wide table holds a granted RowExclusiveLock on it or on a partition (#5582 review round 2, M1). */
+        Assert.Contains("FROM pg_locks AS l", sql, StringComparison.Ordinal);
+        Assert.Contains("JOIN pg_stat_activity AS a ON a.pid = l.pid", sql, StringComparison.Ordinal);
+        Assert.Contains("l.mode = 'RowExclusiveLock'", sql, StringComparison.Ordinal);
+        Assert.Contains("AND l.granted", sql, StringComparison.Ordinal);
+        Assert.Contains("to_regclass('collect.query_store_interval_wide')::oid", sql, StringComparison.Ordinal);
+        Assert.Contains("pg_partition_tree(to_regclass('collect.query_store_interval_wide'))", sql, StringComparison.Ordinal);
+        Assert.Contains("a.datname = current_database()", sql, StringComparison.Ordinal);
+        Assert.Contains("a.pid <> pg_backend_pid()", sql, StringComparison.Ordinal);
+        /* Any transaction with an xid used to count: a write to another table, a temp table, a FOR UPDATE. */
+        Assert.DoesNotContain("backend_xid", sql, StringComparison.Ordinal);
+        /* A writer whose start is not readable counts as open (L1); a readable one counts while it began before H + 2 h. */
+        Assert.Contains("w.xact_start IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("(w.xact_start AT TIME ZONE 'UTC') < $1 + interval '2 hours'", sql, StringComparison.Ordinal);
+        /* The log names the writer; it never reads the session's query text. */
+        Assert.Contains("a.application_name, a.backend_type", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query", QueryStoreComposeStamp.OldestWriterSql.Replace("query_store_interval_wide", string.Empty, StringComparison.Ordinal), StringComparison.OrdinalIgnoreCase);
         /* The 2 hours are the build lag less the trigger's offset: a row of hour H is unmarked only before H + 3 h - 1 h. */
         Assert.Equal(TimeSpan.FromHours(2), QueryStoreComposeStamp.BuildLag - QueryStoreComposeStamp.WhenOffset);
+    }
+
+    [Fact]
+    public void ThePlan_SkipsTheHoursAnOpenWriterWouldDefer_WithTheSameWriterSetAsTheGuard()
+    {
+        var plan = QueryStoreComposeStamp.PlanSql;
+        /* One predicate for the guard and the plan: the plan embeds the guard's writer rows, so they cannot drift apart. */
+        Assert.Contains("l.mode = 'RowExclusiveLock'", plan, StringComparison.Ordinal);
+        Assert.Contains("pg_partition_tree(to_regclass('collect.query_store_interval_wide'))", plan, StringComparison.Ordinal);
+        Assert.Contains("coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)", plan, StringComparison.Ordinal);
+        Assert.Contains("'infinity'::timestamp", plan, StringComparison.Ordinal);
+        /* Both arms carry the bound, and it is the guard's strict comparison. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(plan, @"interval '2 hours' > cutoff\.since").Count);
+    }
+
+    [Fact]
+    public void TheDeferralWatch_WarnsFromTheSecondTickInARow_OrAtOnceForALongWriter_AtMostOncePerTenMinutes_AndAQuietTickResetsIt()
+    {
+        var t0 = new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Utc);
+        var now = t0;
+        var watch = new QueryStoreComposeStamp.DeferralWatch(() => now);
+
+        Assert.False(watch.ShouldWarn(true, TimeSpan.FromMinutes(5)));
+        Assert.True(watch.ShouldWarn(true, TimeSpan.FromMinutes(5)));
+        now = t0.AddMinutes(9);
+        Assert.False(watch.ShouldWarn(true, TimeSpan.FromMinutes(5)));
+        now = t0.AddMinutes(10);
+        Assert.True(watch.ShouldWarn(true, TimeSpan.FromMinutes(5)));
+
+        /* A quiet tick resets the count: the next held-back tick is the first again. */
+        now = t0.AddHours(2);
+        Assert.False(watch.ShouldWarn(false, null));
+        Assert.False(watch.ShouldWarn(true, TimeSpan.FromMinutes(5)));
+
+        /* A writer open for over an hour warns on the first tick; exactly an hour does not; an unknown age does not. */
+        var fresh = new QueryStoreComposeStamp.DeferralWatch(() => now);
+        Assert.False(fresh.ShouldWarn(true, TimeSpan.FromHours(1)));
+        var another = new QueryStoreComposeStamp.DeferralWatch(() => now);
+        Assert.False(another.ShouldWarn(true, null));
+        var longWriter = new QueryStoreComposeStamp.DeferralWatch(() => now);
+        Assert.True(longWriter.ShouldWarn(true, TimeSpan.FromHours(1).Add(TimeSpan.FromSeconds(1))));
+        Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreComposeStamp.DeferralWatch.WarnInterval);
     }
 
     private static QueryStoreComposeStamp.Build B(int hoursAgo, bool stale) => new(new DateTime(2026, 10, 8, 12, 0, 0).AddHours(-hoursAgo), stale);

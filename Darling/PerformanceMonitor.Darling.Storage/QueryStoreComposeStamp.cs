@@ -294,32 +294,69 @@ CREATE TRIGGER trg_query_store_compose_stamp_late_upd
     public const string HourLockSql = "SELECT pg_advisory_xact_lock(5582173, $1::integer);";
 
     /// <summary>
-    /// The margin guard (#5582 review round 1): true while a WRITING transaction that could hold an unmarked row of the hour is
-    /// still open: $1 the hour. The row trigger skips a row whose <c>collection_time</c> is within one hour of the hour of the
-    /// writer's clock (<see cref="WhenOffset"/>), so a row of hour H can land unmarked only while the store's clock is before
-    /// H + 2 h, and the writer's transaction began before that. If such a transaction is still open when the build starts, its
-    /// rows may commit after the build read them, and nothing would ever mark the pair: the hour would read as current with the
-    /// rows missing. So the build waits (it is deferred to the next tick) until no such transaction is open. After the check passes,
-    /// every writer of an unmarked row of H has finished, and a writer that starts later writes marked rows, because the store's
-    /// clock is past H + 3 h when the plan picks the hour.
+    /// The sessions of THIS database, other than the caller, that hold a granted <c>RowExclusiveLock</c> on the wide table or on any of
+    /// its partitions (#5582 review round 2): one row each, with the start of the transaction and who it is. An insert, an update, a delete
+    /// and a <c>COPY</c> into the wide table all take that lock on the table they name, and keep it to the end of the transaction, so
+    /// "holds the lock" is "is a writer of the wide table that has not finished". Inserts go through the parent, so the parent's lock is the
+    /// main signal; the leaves cover a write straight into one. <c>pg_partition_tree</c> returns NOTHING for a table that is not
+    /// partitioned, so the table itself is listed apart from it, and <c>to_regclass</c> turns a missing table into an empty list.
+    /// The session's query text is never read.
+    /// </summary>
+    private const string WideWriterRowsSql = @"
+    SELECT DISTINCT a.pid, a.xact_start, a.application_name, a.backend_type
+    FROM pg_locks AS l
+    JOIN pg_stat_activity AS a ON a.pid = l.pid
+    WHERE l.locktype = 'relation'
+      AND l.mode = 'RowExclusiveLock'
+      AND l.granted
+      AND l.relation IN
+      (
+          SELECT to_regclass('collect.query_store_interval_wide')::oid
+          UNION
+          SELECT t.relid::oid FROM pg_partition_tree(to_regclass('collect.query_store_interval_wide')) AS t
+      )
+      AND a.datname = current_database()
+      AND a.pid <> pg_backend_pid()";
+
+    /// <summary>
+    /// The margin guard (#5582 review round 1, narrowed in round 2): the oldest open WRITER OF THE WIDE TABLE (<see cref="WideWriterRowsSql"/>)
+    /// that could hold an unmarked row of the hour, if there is one: $1 the hour. The row trigger skips a row whose
+    /// <c>collection_time</c> is within one hour of the hour of the writer's clock (<see cref="WhenOffset"/>), so a row of hour H can land
+    /// unmarked only while the store's clock is before H + 2 h, and the writer's transaction began before that. If such a transaction is
+    /// still open when the build starts, its rows may commit after the build read them, and nothing would ever mark the pair: the hour
+    /// would read as current with the rows missing. So the build waits (it is deferred to the next tick) until no such transaction is
+    /// open. After the check passes, every writer of an unmarked row of H has finished, and a writer that starts later writes marked
+    /// rows, because the store's clock is past H + 3 h when the plan picks the hour. A lock is released after the commit is visible
+    /// to other snapshots, so a build that does not see the lock sees the writer's committed rows.
     ///
-    /// <para><c>backend_xid IS NOT NULL</c> is "has written" (a read-only transaction holds no xid, so a long report query does
-    /// not defer anything). <c>datname = current_database()</c> keeps another database of the instance out of it, and
-    /// <c>pid &lt;&gt; pg_backend_pid()</c> the build itself. <c>xact_start</c> of ANOTHER role's session reads NULL without
-    /// <c>pg_read_all_stats</c>, and NULL never satisfies the comparison, so such a session is ignored: the only writer of the wide
-    /// table is the service's own role, whose sessions the build's role can see. <c>pg_stat_activity</c> is read once per
-    /// transaction, and this is the build's first read of it, after the advisory lock.</para>
+    /// <para>Round 1 counted every transaction with an xid, so a write to ANY table (or a <c>CREATE TEMP TABLE</c>) deferred the
+    /// newest hours for as long as it stayed open; the lock on the wide table is what makes a transaction a writer of it. A writer whose
+    /// <c>xact_start</c> reads NULL counts as open: another role's session reads NULL without <c>pg_read_all_stats</c>, and so does every
+    /// session while <c>track_activities</c> is off, and a start time nobody can read cannot be shown to be late enough. That fails toward
+    /// speed, the safe side. <c>datname = current_database()</c> keeps another database of the instance out of it, and
+    /// <c>pid &lt;&gt; pg_backend_pid()</c> the build itself. <c>pg_stat_activity</c> is read once per transaction, and this is the
+    /// build's first read of it, after the advisory lock. A transaction prepared with <c>PREPARE TRANSACTION</c> has no session and is
+    /// not seen; the service never prepares one and <c>max_prepared_transactions</c> defaults to 0.</para>
     /// </summary>
     public const string OpenWriterSql = @"
-SELECT EXISTS
-(
-    SELECT 1
-    FROM pg_stat_activity
-    WHERE datname = current_database()
-      AND backend_xid IS NOT NULL
-      AND pid <> pg_backend_pid()
-      AND (xact_start AT TIME ZONE 'UTC') < $1 + interval '2 hours'
-);";
+SELECT w.pid, w.xact_start, w.application_name, w.backend_type
+FROM (" + WideWriterRowsSql + @"
+) AS w
+WHERE w.xact_start IS NULL
+   OR (w.xact_start AT TIME ZONE 'UTC') < $1 + interval '2 hours'
+ORDER BY w.xact_start NULLS FIRST, w.pid
+LIMIT 1;";
+
+    /// <summary>
+    /// The oldest open writer of the wide table whatever the hour, with how long its transaction has been open by the STORE's clock:
+    /// what the log names when hours are held back (<see cref="OpenWriterSql"/> says whether an hour defers; this says who).
+    /// </summary>
+    public const string OldestWriterSql = @"
+SELECT w.pid, w.xact_start, w.application_name, w.backend_type, now() - w.xact_start AS open_for
+FROM (" + WideWriterRowsSql + @"
+) AS w
+ORDER BY w.xact_start NULLS FIRST, w.pid
+LIMIT 1;";
 
     /// <summary>
     /// Reads each of the hour's pairs' <c>late_seq</c>: $1 the hour. A plain <c>SELECT</c>, with no row lock: the hour's advisory
@@ -424,6 +461,15 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
     /// <para>"Now" is the STORE's clock (<c>now()</c>), not the service's: the trigger's <c>WHEN</c> reads the store's clock too, so
     /// the trigger and this plan share one clock and the skew between the service and the store drops out of the margin. A service
     /// clock that ran ahead used to shrink the margin by the skew (#5582 review round 1).</para>
+    ///
+    /// <para>$3 is NULL in the service. A test passes a store clock of its own (<see cref="TickOptions.StoreNow"/>), because a writer
+    /// blocks a plannable hour only once it has been open for over an hour, and a test cannot wait that long.</para>
+    ///
+    /// <para>The third column, <c>blocked</c>, is true for an hour an open writer of the wide table would defer (<see cref="OpenWriterSql"/>:
+    /// the oldest writer started before the hour plus two hours; a writer with no readable start blocks every hour). The cap is per kind AND
+    /// per blocked, so hours that cannot build do not take the build slots of the hours that can: an old, never-built hour still builds
+    /// while a writer pins the newest ones (#5582 review round 2). The blocked rows are only counted, for the log; the per-build check stays,
+    /// because a writer can start between the plan and the build.</para>
     /// </summary>
     public const string PlanSql = @"
 WITH bounds AS
@@ -434,30 +480,38 @@ WITH bounds AS
     WHERE sv.is_enabled
     HAVING min(c.filled_since) IS NOT NULL
 ),
+cutoff AS
+(
+    SELECT coalesce(min(coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)), 'infinity'::timestamp) AS since
+    FROM (" + WideWriterRowsSql + @"
+    ) AS w
+),
 stale AS
 (
-    SELECT DISTINCT b.hour, true AS stale
+    SELECT DISTINCT b.hour, true AS stale, (b.hour + interval '2 hours' > cutoff.since) AS blocked
     FROM collect.query_store_compose_stamp_built AS b
     JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
     CROSS JOIN bounds
+    CROSS JOIN cutoff
     WHERE b.built_seq IS DISTINCT FROM b.late_seq
       AND b.hour >= bounds.floor_hour
 ),
 missing AS
 (
-    SELECT g AS hour, false AS stale
+    SELECT g AS hour, false AS stale, (g + interval '2 hours' > cutoff.since) AS blocked
     FROM bounds
-    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', (now() AT TIME ZONE 'UTC') - interval '3 hours'), interval '1 hour') AS g
+    CROSS JOIN cutoff
+    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', coalesce($3::timestamp, now() AT TIME ZONE 'UTC') - interval '3 hours'), interval '1 hour') AS g
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
-SELECT p.hour, p.stale
+SELECT p.hour, p.stale, p.blocked
 FROM
 (
-    SELECT u.hour, u.stale, row_number() OVER (PARTITION BY u.stale ORDER BY u.hour DESC) AS rn
+    SELECT u.hour, u.stale, u.blocked, row_number() OVER (PARTITION BY u.stale, u.blocked ORDER BY u.hour DESC) AS rn
     FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS u
 ) AS p
 WHERE p.rn <= $2
-ORDER BY p.stale DESC, p.hour DESC;";
+ORDER BY p.stale DESC, p.blocked, p.hour DESC;";
 
     /// <summary>
     /// The first step of the cleanup: removes the hours below the floor from the hours table and returns them: $1 the floor.
@@ -483,7 +537,7 @@ WHERE hour < $1;";
     public readonly record struct Build(DateTime Hour, bool Stale);
 
     /// <summary>What one tick did.</summary>
-    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0)
+    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0)
     {
         public int Built => BuiltStale + BuiltMissing;
     }
@@ -527,24 +581,126 @@ WHERE hour < $1;";
         return chosen;
     }
 
+    /// <summary>One plan: the hours to build, and how many hours the plan held back because an open writer of the wide table would defer them.</summary>
+    public readonly record struct Plan(IReadOnlyList<Build> Builds, int HeldBack);
+
     /// <summary>The hours to build at <paramref name="nowUtc"/>: <see cref="ChooseBuilds"/> over <see cref="PlanSql"/>, at most <see cref="MaxBuildsPerTick"/>.</summary>
     public static async Task<IReadOnlyList<Build>> PlanBuildsAsync(
-        NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
+        NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken) =>
+        (await PlanAsync(connection, nowUtc, retentionDays, cancellationToken)).Builds;
+
+    /// <summary><see cref="PlanBuildsAsync"/> with the count of held-back hours (the plan's <c>blocked</c> rows, capped per kind like the rest).</summary>
+    public static async Task<Plan> PlanAsync(
+        NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken, DateTime? storeNow = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         var builds = new List<Build>();
+        var heldBack = 0;
         await using var command = new NpgsqlCommand(PlanSql, connection) { CommandTimeout = CommandTimeoutSeconds };
         /* nowUtc only sets the retention floor; the build-lag bound is the store's clock, in the SQL. */
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = FloorHour(nowUtc, retentionDays) });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxBuildsPerTick });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            if (reader.GetBoolean(2))
+            {
+                heldBack++;
+                continue;
+            }
+
             builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1)));
         }
 
-        return ChooseBuilds(builds, MaxBuildsPerTick);
+        return new Plan(ChooseBuilds(builds, MaxBuildsPerTick), heldBack);
+    }
+
+    /// <summary>What a caller can set on <see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, Func{TimeSpan}, CancellationToken, TickOptions?)"/>:
+    /// the <see cref="DeferralWatch"/> (default <see cref="DeferralWatch.Shared"/>) and, for a test, the store clock the plan uses (default: the store's own).</summary>
+    public sealed record TickOptions(DeferralWatch? Watch = null, DateTime? StoreNow = null);
+
+    /// <summary>An open writer of the wide table (<see cref="OldestWriterSql"/>). The query text is never read.</summary>
+    public readonly record struct OpenWriter(int Pid, DateTime? XactStart, string ApplicationName, string BackendType, TimeSpan? OpenFor);
+
+    /// <summary>The oldest open writer of the wide table, or null when none is open (it may have finished since the plan).</summary>
+    public static async Task<OpenWriter?> FindOldestWriterAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var command = new NpgsqlCommand(OldestWriterSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new OpenWriter(
+            reader.GetInt32(0),
+            reader.IsDBNull(1) ? null : reader.GetFieldValue<DateTime>(1),
+            reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+            reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetFieldValue<TimeSpan>(4));
+    }
+
+    /// <summary>
+    /// Decides when the rollup's wait on an open writer is worth a Warning (#5582 review round 2): from the second tick in a row that held
+    /// hours back, or at once when the writer's transaction has been open longer than an hour; and at most once per
+    /// <see cref="WarnInterval"/>. A tick that held nothing back resets the count. State lives in the instance, so the service uses
+    /// <see cref="Shared"/> (each hourly tick is a fresh call) and a test can use its own.
+    /// </summary>
+    public sealed class DeferralWatch
+    {
+        /// <summary>The least often the Warning is logged.</summary>
+        public static readonly TimeSpan WarnInterval = TimeSpan.FromMinutes(10);
+
+        /// <summary>A writer open longer than this is worth a Warning on the first tick it holds hours back.</summary>
+        public static readonly TimeSpan LongWriter = TimeSpan.FromHours(1);
+
+        /// <summary>Ticks in a row that held hours back at which the Warning is due.</summary>
+        public const int TicksInARow = 2;
+
+        private readonly object _gate = new();
+        private readonly Func<DateTime> _utcNow;
+        private int _ticksInARow;
+        private DateTime _lastWarnUtc = DateTime.MinValue;
+
+        public DeferralWatch(Func<DateTime>? utcNow = null)
+        {
+            _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        }
+
+        /// <summary>The watch the service's hourly tick uses.</summary>
+        public static DeferralWatch Shared { get; } = new();
+
+        /// <summary>Records one tick; true when the Warning is due now (and claims it).</summary>
+        public bool ShouldWarn(bool heldBackThisTick, TimeSpan? writerOpenFor)
+        {
+            lock (_gate)
+            {
+                if (!heldBackThisTick)
+                {
+                    _ticksInARow = 0;
+                    return false;
+                }
+
+                _ticksInARow++;
+                if (_ticksInARow < TicksInARow && !(writerOpenFor > LongWriter))
+                {
+                    return false;
+                }
+
+                var now = _utcNow();
+                if (_lastWarnUtc != DateTime.MinValue && now - _lastWarnUtc < WarnInterval)
+                {
+                    return false;
+                }
+
+                _lastWarnUtc = now;
+                return true;
+            }
+        }
     }
 
     /// <summary>
@@ -615,7 +771,8 @@ WHERE hour < $1;";
         await using (var writers = new NpgsqlCommand(OpenWriterSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             writers.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
-            if (Convert.ToBoolean(await writers.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture))
+            /* One row (the oldest such writer) when an hour would defer, none when no writer of the wide table could hold an unmarked row. */
+            if (await writers.ExecuteScalarAsync(cancellationToken) is not null)
             {
                 await transaction.RollbackAsync(cancellationToken);
                 return null;
@@ -694,20 +851,22 @@ WHERE hour < $1;";
     }
 
     /// <summary><see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/> with the elapsed time
-    /// since the tick began supplied by <paramref name="elapsed"/>, read before each build starts.</summary>
+    /// since the tick began supplied by <paramref name="elapsed"/>, read before each build starts, and <see cref="TickOptions"/>.</summary>
     public static async Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken,
+        TickOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(elapsed);
 
         int builtStale = 0, builtMissing = 0, failed = 0, started = 0, deferredForWriters = 0;
-        DateTime? firstDeferredHour = null;
+        var watch = options?.Watch ?? DeferralWatch.Shared;
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         var removed = await GcAsync(connection, nowUtc, retentionDays, cancellationToken);
-        var plan = await PlanBuildsAsync(connection, nowUtc, retentionDays, cancellationToken);
+        var planned = await PlanAsync(connection, nowUtc, retentionDays, cancellationToken, options?.StoreNow);
+        var plan = planned.Builds;
 
         foreach (var item in plan)
         {
@@ -722,7 +881,6 @@ WHERE hour < $1;";
                 if (await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken) is null)
                 {
                     deferredForWriters++;
-                    firstDeferredHour ??= item.Hour;
                     continue;
                 }
 
@@ -743,15 +901,40 @@ WHERE hour < $1;";
             }
         }
 
-        if (deferredForWriters > 0)
+        /* An open writer of the wide table held hours back: at plan time (the hours it would defer never took a build slot) or at build
+           time (it started between the plan and the build). Name it, once per tick, however many hours; the next tick retries. */
+        var heldBack = planned.HeldBack + deferredForWriters;
+        OpenWriter? writer = null;
+        if (heldBack > 0)
         {
-            /* Once per tick, however many hours: the cause is one open writing transaction, and the next tick retries. */
-            logger.LogInformation("Query Store compose rollup: deferred {Count} hour(s), the first {Hour:yyyy-MM-dd HH}:00, because a writing transaction that began before the hour's trigger margin ended is still open; retried next tick",
-                deferredForWriters, firstDeferredHour);
+            try
+            {
+                writer = await FindOldestWriterAsync(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogDebug("Query Store compose rollup: the open-writer lookup failed: {Message}", ex.Message);
+            }
+        }
+
+        var due = heldBack > 0 && watch.ShouldWarn(true, writer?.OpenFor);
+        if (heldBack > 0)
+        {
+            var who = writer is { } open
+                ? string.Format(System.Globalization.CultureInfo.InvariantCulture, "pid {0}, started {1}, application {2}, backend type {3}",
+                    open.Pid, open.XactStart is { } at ? at.ToString("u", System.Globalization.CultureInfo.InvariantCulture) : "unknown (not readable)", open.ApplicationName, open.BackendType)
+                : "it has finished since";
+            logger.Log(due ? LogLevel.Warning : LogLevel.Information,
+                "Query Store compose rollup: {Count} hour(s) wait for a transaction that writes the Query Store wide table and is still open ({Writer}); the rollup builds the other hours and retries these next tick",
+                heldBack, who);
+        }
+        else
+        {
+            watch.ShouldWarn(false, null);
         }
 
         var deferred = plan.Count - started + deferredForWriters;
-        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters);
+        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack);
         logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s)",
             result.Built, builtStale, builtMissing, failed, deferred, removed);
         return result;

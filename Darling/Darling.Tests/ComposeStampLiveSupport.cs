@@ -116,7 +116,9 @@ CROSS JOIN LATERAL (SELECT TIMESTAMP '{At(hourNow)}' - interval '30 hours' + h *
     /// </summary>
     internal static Task SeedPrecisionRowsAsync(NpgsqlConnection connection, DateTime hourNow, PrecisionSpot spot, CancellationToken ct)
     {
-        /* (63-bit rows start, step minutes, tie rows start, step minutes): every stamp of the spot lies inside one hour. */
+        /* (63-bit rows start, step minutes, tie rows start, step minutes). Every stamp of the Built and Stale spots lies inside one hour. The Tail
+           spot's tie rows start 95 minutes before the current hour with a step of 4 minutes, for g = 0 to 10, so g = 9 and 10 (at 59 and 55
+           minutes before it) fall in the next hour; both hours are in the tail arm, so that does not matter to the test. */
         var (bigStart, bigStep, tieStart, tieStep) = spot switch
         {
             PrecisionSpot.Built => (hourNow.AddHours(-12), 7, hourNow.AddHours(-9), 5),
@@ -184,8 +186,8 @@ FROM collect.query_store_interval_wide WHERE module_name = 'modT' GROUP BY colle
     }
 
     /// <summary>One late row (a replay) into an hour, at the given stamp.</summary>
-    internal static Task InsertRowAsync(NpgsqlConnection connection, int serverId, DateTime collectionTime, long interval, CancellationToken ct) => ExecAsync(connection, $@"
-INSERT INTO collect.query_store_interval_wide
+    internal static Task InsertRowAsync(NpgsqlConnection connection, int serverId, DateTime collectionTime, long interval, CancellationToken ct, string table = "collect.query_store_interval_wide") => ExecAsync(connection, $@"
+INSERT INTO {table}
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
 VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', TIMESTAMP '{At(collectionTime.AddMinutes(-3))}', TIMESTAMP '{At(collectionTime)}',
