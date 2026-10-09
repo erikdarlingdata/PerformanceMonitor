@@ -163,6 +163,13 @@ switch ($shape) {
         $pw = 'Aa1!' + ([guid]::NewGuid().ToString('N'))
         net user $account $pw /add | Out-Null
         Grant-ServiceLogonRight ".\$account"
+        # The store's files belong to the previous account. After a logon change the service's own error tells an
+        # operator to re-own the store to the new account, so the leg does the same before the service runs on it.
+        $store = 'C:\ProgramData\PerformanceMonitorDarling'
+        if (Test-Path -LiteralPath $store) {
+            icacls $store /setowner ".\$account" /T /C | Select-Object -Last 1 | Out-Host
+            icacls $store /grant "${account}:(OI)(CI)F" /T /C | Select-Object -Last 1 | Out-Host
+        }
         sc.exe config $svc obj= ".\$account" password= $pw | Out-Host
         try { Start-Service -Name $svc -ErrorAction Stop; (Get-Service -Name $svc).WaitForStatus('Running', [TimeSpan]::FromSeconds(90)) } catch { Write-Host "start on ${account}: $_" }
         Write-Host "service on ${account} after the start attempt: $((Get-Service -Name $svc).Status)"
@@ -190,7 +197,13 @@ else {
     Show-State $root
     Say "RUN this checkout's upgrade-darling.ps1"
     $upgradeArgs = @('-SkipHashCheck')
-    if ($shape -eq 'U3') { $upgradeArgs += @('-InstallRoot', "`"$root`"") }
+    if ($shape -eq 'U3') {
+        # With no service the script cannot find the install root by itself: it must say so and stop.
+        $noRoot = Run-Script (Join-Path $stage 'upgrade-darling.ps1') $upgradeArgs "$Leg-noroot"
+        if ($noRoot.Code -eq '0' -or $noRoot.Code -eq 'TIMEOUT') { Fail-Leg "upgrade-darling.ps1 with no service registered and no -InstallRoot exited with $($noRoot.Code), expected a refusal" }
+        if ($noRoot.Text -notmatch 'is not installed') { Fail-Leg 'upgrade-darling.ps1 with no service registered and no -InstallRoot did not say the service is not installed' }
+        $upgradeArgs += @('-InstallRoot', "`"$root`"")
+    }
     $r = Run-Script (Join-Path $stage 'upgrade-darling.ps1') $upgradeArgs "$Leg-run"
 }
 
