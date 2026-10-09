@@ -444,7 +444,7 @@ credential already exist, provisioned on every service start:
 
 ### 3.1 Why it is off
 
-On loopback the browser surface has no token, and TLS is opt-in rather than on. Shipping it on by default
+On loopback the browser surface has no token unless you configure one (`web.network.token` / `encryptedToken`), and TLS is opt-in rather than on. Shipping it on by default
 would mean every install serves its monitoring data to anything that can open a socket on the box. So it is
 off, and turning it on is one command.
 
@@ -775,8 +775,9 @@ and:
 Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 5152
 ```
 
-Then register it. **On loopback there is no token** — the bearer requirement only applies once you expose the
-endpoint on the LAN:
+Then register it. **On loopback there is no token unless you configure one** — the bearer requirement applies once you
+expose the endpoint on the LAN, or set `mcp.network.token` / `encryptedToken` (then local clients send
+`Authorization: Bearer <token>` too):
 
 ```powershell
 claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/
