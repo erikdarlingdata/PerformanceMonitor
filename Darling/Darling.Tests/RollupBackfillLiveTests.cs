@@ -66,7 +66,7 @@ public sealed class RollupBackfillLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         /* All timestamps Kind-Unspecified — naive-UTC storage, see PgCollectorRowWriter. */
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         var rawOldest = now.AddDays(-HistoryDays);
 
         /* ── 1. PRE-EXISTING HISTORY: raw rows going back well before any rollup exists. ── */
@@ -234,7 +234,7 @@ public sealed class RollupBackfillLiveTests
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
 
         /* Plant history, materialize ALL of it, then purge raw back to a short horizon — the steady state a
            healthy store reaches once its purges are armed. */
@@ -304,7 +304,7 @@ public sealed class RollupBackfillLiveTests
             Assert.True(await TimescaleSupport.TryEnableAsync(setup, null, ct));
             await TimescaleSupport.ConvertToHypertablesAsync(setup, null, ct);
 
-            var seedNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var seedNow = LiveClock.Now();
             await SeedHourlyQueryStatsAsync(setup, seedNow.AddDays(-HistoryDays), seedNow, ct);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(setup, null, ct);
         }
@@ -431,7 +431,7 @@ public sealed class RollupBackfillLiveTests
             Assert.True(await TimescaleSupport.TryEnableAsync(setup, null, ct));
             await TimescaleSupport.ConvertToHypertablesAsync(setup, null, ct);
 
-            var seedNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var seedNow = LiveClock.Now();
             await SeedHourlyQueryStoreStatsAsync(setup, seedNow.AddDays(-HistoryDays), seedNow, ct);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(setup, null, ct);
         }
@@ -519,7 +519,7 @@ public sealed class RollupBackfillLiveTests
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
@@ -586,7 +586,7 @@ public sealed class RollupBackfillLiveTests
 
         /* Wide enough that the raw hypertable holds several chunks, so that one in the MIDDLE of the range exists to
            hold the refresh at. */
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         var rangeFrom = now.Date.AddDays(-CancellationHistoryDays);
         var rangeTo = now.Date;
 
@@ -863,7 +863,7 @@ SELECT EXISTS (
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
@@ -980,7 +980,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
             Assert.True(await TimescaleSupport.TryEnableAsync(setup, null, ct));
             await TimescaleSupport.ConvertToHypertablesAsync(setup, null, ct);
 
-            var seedNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var seedNow = LiveClock.Now();
             await SeedHourlyQueryStatsAsync(setup, seedNow.AddDays(-2), seedNow, ct);
 
             /* ONE corrupt row, which is all it takes. */
@@ -1106,7 +1106,7 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         var historyFrom = now.Date.AddDays(-HistoryDays);
 
         await SeedHourlyQueryStatsAsync(connection, historyFrom, now, ct);

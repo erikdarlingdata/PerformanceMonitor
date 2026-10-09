@@ -58,7 +58,7 @@ public sealed class RollupFloorCacheLiveTests
             await stop.ExecuteNonQueryAsync(ct);
         }
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         var oldest = now.AddDays(-3);
 
         /* ── 1. Plant three days of collect.query_store_stats and materialize the interval-honest hourly
@@ -182,7 +182,7 @@ public sealed class RollupFloorCacheLiveTests
        midnight UTC gave the two stores of one test different seed starts. */
     private static DateTime SeedStart(DateTime now) => DateTime.SpecifyKind(now.Date.AddDays(-3).AddHours(2), DateTimeKind.Unspecified);
 
-    private static DateTime SeedEnd() => DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+    private static DateTime SeedEnd() => LiveClock.Now();
 
     /// <summary>#5496: the seed start is a pure function of the one instant the test read, so it can be proved on both sides of
     /// midnight UTC without waiting for one. A second clock read would have moved the start a whole day when it crossed.</summary>

@@ -85,7 +85,7 @@ public sealed class PlanRegressionDrillDownReuseLiveTests
 
         try
         {
-            var periodEnd = TruncateToSeconds(DateTime.UtcNow);
+            var periodEnd = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var periodStart = periodEnd.AddHours(-4);
 
             await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
