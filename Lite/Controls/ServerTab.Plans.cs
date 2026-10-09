@@ -512,6 +512,8 @@ public partial class ServerTab : UserControl
         prompt.AppendLine("Make sure you understand what the query does before proceeding.");
         prompt.AppendLine("The query will execute with SET STATISTICS XML ON to capture the actual plan.");
         prompt.AppendLine("All data results will be discarded.");
+        prompt.AppendLine();
+        prompt.AppendLine(QueryModificationDetector.CapturedQueryNotice);
 
         var result = MessageBox.Show(
             prompt.ToString(),

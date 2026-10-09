@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
@@ -90,6 +91,27 @@ public sealed partial class DarlingMcpServerAdminTools
     /// dedupe / encrypt / result-aggregation logic can be exercised WITHOUT a real SQL Server.</summary>
     internal delegate Task<ConnectionProbeResult> ServerProbe(MonitoredServer server, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// The reply for a failed connection test. Every reply to an MCP or web client carries one fixed sentence naming
+    /// the host and port the caller sent, and nothing the driver said: the driver's text (a resolved address, a
+    /// certificate subject, a login name, the server's own wording) goes to the service log only, with the typed
+    /// secrets redacted. <paramref name="revealConnectError"/> is true for the <c>--add-server</c> verb, which is typed
+    /// at the service host's own command line by the person who administers it; that caller gets the driver's text.
+    /// </summary>
+    internal static string ConnectFailureReply(
+        MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealConnectError, params string?[] secrets)
+    {
+        var target = server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
+        var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)" : RedactEditSecret(probe.Error, secrets);
+        logger?.LogWarning("Connection test to {Target} failed: {DriverText}", target, driverText);
+        if (revealConnectError && !string.IsNullOrWhiteSpace(probe.Error))
+        {
+            return $"Could not connect: {driverText}";
+        }
+
+        return $"Could not connect to {target}. The service log has the details.";
+    }
+
     private static Task<ConnectionProbeResult> DefaultProbeAsync(MonitoredServer server, CancellationToken cancellationToken) =>
         DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
 
@@ -148,8 +170,9 @@ public sealed partial class DarlingMcpServerAdminTools
         "\"postgres\",\"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\",\"trust_server_certificate\":true}].")]
     public static Task<string> AddServers(
         NpgsqlDataSource postgres,
-        [Description("A JSON ARRAY of server objects to add (see the tool description for the per-object fields and an example).")] string servers_json) =>
-        AddServersAsync(postgres, servers_json, DefaultProbeAsync, CancellationToken.None);
+        [Description("A JSON ARRAY of server objects to add (see the tool description for the per-object fields and an example).")] string servers_json,
+        ILogger? logger = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, logger: logger);
 
     /// <summary>The testable core of <c>add_servers</c>: validates + dedupes + probes (through the injected
     /// <paramref name="probe"/> seam) + encrypts + INSERTs, aggregating a per-server result. Structural validation
@@ -157,8 +180,8 @@ public sealed partial class DarlingMcpServerAdminTools
     /// so a call whose entries are all invalid (bad field, MFA auth) returns without a connection or a probe.</summary>
     internal static Task<string> AddServersAsync(
         NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
-        IPasswordKeyRing? ring = null) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken, ring: ring);
+        IPasswordKeyRing? ring = null, ILogger? logger = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken, ring: ring, logger: logger);
 
     /// <summary>
     /// The add the <c>--add-server</c> verb runs: the same core with the one difference that a password may be an
@@ -168,13 +191,14 @@ public sealed partial class DarlingMcpServerAdminTools
     /// or secrets is still refused (<see cref="ValidateSecret"/>).
     /// </summary>
     internal static Task<string> AddServersFromHostCommandLineAsync(NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring);
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring, revealConnectError: true);
 
     /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
     /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
     internal static async Task<string> AddServersAsync(
         IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
-        bool allowSecretReferences = false, IPasswordKeyRing? ring = null, AwsRoleAllowlist? awsRoleAllowlist = null)
+        bool allowSecretReferences = false, IPasswordKeyRing? ring = null, AwsRoleAllowlist? awsRoleAllowlist = null,
+        ILogger? logger = null, bool revealConnectError = false)
     {
         ring ??= DarlingPasswordKey.Current;
         try
@@ -232,9 +256,7 @@ public sealed partial class DarlingMcpServerAdminTools
                 if (!probeResult.Success)
                 {
                     results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.ConnectionFailed,
-                        string.IsNullOrWhiteSpace(probeResult.Error)
-                            ? "Could not connect to the server."
-                            : $"Could not connect: {probeResult.Error}"));
+                        ConnectFailureReply(entry.ProbeConfig, probeResult, logger, revealConnectError, entry.PlaintextPassword)));
                     continue;
                 }
 

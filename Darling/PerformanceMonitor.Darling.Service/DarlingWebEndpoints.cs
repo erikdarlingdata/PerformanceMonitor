@@ -1076,11 +1076,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         var serverWriteInFlight = new SemaphoreSlim(1, 1);
 
         /* The seam a test stands a stub probe or a held add in through; production runs the core itself. */
-        addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body);
+        addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body, logger);
 
-        /* The edit core and the by-id read, with the same seam. The edit core gets NO logger: the route writes the one
-           audit line itself, with the signed-in principal. */
-        editServer ??= (id, body) => DarlingMcpServerAdminTools.EditServerByIdAsync(postgres, id, body, null, CancellationToken.None);
+        /* The edit core and the by-id read, with the same seam. The edit core gets NO audit logger: the route writes the one
+           audit line itself, with the signed-in principal. It gets the logger for a failed connection test's driver
+           text alone (probeLogger), which the reply to the browser does not carry. */
+        editServer ??= (id, body) => DarlingMcpServerAdminTools.EditServerByIdAsync(postgres, id, body, null, CancellationToken.None, probeLogger: logger);
         readServer ??= id => new DarlingMcpServerAdminTools.PostgresServerEditStore(postgres).ReadRowAsync(id, CancellationToken.None);
 
         app.MapPost("/api/servers", async (HttpContext context) =>

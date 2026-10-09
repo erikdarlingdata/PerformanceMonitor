@@ -1012,6 +1012,13 @@ public sealed class DarlingWebHostService : BackgroundService
            request nobody has authenticated, so the observer's line for it goes through the refusals throttle (round 2, L1). */
         app.UseMiddleware<DarlingWebFailureObserver>(_logger, refusals);
 
+        /* The browser-facing response headers (Content-Security-Policy, X-Frame-Options, X-Content-Type-Options,
+           Referrer-Policy) ride on EVERY response: the shell, static assets, API replies and every gate's refusal
+           or sign-in page. It registers its stamp with OnStarting and decides nothing about the request, so
+           it adds no surface ahead of the Host guard; a class middleware, so the Host guard stays the first
+           app.Use lambda. */
+        app.UseMiddleware<DarlingWebSecurityHeaders>();
+
         app.UseResponseCompression();
 
         /* #5288, #4220: HttpRequest.Host hands the guard below the DECODED form of a Host header
@@ -1867,12 +1874,15 @@ public sealed class DarlingWebHostService : BackgroundService
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
-        return context.Response.WriteAsync(
+        var html =
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
             + $"<p>Signed in — continuing to <a style='color:#2eaef1' href='{linkTarget}'>the dashboard</a>…</p>"
             + $"<script>location.replace({scriptTarget});</script>"
-            + "</body></html>");
+            + "</body></html>";
+        /* The one inline script on this page is allowed by its hash (it carries the sanitized return path). */
+        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = DarlingWebSecurityHeaders.PolicyForInlinePage(html);
+        return context.Response.WriteAsync(html);
     }
 
     /// <summary>The sign-in flow's answer to a single-valued query key sent more than once (#5245): the same
@@ -1905,7 +1915,11 @@ public sealed class DarlingWebHostService : BackgroundService
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
-        return context.Response.WriteAsync(BuildLoginPageHtml(oidcEnabled));
+        var html = BuildLoginPageHtml(oidcEnabled);
+        /* The login page carries one inline style block and one or two small inline scripts (it renders before the
+           gated stylesheet and scripts are reachable); each is allowed by its hash. */
+        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = DarlingWebSecurityHeaders.PolicyForInlinePage(html);
+        return context.Response.WriteAsync(html);
     }
 
     /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled — the token

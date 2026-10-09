@@ -148,6 +148,14 @@ public static partial class QueryModificationDetector
     }
 
     /// <summary>
+    /// One sentence every "run this captured query to get its actual plan" confirmation shows: the text came
+    /// from the monitored server, and any user of that server may have written it, so the operator reads it
+    /// before allowing the run. Shared so Lite, the Darling viewer and the shared plan navigation word it alike.
+    /// </summary>
+    public const string CapturedQueryNotice =
+        "This query text was captured from the monitored server, and any user of that server may have written it, so read it before you allow the run.";
+
+    /// <summary>
     /// Builds the PROMINENT, distinct data-modification warning block for a consent dialog (empty string when
     /// the query does not modify data — the caller shows only its normal "this will execute" warning). Shared
     /// so Lite and the Darling viewer word the modification flag identically. Names the statement types and
