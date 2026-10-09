@@ -43,8 +43,6 @@ public sealed class QueryStoreComposeStampTests
             Assert.Contains(column.SqlType, new[] { "bigint", "numeric" });
             Assert.DoesNotContain("double", column.SqlType, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("double", column.FactExpression, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("double", column.RowExpression, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("float", column.RowExpression, StringComparison.OrdinalIgnoreCase);
             if (column.FactExpression != "COUNT(*)")
             {
                 Assert.Contains(QueryStoreComposeStamp.FactAlias + ".", column.FactExpression, StringComparison.Ordinal);

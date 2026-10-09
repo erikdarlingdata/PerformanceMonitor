@@ -52,7 +52,7 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>The partial columns come from one table</b> (<see cref="PartialColumnMap"/>): the CREATE TABLE in the V173 rung is a
 /// literal (a shipped migration is never regenerated), a test pins it equal to the map, and the builder's expressions and the
-/// compiler's lookups are generated from the map. They are never typed twice and never <c>double precision</c>.</para>
+/// compiler's lookups are generated from the map. They are never <c>double precision</c>.</para>
 ///
 /// <para><b>No Lite twin:</b> Lite has no PostgreSQL store.</para>
 /// </summary>
@@ -104,10 +104,7 @@ public static class QueryStoreComposeStamp
     /// a count, a minimum or a maximum. Never <c>double precision</c>.</param>
     /// <param name="FactExpression">The aggregate over one group of wide rows, over <see cref="FactAlias"/>, as the
     /// compiler writes it. The compiler finds its partial in the map by this text.</param>
-    /// <param name="RowExpression">What one wide row contributes to that aggregate, cast to <see cref="SqlType"/>: the
-    /// partial of a single row, for the compiler's stale and tail arms, which read wide rows. It is the same value the
-    /// aggregate gives over a group of one row.</param>
-    public sealed record PartialColumn(string Column, string SqlType, string FactExpression, string RowExpression);
+    public sealed record PartialColumn(string Column, string SqlType, string FactExpression);
 
     /// <summary>
     /// The one table that says which rollup column holds which partial (#5582). Every partial that
@@ -120,21 +117,21 @@ public static class QueryStoreComposeStamp
     /// </summary>
     public static IReadOnlyList<PartialColumn> PartialColumnMap { get; } = new[]
     {
-        new PartialColumn("wide_rows", "bigint", "COUNT(*)", "1::bigint"),
-        new PartialColumn("ec_count", "bigint", "COUNT(f.execution_count)", "(f.execution_count IS NOT NULL)::int::bigint"),
-        new PartialColumn("ec_min", "bigint", "MIN(f.execution_count)", "f.execution_count"),
-        new PartialColumn("ec_max", "bigint", "MAX(f.execution_count)", "f.execution_count"),
-        new PartialColumn("maxdur_count", "bigint", "COUNT(f.max_duration_us)", "(f.max_duration_us IS NOT NULL)::int::bigint"),
-        new PartialColumn("maxdur_min", "bigint", "MIN(f.max_duration_us)", "f.max_duration_us"),
-        new PartialColumn("maxdur_max", "bigint", "MAX(f.max_duration_us)", "f.max_duration_us"),
-        new PartialColumn("maxcpu_count", "bigint", "COUNT(f.max_cpu_time_us)", "(f.max_cpu_time_us IS NOT NULL)::int::bigint"),
-        new PartialColumn("maxcpu_min", "bigint", "MIN(f.max_cpu_time_us)", "f.max_cpu_time_us"),
-        new PartialColumn("maxcpu_max", "bigint", "MAX(f.max_cpu_time_us)", "f.max_cpu_time_us"),
-        new PartialColumn("ec_sum", "numeric", "SUM(f.execution_count)", "f.execution_count::numeric"),
-        new PartialColumn("maxdur_sum", "numeric", "SUM(f.max_duration_us)", "f.max_duration_us::numeric"),
-        new PartialColumn("maxcpu_sum", "numeric", "SUM(f.max_cpu_time_us)", "f.max_cpu_time_us::numeric"),
-        new PartialColumn("dur_wsum", "numeric", "SUM(f.avg_duration_us * f.execution_count)", "(f.avg_duration_us * f.execution_count)::numeric"),
-        new PartialColumn("cpu_wsum", "numeric", "SUM(f.avg_cpu_time_us * f.execution_count)", "(f.avg_cpu_time_us * f.execution_count)::numeric"),
+        new PartialColumn("wide_rows", "bigint", "COUNT(*)"),
+        new PartialColumn("ec_count", "bigint", "COUNT(f.execution_count)"),
+        new PartialColumn("ec_min", "bigint", "MIN(f.execution_count)"),
+        new PartialColumn("ec_max", "bigint", "MAX(f.execution_count)"),
+        new PartialColumn("maxdur_count", "bigint", "COUNT(f.max_duration_us)"),
+        new PartialColumn("maxdur_min", "bigint", "MIN(f.max_duration_us)"),
+        new PartialColumn("maxdur_max", "bigint", "MAX(f.max_duration_us)"),
+        new PartialColumn("maxcpu_count", "bigint", "COUNT(f.max_cpu_time_us)"),
+        new PartialColumn("maxcpu_min", "bigint", "MIN(f.max_cpu_time_us)"),
+        new PartialColumn("maxcpu_max", "bigint", "MAX(f.max_cpu_time_us)"),
+        new PartialColumn("ec_sum", "numeric", "SUM(f.execution_count)"),
+        new PartialColumn("maxdur_sum", "numeric", "SUM(f.max_duration_us)"),
+        new PartialColumn("maxcpu_sum", "numeric", "SUM(f.max_cpu_time_us)"),
+        new PartialColumn("dur_wsum", "numeric", "SUM(f.avg_duration_us * f.execution_count)"),
+        new PartialColumn("cpu_wsum", "numeric", "SUM(f.avg_cpu_time_us * f.execution_count)"),
     };
 
     /// <summary>The key columns of the grain, after <c>collection_time</c>.</summary>

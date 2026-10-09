@@ -270,6 +270,39 @@ public sealed class ComposeQueryStoreStampCompileTests
         Assert.Equal(Compile(json, context with { QueryStoreStampThrough = null }).Sql, fallback.Sql);
     }
 
+    /// <summary>#5582 L1: the runner's gate (<c>ReadsStampRollup</c>) keeps the guard's stamp-through only for a panel whose text reads the
+    /// rollup. A plan the gate refuses compiles to the wide-table text, and a plan it accepts compiles to the rollup text.</summary>
+    [Fact]
+    public void TheReadsStampRollupGate_AgreesWithTheCompiledText_AndRefusesAPlanTheRollupCannotServe()
+    {
+        var plan = QueryStoreRankedHarness.Parse(TopQueriesOverTime());
+        var through = Day.AddHours(20);
+        var served = Context(Day, Day.AddDays(1), through);
+        Assert.True(ComposeCompiler.ReadsStampRollup(plan, served));
+        Assert.Contains("query_store_compose_stamp", Compile(TopQueriesOverTime(), served).Sql, StringComparison.Ordinal);
+
+        var refused = new[]
+        {
+            served with { QueryStoreStampThrough = null },
+            served with { QueryStoreWideEligible = false },
+            served with { QueryStoreStampThrough = Day },
+        };
+        foreach (var context in refused)
+        {
+            Assert.False(ComposeCompiler.ReadsStampRollup(plan, context));
+            Assert.DoesNotContain("query_store_compose_stamp", Compile(TopQueriesOverTime(), context).Sql, StringComparison.Ordinal);
+        }
+
+        /* A panel on another source never reads the rollup, whatever the context says. */
+        var waits = QueryStoreRankedHarness.Parse("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"}");
+        Assert.False(ComposeCompiler.ReadsStampRollup(waits, served));
+
+        /* No rollup column for a partial: the compile falls back, and the gate's answer matches the compiled text. */
+        var fallback = Compile(TopQueriesOverTime(), served, stampColumns: _ => null);
+        Assert.DoesNotContain("query_store_compose_stamp", fallback.Sql, StringComparison.Ordinal);
+        Assert.Equal(Compile(TopQueriesOverTime(), served with { QueryStoreStampThrough = null }).Sql, fallback.Sql);
+    }
+
     [Fact]
     public void EveryPartialTheCompilerCanAsk_ForAQueryStoreMeasure_HasARollupColumn()
     {

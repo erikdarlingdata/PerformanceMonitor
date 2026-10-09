@@ -3076,7 +3076,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
     private const string QueryStoreWideServerIdsSql =
-        "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1)) ORDER BY server_id";
+        "SELECT server_id, server_name, is_enabled FROM collect.servers WHERE ($1::text[] IS NULL OR server_name = ANY($1)) ORDER BY server_id";
 
     /// <summary>
     /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
@@ -3115,6 +3115,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var wideServers = new List<(int Id, string Name)>();
+            /* #5582 L4: the stamp-through lookup takes every server in scope, enabled or not, because the read and the fleet stale arm
+               cover a disabled server's rows too. The eligibility checks and the group-member count below still see the enabled ones only. */
+            var scopedServerIds = new List<int>();
             await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 servers.Parameters.Add(new NpgsqlParameter
@@ -3125,7 +3128,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
+                    scopedServerIds.Add(reader.GetInt32(0));
+                    if (reader.GetBoolean(2))
+                    {
+                        wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
+                    }
                 }
             }
 
@@ -3174,7 +3181,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, cancellationToken);
 
             /* #5582 part 3: where the compose rollup stops answering, on this same connection. Null (today's route) on any fault. */
-            var stampThrough = await ResolveQueryStoreStampThroughAsync(connection, wideServers.Select(w => w.Id).ToArray(), wideStart, end, schemaVersion, cancellationToken);
+            var stampThrough = await ResolveQueryStoreStampThroughAsync(connection, scopedServerIds.ToArray(), wideStart, end, schemaVersion, cancellationToken);
 
             return (true, wideStart, bound, settingServer, groupMembers, stampThrough);
         }
@@ -3210,14 +3217,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
             lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, Value = serverIds });
             var found = await lookup.ExecuteScalarAsync(cancellationToken);
-            var firstHour = new DateTime(wideStart.Year, wideStart.Month, wideStart.Day, wideStart.Hour, 0, 0, DateTimeKind.Unspecified);
+            /* The series stops at the hour of the window end, so a found hour is never after the end, and it is never before the hour
+               of wideStart: the one test against wideStart covers "the very first hour is already unusable". */
             var through = found is DateTime unusable ? unusable : end;
-            if (through > end)
-            {
-                through = end;
-            }
-
-            return through <= firstHour || through <= wideStart ? null : DateTime.SpecifyKind(through, DateTimeKind.Unspecified);
+            return through <= wideStart ? null : DateTime.SpecifyKind(through, DateTimeKind.Unspecified);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
