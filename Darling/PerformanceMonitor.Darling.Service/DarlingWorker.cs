@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -1021,6 +1021,9 @@ public sealed class DarlingWorker : BackgroundService
        set from two threads (the launch loop for the daily purge, the command loop for purge_now), so the
        check-then-set in both launchers holds _purgeTaskLock. */
     private Task? _purgeTask;
+
+    /// <summary>Test hook (#5592): whether the purge slot is held by a pass that has not completed.</summary>
+    internal bool PurgeSlotBusyForTest { get { lock (_purgeTaskLock) { return _purgeTask is { IsCompleted: false }; } } }
     private readonly object _purgeTaskLock = new();
 
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
@@ -1420,7 +1423,16 @@ LIMIT 1";
         /* #5597: the gate's counts read the floor's monotonic uptime when each slot is recorded, so which slots the alert leaves out
            is decided then, not by the wall-clock minute they were stamped in. */
         _fleetGateStats = new FleetGateStats(static () => DateTime.UtcNow, () => _skipCreditFloor.Uptime);
+
+        /* #5592: the retention drain's "is collection behind" read, built from the fleet gate's own counts. */
+        _collectionPressure = new CollectionPressure(_fleetGateStats);
     }
+
+    /* #5592: the retention drain's pressure read (see CollectionPressure). */
+    private readonly CollectionPressure _collectionPressure;
+
+    /// <summary>Test hook (#5592): the pressure read the retention drain takes.</summary>
+    internal CollectionPressure CollectionPressureForTest => _collectionPressure;
 
     /// <summary>
     /// #4938: what one daily collector's run-time stamp was computed from, kept beside the stamp in
@@ -3450,6 +3462,10 @@ LIMIT 1";
 
         /* #5479: true from a pass that the memory launch guard held off until the first pass that launches bodies again. */
         var heldSinceLastLaunch = false;
+
+        /* #5595: the retention drain's settle window starts here, where the loop starts collecting, not when the worker
+           was built: the store retries and migrations before this point can take minutes. */
+        _collectionPressure.MarkCollectionStarted();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -11211,6 +11227,58 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// How soon after a budget-stopped retention pass ends the next scheduled pass is due (#5592). The launch stamps the
+    /// next pass a whole <see cref="s_purgeInterval"/> out, so a drain the wall budget stopped would otherwise wait a day
+    /// for the rest. One hour leaves collection the gap the budget already guarantees it.
+    /// </summary>
+    internal static readonly TimeSpan PurgeContinuationDelay = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// #5592 (#4732): the earlier of two absolute due times. Both arguments are stamps, not a stamp and the clock, so a
+    /// wall clock that stepped backwards cannot strand the work here the way a raw compare of a stamp against now does:
+    /// a stamp left far in the future by a step back is simply the later one and is replaced, so the continuation is
+    /// still due within <see cref="PurgeContinuationDelay"/> of the pass's end (the stamp is not read as due at once,
+    /// which would start the next drain with no gap for collection). A stamp already sooner, or equal, is returned as it
+    /// is. Internal so a test can pin the table.
+    /// </summary>
+    internal static DateTime SoonerStamp(DateTime firstUtc, DateTime secondUtc) =>
+        firstUtc <= secondUtc ? firstUtc : secondUtc;
+
+    /// <summary>
+    /// #5592: called by the scheduled pass and by <c>purge_now</c> when the retention sweep returns. When the sweep
+    /// stopped on its wall budget with tables left, the next scheduled pass becomes due at most
+    /// <see cref="PurgeContinuationDelay"/> after <paramref name="endUtc"/>: <c>_nextPurgeUtc</c> moves to the sooner of
+    /// itself and that time, never later. A sweep that drained every table, failed (its summary carries no tables left) or
+    /// was cancelled (it threw, so this is never reached) leaves the stamp alone. The set happens under
+    /// <c>_purgeTaskLock</c> like the launchers' check and set, and the slot is still held while this pass runs, so the
+    /// continuation cannot start a second pass beside it. Returns whether the stamp was pulled in.
+    /// </summary>
+    internal bool NotePurgePassEnded(PurgeSummary summary, DateTime endUtc)
+    {
+        if (!summary.StoppedOnBudget)
+        {
+            return false;
+        }
+
+        var continueAtUtc = endUtc + PurgeContinuationDelay;
+        lock (_purgeTaskLock)
+        {
+            var sooner = SoonerStamp(_nextPurgeUtc, continueAtUtc);
+            if (sooner == _nextPurgeUtc)
+            {
+                return false;
+            }
+
+            _nextPurgeUtc = sooner;
+        }
+
+        _logger.LogInformation(
+            "Retention purge stopped on its time budget with {TablesLeft} table(s) left; the next pass is due at {DueUtc:O} instead of waiting for the daily time",
+            summary.TablesLeftOnBudget, continueAtUtc);
+        return true;
+    }
+
+    /// <summary>
     /// #4825: the <c>purge_now</c> command's launch decision, extracted so it is testable the way
     /// <see cref="TryStartScheduledPurge"/> is. The purge used to run inline on the command loop
     /// (<c>RunCommandLoopAsync</c> runs one command at a time), so every other command waited behind it, and it ran
@@ -11220,7 +11288,9 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// <para>If that slot is still running, whether the daily purge or an earlier <c>purge_now</c>, nothing
     /// starts: the reply is a success with <c>started: false, alreadyRunning: true</c>. Otherwise it is a success
     /// with <c>started: true</c> and <c>startedAtUtc</c>. Both carry <c>customRetentionDays</c> as asked. It does
-    /// not touch <c>_nextPurgeUtc</c>: a manual purge neither counts as the day's purge nor delays it.</para>
+    /// not touch <c>_nextPurgeUtc</c> when it starts: a manual purge neither counts as the day's purge nor delays it.
+    /// (One that stops on its wall budget with tables left pulls the stamp in when it ends, see
+    /// <see cref="NotePurgePassEnded"/>.)</para>
     ///
     /// <para><c>startedAtUtc</c> is this service's <c>DateTime.UtcNow</c>, taken just before the purge starts, as
     /// naive UTC in the round-trip ("o") form: the same clock and the same shape as the <c>collection_time</c> the
@@ -11893,11 +11963,15 @@ AND   j.hypertable_name = '{relation}'", connection))
         /* #4823: the daily sweep paces its WAL. Its deletes used to run flat out and put 6.89 GB of WAL into
            one checkpoint interval, which stalled collection while that checkpoint caught up. This runs off
            the collection loop (_purgeTask), so a longer, paced purge delays nothing. */
-        await DarlingRetention.PurgeAsync(
+        var purgeSummary = await DarlingRetention.PurgeAsync(
             postgres, _timescaleAvailable, _logger, stoppingToken,
             name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
             config.PlanContentRetentionDays,
-            paceWal: true);
+            paceWal: true,
+            collectionPressure: _collectionPressure);
+
+        /* #5592: a pass the wall budget stopped brings the next scheduled pass forward to within the hour. */
+        NotePurgePassEnded(purgeSummary, DateTime.UtcNow);
 
         /* AN3: findings retention. Both apps' finding stores declare a cleanup but neither
            app schedules it (Lite's DuckDB archive-reset bounds it incidentally); a 24/7
@@ -12046,11 +12120,15 @@ AND   j.hypertable_name = '{relation}'", connection))
                 postgres, timescaleAvailable, _logger, stoppingToken, resolver,
                 config.PlanContentRetentionDays,
                 paceWal: true,
-                runLabel: runLabel);
+                runLabel: runLabel,
+                collectionPressure: _collectionPressure);
 
             _logger.LogInformation(
                 "{Label} purged {Tables} table(s), {Rows} row(s)/chunk(s)",
                 runLabel, summary.TablesPurged, summary.TotalPurged);
+
+            /* #5592: a manual pass the wall budget stopped leaves the same rows behind a scheduled one would. */
+            NotePurgePassEnded(summary, DateTime.UtcNow);
 
             /* #4427: the sweep above (DarlingRetention.PurgeAsync) no longer drops the three raw tables on a
                TimescaleDB store — they left its drop path entirely. purge_now must not go silent about them:

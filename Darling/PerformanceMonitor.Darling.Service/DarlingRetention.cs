@@ -308,15 +308,33 @@ public static class DarlingRetention
     /// <see cref="BuildManualPurgeLabel"/> so the record reads as a manual purge and names a custom horizon
     /// when one was asked for. Null (the daily sweep) leaves the record's text exactly as it always was.
     /// </param>
+    /// <param name="collectionPressure">
+    /// #5592: the in-process read of whether collection is keeping up. When set on a paced run
+    /// (<paramref name="paceWal"/> true), the drain waits before each batch while collection is behind, pauses after
+    /// each batch for the batch's own run time, and stops at the next batch boundary once the pass has run for
+    /// <paramref name="wallBudget"/>. Null (every test, and any caller that does not pass one) leaves today's
+    /// behavior: no waiting, no pause, no budget. An unpaced run ignores it.
+    /// </param>
+    /// <param name="wallBudget">
+    /// The wall time a pass with a <paramref name="collectionPressure"/> may run before it stops at a batch boundary;
+    /// null takes <see cref="RetentionCollectionYield.DefaultWallBudget"/>.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
-        string? runLabel = null)
+        string? runLabel = null, ICollectionPressure? collectionPressure = null, TimeSpan? wallBudget = null)
     {
         /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
            table is touched. */
         var walPacer = paceWal ? await RetentionWalPacer.CreateAsync(postgres, logger, cancellationToken) : null;
+
+        /* #5592: the pass's yield rule rides on the pacer, so every paced batch finds it. The budget starts here. */
+        if (walPacer is not null && collectionPressure is not null)
+        {
+            walPacer.Yield = new RetentionCollectionYield(
+                collectionPressure, wallBudget ?? RetentionCollectionYield.DefaultWallBudget, logger);
+        }
 
         return await PurgeWithPacerAsync(
             postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
@@ -1079,7 +1097,21 @@ public static class DarlingRetention
                 }
             }
 
-            var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
+            /* #5592: a table the spent budget kept from starting came back as "0 rows, fine" from PurgeOneAsync and was
+               counted above; it was not purged, so it comes back out. A table stopped part-way did delete rows and stays. */
+            var yieldGate = walPacer?.Yield;
+            tablesPurged = Math.Max(0, tablesPurged - (yieldGate?.TablesNotReached ?? 0));
+            var yieldNote = yieldGate?.Describe();
+
+            var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped, yieldGate?.TablesLeft ?? 0);
+            if (yieldGate is { StoppedOnBudget: true })
+            {
+                logger?.LogInformation(
+                    "Retention purge stopped at its {Budget:F0}-minute time budget {Place} with {NotReached} table(s) not reached; the next pass continues from the rows left. Collection was waited for {WaitSeconds:F0} s and the drain paused {PauseSeconds:F0} s between batches",
+                    yieldGate.WallBudget.TotalMinutes, yieldGate.StoppedPlace, yieldGate.TablesNotReached,
+                    yieldGate.TotalWaitSeconds, yieldGate.TotalPauseSeconds);
+            }
+
             if (walPacer is null)
             {
                 logger?.LogInformation(
@@ -1103,7 +1135,8 @@ public static class DarlingRetention
                 paced: walPacer is not null,
                 walBytes: walPacer?.TotalWalBytes ?? 0,
                 pacedSeconds: walPacer?.TotalWaitSeconds ?? 0,
-                runLabel: runLabel);
+                runLabel: runLabel,
+                yieldNote: yieldNote);
             await DarlingObservability.LogRetentionRunAsync(
                 postgres, status, summary.TotalPurged, sw.ElapsedMilliseconds, message, logger, cancellationToken);
 
@@ -1152,7 +1185,7 @@ public static class DarlingRetention
     /// </summary>
     internal static (string Status, string Message) BuildRunRecordSummary(
         int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed,
-        bool paced = false, long walBytes = 0, double pacedSeconds = 0, string? runLabel = null)
+        bool paced = false, long walBytes = 0, double pacedSeconds = 0, string? runLabel = null, string? yieldNote = null)
     {
         var status = tablesFailed == 0 ? "SUCCESS" : "WARNING";
         var message = tablesFailed == 0
@@ -1165,6 +1198,14 @@ public static class DarlingRetention
         if (paced)
         {
             message += $"; store WAL during the purge's batches: {(walBytes / 1_048_576.0).ToString("F0", CultureInfo.InvariantCulture)} MB, paced {pacedSeconds.ToString("F0", CultureInfo.InvariantCulture)} s";
+        }
+
+        /* #5592: a pass that waited for collection, paused between batches or stopped on its time budget says so. Null
+           (no signal passed, or nothing to report) leaves the text exactly as it was. A budget stop is not a failure,
+           so the status stays SUCCESS. */
+        if (!string.IsNullOrEmpty(yieldNote))
+        {
+            message += "; " + yieldNote;
         }
 
         if (!string.IsNullOrEmpty(runLabel))
@@ -1775,6 +1816,14 @@ public static class DarlingRetention
         string? adaptiveRowCapTimeColumn = null,
         RetentionWalPacer? pacer = null)
     {
+        /* #5592: a pass whose wall budget is already spent starts no further table: no connection, no statement.
+           Every table's purge comes through here, so this is the one place that skips them. Nothing was deleted,
+           and the run's summary takes the table back out of its purged count. */
+        if (pacer?.Yield is { } yieldGate && yieldGate.SkipTableOnBudget(tableName))
+        {
+            return 0;
+        }
+
         /* Accumulated OUTSIDE the try so the catch can report progress (#2386). Each statement
            autocommits, so a timeout on the fifth batch does not undo the first four — but the old
            catch returned null and threw the running total away, and the sweep's summary then said
@@ -1898,6 +1947,10 @@ public static class DarlingRetention
                     cancellationToken);
             }
 
+            /* #5592: a drain that ended on the pass's wall budget (the loop exits at a batch boundary) is recorded
+               against this table; the rows it already deleted stay deleted, and the next pass continues from the rest. */
+            pacer?.Yield?.FinishTable(tableName, drained);
+
             /* A row-capped drain reports the two facts the sweep summary cannot carry, because both are
                per-table and the summary is fleet-wide.
 
@@ -1972,6 +2025,13 @@ public static class DarlingRetention
     /// <paramref name="pacer"/> waits after EVERY batch, the last one of a table included, so the debt of a
     /// table's final batch is paid before the next table starts writing. A null pacer never waits. The wait
     /// comes after the executor returns, so the WAL the executor measured never includes it.
+    ///
+    /// <para>#5592: when the pacer carries a <see cref="RetentionCollectionYield"/>, every batch also waits for
+    /// collection before it runs and pauses for its own run time after it, and a pass whose wall budget is spent
+    /// stops here, at the batch boundary, returning what it deleted. This loop is the one place every paced batch
+    /// goes through (<c>PurgeOneAsync</c>'s time-sliced and row-capped branches both call it), so no call site
+    /// changes. The pause comes before the WAL wait on purpose: the WAL bucket refills by elapsed time, so the two
+    /// overlap instead of adding.</para>
     /// </summary>
     internal static async Task<int> DrainBatchesAsync(
         Func<CancellationToken, Task<(int Deleted, int Cap, long WalBytes)>> executeBatch,
@@ -1979,10 +2039,41 @@ public static class DarlingRetention
         CancellationToken cancellationToken)
     {
         var totalDeleted = 0;
+        var yield = pacer?.Yield;
         while (true)
         {
-            var (deleted, cap, walBytes) = await executeBatch(cancellationToken);
+            var batchStarted = 0.0;
+            if (yield is not null)
+            {
+                if (!await yield.BeforeBatchAsync(cancellationToken))
+                {
+                    yield.NoteBudgetStop();
+                    break;
+                }
+
+                batchStarted = yield.NowSeconds;
+            }
+
+            int deleted, cap;
+            long walBytes;
+            try
+            {
+                (deleted, cap, walBytes) = await executeBatch(cancellationToken);
+            }
+            catch (Exception) when (yield is not null && !cancellationToken.IsCancellationRequested)
+            {
+                /* #5595: a batch that throws (a timeout under heavy I/O) was the heaviest one of all. Give the pause
+                   its turn before the error reaches the caller, whose next table would otherwise start at once. */
+                await yield.AfterBatchAsync(batchStarted, cancellationToken);
+                throw;
+            }
+
             totalDeleted += deleted;
+
+            if (yield is not null)
+            {
+                await yield.AfterBatchAsync(batchStarted, cancellationToken);
+            }
 
             if (pacer is not null)
             {
@@ -2159,9 +2250,14 @@ public static class DarlingRetention
 /// (<paramref name="RowsDeleted"/>) and dropped Timescale chunks (<paramref name="ChunksDropped"/> —
 /// drop_chunks doesn't report per-row counts). <see cref="TotalPurged"/> is the single headline number the
 /// daily log and the on-demand <c>purge_now</c> log line report.
+/// <paramref name="TablesLeftOnBudget"/> (#5592) is how many tables still have rows because the pass stopped on its wall
+/// budget (never started, or stopped part-way); zero for a pass that drained every table, failed, or had no budget.
 /// </summary>
-public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, int ChunksDropped)
+public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, int ChunksDropped, int TablesLeftOnBudget = 0)
 {
+    /// <summary>True when the pass stopped on its wall budget with tables left (#5592).</summary>
+    public bool StoppedOnBudget => TablesLeftOnBudget > 0;
+
     /// <summary>Rows deleted plus whole chunks dropped — the coarse "how much did this purge remove" count.</summary>
     public int TotalPurged => RowsDeleted + ChunksDropped;
 }
