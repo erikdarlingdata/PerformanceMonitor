@@ -238,6 +238,82 @@ public sealed class DarlingWebSecurityHeadersTests
             DarlingWebSecurityHeaders.ContentSecurityPolicy,
             DarlingWebSecurityHeaders.PolicyForInlinePage("<html><body><script src=\"js/app.js\"></script></body></html>"));
 
+    private static string LfHash(string block)
+        => "'sha256-" + Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(
+            block.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n')))) + "'";
+
+    [Fact]
+    public void PolicyForInlinePage_ABlockWithCrlfLineEndings_GetsTheHashOfItsLfText()
+    {
+        var crlf = "<html><script>var a = 1;\r\nvar b = 2;\r\n</script><style>p {\r\n color: red; }\r\n</style></html>";
+        var csp = DarlingWebSecurityHeaders.PolicyForInlinePage(crlf);
+
+        Assert.Contains(LfHash("var a = 1;\nvar b = 2;\n"), csp, StringComparison.Ordinal);
+        Assert.Contains(LfHash("p {\n color: red; }\n"), csp, StringComparison.Ordinal);
+        /* The same block in LF form gets the same policy: the line ending in the source file does not matter. */
+        Assert.Equal(csp, DarlingWebSecurityHeaders.PolicyForInlinePage(crlf.Replace("\r\n", "\n", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoginPage_PolicyHashesTheLfTextOfTheBlocksInTheServedPage(bool oidcEnabled)
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Response.Body = new MemoryStream();
+        await DarlingWebHostService.WriteLoginPageAsync(ctx, oidcEnabled);
+        ctx.Response.Body.Position = 0;
+        var html = await new StreamReader(ctx.Response.Body).ReadToEndAsync();
+        var csp = ctx.Response.Headers["Content-Security-Policy"].ToString();
+
+        var blocks = Regex.Matches(html, @"<(script|style)\b[^>]*>(?<body>.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase)
+            .Select(m => m.Groups["body"].Value).Where(b => b.Length > 0).ToList();
+        Assert.True(blocks.Count >= 2);
+        foreach (var block in blocks)
+        {
+            Assert.Contains(LfHash(block), csp, StringComparison.Ordinal);
+        }
+
+        /* The page is served in LF, so the bytes a browser hashes are the bytes the server hashed. */
+        Assert.DoesNotContain('\r', html);
+    }
+
+    [Fact]
+    public async Task LandingPage_PolicyDoesNotChangeWithTheReturnPath_AndHashesItsOneConstantScript()
+    {
+        async Task<(string Csp, string Html)> Render(string returnPath)
+        {
+            var ctx = new DefaultHttpContext();
+            ctx.Response.Body = new MemoryStream();
+            await DarlingWebHostService.WriteSignedInLandingAsync(ctx, returnPath);
+            ctx.Response.Body.Position = 0;
+            return (ctx.Response.Headers["Content-Security-Policy"].ToString(), await new StreamReader(ctx.Response.Body).ReadToEndAsync());
+        }
+
+        var (cspA, htmlA) = await Render("/");
+        var (cspB, htmlB) = await Render("/#/servers?name=a&b=\"</a><script>alert(1)</script>");
+
+        Assert.Equal(cspA, cspB);
+        Assert.Equal(DarlingWebHostService.LandingPagePolicy, cspA);
+        foreach (var html in new[] { htmlA, htmlB })
+        {
+            var blocks = Regex.Matches(html, @"<script\b[^>]*>(?<body>.*?)</script>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            var block = Assert.Single(blocks);
+            Assert.Contains(LfHash(block.Groups["body"].Value), cspA, StringComparison.Ordinal);
+            Assert.DoesNotContain("alert(1)", block.Groups["body"].Value, StringComparison.Ordinal);
+        }
+
+        Assert.Contains(DarlingWebHostService.LandingScriptBlock, htmlB, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LoginPagePolicy_IsFixedPerRendering(bool oidcEnabled)
+        => Assert.Equal(
+            DarlingWebSecurityHeaders.PolicyForInlinePage(DarlingWebHostService.BuildLoginPageHtml(oidcEnabled)),
+            DarlingWebHostService.LoginPagePolicy(oidcEnabled));
+
     private static void AssertEveryInlineBlockIsHashed(string html, string csp)
     {
         var blocks = Regex.Matches(html, @"<(script|style)\b[^>]*>(?<body>.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase)
@@ -247,7 +323,9 @@ public sealed class DarlingWebSecurityHeadersTests
         Assert.NotEmpty(blocks);
         foreach (var (kind, body) in blocks)
         {
-            var hash = "'sha256-" + Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(body))) + "'";
+            /* A browser hashes the block after its parser has turned every line ending into LF. */
+            var lf = body.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+            var hash = "'sha256-" + Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(lf))) + "'";
             var directive = csp.Split(';').Select(d => d.Trim()).First(d => d.StartsWith(kind + "-src ", StringComparison.Ordinal));
             Assert.Contains(hash, directive, StringComparison.Ordinal);
         }

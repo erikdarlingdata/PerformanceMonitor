@@ -1934,11 +1934,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// genuinely signed in. A navigation started by a script on THIS page is same-site, and Strict cookies
     /// travel with it.
     /// </summary>
-    private static Task WriteSignedInLandingAsync(HttpContext context, string returnPath)
+    internal static Task WriteSignedInLandingAsync(HttpContext context, string returnPath)
     {
         var safePath = SanitizeRedirectPath(returnPath);
-        /* JSON-encode for the script (handles quotes/backslashes), HTML-encode for the fallback link. */
-        var scriptTarget = System.Text.Json.JsonSerializer.Serialize(safePath);
+        /* HTML-encode once for the fallback link and for the data- attribute the script reads its target from. */
         var linkTarget = System.Text.Encodings.Web.HtmlEncoder.Default.Encode(safePath);
 
         context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1947,13 +1946,21 @@ public sealed class DarlingWebHostService : BackgroundService
         var html =
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
-            + $"<p>Signed in — continuing to <a style='color:#2eaef1' href='{linkTarget}'>the dashboard</a>…</p>"
-            + $"<script>location.replace({scriptTarget});</script>"
+            + $"<p>Signed in — continuing to <a id='go' style='color:#2eaef1' href='{linkTarget}' data-target='{linkTarget}'>the dashboard</a>…</p>"
+            + LandingScriptBlock
             + "</body></html>";
-        /* The one inline script on this page is allowed by its hash (it carries the sanitized return path). */
-        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = DarlingWebSecurityHeaders.PolicyForInlinePage(html);
+        /* The page's one inline script is constant text (the return path travels in the data-target attribute),
+           so its policy is computed once and never from this rendering. */
+        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = LandingPagePolicy;
         return context.Response.WriteAsync(html);
     }
+
+    /// <summary>The landing page's only inline script: constant text that reads the sanitized return path from the
+    /// link's data-target attribute, so its hash does not depend on the request.</summary>
+    internal const string LandingScriptBlock = "<script>location.replace(document.getElementById('go').dataset.target);</script>";
+
+    /// <summary>The landing page's policy: the default plus the hash of <see cref="LandingScriptBlock"/>.</summary>
+    internal static readonly string LandingPagePolicy = DarlingWebSecurityHeaders.PolicyForInlinePage(LandingScriptBlock);
 
     /// <summary>The sign-in flow's answer to a single-valued query key sent more than once (#5245): the same
     /// rate-limited refusal log and error page every other failed sign-in uses, status 400.</summary>
@@ -1980,22 +1987,37 @@ public sealed class DarlingWebHostService : BackgroundService
             + "</body></html>");
     }
 
-    private static Task WriteLoginPageAsync(HttpContext context, bool oidcEnabled)
+    internal static Task WriteLoginPageAsync(HttpContext context, bool oidcEnabled)
     {
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
         context.Response.Headers.CacheControl = "no-store";
         var html = BuildLoginPageHtml(oidcEnabled);
         /* The login page carries one inline style block and one or two small inline scripts (it renders before the
-           gated stylesheet and scripts are reachable); each is allowed by its hash. */
-        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = DarlingWebSecurityHeaders.PolicyForInlinePage(html);
+           gated stylesheet and scripts are reachable); each is allowed by its hash. The page is constant text
+           (the two renderings differ only by the SSO fragment), so each policy is computed once from the
+           LF-normalized text and never from a rendering. */
+        context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = LoginPagePolicy(oidcEnabled);
         return context.Response.WriteAsync(html);
     }
+
+    private static readonly string s_loginPageHtmlPlain = ComposeLoginPage(oidcEnabled: false);
+    private static readonly string s_loginPageHtmlSso = ComposeLoginPage(oidcEnabled: true);
+    private static readonly string s_loginPolicyPlain = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlPlain);
+    private static readonly string s_loginPolicySso = DarlingWebSecurityHeaders.PolicyForInlinePage(s_loginPageHtmlSso);
+
+    /// <summary>The Content-Security-Policy of the login page, fixed per rendering (SSO link or not).</summary>
+    internal static string LoginPagePolicy(bool oidcEnabled) => oidcEnabled ? s_loginPolicySso : s_loginPolicyPlain;
+
+    /* The source file is checked out with CRLF, and a browser hashes the LF text, so the page is served in LF. */
+    private static string ComposeLoginPage(bool oidcEnabled)
+        => DarlingWebSecurityHeaders.NormalizeLineEndings(
+            LoginPageHtml.Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty, StringComparison.Ordinal));
 
     /// <summary>The login page, with the SSO affordance included exactly when OIDC is enabled — the token
     /// form is never removed (#2550 keeps the shared token as the scripted-caller/break-glass path).</summary>
     internal static string BuildLoginPageHtml(bool oidcEnabled)
-        => LoginPageHtml.Replace("<!--SSO-->", oidcEnabled ? SsoFragmentHtml : string.Empty);
+        => oidcEnabled ? s_loginPageHtmlSso : s_loginPageHtmlPlain;
 
     /* A minimal, fully self-contained login form (no external references) — a GET form whose only field is the
        access token, so submitting it re-requests the same URL with ?token=, which the middleware exchanges for

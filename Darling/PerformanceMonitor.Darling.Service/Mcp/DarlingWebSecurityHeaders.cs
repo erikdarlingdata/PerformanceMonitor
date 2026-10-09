@@ -95,6 +95,11 @@ internal sealed class DarlingWebSecurityHeaders
     /// with the block's exact text, so the pages that build their own markup (the login form and the
     /// signed-in landing page, which render before the gated stylesheets and scripts are reachable) keep
     /// working while every other inline block stays blocked.
+    ///
+    /// <para>A browser hashes a block's text after its HTML parser has turned every line ending into LF, so the
+    /// hash is taken over the LF form of the text, whatever line endings the source file was checked out with.
+    /// Call this once per page, on constant text, and keep the result: the policy never depends on a value
+    /// put into a particular response.</para>
     /// </summary>
     internal static string PolicyForInlinePage(string html)
     {
@@ -115,12 +120,20 @@ internal sealed class DarlingWebSecurityHeaders
         return policy;
     }
 
+    /// <summary>The text with every CRLF and lone CR turned into LF: the form a browser's HTML parser hands to the
+    /// policy check (HTML Standard, "preprocessing the input stream").</summary>
+    internal static string NormalizeLineEndings(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        return text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+    }
+
     private static string HashBlocks(Regex pattern, string html)
     {
         var hashes = new List<string>();
         foreach (Match match in pattern.Matches(html))
         {
-            var body = match.Groups["body"].Value;
+            var body = NormalizeLineEndings(match.Groups["body"].Value);
             if (body.Length == 0)
             {
                 continue;
