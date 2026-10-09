@@ -85,7 +85,7 @@ public sealed class CommentFilterAdoptionTests
     /// name a new entry.
     ///
     /// <para>Four kinds live here and they are not the same kind. Eight <b>collect</b> a doc-comment run,
-    /// where the prefix is what defines the run. Two read a <b>stated, measured</b> bound off a named file each.
+    /// where the prefix is what defines the run. Three read a <b>stated, measured</b> bound off a named file each.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
     /// </summary>
@@ -167,6 +167,15 @@ public sealed class CommentFilterAdoptionTests
             + "string literal there - so blanking literal text would satisfy Assert.DoesNotContain vacuously, "
             + "which is a pass for the wrong reason. Measurement-dependent, not permanent: a second block "
             + "comment in that file makes the bound wrong.",
+
+        ["Lite.Tests/LiteTimeRangeGapTests.cs"] =
+            "STATED BOUND, measured. It COUNTS call sites of ApplyWindowFloorToBanner( across Lite's tab sources (#5562 R7: every banner site feeds the "
+            + "picker's data start). IsDocOrDefinition drops a match whose line, trimmed, starts with //, ///, * or /*, so a "
+            + "doc or comment mention is not a site, and drops the method's own definition line. Stated bound: it reads one "
+            + "line, so a call written inside a block comment on a line that does not begin with * or /* is miscounted as a "
+            + "site (a spurious extra site, the loud direction: the per-file count then disagrees with the sites pinned). "
+            + "The walker would drop the call as comment text correctly, but the same test also needs the definition line "
+            + "kept apart, which the line check does in one step; the sources it reads carry no such block comment today.",
 
         ["Darling.Tests/Pg18IoBytesTests.cs"] =
             "NOT C#. The filter runs over DarlingPgIoReader.PgIoSql - SQL text already extracted from a raw "

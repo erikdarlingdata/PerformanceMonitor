@@ -503,7 +503,28 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             JsonNodeResult(new JsonObject { ["can_edit"] = DarlingWebSeat.FromContext(context).CanEdit }));
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
-        app.MapGet("/api/catalog", () => JsonNodeResult(BuildCatalogNode()));
+        /* #5562: ?server= makes the collector intervals the SERVER's own (a per-server schedule row wins over the
+           fleet-wide one); without it they are the fleet-wide effective interval. Either way the read's reach
+           (max_hours) is the same: it belongs to the read, not the server. An unknown server is answered with the
+           resolver's refusal, not a silent fall back to the fleet's numbers. */
+        app.MapGet("/api/catalog", async (HttpContext context) =>
+        {
+            var serverName = context.Request.Query["server"].ToString();
+            if (string.IsNullOrWhiteSpace(serverName))
+            {
+                var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
+                return JsonNodeResult(BuildCatalogNode(null, fleetSchedules));
+            }
+
+            var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
+            if (resolveError != null)
+            {
+                return JsonNodeResult(JsonNode.Parse(resolveError)!.AsObject());
+            }
+
+            var schedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, resolved.ServerId, context.RequestAborted);
+            return JsonNodeResult(BuildCatalogNode(resolved.ServerId, schedules));
+        });
 
         /* List — a bare array of summaries (no definition); [] when none. */
         app.MapGet("/api/views", async (HttpContext context) =>
@@ -4767,7 +4788,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>Builds the <c>/api/catalog</c> body: the reads (names taken from <see cref="BuildReadDispatch"/>,
     /// each enriched with its <see cref="CatalogDescriptors"/> metadata) and the viz vocabulary. Iterating the
     /// dispatch keys guarantees the catalog only advertises actually-dispatchable reads.</summary>
-    internal static JsonObject BuildCatalogNode()
+    internal static JsonObject BuildCatalogNode() => BuildCatalogNode(null, Array.Empty<ScheduleOverride>());
+
+    /// <summary>
+    /// The catalog with each windowed read's reach (#5562): its <c>hours</c> param carries <c>max_hours</c> (the longest
+    /// window the read's validator accepts, from <see cref="WebReadReach"/>), <c>shape</c>, and the main collector's
+    /// <c>collector</c> id, <c>collector_interval_minutes</c> (the schedule in force: <paramref name="schedules"/> over
+    /// the shipped default) and <c>collector_default_interval_minutes</c>, so the picker can grey out a longer period
+    /// with its reason and say "collected every N minutes" under a range too short to hold three samples.
+    /// </summary>
+    internal static JsonObject BuildCatalogNode(int? serverId, IReadOnlyList<ScheduleOverride> schedules)
     {
         var reads = new JsonArray();
         foreach (var name in BuildReadDispatch().Keys)
@@ -4776,13 +4806,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var parameters = new JsonArray();
             foreach (var p in descriptor.Params)
             {
-                parameters.Add(new JsonObject
+                var param = new JsonObject
                 {
                     ["name"] = p.Name,
                     ["type"] = p.Type,
                     ["required"] = p.Required,
                     ["default"] = ToJsonValue(p.Default),
-                });
+                };
+                if (p.Name == "hours")
+                {
+                    AddReach(param, name, serverId, schedules);
+                }
+
+                parameters.Add(param);
             }
 
             reads.Add(new JsonObject
@@ -4802,6 +4838,39 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         /* v1 keys (reads/viz) unchanged; the v2 composed-view catalog rides alongside under "compose". */
         return new JsonObject { ["reads"] = reads, ["viz"] = viz, ["compose"] = BuildComposeCatalogNode() };
+    }
+
+    /// <summary>Adds a windowed read's reach to its <c>hours</c> catalog param (#5562). A read with no row in
+    /// <see cref="WebReadReach.All"/> is advertised at the default reach with no collector; a census keeps that case
+    /// from shipping.</summary>
+    private static void AddReach(JsonObject param, string read, int? serverId, IReadOnlyList<ScheduleOverride> schedules)
+    {
+        WebReadReach.All.TryGetValue(read, out var reach);
+        var shape = reach?.Shape switch
+        {
+            ReadShape.BucketedTrend => "bucketed_trend",
+            ReadShape.LatestSnapshot => "latest_snapshot",
+            _ => "list",
+        };
+        var collector = reach?.Collector;
+        param["max_hours"] = reach?.MaxHours ?? WebReadReach.DefaultHours;
+        if (WebReadReach.ViewMaxHours.TryGetValue(read, out var views))
+        {
+            var viewReach = new JsonObject();
+            foreach (var (view, hours) in views)
+            {
+                viewReach[view] = hours;
+            }
+
+            param["view_max_hours"] = viewReach;
+        }
+
+        param["shape"] = shape;
+        param["collector"] = collector;
+        param["collector_interval_minutes"] = WebReadReach.CollectorIntervalMinutes(collector, serverId, schedules);
+        param["collector_default_interval_minutes"] = collector is not null && CollectorScheduleDefaults.All.TryGetValue(collector, out var def)
+            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(def.FrequencyMinutes)
+            : null;
     }
 
     /// <summary>

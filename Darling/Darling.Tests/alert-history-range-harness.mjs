@@ -1,12 +1,13 @@
 /* Runs the shipped Alert History page (wwwroot/js/pages/alerts.js) with the real shared renderer (panels.js, util.js,
    mute-context.js) on a small fake DOM and a recording fetch, and prints as one line of JSON what the page asked for
    and drew. AlertHistoryRangeBehaviourTests starts it as
-       node alert-history-range-harness.mjs <path to wwwroot/js> <scenario>
+       node alert-history-range-harness.mjs <path to wwwroot/js> <scenario> [IANA time zone]
    Only the DOM, fetch and charts.js are stand-ins. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { pickRange, pickerText, pickerItems, popupShape, withDocumentListeners } from "./web-picker-driver.mjs";
 
 class FakeNode {
   constructor(tag) {
@@ -38,11 +39,14 @@ class FakeNode {
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = withDocumentListeners({ createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) });
 globalThis.location = { hash: "#/alerts" };
 
 const jsDir = process.argv[2];
 const scenario = process.argv[3];
+// Node on Windows ignores a TZ variable set before it starts, but honours one set on process.env from inside, so the zone is an argument
+// (#5570 r2 H1): the page's time parsing must give the same answer in every browser zone, and a harness stuck in UTC cannot show that.
+if (process.argv[4]) process.env.TZ = process.argv[4];
 
 const urls = [];
 let alertsReply = { alerts: [], truncated: false };
@@ -52,14 +56,18 @@ globalThis.fetch = async (url) => {
   urls.push(u);
   let body = {};
   if (u.startsWith("/api/session")) body = { can_edit: true };
+  else if (u.includes("/api/catalog")) body = { reads: [{ name: "get_alert_history", params: [{ name: "hours", collector: null, collector_interval_minutes: null, max_hours: 2160 }] }] };
   else if (u.includes("/list_servers")) body = servers;
   else if (u.includes("/get_alert_history")) body = typeof alertsReply === "function" ? alertsReply(u) : alertsReply;
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
 const readsOf = () => urls.filter((u) => u.includes("/get_alert_history")).map((u) => Object.fromEntries(new URL(u, "http://x").searchParams));
 
+const T0 = Date.now();
 const row = (i, over = {}) => ({
-  alert_time: new Date(Date.UTC(2026, 0, 1, 12, 0, 0) - i * 60000).toISOString(),
+  // The server's shape: alert_time is r.AlertTime.ToString("o") of a naive-UTC timestamp, so seven fraction digits and NO zone suffix
+  // (#5570 r2 H1). toISOString() would add a Z, which hides a reader that parses the text as local time.
+  alert_time: new Date(T0 - 60000 - i * 60000).toISOString().replace("Z", "0000"),
   server_id: 1, server_name: "srv-a", stored_server_name: "srv-a", metric_name: "High CPU " + i,
   current_value: 90, threshold_value: 80, severity: "warning", severity_source: "fired", dismissed: false, ...over,
 });
@@ -93,12 +101,17 @@ try {
       const main = newMain();
       await renderAlerts(main);
       out.first = readsOf().pop();
-      urls.length = 0; await pick(byLabel(main, "Time range"), 168); out.window = readsOf().pop();
+      urls.length = 0; pickRange(main, "Time range", "168h"); await settle(); out.window = readsOf().pop();
       urls.length = 0; await pick(byLabel(main, "Row limit"), 1000); out.limit = readsOf().pop();
       urls.length = 0; await pick(byLabel(main, "Server"), "srv-b"); out.server = readsOf().pop();
       const cb = checkbox(main);
       urls.length = 0; cb.checked = true; cb.fire("change"); await settle(); out.dismissed = readsOf().pop();
-      out.windowOptions = byLabel(main, "Time range").children.map((o) => o.attrs.value);
+      out.windowOptions = pickerItems(main, "Time range").filter((i) => !i.disabled).map((i) => i.name);
+      out.windowGreyed = pickerItems(main, "Time range").filter((i) => i.disabled).map((i) => i.name);
+      out.windowShape = popupShape(main, "Time range");
+      out.refused = pickRange(main, "Time range", "120d");
+      urls.length = 0; pickRange(main, "Time range", "yesterday"); await settle(); out.finished = readsOf().pop();
+      urls.length = 0; pickRange(main, "Time range", "30m"); await settle(); out.thirtyMinutes = readsOf().pop();
       out.limitOptions = byLabel(main, "Row limit").children.map((o) => o.attrs.value);
       out.serverOptions = byLabel(main, "Server").children.map((o) => o.attrs.value);
     },
@@ -106,7 +119,7 @@ try {
       alertsReply = { alerts: [row(1)], truncated: false };
       const first = newMain();
       await renderAlerts(first);
-      await pick(byLabel(first, "Time range"), 4);
+      pickRange(first, "Time range", "4h"); await settle();
       await pick(byLabel(first, "Row limit"), 500);
       await pick(byLabel(first, "Server"), "srv-a");
       const cb = checkbox(first); cb.checked = true; cb.fire("change"); await settle();
@@ -117,7 +130,7 @@ try {
       urls.length = 0; await renderAlerts(second);
       out.back = readsOf();
       out.shown = {
-        window: byLabel(second, "Time range").value, limit: byLabel(second, "Row limit").value,
+        window: pickerText(second, "Time range"), limit: byLabel(second, "Row limit").value,
         server: byLabel(second, "Server").value, dismissed: checkbox(second).checked,
       };
     },
@@ -169,12 +182,22 @@ try {
       out.before = metrics(main);
       // a narrower window: the oldest row leaves, a newer one lands first, one lands in the middle
       alertsReply = { alerts: [row(0), row(1), row(2), row(3)], truncated: false };
-      await pick(byLabel(main, "Time range"), 4);
+      pickRange(main, "Time range", "4h"); await settle();
       out.after = metrics(main);
       out.keptNode = bodyRows(main)[1] === keep;
       alertsReply = { alerts: [row(3)], truncated: false };
-      await pick(byLabel(main, "Time range"), 1);
+      pickRange(main, "Time range", "1h"); await settle();
       out.shrunk = metrics(main);
+    },
+    async trim() {
+      // Review r1 H2: the read takes whole hours, so a 5 or 30 minute range lists only the alerts inside it. Rows are 1, 20 and 90 minutes old.
+      alertsReply = { alerts: [row(0), row(19), row(89)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      out.day = metrics(main);
+      pickRange(main, "Time range", "5m"); await settle(); out.fiveMinutes = metrics(main);
+      pickRange(main, "Time range", "30m"); await settle(); out.thirtyMinutes = metrics(main);
+      pickRange(main, "Time range", "4h"); await settle(); out.fourHours = metrics(main);
+      out.tzOffsetMinutes = new Date().getTimezoneOffset();
     },
     async mute() {
       alertsReply = { alerts: [row(1)], truncated: false };

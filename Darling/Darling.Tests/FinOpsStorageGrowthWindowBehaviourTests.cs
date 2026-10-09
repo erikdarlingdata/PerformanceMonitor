@@ -84,13 +84,21 @@ public sealed class FinOpsStorageGrowthWindowBehaviourTests
         var run = Run();
         var objects = run.GetProperty("objects");
         Assert.Equal(new[] { "720" }, Hours(objects));
-        Assert.Equal("7,30,90", string.Join(",", objects.GetProperty("options").EnumerateArray().Select(e => e.GetString())));
-        Assert.Equal("30", objects.GetProperty("value").GetString());
+        // #5562 R5: the Compact rolling-only picker, whole days, reach 2160 hours for this view (not the catalog entry's 168).
+        Assert.Equal("Past week,Past 30 days,Past 90 days", string.Join(",", objects.GetProperty("options").EnumerateArray().Select(e => e.GetString())));
+        var refused = objects.GetProperty("refused");
+        Assert.Equal("This page reads whole days back from now, such as 7d or 30d.", refused.GetProperty("hours").GetString());
+        Assert.Equal("This page reads a length back from now, so pick a rolling length such as 24h or 7d.", refused.GetProperty("calendar").GetString());
+        Assert.Equal("This page's reads reach at most 90 days back.", refused.GetProperty("tooLong").GetString());
+        /* Review r1 H1: 1 day would read the server's 30-day default and 2 to 6 days are refused by the read, so neither is offered. */
+        Assert.Equal("This page reads at least 7d back from now.", refused.GetProperty("tooShort").GetString());
+        Assert.Equal("This page reads at least 7d back from now.", refused.GetProperty("oneDay").GetString());
+        Assert.Equal("Past 30 days", objects.GetProperty("value").GetString());
 
         Assert.Equal(new[] { "2160" }, Hours(run.GetProperty("picked90")));
-        Assert.Equal("90", run.GetProperty("picked90").GetProperty("value").GetString());
+        Assert.Equal("Past 90 days", run.GetProperty("picked90").GetProperty("value").GetString());
         Assert.Equal(new[] { "168" }, Hours(run.GetProperty("picked7")));
-        Assert.Equal("7", run.GetProperty("picked7").GetProperty("value").GetString());
+        Assert.Equal("Past week", run.GetProperty("picked7").GetProperty("value").GetString());
     }
 
     [Fact]
@@ -99,11 +107,11 @@ public sealed class FinOpsStorageGrowthWindowBehaviourTests
         var run = Run();
         var rebuilt = run.GetProperty("rebuilt");
         Assert.Equal(new[] { "168" }, Hours(rebuilt));
-        Assert.Equal("7", rebuilt.GetProperty("value").GetString());
+        Assert.Equal("Past week", rebuilt.GetProperty("value").GetString());
 
         Assert.Equal(new[] { "24" }, Hours(run.GetProperty("other")));
         var otherObjects = run.GetProperty("otherObjects");
         Assert.Equal(new[] { "720" }, Hours(otherObjects));
-        Assert.Equal("30", otherObjects.GetProperty("value").GetString());
+        Assert.Equal("Past 30 days", otherObjects.GetProperty("value").GetString());
     }
 }

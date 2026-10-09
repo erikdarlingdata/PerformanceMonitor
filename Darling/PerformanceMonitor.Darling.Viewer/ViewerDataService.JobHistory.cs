@@ -172,10 +172,15 @@ public sealed partial class ViewerDataService
     /// </para>
     /// </summary>
     public async Task<List<ViewerJobHistoryRow>> GetJobHistoryAsync(
-        DateTime sinceUtc, int? serverId = null, int limit = 2000, CancellationToken cancellationToken = default)
+        DateTime sinceUtc, int? serverId = null, int limit = 2000, DateTime? untilUtc = null, CancellationToken cancellationToken = default)
     {
+        /* #5562 R6: a finished range's end goes into the read (the shared reader's UntilUtc), so the SQL bounds the runs before the
+           per-server top-N and the row cap count them. A window that ended in the past on a busy fleet keeps every run inside it, not
+           the newest N of everything since the start. The reader's end is inclusive; the picker's end is exclusive (a run at the next
+           day's start is not in "yesterday"), so it is taken one microsecond (the store's precision) earlier. */
+        var filter = untilUtc is { } until ? new JobHistoryFilter(UntilUtc: until.AddTicks(-TimeSpan.TicksPerMicrosecond)) : null;
         var dtos = await DarlingJobHistoryReader.GetAsync(
-            _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken);
+            _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, filter, cancellationToken);
 
         /* D5: each row converts on its own server's clock, read from the fleet's held clocks (ServerClockCache), the way
            Alert History's rows do, not on whichever server tab happens to be active. */

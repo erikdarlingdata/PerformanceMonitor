@@ -205,14 +205,12 @@ public partial class ViewerServerTab : UserControl
            range handler no-ops while IsLoaded is false, and the checkbox handler no-ops while
            _autoRefreshTimer is still null — so seeding drives no premature reload or timer churn. */
         var toolbarDefaults = preferences ?? new ViewerPreferences();
-        TimeRangeCombo.SelectedIndex = toolbarDefaults.DefaultTimeRangeIndex;
+        InitializeRangePicker(toolbarDefaults);
         AutoRefreshCheckBox.IsChecked = toolbarDefaults.AutoRefreshEnabled;
         AutoRefreshIntervalCombo.SelectedIndex = toolbarDefaults.AutoRefreshIntervalIndex;
 
-        /* Per-server toolbar (this wave): populate the custom-range hour/minute combos and start the
-           auto-refresh timer at the toolbar's interval (seeded above). The settable window these controls
-           drive replaces the removed 24-hour s_dataWindow constant. */
-        InitializeTimeComboBoxes();
+        /* Per-server toolbar (this wave): start the auto-refresh timer at the toolbar's interval (seeded above). The
+           settable window the shared time range picker drives replaces the removed 24-hour s_dataWindow constant. */
         InitializeAutoRefreshTimer();
 
         /* Seed the toolbar's Server/Local/UTC picker from the persisted global mode (MainWindow set
@@ -299,6 +297,10 @@ public partial class ViewerServerTab : UserControl
                Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab. */
             await UpdatePermissionDeniedBadgeAsync();
 
+            /* #5562: redraw the picker's resolved range from the clock (a range that slides with now) and refresh its
+               "collected every N minutes" note (set for the page on screen in the load loop below, before each tab's load). */
+            RefreshRangePicker();
+
             do
             {
                 _refreshRequested = false;
@@ -307,6 +309,9 @@ public partial class ViewerServerTab : UserControl
                 do
                 {
                     loadedTab = InnerTabs.SelectedIndex;
+                    /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
+                       at the top of the pass. */
+                    await UpdateSampleIntervalAsync();
                     await LoadInnerTabAsync(loadedTab);
                 }
                 while (InnerTabs.SelectedIndex != loadedTab);
