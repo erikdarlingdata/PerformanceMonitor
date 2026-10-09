@@ -143,7 +143,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 
 ### Changed
 
-- **Darling web sends browser security headers, the actual-plan confirmation says where the query came from, and connection-test errors carry less detail** ([#5636])
+- **Darling web sends browser security headers, the actual-plan confirmation says where the query came from, and connection-test errors carry less detail, and a configured token gates the loopback endpoints** ([#5636])
 - **Microsoft.Data.SqlClient moves to 7.1.1** ([#4963])
 - **Fleet Custom Views Query Store panels read the store's chunk floors once** ([#5001])
 - **Web System Events grids show the desktop's columns** ([#5118])
