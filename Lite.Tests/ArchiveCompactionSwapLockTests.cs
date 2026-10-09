@@ -117,7 +117,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     {
         var initializer = new DuckDbInitializer(_dbPath);
         _initializers.Add(initializer);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         await ArchiveRowsAsync("20260801_0000_collection_log.parquet", 0, 10);
         await ArchiveRowsAsync("20260801_0100_collection_log.parquet", 10, 20);

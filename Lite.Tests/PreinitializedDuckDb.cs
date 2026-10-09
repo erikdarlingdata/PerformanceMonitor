@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Tests;
@@ -17,15 +18,15 @@ namespace PerformanceMonitorLite.Tests;
 /// several seconds on a hosted runner. The tests that spend that wall time do almost no work: a one-test
 /// class measured 62 s beside the others against 1.9 s alone, and every one of its per-row inserts took the
 /// read lock behind the next init. Copying a file takes no lock, and <see cref="Adopt"/> takes the write
-/// lock only to open the sentinel.</para>
+/// lock only to hand over a sentinel it opened before taking it.</para>
 ///
 /// <para><b>What a copy is.</b> A byte copy of the file a real <c>InitializeAsync</c> built and closed,
 /// with the empty <c>archive</c> folder next to it. The archive views it carries read the live table alone (no
 /// Parquet file existed when they were built), so they hold no path and stay valid at any location. A test
 /// that adds Parquet files rebuilds the views through the code under test, as before. The schema stamps are
 /// copied too. The per-file <c>store_identity</c> row is copied with the file, then renewed by
-/// <see cref="DuckDbInitializer.AdoptInitializedFileForTests"/>, so every copy has its own identity as a
-/// freshly initialized store does.</para>
+/// <see cref="CopyTo"/> on the private copy, so every copy has its own identity as a freshly initialized store
+/// does.</para>
 /// </summary>
 internal static class PreinitializedDuckDb
 {
@@ -70,7 +71,26 @@ internal static class PreinitializedDuckDb
         var directory = Path.GetDirectoryName(databasePath);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
         File.Copy(template, databasePath, overwrite: false);
+        RenewStoreIdentity(databasePath);
         Directory.CreateDirectory(Path.Combine(directory ?? ".", "archive"));
+    }
+
+    /// <summary>
+    /// Gives the copy its own <c>store_identity</c> row, as a file a real <see cref="DuckDbInitializer.InitializeAsync"/>
+    /// builds has: the template's row is copied with the file, so without this every copy would claim the same
+    /// identity and a test that compares two stores (or the interrupted-reset recovery's marker check) would see
+    /// them as one. The copy is a private file nothing else has open yet, so this needs no database lock. It used
+    /// to run inside <see cref="DuckDbInitializer.AdoptInitializedFileForTests"/>'s write lock, about 40 ms of
+    /// exclusive hold per copy (#5208). The connection closes before anything else opens the file, so the change
+    /// is checkpointed into the main file.
+    /// </summary>
+    private static void RenewStoreIdentity(string databasePath)
+    {
+        using var connection = new DuckDBConnection($"Data Source={databasePath}");
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "UPDATE store_identity SET id = CAST(uuid() AS VARCHAR)";
+        cmd.ExecuteNonQuery();
     }
 
     /// <summary>

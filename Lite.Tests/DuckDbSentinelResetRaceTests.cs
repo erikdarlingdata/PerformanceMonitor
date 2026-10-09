@@ -90,9 +90,15 @@ public class DuckDbSentinelResetRaceTests : IDisposable
 
         /* Big enough that the upsert loop's connection stays open for a real slice of wall-clock time —
            the fixed shape does not need this width (the lock makes the order exact either way), but the
-           broken shape does, to make the race land inside the still-open connection's window. */
+           broken shape does, to make the race land inside the still-open connection's window.
+
+           The loop holds the process-wide write lock for its whole length, about 3 ms per key, so every other
+           test's database read queues behind it: at 4,000 keys that was a 12 s hold on a laptop and the longest
+           single one in the suite (#5208). 1,000 keys hold it for about 3 s. Measured with the write lock
+           removed from SaveCollectorStateAsync (the broken shape), this test fails every time at 1,000 keys, and
+           at 400 and at 150 (three runs each), so 1,000 keeps a wide margin over the window the race needs. */
         var racingState = new Dictionary<string, string>(StringComparer.Ordinal);
-        for (var i = 0; i < 4000; i++)
+        for (var i = 0; i < 1000; i++)
             racingState[$"key_{i}"] = $"value_{i}";
 
         var writeTask = Task.Run(() => writer.SaveAsync(serverId: 1, "racer", racingState));
