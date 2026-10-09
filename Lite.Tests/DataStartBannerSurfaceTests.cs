@@ -284,7 +284,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [MemberData(nameof(NoticeRelations))]
     public async Task RowsStartInsideTheRange_ShowTheNotice(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var first = end.AddDays(-2);
         await SeedRowAsync(relation, first);
@@ -310,7 +310,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [MemberData(nameof(NoticeRelations))]
     public async Task QuietStart_TheStoreCoveredTheRange_ShowsNoNotice(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         if (LocalDataService.QueryWindowRelationCollector(relation) is { } collector)
         {
@@ -360,7 +360,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [MemberData(nameof(EventRelations))]
     public async Task EventRelations_HistoryStoredAtTheFirstRun_NamesTheOldestEvent_NotTheRun(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var firstRun = end.AddDays(-2);
         var oldestEvent = end.AddDays(-4);
@@ -382,7 +382,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [MemberData(nameof(EventRelations))]
     public async Task EventRelations_HistoryReachesBackToTheRangeStart_ShowsNoNotice(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedFirstRunAsync(relation, end.AddDays(-2), end, end.AddDays(-10), end.AddDays(-5));
 
@@ -400,7 +400,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [MemberData(nameof(EventRelations))]
     public async Task EventRelations_NoStoredHistory_NamesTheFirstRun(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var firstRun = end.AddDays(-2);
         await SeedFirstRunAsync(relation, firstRun, end);
@@ -488,7 +488,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [MemberData(nameof(BlockingRelations))]
     public async Task BlockingGrids_AReadThatFillsItsCap_NamesItsOldestRow_AlsoOverARangeTheStoreCovers(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var cap = GridCapOf(relation);
         await SeedLogRunsAsync(LocalDataService.QueryWindowRelationCollector(relation)!, end.AddDays(-30), end, 60);
@@ -508,7 +508,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [MemberData(nameof(BlockingRelations))]
     public async Task BlockingGrids_AOneHourRange_WhoseGridHitsItsCap_ShowsTheNoticeAtItsOldestRow_WithNoSlack(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var cap = GridCapOf(relation);
         await SeedLogRunsAsync(LocalDataService.QueryWindowRelationCollector(relation)!, end.AddDays(-30), end, 60);
@@ -529,7 +529,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [MemberData(nameof(BlockingRelations))]
     public async Task BlockingGrids_AReadUnderItsCap_KeepsTheCoverageNotice(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync(LocalDataService.QueryWindowRelationCollector(relation)!, end.AddDays(-30), end, 60);
         await SeedManyAsync(relation, end.AddHours(-5), end.AddHours(-1), 600);
@@ -547,7 +547,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [Fact]
     public async Task BlockedProcessReports_XeCollectionOff_ARangeStartingBeforeTheDmvCollector_NamesTheDmvCoverage()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var started = end.AddDays(-2);
         await SeedLogRunsAsync("dmv_blocking_snapshot", started, end, 60);
@@ -562,7 +562,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [Fact]
     public async Task BlockedProcessReports_XeCollectionOff_ARangeTheDmvCollectorCovers_ShowsNoNotice()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("dmv_blocking_snapshot", end.AddDays(-30), end, 60);
 
@@ -581,7 +581,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     [Fact]
     public async Task BlockedProcessReports_ADmvReadThatFillsItsCap_MergingToFewerRows_NamesItsOldestSnapshot()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var cap = LocalDataService.BlockedProcessReportGridCap;
         await SeedLogRunsAsync("dmv_blocking_snapshot", end.AddDays(-30), end, 60);
@@ -651,7 +651,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task DefaultTrace_ServerBehindUtc_HistoryBeforeTheFirstRun_NamesTheOldestEventInUtc()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var clock = ServerClock.FixedOffset(-300);
         var end = DateTime.UtcNow;
         var firstRun = end.AddDays(-2);
@@ -678,7 +678,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [InlineData(72.0)]
     public async Task DefaultTrace_ServerAheadOfUtc_OldestEventBeforeTheStartInUtc_ShowsNoNotice(double hoursBeforeStart)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var clock = ServerClock.FixedOffset(300);
         var end = DateTime.UtcNow;
         var start = end.AddDays(-7);
@@ -698,7 +698,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task DefaultTrace_ServerBehindUtc_OldestEventJustAfterTheStartInUtc_ShowsTheNotice()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var clock = ServerClock.FixedOffset(-300);
         var end = DateTime.UtcNow;
         var start = end.AddDays(-7);
@@ -718,7 +718,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task DefaultTrace_ServerBehindUtc_NoStoredHistory_NamesTheFirstRunInUtc()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var clock = ServerClock.FixedOffset(-300);
         var end = DateTime.UtcNow;
         var firstRun = end.AddDays(-2);
@@ -737,7 +737,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task DefaultTrace_WithoutAClock_UsesTheActiveServerClockLikeTheGrid()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var clock = ServerClock.FixedOffset(-300);
         var end = NowUtcSeconds();
         var start = end.AddDays(-7);
@@ -776,7 +776,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     public async Task DefaultTrace_RangeAcrossADaylightSavingChange_UsesTheOffsetOfTheRowsOwnDate(
         string startUtc, string endUtc, string oldestServerLocal, string expectedFloorUtc)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var clock = ServerClock.Resolve("Eastern Standard Time", -300);
         var start = DateTime.Parse(startUtc, CultureInfo.InvariantCulture);
         var end = DateTime.Parse(endUtc, CultureInfo.InvariantCulture);
@@ -799,7 +799,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task SystemHealth_UtcEventTime_IsNotShiftedByTheServerClock()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var relation = QueryWindowRelation.SystemHealthEvents;
         var end = DateTime.UtcNow;
         var oldest = end.AddDays(-4);
@@ -950,7 +950,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task TheGridReads_LimitIsTheSameConstantTheBannerCaps()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLongQueriesEverySecondsAsync(end.AddMinutes(-LocalDataService.LongQueryGridCap - 40), end.AddMinutes(-2), 60);
         await SeedLogRunsAsync("wait_stats", end.AddMinutes(-LocalDataService.CollectionLogGridCap - 40), end, 1);
@@ -974,7 +974,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task LongQueries_AReadThatFillsItsCap_NamesItsOldestRow_AlsoOverARangeTheStoreCovers()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("long_query_completions", end.AddDays(-30), end, 360);
         await SeedLongQueriesEverySecondsAsync(end.AddDays(-3), end.AddMinutes(-2), 5 * 60);
@@ -997,7 +997,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task LongQueries_TheCappedNotice_IsWordedAtTheEventTime_NotTheTimeTheRunStoredIt()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLongQueriesEverySecondsAsync(end.AddHours(-30), end.AddMinutes(-2), 5 * 60);
 
@@ -1030,7 +1030,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task LongQueries_AReadUnderItsCap_KeepsTheCoverageNotice()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddHours(-48);
         await SeedLogRunsAsync("long_query_completions", added, end, 5);
@@ -1048,7 +1048,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task LongQueries_ACoveredRangeUnderTheCap_ShowsNoNotice()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("long_query_completions", end.AddDays(-30), end, 360);
         await SeedLongQueriesEverySecondsAsync(end.AddHours(-5), end.AddHours(-4), 20 * 60);
@@ -1070,7 +1070,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task LongQueries_AOneHourRange_WhoseGridHitsItsCap_ShowsTheNoticeAtItsOldestRow_WithNoSlack()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLongQueriesEverySecondsAsync(end.AddMinutes(-40), end.AddMinutes(-2), 10);
 
@@ -1098,7 +1098,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [InlineData(1440, 1)]
     public async Task LongQueries_ARangeNoLongerThanTheSlack_MakesNoProbeCall(int rangeMinutes, int expectedProbeCalls)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("long_query_completions", end.AddDays(-2), end, 5);
         var service = Service();
@@ -1125,7 +1125,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task CollectionLog_AReadThatFillsItsCap_NamesItsOldestRow_AlsoOverARangeTheStoreCovers()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("wait_stats", end.AddDays(-20), end.AddDays(-20), 1);
         await SeedLogRunsAsync("wait_stats", end.AddHours(-12), end, 1);
@@ -1145,7 +1145,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task CollectionLog_AReadUnderItsCap_KeepsTheCoverageNotice()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddHours(-3);
         await SeedLogRunsAsync("wait_stats", added, end, 5);
@@ -1225,7 +1225,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task DurationTrends_ADayHoldingMoreRunsThanTheGridsPage_DrawsPointsAcrossTheWholeRange()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var start = end.AddHours(-24);
         foreach (var collector in new[] { "wait_stats", "cpu_utilization_stats", "memory_stats" })
@@ -1258,7 +1258,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     [Fact]
     public async Task DurationTrends_ASevenDayRange_DrawsEachBucketsSlowestRun_AndNamesTheAverageAndCountInTheHover()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var start = end.AddDays(-7);
         await SeedLogRunsAsync("wait_stats", start, end, 1);
@@ -1349,7 +1349,7 @@ VALUES ({_nextId++}, {Literal(collectedUtc)}, {ServerId}, '{ServerName}', {Liter
     [Fact]
     public async Task LongQueries_UnderTheCap_NameTheOldestCompletionShown_WhenItPredatesTheFirstRun()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var firstRun = new DateTime(end.AddHours(-48).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         await SeedLogRunsAsync("long_query_completions", firstRun, end, 60);
@@ -1369,7 +1369,7 @@ VALUES ({_nextId++}, {Literal(collectedUtc)}, {ServerId}, '{ServerName}', {Liter
     [Fact]
     public async Task LongQueries_UnderTheCap_StillNameTheFirstRun_WhenNoCompletionShownIsOlderThanIt()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var firstRun = new DateTime(end.AddHours(-48).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         await SeedLogRunsAsync("long_query_completions", firstRun, end, 60);

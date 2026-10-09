@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Tests;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -59,7 +60,7 @@ public sealed class QueryStatsTextAfterRankingTests : IDisposable
         _archiveDir = Path.Combine(_tempDir, "archive");
         Directory.CreateDirectory(_archiveDir);
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
-        _duckDb.InitializeAsync().GetAwaiter().GetResult();
+        _duckDb.InitializeFromTemplateAsync().GetAwaiter().GetResult();
     }
 
     public void Dispose()

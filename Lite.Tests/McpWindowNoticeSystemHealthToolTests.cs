@@ -186,7 +186,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task CollectionStartsInsideTheWindow_ReportsTheFloor_AndTheNote(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedLogRunsAsync(floor, Anchor, everyMinutes: 30);
         await SeedFirstAndLaterAsync(tool, floor);
@@ -208,7 +208,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AQuietStart_CollectedFromBeforeTheWindow_FirstEventTwoDaysIn_IsCovered(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         /* The collector has run since before the window and stored nothing until two days in: a quiet server looks exactly like
            this, and a probe that read only the window's events would call it truncated. */
         await SeedLogRunsAsync(WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
@@ -231,7 +231,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task ALateFirstEventOfThisType_OlderEventsOfAnotherType_NoRunsBeforeTheWindow_IsCovered(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         /* No collector run before the window; an event of another type sits before the window start, which proves the window is
            not the data's start even though the tool's own first event came a day before the anchor. */
         await SeedEventAsync(OtherTypeOf(tool), WindowStart.AddDays(-1));
@@ -255,7 +255,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task ADataAnswer_CarriesTheKeysRightAfterHoursBack(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedFirstAndLaterAsync(tool, Anchor.AddDays(-2));
 
@@ -283,7 +283,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AShortWindowWithRows_StartsNoProbe_AndIsCoveredAtTheRequestedStart(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedEventAsync(tool, Anchor.AddMinutes(-30));
 
         var root = Root(await CallAsync(tool, hoursBack: 1));
@@ -307,7 +307,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task ACappedPage_NextToAWindowFloor_LeavesTheNoticeUnchanged(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedLogRunsAsync(floor, Anchor, everyMinutes: 30);
         await SeedFirstAndLaterAsync(tool, floor);
@@ -337,7 +337,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEventOlderThanItsRun_FirstRunBackfill_NamesTheEvent_AndIsNotACut(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var firstRun = WindowStart.AddMinutes(100);
         var backfilled = WindowStart.AddMinutes(30);
         await SeedLogRunsAsync(firstRun, Anchor, everyMinutes: 30);
@@ -367,7 +367,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyWindow_PastCoverage_CarriesTheFloorAndTheNote_UnderHints(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         /* The collector ran for two days of a 7-day ask and the session stored an event of another type: the session IS read, so
            the answer is a measured empty, and only the keys say the older five days were never read. */
         await SeedLogRunsAsync(Anchor.AddDays(-2), Anchor, everyMinutes: 30);
@@ -386,7 +386,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyWindow_EventsCapturedButGatedOut_CarriesTheKeysUnderHints(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         /* An event of the tool's own type that its gate drops: the broker fixture's HIGH notification, or a wait under the duration floor. */
         var (eventType, fixture, _) = SourceOf(tool);
@@ -421,7 +421,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyWindow_EventsCapturedButGatedOut_OverACoveredWindow_KeepsTheHealthyAnswer(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(WindowStart.AddDays(-2), Anchor, everyMinutes: 30);
         var (eventType, fixture, _) = SourceOf(tool);
         var xml = LoadFixture(fixture);
@@ -455,7 +455,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyWindow_TheTypeSeenBeforeTheWindow_PicksTheCutVariant_ByTheNotice(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var (eventType, _, _) = SourceOf(tool);
 
         /* Cut, with a start: the collector ran for two days of the seven, and this type's only stored event is from after the
@@ -477,7 +477,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyWindow_TheTypeSeenBeforeTheWindow_NoStartToName_SaysNothingWasRead(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var (eventType, _, _) = SourceOf(tool);
         await SeedEventAsync(tool, WindowStart.AddDays(-9));
         await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
@@ -495,7 +495,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyWindow_TheTypeSeenBeforeTheWindow_OverACoveredWindow_KeepsGenuinelyQuiet(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedEventAsync(tool, WindowStart.AddDays(-1));
         await SeedLogRunsAsync(WindowStart.AddDays(-2), Anchor, everyMinutes: 30);
 
@@ -518,7 +518,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyWindow_TheStoreHoldsNothingIn_SaysNothingWasRead(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedEventAsync(tool, WindowStart.AddDays(-9));
         await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
 
@@ -535,7 +535,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyShortWindow_IsAlwaysProbed(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedEventAsync(OtherTypeOf(tool), WindowStart.AddDays(-9));
 
         var root = Root(await CallAsync(tool, hoursBack: 1));
@@ -556,7 +556,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     [InlineData(Tool.SignificantWaits)]
     public async Task AnEmptyWindow_TheCollectorCoveredFromBeforeIt_SaysCovered(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(WindowStart.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedEventAsync(OtherTypeOf(tool), WindowStart.AddDays(-1));
 
@@ -572,7 +572,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     [InlineData(Tool.SignificantWaits)]
     public async Task ANeverCapturedServer_IsUnavailable_AndStaysBare(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
 
         var root = Root(await CallAsync(tool));
 
