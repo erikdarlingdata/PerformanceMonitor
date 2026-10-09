@@ -1420,6 +1420,31 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>
+    /// The Lite shard script and its packer are test inputs, so every filter that gates a Lite run names them
+    /// (#5616). Without the entries a pull request that edits only one of them ran no shard at all.
+    /// </summary>
+    [Fact]
+    public void TheLiteFilters_NameTheShardScriptAndItsPacker()
+    {
+        var yaml = ReadBuildYaml(RepoRoot());
+
+        foreach (var filter in new[] { "lite", "lite_shard", "darling", "darling_full" })
+        {
+            var patterns = FilterPatterns(yaml, filter);
+            Assert.True(patterns.Count > 0, $"build.yml's '{filter}' filter is gone");
+            Assert.Contains(".github/scripts/run-lite-shard.ps1", patterns);
+            if (filter.StartsWith("lite", StringComparison.Ordinal))
+            {
+                Assert.Contains(".github/scripts/lite-shard-pack.py", patterns);
+            }
+            else
+            {
+                Assert.Contains(".github/scripts/run-darling-pg-shard.ps1", patterns);
+            }
+        }
+    }
+
+    /// <summary>
     /// The suite that reads the whole tree has to run on the whole tree.
     ///
     /// <para><see cref="EveryCrossAppSourceRead_IsReachableByTheFilterThatGatesItsSuite"/> above covers reads
@@ -2843,8 +2868,11 @@ public class CrossAppGuardCiGateTests
         /* And the run step honours the mode: the trait selection only in `reads`, the duration or hash cut otherwise. */
         var run = StepBlock(job, "Run Lite tests (shard)");
         Assert.Contains("LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}", run, StringComparison.Ordinal);
-        Assert.Contains("if ($env:LITE_SCOPE_MODE -eq 'reads')", run, StringComparison.Ordinal);
-        Assert.Contains("Get-LiteClasses @('-trait', 'Reads=Darling')", run, StringComparison.Ordinal);
+        Assert.Contains("-ScopeMode $env:LITE_SCOPE_MODE", run, StringComparison.Ordinal);
+        /* #5616: the cut itself is run-lite-shard.ps1, the one copy build.yml's legs and nightly.yml's legs both call. */
+        var body = ReadLiteShardScript(RepoRoot());
+        Assert.Contains("if ($ScopeMode -eq 'reads')", body, StringComparison.Ordinal);
+        Assert.Contains("Get-LiteClasses @('-trait', 'Reads=Darling')", body, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -2888,31 +2916,36 @@ public class CrossAppGuardCiGateTests
            later edit to the packer could keep every pin green and ship. Shard 0 alone runs it. */
         Assert.Contains("run: python .github/scripts/lite-shard-pack.py --self-test", job, StringComparison.Ordinal);
         Assert.Contains("\n        if: matrix.shard == 0\n", StepBlock(job, "Shard packer self-test"), StringComparison.Ordinal);
-        var run = StepBlock(job, "Run Lite tests (shard)");
-        Assert.Contains("LITE_TIMING_RUN: ${{ needs.gate.outputs.lite_timing_run }}", run, StringComparison.Ordinal);
-        Assert.Contains("LITE_TIMING_ARTIFACTS: ${{ needs.gate.outputs.lite_timing_artifacts }}", run, StringComparison.Ordinal);
-        Assert.Contains("GH_TOKEN: ${{ github.token }}", run, StringComparison.Ordinal);
-        Assert.Contains("gh run download $env:LITE_TIMING_RUN --pattern 'lite-tests-timing-*'", run, StringComparison.Ordinal);
+        var step = StepBlock(job, "Run Lite tests (shard)");
+        Assert.Contains("LITE_TIMING_RUN: ${{ needs.gate.outputs.lite_timing_run }}", step, StringComparison.Ordinal);
+        Assert.Contains("LITE_TIMING_ARTIFACTS: ${{ needs.gate.outputs.lite_timing_artifacts }}", step, StringComparison.Ordinal);
+        Assert.Contains("GH_TOKEN: ${{ github.token }}", step, StringComparison.Ordinal);
+        /* #5616: the step hands the pin to the shard script (run-lite-shard.ps1), which does the download and the cut. */
+        Assert.Contains("-TimingRun $env:LITE_TIMING_RUN -TimingArtifacts $env:LITE_TIMING_ARTIFACTS", step, StringComparison.Ordinal);
+        Assert.Contains("-ShardCount ${{ strategy.job-total }} -JobIndex ${{ strategy.job-index }}", step, StringComparison.Ordinal);
+        Assert.Contains("-Shard ${{ matrix.shard }}", step, StringComparison.Ordinal);
+        var run = ReadLiteShardScript(RepoRoot());
+        Assert.Contains("gh run download $TimingRun --pattern 'lite-tests-timing-*'", run, StringComparison.Ordinal);
         Assert.Contains("lite-shard-pack.py pack --classes", run, StringComparison.Ordinal);
         Assert.Contains("lite-shard-pack.py reconcile --classes", run, StringComparison.Ordinal);
 
-        var readsAt = run.IndexOf("if ($env:LITE_SCOPE_MODE -eq 'reads')", StringComparison.Ordinal);
-        var fullAt = run.IndexOf("\n          else {\n", readsAt, StringComparison.Ordinal);
+        var readsAt = run.IndexOf("if ($ScopeMode -eq 'reads')", StringComparison.Ordinal);
+        var fullAt = run.IndexOf("\nelse {\n", readsAt, StringComparison.Ordinal);
         Assert.True(readsAt > 0 && fullAt > readsAt, "the run step's reads/full branches moved — find them before editing this test");
         Assert.DoesNotContain("lite-shard-pack", run[readsAt..fullAt], StringComparison.Ordinal);
         Assert.Contains("lite-shard-pack", run[fullAt..], StringComparison.Ordinal);
 
         /* The shard count is the matrix's, never a literal: a literal 4 left behind by a matrix change drops classes. */
-        Assert.Contains("$shards = ${{ strategy.job-total }}", run, StringComparison.Ordinal);
+        Assert.Contains("$shards = $ShardCount", run, StringComparison.Ordinal);
         Assert.DoesNotContain("% 4", run, StringComparison.Ordinal);
-        Assert.Contains("($hash[0] % $shards) -eq ${{ matrix.shard }}", run, StringComparison.Ordinal);
+        Assert.Contains("($hash[0] % $shards) -eq $Shard", run, StringComparison.Ordinal);
 
         /* ...and job-total is the shard count only while `shard` is the matrix's one axis: a second axis (an OS, say)
            raises job-total while matrix.shard stays 0-3, so the packer would write buckets no leg reads and those
            classes would never run, with no leg selecting zero. On a one-axis matrix job-index IS the shard value, so
            each leg checks that and fails when it is not, before either cut uses $shards. */
-        Assert.Contains("if (${{ strategy.job-index }} -ne ${{ matrix.shard }}) { throw ", run, StringComparison.Ordinal);
-        Assert.Matches(@"\$shards = \$\{\{ strategy\.job-total \}\}\s+(?:#[^\r\n]*\s+)*if \(\$\{\{ strategy\.job-index \}\} -ne \$\{\{ matrix\.shard \}\}\) \{ throw [^\r\n]*\}\s+if \(\$env:LITE_TIMING_RUN -match ", run);
+        Assert.Contains("if ($JobIndex -ne $Shard) { throw ", run, StringComparison.Ordinal);
+        Assert.Matches(@"\$shards = \$ShardCount\s+(?:#[^\r\n]*\s+)*if \(\$JobIndex -ne \$Shard\) \{ throw [^\r\n]*\}\s+if \(\$TimingRun -match ", run);
 
         /* The download is tried three times, and every try starts from an EMPTY folder: gh extracts each file
            create-exclusive, so a file a partial try left would make tries 2 and 3 fail too. The native-command
@@ -2929,7 +2962,7 @@ public class CrossAppGuardCiGateTests
         Assert.Matches(@"-ne \(\$got -join ','\)\) \{ throw ", run);
         Assert.Matches(@"if \(\$packExit -ne 0\) \{ throw ", run);
         Assert.Matches(@"reconcile --classes \$classesFile --shards \$shards --out \$planDir\s+if \(\$LASTEXITCODE -ne 0\) \{ throw ", run);
-        Assert.Contains("if ($env:LITE_TIMING_RUN -match '^\\d+$')", run, StringComparison.Ordinal);
+        Assert.Contains("if ($TimingRun -match '^\\d+$')", run, StringComparison.Ordinal);
 
         /* The logged plan id hashes each shard's file under its own label, so two different partitions of the same
            classes cannot share an id, and the notice says every shard must print the same id instead of claiming
@@ -3086,17 +3119,17 @@ public class CrossAppGuardCiGateTests
                 .Where(line => !line.TrimStart().StartsWith('#'))
                 .ToArray();
 
-            // build.yml has two: the Lite shard packer's timings and (#5459, shadow mode) the nightly's test map. The
-            // second reads a NIGHTLY run, never a build.yml run, so a cancelled push run cannot starve it, and its
-            // selection is not used to skip anything.
+            // build.yml has one: (#5459, shadow mode) the nightly's test map. It reads a NIGHTLY run, never a build.yml
+            // run, so a cancelled push run cannot starve it, and its selection is not used to skip anything. The Lite
+            // shard packer's timings download (#5208) moved with the shard cut into run-lite-shard.ps1 (#5616), checked
+            // below; no workflow step has it any more.
             var downloadLines = code.Where(line => line.Contains("gh run download", StringComparison.Ordinal)).ToArray();
             var downloads = downloadLines.Length;
             Assert.True(
-                downloads == (name == "build.yml" ? 2 : 0),
-                $"{name} has {downloads} 'gh run download' line(s); only build.yml may have them, one for the Lite shard step and one for the shadow-mode test map.");
+                downloads == (name == "build.yml" ? 1 : 0),
+                $"{name} has {downloads} 'gh run download' line(s); only build.yml may have one, for the shadow-mode test map.");
             if (name == "build.yml")
             {
-                Assert.Single(downloadLines, line => line.Contains("--pattern 'lite-tests-timing-*'", StringComparison.Ordinal));
                 Assert.Single(downloadLines, line => line.Contains("-n test-map ", StringComparison.Ordinal));
             }
 
@@ -3124,10 +3157,21 @@ public class CrossAppGuardCiGateTests
             Assert.Contains("name: ${{ needs.guard-tests.outputs.", fetch, StringComparison.Ordinal);
         }
 
-        /* The one download sits in the Lite shard step, which is also what the comment above the concurrency
-           block names, so the prose and the code cannot part ways quietly. */
+        /* The packer's download sits in the Lite shard script that the shard step calls (#5616), which is also what the
+           comment above the concurrency block names, so the prose and the code cannot part ways quietly. The script
+           is the only one of its kind: no other script in the folder downloads another run's artifacts, and the
+           nightly's own copy of the step is the same script call with no timing source. */
         var shardStep = StepBlock(JobBlock(build, "lite-tests"), "Run Lite tests (shard)");
-        Assert.Contains("gh run download", shardStep, StringComparison.Ordinal);
+        Assert.Contains("run-lite-shard.ps1", shardStep, StringComparison.Ordinal);
+        var scriptsDir = Path.Combine(RepoRoot(), ".github", "scripts");
+        var scriptDownloads = Directory.GetFiles(scriptsDir, "*.ps1")
+            .Where(f => File.ReadAllLines(f).Any(l => !l.TrimStart().StartsWith('#') && l.Contains("gh run download", StringComparison.Ordinal)))
+            .Select(Path.GetFileName)
+            .ToArray();
+        Assert.Equal(new[] { "run-lite-shard.ps1" }, scriptDownloads);
+        Assert.Single(
+            File.ReadAllLines(Path.Combine(scriptsDir, "run-lite-shard.ps1")),
+            l => !l.TrimStart().StartsWith('#') && l.Contains("gh run download", StringComparison.Ordinal) && l.Contains("--pattern 'lite-tests-timing-*'", StringComparison.Ordinal));
         Assert.Contains("the Lite shard packer", build[..build.IndexOf("\nconcurrency:\n", StringComparison.Ordinal)], StringComparison.Ordinal);
     }
 
@@ -3168,6 +3212,10 @@ public class CrossAppGuardCiGateTests
         Assert.Contains(message, first, StringComparison.Ordinal);
         Assert.Contains("exit 1", first, StringComparison.Ordinal);
     }
+
+    /// <summary>The Lite shard script (#5616) both workflows call, LF-normalised.</summary>
+    internal static string ReadLiteShardScript(string repo) =>
+        File.ReadAllText(Path.Combine(repo, ".github", "scripts", "run-lite-shard.ps1")).Replace("\r\n", "\n", StringComparison.Ordinal);
 
     private static string ReadBuildYaml(string repo) =>
         File.ReadAllText(Path.Combine(repo, ".github", "workflows", "build.yml"))

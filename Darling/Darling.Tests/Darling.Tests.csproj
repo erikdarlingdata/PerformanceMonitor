@@ -119,6 +119,11 @@
          thing that keeps CI's cluster shaped like the product's as the catalog grows. -->
     <None Include="..\..\.github\workflows\build.yml" Link="Fixtures\build.yml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\.github\workflows\nightly.yml" Link="Fixtures\nightly.yml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #5616: the shard scripts both workflows call. The cut, the chunking and the per-chunk runs moved out of the
+         workflow steps into them, so the pins that read those steps (CiShardCommandLineBudgetTests,
+         CiShardHangReportTests) read these copies. -->
+    <None Include="..\..\.github\scripts\run-darling-pg-shard.ps1" Link="Fixtures\run-darling-pg-shard.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\.github\scripts\run-lite-shard.ps1" Link="Fixtures\run-lite-shard.ps1" CopyToOutputDirectory="PreserveNewest" />
     <!-- #3072: Darling/README.md, copied beside the test binary so ReadmeDerivedCountPinTests parses
          the REAL file. Its collector-inventory, V1-table, hypertable and worker-sizing figures are
          restatements of CollectorCatalog.All / TimescaleSupport.HypertableCount, and prose cannot call

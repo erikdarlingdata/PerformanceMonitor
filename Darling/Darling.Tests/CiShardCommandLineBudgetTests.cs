@@ -17,8 +17,10 @@ namespace Darling.Tests;
 /// #5100: the sharded test steps in <c>build.yml</c> pass every class of the shard as a <c>-class</c>
 /// argument. Windows CreateProcess caps the whole command line at 32,767 characters, and one Darling
 /// shard's arguments alone reached ~32,660. Each step therefore splits its class list into chunks under a
-/// named character budget and runs the test host once per chunk. These are source pins on the workflow
-/// text, because the step only runs on a Windows runner.
+/// named character budget and runs the test host once per chunk. These are source pins, because the step only
+/// runs on a Windows runner. #5616: that logic is one PowerShell script per suite
+/// (<c>.github/scripts/run-darling-pg-shard.ps1</c>, <c>run-lite-shard.ps1</c>) that build.yml's PR legs and
+/// nightly.yml's legs both call, so the pins read the scripts; the workflow steps only pass arguments.
 /// </summary>
 public sealed class CiShardCommandLineBudgetTests
 {
@@ -76,7 +78,11 @@ public sealed class CiShardCommandLineBudgetTests
     public void DarlingStep_GivesEachChunkItsOwnTrx()
     {
         var step = ReadStep("Run Darling PG tests");
-        Assert.Contains("TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx", step);
+        Assert.Contains("TestResults/$ResultPrefix-${Shard}-$chunkNumber.trx", step);
+
+        // ...and each caller names its own prefix, so the PR legs and the nightly's legs never write the same file.
+        Assert.Contains("-ResultPrefix darling-pr ", ReadWorkflowStep("build.yml", "Run Darling PG tests"));
+        Assert.Contains("-ResultPrefix darling-nightly ", ReadWorkflowStep("nightly.yml", "Run Darling PG tests"));
     }
 
     [Fact]
@@ -103,13 +109,22 @@ public sealed class CiShardCommandLineBudgetTests
         return step.Substring(start, end + endMarker.Length - start).Replace("\r\n", "\n");
     }
 
+    /// <summary>The shard script the named step calls (#5616), linked into Fixtures by Darling.Tests.csproj.</summary>
     private static string ReadStep(string stepName)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "build.yml");
-        Assert.True(File.Exists(path), "build.yml was not copied beside the test binary (Darling.Tests.csproj links it into Fixtures\\).");
+        var file = stepName == "Run Darling PG tests" ? "run-darling-pg-shard.ps1" : "run-lite-shard.ps1";
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", file);
+        Assert.True(File.Exists(path), $"{file} was not copied beside the test binary (Darling.Tests.csproj links it into Fixtures\\).");
+        return File.ReadAllText(path).Replace("\r\n", "\n");
+    }
+
+    private static string ReadWorkflowStep(string workflow, string stepName)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", workflow);
+        Assert.True(File.Exists(path), $"{workflow} was not copied beside the test binary (Darling.Tests.csproj links it into Fixtures\\).");
         var text = File.ReadAllText(path);
         var start = text.IndexOf("- name: " + stepName, StringComparison.Ordinal);
-        Assert.True(start >= 0, $"build.yml has no step named '{stepName}'.");
+        Assert.True(start >= 0, $"{workflow} has no step named '{stepName}'.");
         var next = Regex.Match(text[(start + 1)..], @"\r?\n      - name: |\r?\n  [a-z][\w-]*:\r?\n");
         return next.Success ? text.Substring(start, next.Index + 1) : text[start..];
     }

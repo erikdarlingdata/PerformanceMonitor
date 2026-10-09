@@ -282,14 +282,25 @@ public sealed class SlowClassCensusTests
     {
         var yml = File.ReadAllText(Path.Combine(Root(), ".github", "workflows", "build.yml"));
 
-        // darling-pg shards and the build job's whole-suite pass (Darling); the Lite shards (Lite). The whole-tree guards job
-        // is deliberately NOT here: CrossAppGuardCiGateTests pins its invocation whole, and the backstop exemptions rest on it.
-        Assert.Equal(2, Regex.Matches(yml, @"slow-skip --suite darling --event \$env:SLOW_EVENT --repo \$env:SLOW_REPO --pr \$env:SLOW_PR").Count);
-        Assert.Single(Regex.Matches(yml, @"slow-skip --suite lite --event \$env:SLOW_EVENT --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
+        // #5616: the shard cut moved into one script per suite, which build.yml's legs and nightly.yml's legs both call.
+        // The build job's whole-suite pass (Darling) stays inline; the Darling shards and the Lite shards are the scripts.
+        // The whole-tree guards job is deliberately NOT here: CrossAppGuardCiGateTests pins its invocation whole, and the
+        // backstop exemptions rest on it.
+        var darlingShard = File.ReadAllText(Path.Combine(Root(), ".github", "scripts", "run-darling-pg-shard.ps1"));
+        var liteShard = File.ReadAllText(Path.Combine(Root(), ".github", "scripts", "run-lite-shard.ps1"));
+        Assert.Single(Regex.Matches(yml, @"slow-skip --suite darling --event \$env:SLOW_EVENT --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
+        Assert.Single(Regex.Matches(darlingShard, @"slow-skip --suite darling --event \$EventName --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
+        Assert.Single(Regex.Matches(liteShard, @"slow-skip --suite lite --event \$EventName --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
+        Assert.DoesNotContain("slow-skip", File.ReadAllText(Path.Combine(Root(), ".github", "workflows", "nightly.yml")), StringComparison.Ordinal);
 
-        // Each use sits inside an `$env:SLOW_EVENT -eq 'pull_request'` condition, so a push, a merge-queue run, the
-        // nightly and a release run every class.
-        Assert.Equal(3, Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request'").Count);
+        // Each use sits inside a `pull_request` condition, so a push, a merge-queue run, the nightly (whose legs pass no
+        // event) and a release run every class.
+        Assert.Single(Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request'"));
+        Assert.Single(Regex.Matches(darlingShard, @"\$EventName -eq 'pull_request'"));
+        Assert.Single(Regex.Matches(liteShard, @"\$EventName -eq 'pull_request'"));
+
+        // The two shard steps hand the event on from the environment they set, and the nightly passes none.
+        Assert.Equal(2, Regex.Matches(yml, @"run-(darling-pg|lite)-shard\.ps1 [^\r\n]*-EventName \$env:SLOW_EVENT").Count);
 
         // And the environment each of the three steps reads is set from the run.
         Assert.Equal(3, Regex.Matches(yml, @"SLOW_EVENT: \$\{\{ github\.event_name \}\}").Count);

@@ -53,13 +53,14 @@ public sealed class CiShardHangReportTests
     [InlineData("Run Lite tests (shard)")]
     public void ShardStep_AsksTheRunnerToNameALongRunningTest_AndKeepsTheRunnerOutput(string stepName)
     {
-        var step = ReadStep(stepName);
+        // #5616: the chunk loop lives in the shard script both workflows call, so the runner's flags are read from it.
+        var step = ReadShardScript(stepName);
 
         var longRunning = Regex.Match(step, @"dotnet\s+run\s+[^\r\n]*@chunkArgs[^\r\n]*\s-longRunning\s+(?<n>\d+)\b");
         Assert.True(longRunning.Success, $"'{stepName}' does not pass -longRunning to the chunk's runner, so a hung test is not named.");
         Assert.InRange(int.Parse(longRunning.Groups["n"].Value), MinLongRunningSeconds, MaxLongRunningSeconds);
 
-        Assert.Matches(@"dotnet\s+run\s+[^\r\n]*@chunkArgs[^\r\n]*\|\s*Tee-Object\s+-FilePath\s+TestResults/(darling|lite)-runner-\$\{\{ matrix\.shard \}\}\.log\s+-Append", step);
+        Assert.Matches(@"dotnet\s+run\s+[^\r\n]*@chunkArgs[^\r\n]*\|\s*Tee-Object\s+-FilePath\s+TestResults/(darling|lite)-runner-\$\{Shard\}\.log\s+-Append", step);
         Assert.Matches(@"New-Item\s+-ItemType\s+Directory\s+-Force\s+-Path\s+TestResults", step);
     }
 
@@ -92,44 +93,56 @@ public sealed class CiShardHangReportTests
     }
 
     /// <summary>
-    /// #5587, nightly.yml: the same hang report for the single-process nightly steps. The step must still fail when the
-    /// runner fails, so the pipe to <c>Tee-Object</c> is followed by a check of <c>$LASTEXITCODE</c>.
+    /// #5587, #5616, nightly.yml: the nightly's shard steps call the same scripts as build.yml's, so the hang report
+    /// (<c>-longRunning</c> and the teed runner log) is the script's, and the step must pass the script's shard
+    /// arguments and no event: the nightly runs every class, so it must not pass <c>-EventName</c>.
     /// </summary>
     [Theory]
-    [InlineData("Run tests", "lite")]
-    [InlineData("Run Darling PG tests", "darling")]
-    public void NightlyStep_AsksTheRunnerToNameALongRunningTest_KeepsTheRunnerOutput_AndStillFailsWithTheRunner(string stepName, string product)
+    [InlineData("Run Lite tests (shard)", "run-lite-shard.ps1")]
+    [InlineData("Run Darling PG tests", "run-darling-pg-shard.ps1")]
+    public void NightlyStep_CallsTheSharedShardScript_WithItsShardAndNoEvent(string stepName, string script)
     {
         var step = ReadStep(stepName, "nightly.yml");
 
-        var longRunning = Regex.Match(step, @"dotnet\s+run\s+[^\r\n]*\s-longRunning\s+(?<n>\d+)\b");
-        Assert.True(longRunning.Success, $"nightly.yml '{stepName}' does not pass -longRunning to the runner, so a hung test is not named.");
-        Assert.InRange(int.Parse(longRunning.Groups["n"].Value), MinLongRunningSeconds, MaxLongRunningSeconds);
-
-        Assert.Matches(@"dotnet\s+run\s+[^\r\n]*\|\s*Tee-Object\s+-FilePath\s+TestResults/" + product + @"-runner-nightly\.log\s*(\r?\n)", step);
-        Assert.Matches(@"New-Item\s+-ItemType\s+Directory\s+-Force\s+-Path\s+TestResults", step);
-        Assert.Matches(@"Tee-Object[^\r\n]*\r?\n\s*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}", step);
         Assert.Matches(@"(?m)^        shell:\s*pwsh\s*$", step);
+        Assert.Contains("./.github/scripts/" + script + " -Shard ${{ matrix.shard }} -ShardCount ${{ strategy.job-total }}", step, StringComparison.Ordinal);
+        Assert.DoesNotContain("-EventName", step, StringComparison.Ordinal);
+        Assert.DoesNotContain("-GuardBuildUsed", step, StringComparison.Ordinal);
+        Assert.DoesNotContain("-TimingRun", step, StringComparison.Ordinal);
+        Assert.DoesNotContain("dotnet run", step, StringComparison.Ordinal);
+
+        // The hang report and the exit-code propagation live once, in the script: the runner is asked for -longRunning
+        // and its output is teed, and a failing chunk fails the script (and so the step).
+        var body = ReadShardScript(stepName);
+        var longRunning = Regex.Match(body, @"dotnet\s+run\s+[^\r\n]*@chunkArgs[^\r\n]*\s-longRunning\s+(?<n>\d+)\b");
+        Assert.True(longRunning.Success, $"{script} does not pass -longRunning to the chunk's runner, so a hung test is not named.");
+        Assert.InRange(int.Parse(longRunning.Groups["n"].Value), MinLongRunningSeconds, MaxLongRunningSeconds);
+        Assert.Matches(@"\$failedChunks\s+-gt\s+0\)[^\r\n]*exit\s+1", body);
     }
 
     /// <summary>
-    /// #5587, nightly.yml: step timeouts from the last 5 completed nightly runs on dev (2026-10-06 to 2026-10-08). Lite:
-    /// the step took 32.4 to 44.2 minutes and the job 4.9 minutes more at most, so with the job's 150 the timeout is
-    /// 150 - 4.9 - 5 = 140, and 44.2 is 32% of it. Darling: 32.2 to 41.2 minutes in a job of 60, so 60 - 5.1 - 5 = 49 and
-    /// 41.2 is 84% of it, over the 70% bar; the Darling step has no timeout of its own and says why in its comment.
+    /// #5587, #5616, nightly.yml: step timeouts from numbers. Lite: build.yml's four legs ran the step for 5.6 to 19.9
+    /// minutes over the last 7 successful dev pushes; the nightly's hash cut is less even, so the step gets twice that
+    /// (40) in a job of 50, and 19.9 is 50% of it, under the 70% bar. Darling: build.yml's six legs ran 5.5 to 10.9
+    /// minutes, the step gets build.yml's 22 in a job of 40, and 10.9 is 50% of it.
     /// </summary>
     [Fact]
     public void NightlyStepTimeouts_FollowTheMeasuredNumbers()
     {
-        var lite = ReadStep("Run tests", "nightly.yml");
-        var timeout = Regex.Match(lite, @"(?m)^        timeout-minutes:\s*(?<n>\d+)\s*$");
-        Assert.True(timeout.Success, "nightly.yml 'Run tests' (Lite) has no step-level timeout-minutes.");
-        Assert.InRange(int.Parse(timeout.Groups["n"].Value), 60, 145);
+        var yml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "nightly.yml")).Replace("\r\n", "\n");
+        foreach (var (job, stepName, maxJob) in new[] { ("lite-tests", "Run Lite tests (shard)", 50), ("darling-pg", "Run Darling PG tests", 40) })
+        {
+            var step = ReadStep(stepName, "nightly.yml");
+            var timeout = Regex.Match(step, @"(?m)^        timeout-minutes:\s*(?<n>\d+)\s*$");
+            Assert.True(timeout.Success, $"nightly.yml '{stepName}' has no step-level timeout-minutes.");
 
-        var darling = ReadStep("Run Darling PG tests", "nightly.yml");
-        Assert.DoesNotMatch(@"(?m)^        timeout-minutes:", darling);
-        Assert.Contains("NO step timeout, from numbers",
-            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "nightly.yml")), StringComparison.Ordinal);
+            var jobStart = yml.IndexOf("\n  " + job + ":\n", StringComparison.Ordinal);
+            Assert.True(jobStart >= 0, $"nightly.yml has no job '{job}'.");
+            var jobTimeout = Regex.Match(yml[jobStart..], @"(?m)^    timeout-minutes:\s*(?<n>\d+)\s*$");
+            Assert.True(jobTimeout.Success && int.Parse(jobTimeout.Groups["n"].Value) == maxJob,
+                $"nightly.yml job '{job}' timeout is not {maxJob}.");
+            Assert.InRange(int.Parse(timeout.Groups["n"].Value), 20, maxJob - 10);
+        }
     }
 
     [Fact]
@@ -138,13 +151,13 @@ public sealed class CiShardHangReportTests
         var lite = ReadStep("Upload Lite runner output", "nightly.yml");
         Assert.Matches(@"(?m)^        if:\s*always\(\)", lite);
         Assert.Contains("TestResults/lite-runner-*.log", lite, StringComparison.Ordinal);
-        Assert.Contains("lite-runner-log-nightly", lite, StringComparison.Ordinal);
+        Assert.Contains("lite-runner-log-nightly-${{ matrix.shard }}", lite, StringComparison.Ordinal);
         Assert.Matches(@"(?m)^        timeout-minutes:\s*\d+", lite);
 
         var darling = ReadStep("Upload Darling runner output", "nightly.yml");
         Assert.Matches(@"(?m)^        if:\s*always\(\)", darling);
         Assert.Contains("TestResults/darling-runner-*.log", darling, StringComparison.Ordinal);
-        Assert.Contains("darling-runner-log-nightly", darling, StringComparison.Ordinal);
+        Assert.Contains("darling-runner-log-nightly-${{ matrix.shard }}", darling, StringComparison.Ordinal);
         Assert.Matches(@"(?m)^        timeout-minutes:\s*\d+", darling);
 
         var failure = ReadStep("Upload PG log and test results on failure", "nightly.yml");
@@ -185,6 +198,15 @@ public sealed class CiShardHangReportTests
 
     private static string ReadSiblingSource(string file, [CallerFilePath] string callerFile = "") =>
         File.ReadAllText(Path.Combine(Path.GetDirectoryName(callerFile)!, file)).Replace("\r\n", "\n");
+
+    /// <summary>The shard script the named step calls (#5616), read from the copy linked into Fixtures.</summary>
+    private static string ReadShardScript(string stepName)
+    {
+        var file = stepName == "Run Darling PG tests" ? "run-darling-pg-shard.ps1" : "run-lite-shard.ps1";
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", file);
+        Assert.True(File.Exists(path), $"{file} was not copied beside the test binary (Darling.Tests.csproj links it into Fixtures\\).");
+        return File.ReadAllText(path).Replace("\r\n", "\n");
+    }
 
     private static string ReadStep(string stepName, string workflow = "build.yml")
     {

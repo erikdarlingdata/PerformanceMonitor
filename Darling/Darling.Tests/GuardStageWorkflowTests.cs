@@ -436,9 +436,19 @@ public sealed class GuardStageWorkflowTests
             "the check has to come before setup-dotnet, whose cache input reads its output");
 
         /* Guard is left out only through the one filter the check's output feeds; there is no literal exclusion. */
-        var run = Step(job, runStep);
-        Assert.Contains("GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}", run, StringComparison.Ordinal);
-        Assert.Contains("$guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })", run, StringComparison.Ordinal);
+        var step = Step(job, runStep);
+        Assert.Contains("GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}", step, StringComparison.Ordinal);
+        /* #5616: the two shard jobs hand the flag to a shard script (run-darling-pg-shard.ps1, run-lite-shard.ps1) that holds
+           the listing, so the filter is read from the script; the tree-guards job keeps its listing inline. */
+        var run = step;
+        var filterLine = "$guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })";
+        if (jobKey != "darling-tree-guards")
+        {
+            Assert.Contains("-GuardBuildUsed $env:GUARD_BUILD_USED", step, StringComparison.Ordinal);
+            run = RepoFile.ReadRepoFileLf(".github", "scripts", jobKey == "darling-pg" ? "run-darling-pg-shard.ps1" : "run-lite-shard.ps1");
+            filterLine = "$guardFilter = @(if ($GuardBuildUsed -eq 'true') { '-trait-'; 'Stage=Guard' })";
+        }
+        Assert.Contains(filterLine, run, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(run, "'-trait-'"));
         Assert.DoesNotContain("-trait- Stage=Guard", run, StringComparison.Ordinal);
 
