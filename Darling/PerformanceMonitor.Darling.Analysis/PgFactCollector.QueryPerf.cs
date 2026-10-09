@@ -1007,8 +1007,10 @@ AND   m.plan_id = ANY($3)";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* The check could not run, so the candidate stays, as it did before the check existed. Only the exception's
-               type is logged: a plan holds customer values. */
+            /* The check could not run, so the candidate stays, as it did before the check existed, and the failure is
+               recorded under the fact's family so the missing check is not mistaken for a clean one (#2826). Only the
+               exception's type is logged: a plan holds customer values. */
+            ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync));
             _logger?.LogWarning(
                 "[PgFactCollector] The PLAN_REGRESSION input check could not read a plan on server {ServerId} ({ExceptionType}); the candidate is kept unverified",
                 context.ServerId, ex.GetType().Name);

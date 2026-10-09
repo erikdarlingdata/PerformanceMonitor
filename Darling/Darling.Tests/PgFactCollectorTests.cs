@@ -312,7 +312,10 @@ public sealed class PgFactCollectorTests
                     views.Contains(target) || tables.Contains(target) || ctes.Contains(target)
                         || target == QueryStoreIntervalLatest.TableName
                         /* #5448: the daily-totals twin reads the per-day table beside it. */
-                        || target == "plan_regression_daily",
+                        || target == "plan_regression_daily"
+                        /* #5630: the PLAN_REGRESSION read joins the statement text dimension for the recompile hint, as
+                           the drill-down does (#2150). */
+                        || target == "query_store_text",
                     $"FROM/JOIN target '{target}' resolves to no V4 view, collector table, or CTE in:\n{sql}");
             }
         }

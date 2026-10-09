@@ -228,12 +228,6 @@ public sealed class PlanRegressionInputsLiveTests
         const string LookupText = "SELECT i.item_id FROM dbo.item AS i WHERE i.package_id = @package_id OPTION (RECOMPILE)";
         const string RealText = "SELECT o.order_id FROM dbo.orders AS o WHERE o.customer_id = @location_id";
 
-        if (intervalTable)
-        {
-            await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
-        }
-
-        try
         {
             if (intervalTable)
             {
@@ -287,13 +281,6 @@ public sealed class PlanRegressionInputsLiveTests
             await InsertTextAsync(connection, ServerId, Withheld, SensitiveStatements.PlaceholderText, periodEnd, ct);
             await InsertPlanAsync(connection, 71, SensitiveStatements.Xml(PlanFor(secret, "(5)"))!, gz: true, periodEnd, ct);
             await InsertPlanAsync(connection, 72, SensitiveStatements.Xml(PlanFor(secret, "(5)"))!, gz: true, periodEnd, ct);
-        }
-        finally
-        {
-            if (intervalTable)
-            {
-                await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late", ct);
-            }
         }
 
         if (intervalTable)
@@ -415,12 +402,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $10, $11, $12, $13,
         map.Parameters.AddWithValue("0x5630");
         map.Parameters.AddWithValue(NpgsqlDbType.Timestamp, lastSeen);
         await map.ExecuteNonQueryAsync(ct);
-    }
-
-    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = LiveTimeoutSeconds };
-        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<NpgsqlConnection> OpenWithSearchPathAsync(string connectionString, CancellationToken ct)
