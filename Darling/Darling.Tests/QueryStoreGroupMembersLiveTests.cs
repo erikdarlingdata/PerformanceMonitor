@@ -71,14 +71,14 @@ public sealed class QueryStoreGroupMembersLiveTests
             + "'m' || (g % 50), 'db' || g FROM generate_series(1, 6000) AS g", ct);
         await ExecAsync(connection, "ANALYZE collect.query_store_interval_wide", ct);
 
-        /* A positive n_distinct is the count itself. */
-        Assert.Equal(50L, await QueryStoreGroupMembers.ResolveAsync(connection, moduleName, 3, ct));
+        /* A positive n_distinct is the count itself, times the safety factor of 4. */
+        Assert.Equal(200L, await QueryStoreGroupMembers.ResolveAsync(connection, moduleName, 3, ct));
 
-        /* A negative n_distinct (-1: every row distinct) is a fraction of reltuples, so it is the row count. */
+        /* A negative n_distinct (-1: every row distinct) is a fraction of reltuples, so it is the row count, times the safety factor. */
         var reltuples = Convert.ToInt64(await ScalarAsync(connection,
             "SELECT reltuples::bigint FROM pg_class WHERE oid = 'collect.query_store_interval_wide'::regclass", ct), System.Globalization.CultureInfo.InvariantCulture);
         Assert.Equal(6000L, reltuples);
-        Assert.Equal(6000L, await QueryStoreGroupMembers.ResolveAsync(connection, databaseName, 3, ct));
+        Assert.Equal(24000L, await QueryStoreGroupMembers.ResolveAsync(connection, databaseName, 3, ct));
 
         /* The partitioned parent has its statistics inherited, and no non-inherited row: the lookup must ask for the inherited ones. */
         Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection,
@@ -88,13 +88,13 @@ public sealed class QueryStoreGroupMembersLiveTests
             "SELECT count(*) FROM pg_stats WHERE schemaname = 'collect' AND tablename = 'query_store_interval_wide' AND attname = 'module_name' AND NOT inherited", ct),
             System.Globalization.CultureInfo.InvariantCulture));
 
-        /* server is the servers in scope, exactly; the product of several dimensions is the product of the counts. */
+        /* server is the servers in scope, exactly (no factor); the product of several dimensions is the product of the counts, the n_distinct one times 4. */
         var serverOnly = QueryStoreRankedHarness.Parse(Panel("server"));
         Assert.Equal(43L, await QueryStoreGroupMembers.ResolveAsync(connection, serverOnly, 43, ct));
         var both = QueryStoreRankedHarness.Parse(
             "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":10,"
             + "\"groupBy\":[\"server\",\"module_name\"],\"viz\":\"line\"}");
-        Assert.Equal(150L, await QueryStoreGroupMembers.ResolveAsync(connection, both, 3, ct));
+        Assert.Equal(600L, await QueryStoreGroupMembers.ResolveAsync(connection, both, 3, ct));
 
         /* query_hash has no bound this lookup can give: unknown. A panel that is not a RankedTimeSeries asks for nothing. */
         Assert.Null(await QueryStoreGroupMembers.ResolveAsync(connection, QueryStoreRankedHarness.Parse(Panel("query_hash")), 3, ct));

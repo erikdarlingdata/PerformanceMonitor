@@ -49,7 +49,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// every run whose names are all registered) adds nothing to the SQL or to the parameters.
 /// <see cref="QueryStoreGroupMembers"/> (#5582) is the runner's count of the members of a Query Store RankedTimeSeries panel's group
 /// dimension(s), the product when there are several: the servers in scope for <c>server</c>, and <c>pg_stats.n_distinct</c> of the
-/// wide parent for <c>database_name</c> and <c>module_name</c> (a high figure, since it counts all retention). Null (the default, and
+/// wide parent for <c>database_name</c> and <c>module_name</c>, each times <see cref="QueryStoreGroupMembers.NDistinctSafetyFactor"/>
+/// (a sampled estimate runs low for a long-tailed column). Null (the default, and
 /// every run that could not count) means unknown, and unknown compiles the two-scan text: the single-scan base CTE holds buckets x
 /// members rows, which only a known count can bound by <see cref="ComposeLimits.MaxSingleScanBaseRows"/>.
 /// <see cref="QueryStoreStampThrough"/> (#5582, part 3) is the instant below which the Query Store compose rollup answers a wide-route read
