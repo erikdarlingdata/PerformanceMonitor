@@ -257,7 +257,8 @@ public sealed partial class DarlingMcpServerAdminTools
     /// envelope with the submitted secret redacted, because a driver's message can quote it.
     /// </summary>
     internal static async Task<string> EditServerByIdAsync(
-        NpgsqlDataSource postgres, int serverId, string changesJson, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, string changesJson, ILogger? logger, CancellationToken cancellationToken,
+        ILogger? probeLogger = null)
     {
         string?[] submittedSecrets = [];
         try
@@ -270,7 +271,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
             submittedSecrets = [changes!.Password, changes.AwsExternalId];
             return await EditServerCoreAsync(
-                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken);
+                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken, probeLogger);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -282,12 +283,13 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary>The core over a changes string: parses it, then runs <see cref="EditServerCoreAsync(IServerEditStore, int, ServerEditChanges, ServerProbe, IPasswordKeyRing, ILogger?, CancellationToken)"/>.
     /// An unparseable body is <c>invalid</c> without a store read.</summary>
     internal static async Task<string> EditServerCoreAsync(
-        IServerEditStore store, int serverId, string changesJson, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
+        IServerEditStore store, int serverId, string changesJson, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
+        ILogger? probeLogger = null)
     {
         var (changes, error) = ParseEditChanges(changesJson);
         return error != null
             ? Outcome(EditStatus.Invalid, error)
-            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken);
+            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken, probeLogger);
     }
 
     /// <summary>
@@ -295,7 +297,8 @@ public sealed partial class DarlingMcpServerAdminTools
     /// outcome is an answer; only an unexpected store fault throws (the caller turns it into the error envelope).
     /// </summary>
     internal static async Task<string> EditServerCoreAsync(
-        IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
+        IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
+        ILogger? probeLogger = null)
     {
         var row = await store.ReadRowAsync(serverId, cancellationToken);
         if (row is null)
@@ -343,8 +346,10 @@ public sealed partial class DarlingMcpServerAdminTools
             var probeResult = await probe(plan.ProbeConfig, cancellationToken);
             if (!probeResult.Success)
             {
-                var detail = string.IsNullOrWhiteSpace(probeResult.Error) ? "Could not connect to the server." : $"Could not connect: {probeResult.Error}";
-                return Outcome(EditStatus.ConnectionFailed, RedactEditSecret(detail, plan.PlaintextSecret, plan.PlaintextExternalId) + " Nothing was saved.");
+                /* The reply names the host and port and nothing the driver said; the driver's text goes to the log (the
+                   web route passes no audit logger, so it passes probeLogger for this line alone). */
+                var detail = ConnectFailureReply(plan.ProbeConfig, probeResult, probeLogger ?? logger, false, plan.PlaintextSecret, plan.PlaintextExternalId);
+                return Outcome(EditStatus.ConnectionFailed, detail + " Nothing was saved.");
             }
 
             tested = true;

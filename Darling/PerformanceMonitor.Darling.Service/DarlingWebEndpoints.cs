@@ -1076,11 +1076,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         var serverWriteInFlight = new SemaphoreSlim(1, 1);
 
         /* The seam a test stands a stub probe or a held add in through; production runs the core itself. */
-        addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body);
+        addServers ??= body => DarlingMcpServerAdminTools.AddServers(postgres, body, logger);
 
-        /* The edit core and the by-id read, with the same seam. The edit core gets NO logger: the route writes the one
-           audit line itself, with the signed-in principal. */
-        editServer ??= (id, body) => DarlingMcpServerAdminTools.EditServerByIdAsync(postgres, id, body, null, CancellationToken.None);
+        /* The edit core and the by-id read, with the same seam. The edit core gets NO audit logger: the route writes the one
+           audit line itself, with the signed-in principal. It gets the logger for a failed connection test's driver
+           text alone (probeLogger), which the reply to the browser does not carry. */
+        editServer ??= (id, body) => DarlingMcpServerAdminTools.EditServerByIdAsync(postgres, id, body, null, CancellationToken.None, probeLogger: logger);
         readServer ??= id => new DarlingMcpServerAdminTools.PostgresServerEditStore(postgres).ReadRowAsync(id, CancellationToken.None);
 
         app.MapPost("/api/servers", async (HttpContext context) =>
@@ -3794,19 +3795,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 415 otherwise. Requiring a non-simple Content-Type forces the browser to CORS-preflight ANY cross-origin
     /// write, and the dashboard answers no preflight — so a simple-request CSRF (which can only send
     /// <c>text/plain</c> / <c>application/x-www-form-urlencoded</c> / <c>multipart/form-data</c>) can never reach
-    /// a write. A null/empty or non-json Content-Type is rejected.
+    /// a write. A null/empty or non-json Content-Type is rejected. The test itself lives in
+    /// <c>PerformanceMonitor.Common.JsonContentType</c>, shared with Lite's MCP host.
     /// </summary>
     internal static bool IsJsonContentType(string? contentType)
-    {
-        if (string.IsNullOrEmpty(contentType))
-        {
-            return false;
-        }
-
-        var semicolon = contentType.IndexOf(';');
-        var mediaType = semicolon >= 0 ? contentType.AsSpan(0, semicolon) : contentType.AsSpan();
-        return mediaType.Trim().Equals("application/json", StringComparison.OrdinalIgnoreCase);
-    }
+        => PerformanceMonitor.Common.JsonContentType.IsJson(contentType);
 
     /* ── definition validation (the authority: a bad doc can never be stored) ── */
 

@@ -46,6 +46,10 @@ internal enum DarlingRefusalGate
     /// (round 2, L1). Not a refusal: the failure observer uses this key to throttle the failure line it writes for a caller nobody
     /// has authenticated, so a request that makes a gate throw repeatedly cannot fill the log with stack traces.</summary>
     PreAuthFailure,
+
+    /// <summary>The JSON-only POST check on the MCP listener: a POST whose Content-Type is not JSON. 415. Its own
+    /// gate because the fix is on the client (send <c>application/json</c>), not a credential or an address.</summary>
+    JsonContentType,
 }
 
 /// <summary>
@@ -270,6 +274,7 @@ internal sealed class DarlingHttpRefusalLog
         DarlingRefusalGate.ReadOnlySeat => "read-only seat (web.network.oidc viewerRoles)",
         DarlingRefusalGate.SignIn => "OIDC sign-in flow (web.network.oidc)",
         DarlingRefusalGate.PreAuthFailure => "failure before the request was authenticated",
+        DarlingRefusalGate.JsonContentType => "JSON-only POST check (Content-Type)",
         _ => gate.ToString(),
     };
 

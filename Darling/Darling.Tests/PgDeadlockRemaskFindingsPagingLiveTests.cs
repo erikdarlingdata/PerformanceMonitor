@@ -75,7 +75,14 @@ public sealed class PgDeadlockRemaskFindingsPagingLiveTests
         var emptyStart = 2 * blocksPerPass;
         var (planType, buffers) = await ExplainPageAsync(connection, emptyStart, ct);
         Assert.Equal("Tid Range Scan", planType);
-        Assert.True(buffers <= blocksPerPass + 16, $"a page read {buffers} buffers; its range is {blocksPerPass} blocks");
+        TestContext.Current.TestOutputHelper?.WriteLine(
+            $"analysis_findings: {blocks} blocks; page range {blocksPerPass} blocks; bound {blocksPerPass + PageBufferSlack}; least buffers over {ExplainRuns} runs: {buffers}");
+        /* The bound must stay meaningful: a page that scanned the whole table would read `blocks`, and the bound has to sit
+           well under that, or the check below could not tell a bounded page from a whole-table one. */
+        Assert.True(
+            (blocksPerPass + PageBufferSlack) * 2 < blocks,
+            $"the bound ({blocksPerPass + PageBufferSlack} buffers) is not well under a whole-table read ({blocks} blocks)");
+        Assert.True(buffers <= blocksPerPass + PageBufferSlack, $"a page read {buffers} buffers at least; its range is {blocksPerPass} blocks (table: {blocks} blocks)");
 
         /* The page that matches nothing: the cursor still moves, by the block range. */
         var (afterEmpty, emptyExamined, emptyRewritten, _) = await PgDeadlockRemask.RemaskStoredFindingsAsync(connection, emptyStart, null, ct);
@@ -276,35 +283,54 @@ FROM generate_series($1::bigint, $2::bigint) AS i", connection);
             }
         }
 
-        await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + PgDeadlockRemask.FindingPageSql, connection);
-        command.Parameters.Add(new NpgsqlParameter { Value = string.Create(CultureInfo.InvariantCulture, $"({from},0)"), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
-        command.Parameters.Add(new NpgsqlParameter { Value = string.Create(CultureInfo.InvariantCulture, $"({from + PgDeadlockRemask.FindingBlocksPerPass},0)"), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
-        var json = (string)(await command.ExecuteScalarAsync(ct))!;
-        using var document = JsonDocument.Parse(json);
-        var root = document.RootElement[0].GetProperty("Plan");
-
-        var scans = new List<string>();
-        void Walk(JsonElement node)
+        /* The least buffer count over ExplainRuns runs of the same page. The extra reads a run carries are catalog pages,
+           and they vary from run to run: a catalog cache reset (another test class creating and dropping databases on
+           the same server) can bring them back after the warm-up above. A page that scans the whole table reads all of
+           it on every run, so the least of the runs still catches that, and a run's catalog reads cannot fail the bound. */
+        var scanType = string.Empty;
+        var least = long.MaxValue;
+        for (var run = 0; run < ExplainRuns; run++)
         {
-            var type = node.GetProperty("Node Type").GetString()!;
-            if (type.EndsWith("Scan", StringComparison.Ordinal))
-            {
-                scans.Add(type);
-            }
+            await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + PgDeadlockRemask.FindingPageSql, connection);
+            command.Parameters.Add(new NpgsqlParameter { Value = string.Create(CultureInfo.InvariantCulture, $"({from},0)"), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            command.Parameters.Add(new NpgsqlParameter { Value = string.Create(CultureInfo.InvariantCulture, $"({from + PgDeadlockRemask.FindingBlocksPerPass},0)"), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            var json = (string)(await command.ExecuteScalarAsync(ct))!;
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement[0].GetProperty("Plan");
 
-            if (node.TryGetProperty("Plans", out var children))
+            var scans = new List<string>();
+            void Walk(JsonElement node)
             {
-                foreach (var child in children.EnumerateArray())
+                var type = node.GetProperty("Node Type").GetString()!;
+                if (type.EndsWith("Scan", StringComparison.Ordinal))
                 {
-                    Walk(child);
+                    scans.Add(type);
+                }
+
+                if (node.TryGetProperty("Plans", out var children))
+                {
+                    foreach (var child in children.EnumerateArray())
+                    {
+                        Walk(child);
+                    }
                 }
             }
+
+            Walk(root);
+            var thisScan = string.Join("+", scans);
+            Assert.True(run == 0 || thisScan == scanType, $"the page's plan changed between runs: {scanType} then {thisScan}");
+            scanType = thisScan;
+            least = Math.Min(least, root.GetProperty("Shared Hit Blocks").GetInt64() + root.GetProperty("Shared Read Blocks").GetInt64());
         }
 
-        Walk(root);
-        var buffers = root.GetProperty("Shared Hit Blocks").GetInt64() + root.GetProperty("Shared Read Blocks").GetInt64();
-        return (string.Join("+", scans), buffers);
+        return (scanType, least);
     }
+
+    /// <summary>How many times <see cref="ExplainPageAsync"/> runs the page; the least buffer count of them is kept.</summary>
+    private const int ExplainRuns = 3;
+
+    /// <summary>Buffers a page may read beyond its block range: the catalog pages a run can still read after the warm-up.</summary>
+    private const int PageBufferSlack = 128;
 
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {

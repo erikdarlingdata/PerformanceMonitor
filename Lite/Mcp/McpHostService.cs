@@ -93,6 +93,27 @@ public sealed class McpHostService : BackgroundService
         services.AddSingleton(new McpCollectorRunTimes(schedules, serverManager));
     }
 
+    /// <summary>
+    /// A POST must carry a JSON Content-Type; any other type, or none, is answered 415 before <c>MapMcp</c>.
+    /// The guard is installed right after the Host guard. A charset parameter is fine. GET (the event stream)
+    /// and DELETE carry no body to type and pass. This is the twin of the gate in Darling's MCP host
+    /// (<c>DarlingMcpHostService</c>); both call the one shared test, <see cref="JsonContentType.IsJson"/>.
+    /// </summary>
+    internal static void UseJsonPostGuard(IApplicationBuilder app)
+    {
+        app.Use(async (context, next) =>
+        {
+            if (HttpMethods.IsPost(context.Request.Method)
+                && !JsonContentType.IsJson(context.Request.ContentType))
+            {
+                context.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
+                return;
+            }
+
+            await next(context);
+        });
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
@@ -213,6 +234,8 @@ public sealed class McpHostService : BackgroundService
 
                 await next(context);
             });
+
+            UseJsonPostGuard(_app);
 
             _app.MapMcp();
 
