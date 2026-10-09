@@ -60,7 +60,7 @@ public sealed class MigrationLockHolderLogTests
     }
 
     [Fact]
-    public async Task ASessionHoldingACollectTableLock_IsNamedInTheLog_WithItsPidStateAndQuery_AgainstDevPostgres()
+    public async Task ASessionHoldingACollectTableLock_IsNamedInTheLog_WithItsFields_AndNoQueryText_AgainstDevPostgres()
     {
         var connectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -70,10 +70,16 @@ public sealed class MigrationLockHolderLogTests
         await observer.OpenAsync(TestContext.Current.CancellationToken);
         await PgMigrations.MigrateAsync(observer, TestContext.Current.CancellationToken);
 
-        await using var holder = new NpgsqlConnection(connectionString);
+        var holderConnectionString = new NpgsqlConnectionStringBuilder(connectionString) { ApplicationName = "lock-holder-5582" }.ConnectionString;
+        await using var holder = new NpgsqlConnection(holderConnectionString);
         await holder.OpenAsync(TestContext.Current.CancellationToken);
         var holderPid = holder.ProcessID;
         var transaction = await holder.BeginTransactionAsync(TestContext.Current.CancellationToken);
+
+        await using var reader = new NpgsqlConnection(holderConnectionString);
+        await reader.OpenAsync(TestContext.Current.CancellationToken);
+        var readerPid = reader.ProcessID;
+        var readerTransaction = await reader.BeginTransactionAsync(TestContext.Current.CancellationToken);
 
         var bodySucceeded = false;
         try
@@ -84,17 +90,36 @@ public sealed class MigrationLockHolderLogTests
                 await hold.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
             }
 
+            /* A plain SELECT holds ACCESS SHARE, which blocks the ACCESS EXCLUSIVE lock of most schema changes. */
+            const string ReaderQuery = "SELECT 1 FROM collect.darling_schema_version /* 5582 reader */";
+            await using (var read = new NpgsqlCommand(ReaderQuery, reader, readerTransaction))
+            {
+                await read.ExecuteScalarAsync(TestContext.Current.CancellationToken);
+            }
+
             PgMigrations.ResetLockHolderLogThrottleForTests();
             var logger = new CapturingLogger();
             await PgMigrations.LogLockHoldersAsync(observer, logger, 173, "the rung", "canceling statement due to lock timeout", TestContext.Current.CancellationToken);
 
             var line = Assert.Single(logger.Lines);
             Assert.Contains("V173", line, StringComparison.Ordinal);
-            Assert.Contains($"pid {holderPid} ", line, StringComparison.Ordinal);
-            Assert.Contains("state idle in transaction", line, StringComparison.Ordinal);
+            Assert.Contains($"pid {holderPid} (client backend), application lock-holder-5582, state idle in transaction, transaction started ", line, StringComparison.Ordinal);
+            Assert.Contains("waiting on Client: ClientRead", line, StringComparison.Ordinal);
             Assert.Contains("darling_schema_version (ShareUpdateExclusiveLock)", line, StringComparison.Ordinal);
-            Assert.Contains(HolderQuery, line, StringComparison.Ordinal);
+            Assert.Contains($"pid {readerPid} ", line, StringComparison.Ordinal);
+            Assert.Contains("darling_schema_version (AccessShareLock)", line, StringComparison.Ordinal);
             Assert.DoesNotContain($"pid {observer.ProcessID} ", line, StringComparison.Ordinal);
+
+            /* A client session's query text is never logged. */
+            Assert.DoesNotContain("5582 holder", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("5582 reader", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("query:", line, StringComparison.Ordinal);
+
+            /* The lookup's SET LOCAL limits end with its transaction and do not leak into the caller's session. */
+            await using (var show = new NpgsqlCommand("SHOW statement_timeout", observer))
+            {
+                Assert.NotEqual("5s", (string?)await show.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+            }
 
             /* The second call inside the ten minutes says nothing. */
             await PgMigrations.LogLockHoldersAsync(observer, logger, 173, "the rung", "again", TestContext.Current.CancellationToken);
@@ -103,14 +128,109 @@ public sealed class MigrationLockHolderLogTests
             /* A fault in the diagnostic is swallowed: a closed connection must not throw out of the log call. */
             PgMigrations.ResetLockHolderLogThrottleForTests();
             await using var closed = new NpgsqlConnection(connectionString);
-            await PgMigrations.LogLockHoldersAsync(closed, new CapturingLogger(), 173, "the rung", "closed", TestContext.Current.CancellationToken);
+            var failed = new CapturingLogger();
+            await PgMigrations.LogLockHoldersAsync(closed, failed, 173, "the rung", "closed", TestContext.Current.CancellationToken);
+            Assert.Empty(failed.Lines);
+
+            /* A failed lookup does not claim the ten minutes: the next attempt on a working connection still logs. */
+            await PgMigrations.LogLockHoldersAsync(observer, failed, 173, "the rung", "after the failure", TestContext.Current.CancellationToken);
+            Assert.Single(failed.Lines);
             bodySucceeded = true;
         }
         finally
         {
             PgMigrations.ResetLockHolderLogThrottleForTests();
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+                await readerTransaction.RollbackAsync(CancellationToken.None);
+            });
+        }
+    }
+
+    [Fact]
+    public async Task ACancelDuringTheLookup_Propagates_AndLeavesTheThrottleUnclaimed_AgainstDevPostgres()
+    {
+        var connectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live lock-holder log test.");
+
+        await using var observer = new NpgsqlConnection(connectionString);
+        await observer.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(observer, TestContext.Current.CancellationToken);
+
+        var bodySucceeded = false;
+        try
+        {
+            PgMigrations.ResetLockHolderLogThrottleForTests();
+            using var cancelled = new CancellationTokenSource();
+            await cancelled.CancelAsync();
+            var logger = new CapturingLogger();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                PgMigrations.LogLockHoldersAsync(observer, logger, 173, "the rung", "shutdown", cancelled.Token));
+            Assert.Empty(logger.Lines);
+            Assert.True(PgMigrations.IsLockHolderLogDue(DateTime.UtcNow), "a cancelled lookup must not claim the ten minutes");
+            bodySucceeded = true;
+        }
+        finally
+        {
+            PgMigrations.ResetLockHolderLogThrottleForTests();
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task TheLookupLimits_AreValidSetLocalStatements_AgainstDevPostgres()
+    {
+        var connectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live lock-holder log test.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        var transaction = await connection.BeginTransactionAsync(TestContext.Current.CancellationToken);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var limits = new NpgsqlCommand(PgMigrations.LockHolderLookupLimitsSql, connection, transaction))
+            {
+                await limits.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+
+            await using (var show = new NpgsqlCommand("SELECT current_setting('statement_timeout') || '/' || current_setting('lock_timeout')", connection, transaction))
+            {
+                Assert.Equal("5s/2s", (string?)await show.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
             await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () => await transaction.RollbackAsync(CancellationToken.None));
         }
+    }
+
+    [Fact]
+    public void TheLookup_RunsInItsOwnTransactionWithLimits_ListsEveryMode_AndReadsQueryTextOnlyForAutovacuum()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "PgMigrations.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var start = source.IndexOf("internal static async Task LogLockHoldersAsync(", StringComparison.Ordinal);
+        var end = source.IndexOf("\n    }\n", start, StringComparison.Ordinal);
+        var body = source[start..end];
+
+        var begin = body.IndexOf("connection.BeginTransactionAsync(", StringComparison.Ordinal);
+        var limits = body.IndexOf("LockHolderLookupLimitsSql", StringComparison.Ordinal);
+        var query = body.IndexOf("new NpgsqlCommand(LockHoldersSql, connection, lookup)", StringComparison.Ordinal);
+        var commit = body.IndexOf("lookup.CommitAsync(", StringComparison.Ordinal);
+        Assert.True(begin > 0 && limits > begin && query > limits && commit > query, "begin, set the limits, run the lookup, commit");
+
+        var claim = body.IndexOf("TryClaimLockHolderLog(", StringComparison.Ordinal);
+        Assert.True(claim > commit, "the ten minutes are claimed after the lookup worked, not before it runs");
+        Assert.Contains("ex is not OperationCanceledException and not OutOfMemoryException", body, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("l.mode IN", PgMigrations.LockHoldersSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN a.backend_type = 'autovacuum worker' THEN left(a.query, 200) END", PgMigrations.LockHoldersSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("a.query", PgMigrations.LockHoldersSql.Replace("CASE WHEN a.backend_type = 'autovacuum worker' THEN left(a.query, 200) END", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     private sealed class CapturingLogger : ILogger

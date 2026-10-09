@@ -7,6 +7,7 @@
  */
 
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -81,8 +82,25 @@ public sealed class QueryStoreGroupMembersTests
     {
         var ct = TestContext.Current.CancellationToken;
 
-        /* Neither dimension reads pg_stats, so no connection is needed (a null one would throw if touched). */
-        Assert.Equal(43L, await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("server")), 43, ct));
-        Assert.Null(await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("query_hash")), 43, ct));
+        /* Neither dimension reads pg_stats, so no connection is needed. ResolveAsync catches every non-cancel fault and returns null,
+           so a null result alone cannot tell "unknown by design" from "touched the null connection and failed": the capturing
+           logger can. A resolver that touched the connection logs a Debug line for the fault it swallowed. */
+        var quiet = new CapturingTestLogger();
+        using (ReadScope.Open(quiet))
+        {
+            Assert.Equal(43L, await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("server")), 43, ct));
+            Assert.Null(await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("query_hash")), 43, ct));
+        }
+
+        Assert.True(quiet.Lines.Count == 0, "the resolver swallowed a fault, so it touched the store: " + quiet.Joined);
+
+        /* Control: a dimension that does read pg_stats fails on the null connection, and that swallowed fault does reach the logger. */
+        var loud = new CapturingTestLogger();
+        using (ReadScope.Open(loud))
+        {
+            Assert.Null(await QueryStoreGroupMembers.ResolveAsync(null!, QueryStoreRankedHarness.Parse(Panel("database_name")), 43, ct));
+        }
+
+        Assert.Equal(1, loud.CountAtLevel(LogLevel.Debug));
     }
 }

@@ -8107,6 +8107,16 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     private static readonly object s_lockHolderLogGate = new();
     private static DateTime s_lastLockHolderLogUtc = DateTime.MinValue;
 
+    /// <summary>True when no lock-holder list was logged in the last <see cref="LockHolderLogInterval"/> as of <paramref name="nowUtc"/>.
+    /// Reads the throttle without claiming it.</summary>
+    internal static bool IsLockHolderLogDue(DateTime nowUtc)
+    {
+        lock (s_lockHolderLogGate)
+        {
+            return s_lastLockHolderLogUtc == DateTime.MinValue || nowUtc - s_lastLockHolderLogUtc >= LockHolderLogInterval;
+        }
+    }
+
     /// <summary>Claims the right to log the lock holders at <paramref name="nowUtc"/>: true when none was logged in the last
     /// <see cref="LockHolderLogInterval"/>. Static on purpose, because each retry of the rung is a fresh call.</summary>
     internal static bool TryClaimLockHolderLog(DateTime nowUtc)
@@ -8135,14 +8145,23 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// <summary>The most lock-holding sessions one log line names ($1 of <see cref="LockHoldersSql"/>).</summary>
     internal const int LockHolderListCap = 20;
 
-    /// <summary>The sessions of this database holding a lock on a <c>collect</c> table that blocks a schema change, one row per session
-    /// with the tables it holds. Row-share locks (what a plain SELECT takes) do not block DDL, so they are left out.</summary>
+    /// <summary>The server-side limits of the lock-holder lookup, set for its own transaction only (#5582). The rung's
+    /// <c>lock_timeout</c> is gone once the rung rolled back, so without these the lookup would wait on whatever it met.</summary>
+    internal const string LockHolderLookupLimitsSql = "SET LOCAL statement_timeout = '5s'; SET LOCAL lock_timeout = '2s'";
+
+    /// <summary>The sessions of this database holding a granted lock on a <c>collect</c> table, one row per session with the tables and
+    /// modes it holds. Every mode is listed, because a plain SELECT takes <c>AccessShareLock</c> and that conflicts with the
+    /// <c>AccessExclusiveLock</c> most schema changes take. The row holds the session's pid, backend type, application name, state,
+    /// transaction start, wait event, and relation and lock mode; the first 200 characters of the query come back only for an
+    /// autovacuum worker.</summary>
     internal const string LockHoldersSql = """
         SELECT a.pid,
                a.backend_type,
+               a.application_name,
                a.state,
                a.xact_start,
-               left(a.query, 200) AS query,
+               concat_ws(': ', a.wait_event_type, a.wait_event) AS wait,
+               CASE WHEN a.backend_type = 'autovacuum worker' THEN left(a.query, 200) END AS query,
                string_agg(DISTINCT c.relname || ' (' || l.mode || ')', ', ') AS held
         FROM pg_locks l
         JOIN pg_class c ON c.oid = l.relation
@@ -8152,55 +8171,76 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
           AND l.granted
           AND a.datname = current_database()
           AND a.pid <> pg_backend_pid()
-          AND l.mode IN ('RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
-        GROUP BY a.pid, a.backend_type, a.state, a.xact_start, left(a.query, 200)
+        GROUP BY a.pid, a.backend_type, a.application_name, a.state, a.xact_start, a.wait_event_type, a.wait_event,
+                 CASE WHEN a.backend_type = 'autovacuum worker' THEN left(a.query, 200) END
         ORDER BY a.xact_start NULLS LAST, a.pid
         LIMIT $1
         """;
 
     /// <summary>
-    /// #5582: after a rung hit <c>lock_timeout</c>, logs the sessions that hold a blocking lock on a <c>collect</c> table: pid, backend
-    /// type, state, transaction start and the first 200 characters of the query. At most once per <see cref="LockHolderLogInterval"/>.
-    /// A fault in the diagnostic is swallowed, because the rung's own failure is what the caller reports.
+    /// #5582: after a rung hit <c>lock_timeout</c>, logs the sessions that hold a lock on a <c>collect</c> table: pid, backend type,
+    /// application name, state, transaction start, wait event, relation and lock mode, plus the first 200 characters of the query for
+    /// an autovacuum worker. At most once per <see cref="LockHolderLogInterval"/>, and the interval is claimed only after the lookup
+    /// worked, so a failed lookup does not mute the next attempt. The lookup runs in its own transaction with server-side limits.
+    /// A fault in the diagnostic is swallowed, because the rung's own failure is what the caller reports; a cancel is not.
     /// </summary>
     internal static async Task LogLockHoldersAsync(
         NpgsqlConnection connection, ILogger? logger, int version, string name, string reason, CancellationToken cancellationToken, Func<DateTime>? utcNow = null)
     {
-        if (logger is null || !TryClaimLockHolderLog((utcNow ?? (() => DateTime.UtcNow))()))
+        var nowUtc = (utcNow ?? (() => DateTime.UtcNow))();
+        if (logger is null || !IsLockHolderLogDue(nowUtc))
         {
             return;
         }
 
+        List<string> holders;
         try
         {
-            var holders = new List<string>();
-            using var command = new NpgsqlCommand(LockHoldersSql, connection) { CommandTimeout = 30 };
+            holders = new List<string>();
+            using var lookup = await connection.BeginTransactionAsync(cancellationToken);
+            using (var limits = new NpgsqlCommand(LockHolderLookupLimitsSql, connection, lookup))
+            {
+                await limits.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            using var command = new NpgsqlCommand(LockHoldersSql, connection, lookup) { CommandTimeout = 30 };
             command.Parameters.AddWithValue(LockHolderListCap);
             using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
                 while (await reader.ReadAsync(cancellationToken))
                 {
+                    var text = reader.IsDBNull(6) ? string.Empty : reader.GetString(6);
                     holders.Add(string.Format(
                         System.Globalization.CultureInfo.InvariantCulture,
-                        "pid {0} ({1}), state {2}, transaction started {3:u}, holding {4}, query: {5}",
+                        "pid {0} ({1}), application {2}, state {3}, transaction started {4:u}, waiting on {5}, holding {6}{7}",
                         reader.GetInt32(0),
                         reader.IsDBNull(1) ? "unknown" : reader.GetString(1),
-                        reader.IsDBNull(2) ? "none" : reader.GetString(2),
-                        reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3),
-                        reader.GetString(5),
-                        reader.IsDBNull(4) ? string.Empty : reader.GetString(4)));
+                        reader.IsDBNull(2) || reader.GetString(2).Length == 0 ? "none" : reader.GetString(2),
+                        reader.IsDBNull(3) ? "none" : reader.GetString(3),
+                        reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4),
+                        reader.IsDBNull(5) || reader.GetString(5).Length == 0 ? "nothing" : reader.GetString(5),
+                        reader.GetString(7),
+                        text.Length == 0 ? string.Empty : ", query: " + text));
                 }
             }
 
-            logger.LogWarning(
-                "Store migration V{Version} ({Name}) could not get its table lock in time ({Reason}). Collection waits until it applies. " +
-                "Sessions holding a lock on a collect table: {Holders}",
-                version, name, reason, holders.Count == 0 ? "none found" : string.Join("; ", holders));
+            await lookup.CommitAsync(cancellationToken);
         }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
         {
             logger.LogDebug("The lock-holder lookup for store migration V{Version} failed: {Message}", version, ex.Message);
+            return;
         }
+
+        if (!TryClaimLockHolderLog(nowUtc))
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "Store migration V{Version} ({Name}) could not get its table lock in time ({Reason}). Collection waits until it applies. " +
+            "Sessions holding a lock on a collect table: {Holders}",
+            version, name, reason, holders.Count == 0 ? "none found" : string.Join("; ", holders));
     }
 
     /// <summary>
