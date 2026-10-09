@@ -208,7 +208,7 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
     public async Task TheMonthToDaySeam_ReturnsEveryRowExactlyOnce_ThroughTheArchiveView(string table)
     {
         var initializer = NewInitializer();
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
 
         /* Before the switch: days 24-26 merged into the month file and a part by the old pass. */
@@ -256,7 +256,7 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
     public async Task TheViewReadsTheDayFile_AndAOneHourReadTouchesOnlyAFewOfItsRowGroups(string table)
     {
         var initializer = NewInitializer();
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
 
         /* One archive pass an hour, as in production: the day file takes each new hour in time order, so its row

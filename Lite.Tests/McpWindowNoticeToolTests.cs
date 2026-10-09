@@ -191,7 +191,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_RowsStartInsideTheWindow_ReportTheFloor()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-2);
         await SeedSnapshotAsync(floor);
@@ -205,7 +205,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AnOlderRowBeforeTheWindow_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedSnapshotAsync(now.AddDays(-8));
         await SeedSnapshotAsync(now.AddDays(-2));
@@ -218,7 +218,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AQuietStart_TheCollectorRanFromTheWindowsStart_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         /* The collector ran every half hour from before the window began; the first snapshot is two days in.
            A server idle overnight looks exactly like this, and a rows-only probe would call it truncated. */
@@ -233,7 +233,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AFilledPage_StillReportsThePageCut_BesideTheCoverage()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedSnapshotAsync(now.AddHours(-30));
         await SeedSnapshotAsync(now.AddHours(-3));
@@ -252,7 +252,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_RowsStartInsideTheWindow_ReportTheFloor()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-2);
         await SeedWaitingTaskAsync(floor);
@@ -266,7 +266,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AnOlderRowBeforeTheWindow_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedWaitingTaskAsync(now.AddDays(-8));
         await SeedWaitingTaskAsync(now.AddDays(-2));
@@ -279,7 +279,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AQuietStart_TheCollectorRanFromTheWindowsStart_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         /* Nothing waits for hours on a quiet server: the first row comes two days into the window while the
            collector has been running since before it. */
@@ -294,7 +294,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AFilledPage_StillReportsThePageCut_BesideTheCoverage()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedWaitingTaskAsync(now.AddHours(-30));
         await SeedWaitingTaskAsync(now.AddHours(-3));
@@ -313,7 +313,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_TheBaselineStartsInsideTheSevenDays_ReportsTheFloor()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         /* The baseline is the seven days before the 24-hour window: it starts 8 days back, and the store's first
            row is 3 days back, so the baseline holds two of its seven days and nothing else says so. */
@@ -331,7 +331,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AnOlderRowBeforeTheBaseline_IsCovered_AtTheBaselinesStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedRegressionAsync(now.AddDays(-9), queryId: 2, avgUs: 1000, intervalId: 3);
         await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 1);
@@ -348,7 +348,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AFilledPage_StillReportsThePageCut_BesideTheCoverage()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedRegressionAsync(now.AddDays(-9), queryId: 9, avgUs: 1000, intervalId: 9);
         foreach (var queryId in new long[] { 1, 2 })
@@ -370,7 +370,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AnIdleGrid_OverACutWindow_CarriesTheCutSentence()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedIdleQueryStatsAsync(now.AddDays(-2), "0xI1");
         await SeedIdleQueryStatsAsync(now.AddDays(-1), "0xI2");
@@ -390,7 +390,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AFilteredIdleGrid_OverACutWindow_KeepsItsOwnSentence()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedIdleQueryStatsAsync(now.AddDays(-2), "0xI1");
         await SeedIdleQueryStatsAsync(now.AddDays(-1), "0xI2");
@@ -406,7 +406,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AnIdleGrid_OverACoveredWindow_KeepsTheIdleSentence()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedIdleQueryStatsAsync(now.AddHours(-167.9), "0xI1");
         await SeedIdleQueryStatsAsync(now.AddDays(-1), "0xI2");
@@ -424,7 +424,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_RowsStartInsideTheWindow_ReportTheFloor()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-2);
         await SeedQueryStatsAsync(floor, "0xH1");
@@ -439,7 +439,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AnOlderRowBeforeTheWindow_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedQueryStatsAsync(now.AddDays(-8), "0xH0");
         await SeedQueryStatsAsync(now.AddDays(-2), "0xH1");
@@ -453,7 +453,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AFilledGrid_StillReportsTheCellCap_BesideTheCoverage()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedQueryStatsAsync(now.AddHours(-30), "0xH0");
         /* Three captures in three different bins: three cells, against a cap of two. */
@@ -518,7 +518,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AOneHourWindow_MakesNoProbeCall_AndACappedPageStillNamesItsOldestRow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedSnapshotAsync(now.AddMinutes(-35));
         await SeedSnapshotAsync(now.AddMinutes(-25));
@@ -536,7 +536,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AOneHourWindow_MakesNoProbeCall_AndACappedPageStillNamesItsOldestRow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedWaitingTaskAsync(now.AddMinutes(-35));
         await SeedWaitingTaskAsync(now.AddMinutes(-25));
@@ -554,7 +554,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AOneHourWindow_MakesNoProbeCall_AndIsCoveredAtTheWindowsStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedQueryStatsAsync(now.AddMinutes(-35), "0xH1");
         await SeedQueryStatsAsync(now.AddMinutes(-15), "0xH2");
@@ -578,7 +578,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AnEmptyWindowTheCollectorRanIn_PastCoverage_CarriesTheFloorAndTheNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         /* The collector ran every half hour for two days and nothing was running at any of them: the store holds
            the last two days of a 7-day ask, and nothing but the three keys says the older five were never read. */
@@ -592,7 +592,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AFilteredMiss_PastCoverage_CarriesTheSameKeys()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-2);
         await SeedSnapshotAsync(floor);
@@ -608,7 +608,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AFilteredMiss_OverACoveredRange_SaysCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedSnapshotAsync(now.AddDays(-8));
         await SeedSnapshotAsync(now.AddDays(-2));
@@ -626,7 +626,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AnEmptyOneHourWindow_IsProbed_AndNamesTheFirstRunInIt()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("query_snapshots", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
 
@@ -642,7 +642,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AnEmptyOneHourWindow_WithNoRunInIt_IsNotCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
 
         var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 1));
 
@@ -653,7 +653,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetActiveQueries_AnEmptyAnswer_OnAServerNeverCollected_IsNotCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
 
         var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 168));
 
@@ -664,7 +664,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AnEmptyWideWindow_WhoseRunsAreAllOlder_IsNotCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", now.AddDays(-10), now.AddDays(-9), everyMinutes: 60);
 
@@ -676,7 +676,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AnEmptyOneHourWindow_WithNoRunInIt_IsNotCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
 
         var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 1));
 
@@ -709,7 +709,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AnEmptyWindowTheCollectorRanIn_PastCoverage_CarriesTheFloorAndTheNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         /* Nothing waits for hours on a quiet server: the collector ran, and no task was waiting at any of its runs. */
         await SeedLogRunsAsync("waiting_tasks", now.AddDays(-2), now, everyMinutes: 30);
@@ -722,7 +722,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AnEmptyWindow_OverACoveredRange_SaysCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", now.AddHours(-168 - 1), now, everyMinutes: 30);
 
@@ -734,7 +734,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetWaitingTasks_AnEmptyOneHourWindow_IsProbed_AndNamesTheFirstRunInIt()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
 
@@ -746,7 +746,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AnAllClear_TheBaselineStartsInsideTheSevenDays_CarriesTheFloorAndTheNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-3);
         /* The same average on both sides: no regression, so the answer is the all-clear. The baseline holds three of
@@ -769,7 +769,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AnAllClear_OverACoveredBaseline_KeepsTheAllClearSentence()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedRegressionAsync(now.AddDays(-9), queryId: 1, avgUs: 1000, intervalId: 1);
         await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 3);
@@ -784,7 +784,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AFilteredMiss_CarriesTheSameKeys_AndTheFloorIsTheTablesNotTheFilters()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-3);
         await SeedRegressionAsync(floor, queryId: 1, avgUs: 1000, intervalId: 1);
@@ -804,7 +804,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AFilterThatMatches_AndFindsNothingWrong_IsTheAllClear()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedRegressionAsync(now.AddDays(-9), queryId: 1, avgUs: 1000, intervalId: 1);
         await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 3);
@@ -824,7 +824,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AFilteredDatabase_WithBaselineCapturesOnly_SaysItsWindowIsMissing_NotTheAllClear()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-3);
         await SeedRegressionAsync(floor, queryId: 1, avgUs: 1000, intervalId: 1);
@@ -848,7 +848,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AFilteredDatabase_WithWindowCapturesOnly_SaysItHasNoBaseline_NotTheAllClear()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedRegressionAsync(now.AddDays(-3), queryId: 2, avgUs: 1000, intervalId: 1, database: "Other");
         await SeedRegressionAsync(now.AddHours(-1), queryId: 1, avgUs: 3000, intervalId: 2);
@@ -866,7 +866,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AnEmptyRecentSide_CarriesTheSameKeys()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-3);
         /* History from before the recent window and nothing inside it: the answer names the missing recent side. */
@@ -881,7 +881,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryStoreRegressions_AnAllClear_OverACoveredBaseline_SaysCovered_AtTheBaselinesStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedRegressionAsync(now.AddDays(-9), queryId: 2, avgUs: 1000, intervalId: 3);
         await SeedRegressionAsync(now.AddDays(-3), queryId: 1, avgUs: 1000, intervalId: 1);
@@ -895,7 +895,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AFilteredMiss_PastCoverage_CarriesTheFloorAndTheNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var floor = now.AddDays(-2);
         await SeedQueryStatsAsync(floor, "0xH1");
@@ -910,7 +910,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AFilteredMiss_OverACoveredRange_SaysCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedQueryStatsAsync(now.AddDays(-8), "0xH0");
         await SeedQueryStatsAsync(now.AddDays(-2), "0xH1");
@@ -923,7 +923,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_AnEmptyOneHourWindow_IsProbed_AndNamesTheFirstRowInIt()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedQueryStatsAsync(now.AddMinutes(-35), "0xH1");
 
@@ -940,7 +940,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     [Fact]
     public async Task GetQueryHeatmap_RowsOnlyOutsideTheWindow_SaysTheStoreHoldsNothingInIt()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedQueryStatsAsync(now.AddDays(-30), "0xH0");
 

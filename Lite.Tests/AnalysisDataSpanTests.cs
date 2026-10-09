@@ -66,7 +66,7 @@ public sealed class AnalysisDataSpanTests : IDisposable
     public async Task DataSpan_CountsArchivedParquetHistory_AcrossAnArchiveReset()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
         {
@@ -107,7 +107,7 @@ VALUES
     public async Task DataSpan_StillGatesAGenuinelyYoungInstall()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
         {
@@ -135,7 +135,7 @@ VALUES
     public async Task InsufficientHistoryMessage_IsSetForANewServer()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         await SeedWaitStatsAsync(initializer, hoursOfHistory: 2);
 
         var analysis = new AnalysisService(initializer);
@@ -151,7 +151,7 @@ VALUES
     public async Task InsufficientHistoryMessage_IsNullOnceTheServerHasEnoughHistory()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         await SeedWaitStatsAsync(initializer, hoursOfHistory: 30);
 
         var analysis = new AnalysisService(initializer);
@@ -164,7 +164,7 @@ VALUES
     public async Task InsufficientHistoryMessage_IsSetForAServerWithNoRows()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         var analysis = new AnalysisService(initializer);
 
@@ -188,7 +188,7 @@ VALUES
     public async Task LiteService_DefaultsToTheSharedMinimum()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         Assert.Equal(AnalysisHistoryGate.MinimumDataHours, new AnalysisService(initializer).MinimumDataHours);
     }

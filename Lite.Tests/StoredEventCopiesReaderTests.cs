@@ -60,7 +60,7 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
         var initializer = new DuckDbInitializer(dbPath);
         _initializers.Add(initializer);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         var eventTime = firstStored.AddMinutes(-2);
 
         string Bpr(int id, DateTime stored) =>
@@ -112,7 +112,7 @@ public sealed class StoredEventCopiesReaderTests : IDisposable
         var bound = now.AddMinutes(-10);
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
         using var initializer = new DuckDbInitializer(dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
         {
             await connection.OpenAsync(TestContext.Current.CancellationToken);

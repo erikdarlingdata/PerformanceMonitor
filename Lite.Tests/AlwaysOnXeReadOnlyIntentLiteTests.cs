@@ -235,7 +235,7 @@ public sealed class AlwaysOnXeReadOnlyIntentLiteTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
 
         var server = new ServerConnection
         {

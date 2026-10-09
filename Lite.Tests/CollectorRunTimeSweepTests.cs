@@ -44,7 +44,7 @@ public sealed class CollectorRunTimeSweepTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(Path.Combine(_dir, "pm.duckdb"));
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
         var servers = new ServerManager(_dir);
         var server = new ServerConnection { ServerName = "sweep-test", DisplayName = "sweep-test" };
         servers.AddServer(server);

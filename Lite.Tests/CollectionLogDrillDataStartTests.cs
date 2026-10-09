@@ -141,7 +141,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task ACollectorThatStartedLateInACoveredWeek_ShowsNoNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(OtherCollector, new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc), AsOf, 360);
         await SeedRunsAsync(Collector, AsOf.AddDays(-2), AsOf, 120);
 
@@ -160,7 +160,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task AServerWhoseFirstCollectionFallsInsideTheWeek_NamesIt()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var first = new DateTime(2026, 9, 15, 9, 30, 0, DateTimeKind.Utc);
         await SeedRunsAsync(OtherCollector, first, AsOf, 60);
         await SeedRunsAsync(Collector, first, AsOf, 60);
@@ -181,7 +181,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task AFirstCollectionJustInsideTheSlack_ShowsNoNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(Collector, WeekStart.AddMinutes(45), AsOf, 60);
 
         var load = await LoadAsync();
@@ -202,7 +202,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task TheNote_IsWordedInTheZoneTheGridPrintsItsTimesIn()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var first = new DateTime(2026, 9, 15, 13, 30, 0, DateTimeKind.Utc);
         await SeedRunsAsync(Collector, first, AsOf, 60);
         var load = await LoadAsync();
@@ -234,7 +234,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task TheRows_AreTheCollectorsRunsInsideTheWindow_BothEndsInclusive()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(OtherCollector, AsOf.AddDays(-30), AsOf.AddDays(1), 720);
         await SeedRunsAsync(Collector, WeekStart.AddDays(-1), AsOf.AddDays(1), 720);
 
@@ -322,7 +322,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task AWeekWithNoRunAtAll_ShowsNoNote_AndNoRows()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(Collector, AsOf.AddMinutes(5), AsOf.AddDays(1), 60);
 
         var load = await LoadAsync();

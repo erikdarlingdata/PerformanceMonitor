@@ -405,7 +405,7 @@ public sealed class SecondaryReplicaFactTests : IClassFixture<SharedDuckDbFixtur
         {
             var dbPath = Path.Combine(dir, "test.duckdb");
             using var initializer = new DuckDbInitializer(dbPath);
-            await initializer.InitializeAsync();
+            await initializer.InitializeFromTemplateAsync();
 
             /* The AG snapshot an AsOf or compare window reaches once archival has moved it to Parquet (after 7 days, or
                all of it at the 512 MB reset): the hot tables are empty afterwards, only the v_ views still see it. */
