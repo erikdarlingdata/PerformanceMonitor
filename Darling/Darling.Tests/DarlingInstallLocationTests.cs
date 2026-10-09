@@ -1066,12 +1066,6 @@ function Get-CimInstance {
     }
 
     /// <summary>
-    /// The shared probe for the #5627 shapes: the script's own trust, re-run and walk functions run over a real
-    /// temp tree (root, darling.json, pg-runtime\pgsql\bin\postgres.exe), with <c>Get-Acl</c> shadowed the way this
-    /// class already does for owners, so a service SID can own files without an elevated token. Each scenario
-    /// prints <c>label.count=N</c> and <c>label.text=...</c>.
-    /// </summary>
-    /// <summary>
     /// #5628: runs a probe built from <see cref="ServiceOwnedTreeProbe"/> and fails the test first, by name, if the
     /// probe's own setup did not take (a <c>setup.*=False</c> line, or no setup line at all), so that can never
     /// pass or read as a product result.
@@ -1114,6 +1108,13 @@ function Get-CimInstance {
         }
         """;
 
+    /// <summary>
+    /// The shared probe for the #5627 shapes: the script's own trust, re-run and walk functions run over a real
+    /// temp tree (root, darling.json, pg-runtime\pgsql\bin\postgres.exe), with <c>Get-Acl</c> shadowed the way this
+    /// class already does for owners, so a service SID can own files without an elevated token. Each scenario
+    /// prints <c>label.count=N</c> and <c>label.text=...</c>, and the prelude prints <c>setup.*</c> markers (#5628)
+    /// that <see cref="RunServiceOwnedTreeProbe"/> requires to be True.
+    /// </summary>
     private static StringBuilder ServiceOwnedTreeProbe()
     {
         var probe = new StringBuilder();
