@@ -169,7 +169,7 @@ public sealed class ConnectionTestReplyTests : IDisposable
         Assert.DoesNotContain(Password, log.Joined, StringComparison.Ordinal);
     }
 
-    private sealed class Rig : IAsyncDisposable
+    private sealed class WebFixture : IAsyncDisposable
     {
         public required WebApplication App { get; init; }
 
@@ -186,7 +186,7 @@ public sealed class ConnectionTestReplyTests : IDisposable
 
     /// <summary>The web routes over the real add and edit cores with the failing probe, so what the browser is
     /// answered is what the cores say.</summary>
-    private static async Task<Rig> StartWebAsync()
+    private static async Task<WebFixture> StartWebAsync()
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -208,28 +208,28 @@ public sealed class ConnectionTestReplyTests : IDisposable
             (id, body) => Core.EditServerCoreAsync(new OneRowStore(), id, body, Failing, TestKeyRings.Healthy, null, CancellationToken.None, probeLog),
             null, null);
         await app.StartAsync(TestContext.Current.CancellationToken);
-        return new Rig { App = app, Client = app.GetTestClient(), Probe = probeLog };
+        return new WebFixture { App = app, Client = app.GetTestClient(), Probe = probeLog };
     }
 
     [Fact]
     public async Task WebAdd_FailedProbe_ReplyCarriesNoDriverText_AndTheLogHasIt()
     {
-        await using var rig = await StartWebAsync();
+        await using var fixture = await StartWebAsync();
         var ct = TestContext.Current.CancellationToken;
 
-        using var response = await rig.Client.PostAsync("/api/servers", new StringContent(AddBody(), Encoding.UTF8, "application/json"), ct);
+        using var response = await fixture.Client.PostAsync("/api/servers", new StringContent(AddBody(), Encoding.UTF8, "application/json"), ct);
         var reply = await response.Content.ReadAsStringAsync(ct);
 
         AssertFixedReply(DetailOf(reply), "sql-test-01,1444");
         AssertFixedReply(reply, "sql-test-01,1444");
-        Assert.Contains(rig.Probe.Lines, l => l.Contains("Distinctive-Driver-Text", StringComparison.Ordinal));
-        Assert.DoesNotContain(Password, rig.Probe.Joined, StringComparison.Ordinal);
+        Assert.Contains(fixture.Probe.Lines, l => l.Contains("Distinctive-Driver-Text", StringComparison.Ordinal));
+        Assert.DoesNotContain(Password, fixture.Probe.Joined, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task WebEdit_FailedProbe_ReplyCarriesNoDriverText_AndTheLogHasIt()
     {
-        await using var rig = await StartWebAsync();
+        await using var fixture = await StartWebAsync();
         var ct = TestContext.Current.CancellationToken;
         using var request = new HttpRequestMessage(HttpMethod.Patch, "/api/servers/41")
         {
@@ -238,12 +238,12 @@ public sealed class ConnectionTestReplyTests : IDisposable
                 Encoding.UTF8, "application/json"),
         };
 
-        using var response = await rig.Client.SendAsync(request, ct);
+        using var response = await fixture.Client.SendAsync(request, ct);
         var reply = await response.Content.ReadAsStringAsync(ct);
 
         AssertFixedReply(reply, "beta-02.example.test");
-        Assert.Contains(rig.Probe.Lines, l => l.Contains("Distinctive-Driver-Text", StringComparison.Ordinal));
-        Assert.DoesNotContain(Password, rig.Probe.Joined, StringComparison.Ordinal);
+        Assert.Contains(fixture.Probe.Lines, l => l.Contains("Distinctive-Driver-Text", StringComparison.Ordinal));
+        Assert.DoesNotContain(Password, fixture.Probe.Joined, StringComparison.Ordinal);
     }
 
     /// <summary>The web routes' own wiring (the real store, the real probe) passes the logger the driver text goes

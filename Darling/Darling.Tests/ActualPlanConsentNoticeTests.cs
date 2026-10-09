@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// apps' history windows use) appends it. The prompts are WPF message boxes, so the prompt side is read from
 /// source, anchored on the one-line reference.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ActualPlanConsentNoticeTests
 {
     [Fact]

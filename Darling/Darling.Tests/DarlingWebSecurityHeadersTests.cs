@@ -33,7 +33,7 @@ namespace Darling.Tests;
 /// The web host's browser-facing response headers (<c>Content-Security-Policy</c>, <c>X-Frame-Options</c>,
 /// <c>X-Content-Type-Options</c>, <c>Referrer-Policy</c>), through the SAME <c>ConfigurePipeline</c> production
 /// calls, over a <see cref="TestServer"/>: on the HTML shell, a static asset, an API JSON reply and an error
-/// reply, in loopback mode and in network mode. A second group scans <c>wwwroot/</c> for any construct the policy
+/// reply, in loopback mode and in network mode. A second group checks <c>wwwroot/</c> for any construct the policy
 /// would block, so a later change to the page cannot start failing in the browser without a test going red.
 /// </summary>
 public sealed class DarlingWebSecurityHeadersTests
@@ -336,7 +336,7 @@ public sealed class DarlingWebSecurityHeadersTests
                      || f.EndsWith(".js", StringComparison.OrdinalIgnoreCase)
                      || f.EndsWith(".css", StringComparison.OrdinalIgnoreCase))
             .ToList();
-        Assert.True(files.Count > 60, "the scan read only " + files.Count + " files; it is reading the wrong folder");
+        Assert.True(files.Count > 60, "the check read only " + files.Count + " files; it is reading the wrong folder");
         Assert.Contains(files, f => f.EndsWith("index.html", StringComparison.OrdinalIgnoreCase));
 
         var problems = new List<string>();
@@ -361,7 +361,7 @@ public sealed class DarlingWebSecurityHeadersTests
         foreach (Match m in Regex.Matches(index, @"<(script|link)\b[^>]*\b(src|href)\s*=\s*""([^""]*)""", RegexOptions.IgnoreCase))
         {
             var target = m.Groups[3].Value;
-            Assert.False(target.StartsWith("http", StringComparison.OrdinalIgnoreCase) || target.StartsWith("//", StringComparison.Ordinal),
+            Assert.False(target.StartsWith("http", StringComparison.OrdinalIgnoreCase) || Regex.IsMatch(target, "^/{2}"),
                 "index.html loads " + target + " from another origin");
         }
     }
@@ -378,7 +378,7 @@ public sealed class DarlingWebSecurityHeadersTests
     [InlineData("a.js", "const s = document.createElement('style');", "a created <style> element")]
     [InlineData("a.js", "const h = '<img src=x onerror=go()>';", "an on*= event-handler attribute")]
     [InlineData("a.css", "@import url(https://cdn.example/x.css);", "a stylesheet @import from another origin")]
-    public void TheGuardScan_SeesEachBlockedConstruct(string fileName, string text, string expected)
+    public void TheGuardCheck_SeesEachBlockedConstruct(string fileName, string text, string expected)
         => Assert.Contains(expected, FindBlockedConstructs(fileName, text));
 
     [Theory]
@@ -387,6 +387,6 @@ public sealed class DarlingWebSecurityHeadersTests
     [InlineData("a.js", "/* eval(x) and onclick=\"y\" in a comment */ const a = 1; // javascript: in a comment")]
     [InlineData("a.js", "node.style.display = 'none'; el('div', { style: 'height:4px', onClick: go });")]
     [InlineData("a.js", "const ns = \"http://www.w3.org/2000/svg\";")]
-    public void TheGuardScan_LeavesAllowedCodeAlone(string fileName, string text)
+    public void TheGuardCheck_LeavesAllowedCodeAlone(string fileName, string text)
         => Assert.Empty(FindBlockedConstructs(fileName, text));
 }
