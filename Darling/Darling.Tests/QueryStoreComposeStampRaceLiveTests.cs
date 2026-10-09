@@ -285,14 +285,23 @@ public sealed class QueryStoreComposeStampRaceLiveTests
 
             /* The first build holds the hour's advisory lock and has not committed. The second must wait for it, and then redo the hour
                on top of the first's committed rows: without the lock both delete nothing and both insert, which doubles the hour. */
+            /* The callback only records what it saw: a throw from inside it would leave the second build running against a store the
+               test is tearing down, which blocks the host instead of failing the test. The assertions run once both builds are done. */
+            var secondWaited = false;
+            long ungrantedAdvisoryLocks = -1;
+            var secondFinishedEarly = false;
             await QueryStoreComposeStamp.BuildHourAsync(first, hour, DateTime.UtcNow, ct, async () =>
             {
                 secondBuild = QueryStoreComposeStamp.BuildHourAsync(second, hour, DateTime.UtcNow, ct);
-                Assert.True(await SomeoneWaitsOnALockAsync(connection, ct), "the second build should wait on the hour's advisory lock");
-                Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted", ct));
-                Assert.False(secondBuild.IsCompleted);
+                secondWaited = await SomeoneWaitsOnALockAsync(connection, ct);
+                ungrantedAdvisoryLocks = await CountAsync(connection, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted", ct);
+                secondFinishedEarly = secondBuild.IsCompleted;
             });
-            Assert.NotNull(await secondBuild!);
+            var secondResult = await secondBuild!.WaitAsync(TimeSpan.FromSeconds(60), ct);
+            Assert.True(secondWaited, "the second build should wait on the hour's advisory lock");
+            Assert.Equal(1, ungrantedAdvisoryLocks);
+            Assert.False(secondFinishedEarly);
+            Assert.NotNull(secondResult);
 
             var wideRows = await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_interval_wide WHERE collection_time >= TIMESTAMP '{At(hour)}' AND collection_time < TIMESTAMP '{At(hour.AddHours(1))}'", ct);
             Assert.True(wideRows > 0);
