@@ -17,7 +17,7 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #4766: a custom range on the Queries tab comes back as the instants that were picked. The tab holds the range
-/// as UTC instants (<see cref="PerformanceMonitorLite.Controls.ServerTab.CurrentWindowUtc"/>) and the toolbar pickers only show them in the display
+/// as UTC instants (<see cref="PerformanceMonitorLite.Helpers.LiteTimeRange.WindowFor"/>, #5562) and the toolbar picker only shows them in the display
 /// zone; <see cref="LocalDataService.GetQueriesTabWindowUtc"/> hands the same two instants to the read that compares
 /// them against <c>collection_time</c>. No conversion sits between the pickers and the read, so the window is the
 /// instant the user picked in every display mode, on either side of a clock change (the second 01:30 of the
@@ -103,10 +103,10 @@ public sealed class QueriesTabWindowRoundTripTests
             var toInstant = Utc(to);
 
             var zone = PerformanceMonitorLite.Controls.ServerTab.PickerZone(mode, clock);
-            var held = new PerformanceMonitor.Ui.CustomRangeState();
-            held.Set(fromInstant, toInstant);
-            Assert.NotNull(held.Render(zone));
-            var (_, heldFrom, heldTo) = PerformanceMonitorLite.Controls.ServerTab.CurrentWindowUtc(24, true, held);
+            /* #5562: the range the tab holds is a fixed range on the shared picker; the zone only words it. */
+            var spec = PerformanceMonitor.Ui.TimeRangeSpec.FixedRange(fromInstant, toInstant);
+            Assert.True(spec.TryResolve(toInstant.AddDays(1), zone, out var resolved, out _));
+            var (_, heldFrom, heldTo) = PerformanceMonitorLite.Helpers.LiteTimeRange.WindowFor(resolved!);
             var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, heldFrom, heldTo);
 
             Assert.Equal(Range(fromInstant, toInstant), Range(start, end));

@@ -142,7 +142,7 @@ public sealed class ViewerAlertClockCacheTests
         var alertHistory = ViewerCode("ViewerDataService.AlertHistory.cs");
         var method = Regex.Match(
             alertHistory,
-            @"public async Task<List<ViewerAlertRow>> GetAlertHistoryAsync\(.*?\n    \}\n",
+            @"public async Task<List<ViewerAlertRow>> GetAlertHistoryWindowAsync\(.*?\n    \}\n",
             RegexOptions.Singleline);
 
         Assert.True(method.Success);

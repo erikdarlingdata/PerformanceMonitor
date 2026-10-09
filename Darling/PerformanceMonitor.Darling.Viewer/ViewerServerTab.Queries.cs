@@ -319,6 +319,10 @@ public partial class ViewerServerTab
     internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
         HourlyServed? hourly = null, QueryStoreIntervalWide.WideReadPlan? widePlan = null)
     {
+        /* #5562 R7: every banner site's floor (the probe answer the site already awaited) also feeds the picker's "Data starts"
+           note of the tab the banner is on screen in. One feed here covers each site, the event surfaces included. */
+        ViewerDataStartNote.Feed(banner, floor);
+
         /* #4689: when the interval table served, the rows start at the plan's EffectiveStart, not at raw's
            floor. The banner names that start and the bound that set it; the slicer still reads raw, so a
            truncated raw floor is named beside it. The raw route's banner below is unchanged.

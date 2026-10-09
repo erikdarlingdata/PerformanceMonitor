@@ -1543,6 +1543,11 @@ public sealed class TsqlConventionGuardTests
            newest > TimeSpan.FromDays(ArchiveService.HotDataDays)`, an age comparison on the newest snapshot
            time, not T-SQL and not a tempdb label, so no census reads a site of that kind here. */
         "Lite/Services/LocalDataService.DatabaseStates.cs IsStale",
+        /* #5562: an expression-bodied method whose body opens with a property pattern (`untilUtc is { } end ? … : …`), the
+           same shape as IsStale above. The brace match closes the range at the pattern's own `}`, stranding the two calls to
+           ReadAlertHistoryAsync. They hold no string literal and no T-SQL (the SQL is in ReadAlertHistoryAsync, which the scan
+           reads whole), so no census reads a site of that kind outside the range. */
+        "Lite/Services/LocalDataService.AlertHistory.cs GetAlertHistoryWindowAsync",
         /* #3541 A12: the Lite twin of the four DarlingObjectStatsReader growth derivations above — the same
            `is { } b ? … : null` shape, the same absence of any string literal. */
         "Lite/Services/LocalDataService.FinOps.IndexObjects.cs DailyGrowthRateMb",

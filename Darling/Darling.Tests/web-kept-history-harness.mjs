@@ -98,9 +98,9 @@ let found = null;
 const editorScenario = scenario.startsWith("editor");
 /* The offeredRanges scenario also loads the server page (pages/server.js and the fleet page it imports). The page
    keeps its Range presets, and the widest of them that it hands tabNote, in module-private constants, so the scratch
-   copy appends one line exporting RANGE_OPTIONS and WIDEST_RANGE_HOURS, the same way the editor copy exports
+   copy appends one line exporting RANGE_OPTIONS and holdSpec, the same way the editor copy exports
    ensureFieldConfigs. */
-const serverPageScenario = scenario === "offeredRanges" || scenario.startsWith("custom");
+const serverPageScenario = scenario === "offeredRanges" || scenario.startsWith("custom") || scenario.startsWith("picker") || scenario.startsWith("tabReach");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
 let modules;
 try {
@@ -133,7 +133,7 @@ try {
   if (serverPageScenario) {
     fs.writeFileSync(
       path.join(scratch, "pages", "server.js"),
-      fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, WIDEST_RANGE_HOURS };\n"
+      fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, holdSpec };\n"
     );
   }
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
@@ -144,6 +144,8 @@ try {
     charts: await load("charts.js"),
     editor: editorScenario ? await load("editor.js") : null,
     server: serverPageScenario ? await load(path.join("pages", "server.js")) : null,
+    timeRange: serverPageScenario ? await load("time-range.js") : null,
+    pageRange: serverPageScenario ? await load("page-range.js") : null,
   };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
@@ -433,12 +435,27 @@ const scenarios = {
   // listed by range, registry and tab. What each tab draws is mounted too, under a node that names its range and tab,
   // so a notice or an error the page shows at an offered range comes back saying where.
   offeredRanges: async () => {
+    /* The catalog (HARNESS_INPUT, the real /api/catalog body) gives each read's reach; a read without a row, and a run without a
+       catalog, take the scenario's value (the common 168 hours). A tab offers the presets within the smallest reach of its
+       `reachReads` (#5562 review r1 M4), and each read refuses what its own catalog row does not take. */
     const maxHours = Number(scenarioValue);
+    const catalog = INPUT || { reads: [] };
+    const readReach = (name) => {
+      const entry = (catalog.reads || []).find((r) => r.name === name);
+      return entry ? modules.pageRange.readsReachHours(catalog, [name]) : maxHours;
+    };
     answer = (url) => {
       const hours = Number(asked(url));
-      return hours > maxHours ? refusal(hours, maxHours, Math.round(maxHours / 24)) : data(PICKER_ROWS[tool(url)] || {});
+      const max = readReach(tool(url));
+      return hours > max ? refusal(hours, max, Math.round(max / 24)) : data(PICKER_ROWS[tool(url)] || {});
     };
-    offered = modules.server.RANGE_OPTIONS.map((option) => option.hours);
+    const tabReach = (tab) => (catalog.reads && tab.reachReads ? modules.pageRange.readsReachHours(catalog, tab.reachReads) : maxHours);
+    const allTabs = [["SQL Server", modules.tabs.SERVER_TABS], ["PostgreSQL", modules.tabs.POSTGRES_TABS]].flatMap(([engine, registry]) => registry.map((tab) => [engine, tab]));
+    /* `offered` is the presets EVERY tab offers; `reaches` is each tab's own longest, and `undeclared` the windowed reads a tab made
+       that its `reachReads` does not name (a list that missed one would lift the tab's reach past a read that refuses it). */
+    const common = Math.min(...allTabs.map(([, tab]) => tabReach(tab)));
+    offered = modules.server.RANGE_OPTIONS.filter((option) => option.hours <= common).map((option) => option.hours);
+    found = { reaches: {}, undeclared: [], offeredBy: {} };
     beyond = [];
     observed = [];
     notes = [];
@@ -446,6 +463,8 @@ const scenarios = {
     for (const option of modules.server.RANGE_OPTIONS) {
       for (const [engine, registry] of [["SQL Server", modules.tabs.SERVER_TABS], ["PostgreSQL", modules.tabs.POSTGRES_TABS]]) {
         for (const tab of registry) {
+          if (option.hours > tabReach(tab)) continue;
+          (found.offeredBy[engine + " " + tab.id] ||= []).push(option.hours);
           const before = fetches.length;
           const holder = new FakeNode("div");
           holder.where = option.label + ": " + engine + " " + tab.id + " tab";
@@ -456,8 +475,11 @@ const scenarios = {
             const url = new URL(fetched, "http://viewer.test");
             if (asked(url) !== null) {
               observed.push(option.hours + " " + engine + " " + tool(url));
+              if (!(tab.reachReads || []).includes(tool(url)) && !found.undeclared.includes(engine + " " + tab.id + " " + tool(url))) {
+                found.undeclared.push(engine + " " + tab.id + " " + tool(url));
+              }
             }
-            if (Number(asked(url)) > maxHours) {
+            if (Number(asked(url)) > readReach(tool(url))) {
               beyond.push(option.label + ": " + engine + " " + tab.id + " tab, " + tool(url) + " asked for " + asked(url) + " hours");
             }
           }
@@ -466,7 +488,8 @@ const scenarios = {
     }
     for (const [engine, registry] of [["SQL Server", modules.tabs.SERVER_TABS], ["PostgreSQL", modules.tabs.POSTGRES_TABS]]) {
       for (const tab of registry) {
-        const note = modules.tabs.tabNote(tab, modules.server.WIDEST_RANGE_HOURS);
+        found.reaches[engine + " " + tab.id] = tabReach(tab);
+        const note = modules.tabs.tabNote(tab, tabReach(tab));
         if (note) {
           notes.push(engine + " " + tab.id + ": " + note.textContent);
         }
@@ -495,11 +518,38 @@ Object.assign(scenarios, {
       rounded: r(T0, T1),
       exact: r("2026-01-02T06:30:00.000Z", T1),
       subHour: r("2026-01-02T10:00:00.000Z", T1),
+      tooShort: r("2026-01-02T10:27:00.000Z", T1),
       reversed: r(T1, T0),
       future: r("2026-05-31T00:00:00.000Z", "2026-06-02T00:00:00.000Z"),
       tooWide: r("2025-12-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"),
       live: modules.server.resolveCustomRange(NOW - 5 * 3600000, NOW - 1000, NOW),
     };
+    return [];
+  },
+  // #5562: a range under an hour is fetched as the whole hour that holds it and trimmed to the exact pair, and the picker's choices
+  // reach the page as whole-hour presets (no trimming) or as custom ranges (trimmed).
+  pickerSubHour: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const before = fetches.length;
+    const err = modules.server.holdSpec("SRV1", modules.timeRange.fixedSpec(Date.parse("2026-01-02T10:00:00.000Z"), Date.parse(T1)), NOW);
+    const ctx = modules.server.rangeContext(NOW);
+    const cpu = await modules.util.readTool("get_cpu_utilization", { server: "SRV1", hours: ctx.hours });
+    found = { err, hours: ctx.hours, label: ctx.label, custom: ctx.custom === true, reads: fetches.slice(before), rows: cpu.data.samples.length };
+    return [];
+  },
+  // Every preset and calendar period the picker offers, held for a server in the browser's zone (the scenario name carries it).
+  pickerPresetsLocal: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const tr = modules.timeRange;
+    const out = {};
+    for (const spec of [...tr.ROLLING_PRESETS, ...tr.CALENDAR_PRESETS]) {
+      const err = modules.server.holdSpec("SRV1", spec, NOW);
+      const ctx = modules.server.rangeContext(NOW);
+      out[tr.specId(spec)] = { err, hours: ctx.hours, label: ctx.label, custom: ctx.custom === true };
+    }
+    found = out;
     return [];
   },
   // A past-end custom range through the page: its reads carry as_of=end and the rounded hours.
@@ -575,6 +625,109 @@ Object.assign(scenarios, {
     };
     found = { rounded: ctx(T0, T1), whole: ctx("2026-01-02T06:30:00.000Z", T1) };
     return [];
+  },
+});
+
+/* ── per-tab reach on the server page (#5562 review r1 M4) ──
+   The answer to /api/catalog is HARNESS_INPUT, the real catalog body, so a tab's reach is the one the service serves. */
+const tabReachAnswers = () => {
+  const catalog = INPUT || { reads: [] };
+  answer = (url) => {
+    if (url.pathname === "/api/fleet") return data({ cards: [] });
+    if (url.pathname === "/api/catalog") return data(catalog);
+    if (url.pathname.startsWith("/api/read/")) {
+      const max = modules.pageRange.readsReachHours(catalog, [tool(url)]);
+      const hours = Number(asked(url));
+      return hours > max ? refusal(hours, max, Math.round(max / 24)) : data({});
+    }
+    return data({});
+  };
+};
+const tabPage = async (server, tabId) => {
+  const holder = new FakeNode("div");
+  modules.server.renderServer(holder, server, tabId);
+  await settleFast();
+  return holder;
+};
+const HOURS = 3600000;
+Object.assign(scenarios, {
+  // A 30 day or 20 day range held on the tab that reads 30 days, then carried to a tab that reads 7: that tab reads its own reach, says so
+  // in a notice and in its label, refuses the range in its own picker, and keeps the range held for the tab that takes it.
+  tabReachCarried: async () => {
+    tabReachAnswers();
+    const tr = modules.timeRange;
+    await tabPage("SRV1", "io");
+    const out = { ioFirst: modules.server.rangeContext(NOW).hours };
+    out.holdTwentyDays = modules.server.holdSpec("SRV1", tr.relativeSpec(480 * HOURS), NOW);
+    out.ioTwentyDays = { hours: modules.server.rangeContext(NOW).hours, note: modules.server.reachNoteText(NOW) };
+    await tabPage("SRV1", "waits");
+    const twenty = modules.server.rangeContext(NOW);
+    out.waitsTwentyDays = { hours: twenty.hours, label: twenty.label, custom: twenty.custom === true, note: modules.server.reachNoteText(NOW) };
+    out.holdThirtyOnWaits = modules.server.holdSpec("SRV1", tr.relativeSpec(720 * HOURS), NOW);
+    out.holdThirtyOnWaitsRange = modules.server.resolveCustomRange(NOW - 720 * HOURS, NOW, NOW);
+    await tabPage("SRV1", "io");
+    out.holdThirtyOnIo = modules.server.holdSpec("SRV1", tr.relativeSpec(720 * HOURS), NOW);
+    out.ioThirty = { hours: modules.server.rangeContext(NOW).hours, note: modules.server.reachNoteText(NOW) };
+    const before = fetches.length;
+    const holder = await tabPage("SRV1", "waits");
+    const thirty = modules.server.rangeContext(NOW);
+    out.waitsThirty = { hours: thirty.hours, label: thirty.label, custom: thirty.custom === true, note: modules.server.reachNoteText(NOW) };
+    out.waitsReads = fetches.slice(before).filter((f) => f.startsWith("/api/read/"));
+    found = out;
+    return [holder];
+  },
+  // A wide range held on one server, then a server whose catalog is not read yet: the panels wait for the catalog and read once, at the tab's
+  // reach, instead of reading 7 days and then the rest.
+  tabReachWaits: async () => {
+    tabReachAnswers();
+    await tabPage("SRV1", "io");
+    modules.server.holdSpec("SRV1", modules.timeRange.relativeSpec(720 * HOURS), NOW);
+    const before = fetches.length;
+    const holder = await tabPage("SRV2", "io");
+    const after = fetches.slice(before);
+    found = { fetches: after, firstRead: after.findIndex((f) => f.startsWith("/api/read/")), catalog: after.findIndex((f) => f.startsWith("/api/catalog")) };
+    return [holder];
+  },
+  // Review r2 M1: a fixed range that starts in the future is refused by the server page's hold, and the range it had stays.
+  tabReachHoldFutureStart: async () => {
+    tabReachAnswers();
+    const holder = await tabPage("SRV1", "io");
+    const before = modules.server.rangeContext(NOW);
+    const refused = modules.server.holdSpec("SRV1", modules.timeRange.fixedSpec(NOW + HOURS, NOW + 3 * HOURS), NOW);
+    const after = modules.server.rangeContext(NOW);
+    found = { refused, beforeHours: before.hours, afterHours: after.hours, custom: after.custom === true };
+    return [holder];
+  },
+  // Review r2 L2: while the catalog is pending, another redraw of the same server (a range change or the 60 second refresh both call
+  // redrawPanels) must not add a second wait, or two redraws run when the catalog arrives and the panels' reads go out twice. The catalog
+  // answer is held back until the second render has happened. The batches are counted at the tab's build(): the page joins identical reads
+  // that are in flight together, so two batches can still show as one set of URLs, but each batch is a full rebuild of the panels.
+  tabReachWaitsRedrawn: async () => {
+    tabReachAnswers();
+    await tabPage("SRV1", "io");
+    modules.server.holdSpec("SRV1", modules.timeRange.relativeSpec(720 * HOURS), NOW);
+    const ioTab = modules.tabs.SERVER_TABS.find((t) => t.id === "io");
+    const realBuild = ioTab.build;
+    let builds = 0;
+    ioTab.build = (...args) => { builds++; return realBuild.apply(ioTab, args); };
+    const realFetch = globalThis.fetch;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    globalThis.fetch = async (url, init) => {
+      if (String(url).startsWith("/api/catalog")) await gate;
+      return realFetch(url, init);
+    };
+    const before = fetches.length;
+    const holder = await tabPage("SRV2", "io");
+    const again = await tabPage("SRV2", "io");
+    const readsBeforeRelease = fetches.slice(before).filter((f) => f.startsWith("/api/read/")).length;
+    release();
+    await settleFast();
+    globalThis.fetch = realFetch;
+    ioTab.build = realBuild;
+    const reads = fetches.slice(before).filter((f) => f.startsWith("/api/read/"));
+    found = { readsBeforeRelease, builds, reads, distinct: new Set(reads).size };
+    return [holder, again];
   },
 });
 

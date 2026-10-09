@@ -56,16 +56,18 @@ public partial class LocalDataService
     /// on its open tab's clock when it has one, then the machine's, the chain the Alert History tab uses.
     /// </summary>
     public async Task<List<JobHistoryRow>> GetJobHistoryAsync(
-        DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null) =>
-        (await GetJobHistoryWithClocksAsync(windowStartUtc, limit, serverId, openTabClocks)).Rows;
+        DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
+        DateTime? windowEndUtc = null) =>
+        (await GetJobHistoryWithClocksAsync(windowStartUtc, limit, serverId, openTabClocks, windowEndUtc)).Rows;
 
     /// <summary>
-    /// <see cref="GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?)"/> that also returns the clock it
+    /// <see cref="GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?, DateTime?)"/> that also returns the clock it
     /// windowed each server on, by server id (#4966). The tab words the note for one server from <c>Clocks[serverId]</c>, so the note
     /// and the read share one clock read and cannot disagree on a clock that changed between two reads.
     /// </summary>
     internal async Task<(List<JobHistoryRow> Rows, IReadOnlyDictionary<int, ServerClock> Clocks)> GetJobHistoryWithClocksAsync(
-        DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null)
+        DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
+        DateTime? windowEndUtc = null)
     {
         var serverIds = serverId.HasValue
             ? new List<int> { serverId.Value }
@@ -77,10 +79,10 @@ public partial class LocalDataService
         {
             var clock = await ReadJobHistoryClockAsync(id, openTabClocks is not null && openTabClocks.TryGetValue(id, out var tabClock) ? tabClock : null);
             clocks[id] = clock;
-            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit));
+            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit, windowEndUtc));
         }
 
-        return (ApplyJobHistoryWindow(rows, windowStartUtc, limit), clocks);
+        return (ApplyJobHistoryWindow(rows, windowStartUtc, limit, windowEndUtc), clocks);
     }
 
     /// <summary>This machine's zone, the last clock in the Job History chain. A seam for the tests, which name a fixed zone so a
@@ -223,12 +225,14 @@ ORDER BY server_id";
     /// <paramref name="windowStartUtc"/> (each server's SQL pre-filter is widened by an hour, so a run just before the
     /// window can still be in the set), orders them newest first by their real instant (two servers' stored wall clocks
     /// are in different zones, so the raw order is not the order the runs happened in), and keeps the newest
-    /// <paramref name="limit"/>. The server id is the last tie-break so the order is the same on every read.
+    /// <paramref name="limit"/>. The server id is the last tie-break so the order is the same on every read. A
+    /// <paramref name="windowEndUtc"/> (#5562) is exclusive and is applied in the SQL before each server's row cap
+    /// (<see cref="ReadJobHistoryForServerAsync"/>); the check here is the exact one after the server-local to UTC conversion.
     /// </summary>
-    internal static List<JobHistoryRow> ApplyJobHistoryWindow(List<JobHistoryRow> rows, DateTime windowStartUtc, int limit)
+    internal static List<JobHistoryRow> ApplyJobHistoryWindow(List<JobHistoryRow> rows, DateTime windowStartUtc, int limit, DateTime? windowEndUtc = null)
     {
         return rows
-            .Where(r => r.RunDateTimeUtc is { } runUtc && runUtc >= windowStartUtc)
+            .Where(r => r.RunDateTimeUtc is { } runUtc && runUtc >= windowStartUtc && (windowEndUtc is not { } end || runUtc < end))
             .OrderByDescending(r => r.RunDateTimeUtc)
             .ThenByDescending(r => r.InstanceId)
             .ThenByDescending(r => r.ServerId)
@@ -238,7 +242,36 @@ ORDER BY server_id";
 
     /// <summary>One server's runs: the newest <paramref name="limit"/> at or after the server-local start of the window,
     /// each with its run time converted to UTC through <paramref name="clock"/>. Not yet held to the exact window.</summary>
-    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit)
+    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc)
+    {
+        var readLimit = limit;
+        var items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc);
+        if (windowEndUtc is not { } end || limit <= 0)
+        {
+            return items;
+        }
+
+        /* #5562: the SQL end bound is the server-local end widened by an hour (a daylight-saving change next to the end
+           moves the stored wall clock by an hour against the instant), so runs in that margin can sit among the newest rows
+           and displace runs inside the window from the cap. The margin runs are the newest ones: while the read came back
+           full and holds fewer than <c>limit</c> runs inside the window, read again with room for the missing
+           ones, so the cap lands on the window. A read that came back short has reached the oldest row, so it is complete. */
+        while (items.Count >= readLimit)
+        {
+            var inside = items.Count(r => r.RunDateTimeUtc is { } runUtc && runUtc < end);
+            if (inside >= limit)
+            {
+                break;
+            }
+
+            readLimit += limit - inside;
+            items = await ReadJobHistoryForServerOnceAsync(serverId, clock, windowStartUtc, readLimit, windowEndUtc);
+        }
+
+        return items;
+    }
+
+    private async Task<List<JobHistoryRow>> ReadJobHistoryForServerOnceAsync(int serverId, ServerClock clock, DateTime windowStartUtc, int limit, DateTime? windowEndUtc)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -248,6 +281,11 @@ ORDER BY server_id";
            daylight-saving change inside the span; ApplyJobHistoryWindow drops what that lets in (#4966). */
         var statsStart = clock.ToServerLocal(windowStartUtc);
         var preFilterStart = statsStart.AddHours(-1);
+
+        /* #5562 (R6): a window that ended before now has a real END bound, in the SQL and ahead of the row cap, so the cap
+           counts the runs inside the window, not the newer ones after it. The bound is exclusive, on the server-local wall
+           clock, widened an hour like the start; the exact instant check and the margin re-read are ReadJobHistoryForServerAsync's. */
+        var endClause = windowEndUtc.HasValue ? "AND   run_datetime < $5" : string.Empty;
 
         /* #4229 (Darling parity): the per-job average/max used to run as a window function OVER every step
            row the window matched, forcing a full sort/aggregate of the whole set before ORDER BY/LIMIT could
@@ -267,6 +305,7 @@ WITH job_stats AS (
     WHERE step_id = 0
     AND   run_status = 1
     AND   run_datetime >= $3
+    {endClause}
     AND   server_id = $2
     GROUP BY server_id, job_id
 ),
@@ -290,6 +329,7 @@ base AS (
         message
     FROM v_job_history
     WHERE run_datetime >= $1
+    {endClause}
     AND   server_id = $2
     ORDER BY run_datetime DESC, instance_id DESC
     LIMIT $4
@@ -331,6 +371,10 @@ ORDER BY base.run_datetime DESC, base.instance_id DESC";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = statsStart });
         command.Parameters.Add(new DuckDBParameter { Value = limit });
+        if (windowEndUtc.HasValue)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = clock.ToServerLocal(windowEndUtc.Value).AddHours(1) });
+        }
 
         var items = new List<JobHistoryRow>();
         using var reader = await command.ExecuteReaderAsync();

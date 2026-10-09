@@ -195,6 +195,8 @@ export function renderFindings(server, res) {
 export const analysisFindingsTab = {
   id: "recommendations",
   label: "Recommendations",
+  /* The windowed reads this tab makes, so the server page reads its reach from the catalog (#5562 review r1 M4). */
+  reachReads: ["get_analysis_findings"],
   build: (server, ctx) => {
     const body = el("div", { class: "panel-body" }, [loadingStrip()]);
     (async () => {

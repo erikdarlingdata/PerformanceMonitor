@@ -34,9 +34,9 @@ public sealed class FinOpsTabHighImpactPageTests
     public void ThePickerOffersTheDesktopWindowsAndTheStateIsKeptPerServer()
     {
         var tab = Tab();
-        var pairs = Regex.Matches(tab, "\\{ value: (\\d+), label: \"([^\"]+)\" \\}").Select(m => m.Groups[1].Value + "=" + m.Groups[2].Value);
-        Assert.Equal("1=Last 1 hour,4=Last 4 hours,12=Last 12 hours,24=Last 24 hours,168=Last 7 days", string.Join(",", pairs));
-        Assert.Contains("pickerControl(\"Window\", WINDOWS, start,", tab);
+        // #5562 R5: the shared picker in its Compact, rolling-only form (finops/window.js), not a hand-listed select.
+        Assert.DoesNotContain("WINDOWS", tab);
+        Assert.Contains("finopsWindowControl({ hours: start, onChange: (hours) => load(hours) })", tab);
         Assert.Contains("const chosenHours = new Map();", tab);
         Assert.Contains("chosenHours.set(server, hours);", tab);
         Assert.Contains("chosenHours.get(server) ?? HOURS", tab);
@@ -77,7 +77,7 @@ public sealed class FinOpsTabHighImpactPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "../plan-viewer.js", "./gate.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "../plan-viewer.js", "./gate.js", "./window.js" }));
         Assert.Contains("./gate.js", imports);
     }
 

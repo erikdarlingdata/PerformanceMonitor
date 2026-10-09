@@ -898,7 +898,7 @@ public sealed class ServerPageTabsTests
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
         Assert.Contains("return note ? noticeStrip(note) : null;", js, StringComparison.Ordinal);
-        Assert.Contains("tabNote(tab, WIDEST_RANGE_HOURS)", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("tabNote(tab, tabReach())", ServerJs, StringComparison.Ordinal);
     }
 
     /// <summary>

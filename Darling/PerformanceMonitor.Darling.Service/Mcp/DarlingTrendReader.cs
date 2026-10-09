@@ -389,7 +389,13 @@ internal static class DarlingTrendReader
     {
         var isArtifact = "COALESCE((" + WaitStatisticsArtifact.ArtifactPredicateSql(
             "cntr_type", "object_name", "prev_value", "cntr_value", "next_value") + "), false)";
-        var isWaitStatistics = WaitStatisticsArtifact.ObjectNameSuffixMatchSql("object_name");
+        /* #5562 L4b: the suffix test as LIKE, not right(object_name, 16) = '...'. On a compressed perfmon_stats chunk the right()
+           call is a plain Filter, so the first arm (which returns nothing for any counter outside the Wait Statistics object)
+           decompressed and materialized every row of the counter in the window and threw them all away: 12.5 s for 30 days of
+           Batch Requests/sec on a large store. LIKE runs inside the columnar scan's Vectorized Filter. Same rows: the suffix has no
+           wildcard character, and NULL still lands in the second arm only. The shared WaitStatisticsArtifact text (Lite and the
+           Viewer) is left as it is. */
+        var isWaitStatistics = $"object_name IS NOT NULL AND object_name LIKE '%{WaitStatisticsArtifact.ObjectNameSuffix}'";
         return $$"""
             SELECT
                 collection_time,

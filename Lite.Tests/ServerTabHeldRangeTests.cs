@@ -13,34 +13,35 @@ using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Controls;
+using PerformanceMonitorLite.Helpers;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #4766: the Server tab holds its custom range as two UTC instants (<see cref="CustomRangeState"/>) and the pickers
-/// on the toolbar only show it. The window a refresh reads is the pair as held, whatever zone the pickers are drawn
-/// in; a switch of display mode draws the same pair in the new zone and parses nothing back.
+/// #5562: the Server tab holds its range on the shared picker, and the window a refresh reads comes from
+/// <see cref="LiteTimeRange.WindowFor"/>: a rolling range of whole hours is still (hours, null, null), exactly as the
+/// old presets were, and everything else (a sub-hour span, a calendar period, a typed range) carries the two instants
+/// it resolves to, so the ~60 consumers of <c>GetCurrentWindowUtc</c> / <c>GetHoursBack</c> / <c>GetChartWindow</c>
+/// need no change. The tab is a WPF control this suite does not instantiate (the shared picker has its own STA tests in
+/// Darling.Tests): the mapping, the settings split and the zone are pure and tested here directly, and the wiring
+/// around them is a source pin.
 ///
-/// <para>A range whose start is 06:30 UTC on 1 November is the case that needs this. On a US Eastern server that
-/// instant is the SECOND 01:30 of the day (the clocks fall back at 06:00 UTC), and the picker text "01:30" names the
-/// first (05:30 UTC). Read the text back after a redraw and the range moves an hour, so the redraw must not be read
-/// as the user typing. The tab is a WPF control this suite does not instantiate: the window and the zone are pure
-/// static methods tested here directly, and the wiring around them is a source pin.</para>
+/// <para>#4766 still holds: a fixed range holds its instants itself, so the zone only changes the text. A range from
+/// 06:30 UTC on 1 November is the second 01:30 on a US Eastern server, and it reads 06:30 UTC in every display mode.</para>
 /// </summary>
 public sealed class ServerTabHeldRangeTests
 {
     private static ServerClock Eastern() => ServerClock.Resolve("Eastern Standard Time", -300);
 
-    private static DateTime At(int day, int hour, int minute) =>
-        new(2026, 11, day, hour, minute, 0, DateTimeKind.Unspecified);
+    private static DateTime At(int month, int day, int hour, int minute) =>
+        new(2026, month, day, hour, minute, 0, DateTimeKind.Unspecified);
 
-    /* A range from the second 01:30 to the second 02:30 of the change day, as the tab holds it. */
-    private static CustomRangeState Held()
+    private static ResolvedTimeRange Resolve(TimeRangeSpec spec, DateTime nowUtc, TimeZoneInfo zone)
     {
-        var held = new CustomRangeState();
-        held.Set(At(1, 6, 30), At(1, 7, 30));
-        return held;
+        Assert.True(spec.TryResolve(nowUtc, zone, out var range, out var error), error?.Message);
+        return range!;
     }
 
     // ── The window a refresh reads ──
@@ -49,29 +50,76 @@ public sealed class ServerTabHeldRangeTests
     [InlineData(TimeDisplayMode.UTC)]
     [InlineData(TimeDisplayMode.LocalTime)]
     [InlineData(TimeDisplayMode.ServerTime)]
-    public void AHeldRange_IsTheWindow_WhateverZoneThePickersAreDrawnIn(TimeDisplayMode mode)
+    public void AFixedRange_IsTheWindow_WhateverZoneThePickerIsDrawnIn(TimeDisplayMode mode)
     {
-        var held = Held();
         var zone = ServerTab.PickerZone(mode, Eastern());
+        var spec = TimeRangeSpec.FixedRange(At(11, 1, 6, 30), At(11, 1, 7, 30));
 
-        /* The pickers are drawn in this zone. Drawing them reads the pair and writes nothing. */
-        Assert.NotNull(held.Render(zone));
+        var (hoursBack, fromUtc, toUtc) = LiteTimeRange.WindowFor(Resolve(spec, At(11, 5, 12, 0), zone));
 
-        var (hoursBack, fromUtc, toUtc) = ServerTab.CurrentWindowUtc(4, customSelected: true, held);
+        Assert.Equal(At(11, 1, 6, 30), fromUtc);
+        Assert.Equal(At(11, 1, 7, 30), toUtc);
+        /* Hours from the start to now, rounded up: 4 days and 5.5 hours. */
+        Assert.Equal(102, hoursBack);
+    }
 
-        Assert.Equal(4, hoursBack);
-        Assert.Equal(At(1, 6, 30), fromUtc);
-        Assert.Equal(At(1, 7, 30), toUtc);
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(12)]
+    [InlineData(24)]
+    [InlineData(168)]
+    public void ARollingRangeOfWholeHours_HasNoBounds_LikeTheOldPresets(int hours)
+    {
+        var spec = TimeRangePresets.FromLegacyHours(hours)!;
+
+        Assert.Equal((hours, (DateTime?)null, (DateTime?)null), LiteTimeRange.WindowFor(Resolve(spec, At(10, 8, 12, 0), TimeZoneInfo.Utc)));
+    }
+
+    [Theory]
+    [InlineData(5, 1)]
+    [InlineData(15, 1)]
+    [InlineData(30, 1)]
+    [InlineData(90, 2)]
+    public void ASubHourOrFractionalSpan_CarriesItsInstants_AndHoursBackRoundsUp(int minutes, int expectedHoursBack)
+    {
+        var now = At(10, 8, 12, 0);
+        var spec = TimeRangeSpec.Relative(TimeSpan.FromMinutes(minutes));
+
+        var (hoursBack, fromUtc, toUtc) = LiteTimeRange.WindowFor(Resolve(spec, now, TimeZoneInfo.Utc));
+
+        Assert.Equal(expectedHoursBack, hoursBack);
+        Assert.Equal(now.AddMinutes(-minutes), fromUtc);
+        Assert.Equal(now, toUtc);
     }
 
     [Fact]
-    public void APresetOrAnEmptyHold_HasNoBounds()
+    public void ACalendarPeriod_FlowsThroughAsTheDisplayZonesWallClockDay()
     {
-        var held = Held();
-        Assert.Equal((4, (DateTime?)null, (DateTime?)null), ServerTab.CurrentWindowUtc(4, customSelected: false, held));
+        /* 'Yesterday' on an Eastern server read at 08 Oct 2026 12:00 UTC (08:00 there) is 7 Oct 00:00 to 8 Oct 00:00 Eastern. */
+        var zone = ServerTab.PickerZone(TimeDisplayMode.ServerTime, Eastern());
+        var now = At(10, 8, 12, 0);
+        var spec = TimeRangeSpec.ForPeriod(CalendarPeriod.Yesterday);
+        var range = Resolve(spec, now, zone);
 
-        var nothingHeldYet = new CustomRangeState();
-        Assert.Equal((24, (DateTime?)null, (DateTime?)null), ServerTab.CurrentWindowUtc(24, customSelected: true, nothingHeldYet));
+        var (hoursBack, fromUtc, toUtc) = LiteTimeRange.WindowFor(range);
+
+        Assert.Equal(At(10, 7, 4, 0), fromUtc);
+        Assert.Equal(At(10, 8, 4, 0), toUtc);
+        Assert.Equal(32, hoursBack);
+
+        /* The chart axis for it is that pair, not 'now - hoursBack'. */
+        Assert.Equal((At(10, 7, 4, 0), At(10, 8, 4, 0)), ServerTab.GetChartWindow(hoursBack, fromUtc, toUtc, now));
+        Assert.True(LiteTimeRange.HasExplicitInstants(range));
+    }
+
+    [Fact]
+    public void ARollingWholeHourRange_IsNotExplicit_ASlidingOneIs()
+    {
+        var now = At(10, 8, 12, 0);
+        Assert.False(LiteTimeRange.HasExplicitInstants(Resolve(TimeRangeSpec.Relative(TimeSpan.FromHours(4)), now, TimeZoneInfo.Utc)));
+        Assert.True(LiteTimeRange.HasExplicitInstants(Resolve(TimeRangeSpec.Relative(TimeSpan.FromMinutes(30)), now, TimeZoneInfo.Utc)));
+        Assert.True(LiteTimeRange.HasExplicitInstants(Resolve(TimeRangeSpec.SinceInstant(At(10, 7, 0, 0)), now, TimeZoneInfo.Utc)));
     }
 
     [Fact]
@@ -84,96 +132,182 @@ public sealed class ServerTabHeldRangeTests
 
         /* The zone of the clock the tab was handed, so a tab that is not the selected one keeps its own server's zone. */
         var server = ServerTab.PickerZone(TimeDisplayMode.ServerTime, clock);
-        Assert.Equal(TimeSpan.FromHours(-4), server.GetUtcOffset(DateTime.SpecifyKind(At(1, 5, 30), DateTimeKind.Utc)));
-        Assert.Equal(TimeSpan.FromHours(-5), server.GetUtcOffset(DateTime.SpecifyKind(At(1, 6, 30), DateTimeKind.Utc)));
+        Assert.Equal(TimeSpan.FromHours(-4), server.GetUtcOffset(DateTime.SpecifyKind(At(11, 1, 5, 30), DateTimeKind.Utc)));
+        Assert.Equal(TimeSpan.FromHours(-5), server.GetUtcOffset(DateTime.SpecifyKind(At(11, 1, 6, 30), DateTimeKind.Utc)));
+    }
+
+    // ── Settings: the legacy hours key keeps working, default_time_range is optional ──
+
+    [Theory]
+    [InlineData(1, "1h")]
+    [InlineData(4, "4h")]
+    [InlineData(12, "12h")]
+    [InlineData(24, "1d")]
+    [InlineData(168, "1w")]
+    [InlineData(48, "2d")]
+    public void TheLegacyHoursKey_MapsThroughFromLegacyHours(int hours, string expectedId)
+    {
+        Assert.Equal(expectedId, LiteTimeRange.FromSettings(null, hours).Id);
+        Assert.Equal(expectedId, LiteTimeRange.FromSettings("", hours).Id);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-3)]
+    [InlineData(int.MaxValue)]
+    [InlineData(300_000_000)]
+    public void ANonsenseLegacyValue_OpensOnFourHours(int hours)
+    {
+        Assert.Equal("4h", LiteTimeRange.FromSettings(null, hours).Id);
+    }
+
+    [Theory]
+    [InlineData("400000mo")]
+    [InlineData("1000000d")]
+    [InlineData("999999w")]
+    public void ACorruptRangeId_FallsBackWithoutThrowing(string id)
+    {
+        /* #5562 review H1: a hand-edited settings.json used to throw OverflowException when a server tab was built. */
+        Assert.Equal("4h", LiteTimeRange.FromSettings(id, 0).Id);
+        Assert.Equal("1d", LiteTimeRange.FromSettings(id, 24).Id);
     }
 
     [Fact]
-    public void ADisplayModeRoundTrip_ServerThenUtcThenServer_LeavesTheHeldInstantsAlone()
+    public void TheNewKey_WinsForAPresetOrAPeriod_AndANonPersistableOneFallsBackToTheHours()
     {
-        var held = Held();
-        var clock = Eastern();
-        var serverZone = ServerTab.PickerZone(TimeDisplayMode.ServerTime, clock);
-        var utcZone = ServerTab.PickerZone(TimeDisplayMode.UTC, clock);
+        Assert.Equal("30m", LiteTimeRange.FromSettings("30m", 24).Id);
+        Assert.Equal("previous-week", LiteTimeRange.FromSettings("previous-week", 24).Id);
+        Assert.Equal("1mo", LiteTimeRange.FromSettings("1mo", 4).Id);
 
-        var inServer = held.Render(serverZone);
-        var inUtc = held.Render(utcZone);
-        var inServerAgain = held.Render(serverZone);
-
-        /* 06:30 UTC is 01:30 on the server's clock, and 07:30 UTC is 02:30 there. */
-        Assert.Equal((At(1, 1, 30), At(1, 2, 30)), inServer);
-        Assert.Equal((At(1, 6, 30), At(1, 7, 30)), inUtc);
-        Assert.Equal(inServer, inServerAgain);
-
-        Assert.Equal(At(1, 6, 30), held.FromUtc);
-        Assert.Equal(At(1, 7, 30), held.ToUtc);
-        Assert.Equal(At(1, 6, 30), ServerTab.CurrentWindowUtc(4, customSelected: true, held).fromUtc);
+        /* A typed range is never taken from a file, and neither is text that is not a range. */
+        Assert.Equal("12h", LiteTimeRange.FromSettings("fixed:2026-10-01T04:00:00Z/2026-10-02T04:00:00Z", 12).Id);
+        Assert.Equal("12h", LiteTimeRange.FromSettings("since:2026-10-01T04:00:00Z", 12).Id);
+        Assert.Equal("12h", LiteTimeRange.FromSettings("nonsense", 12).Id);
     }
 
-    /// <summary>
-    /// The fact that makes the redraw guard necessary. The pickers show the second 01:30 as the text "01:30". Read
-    /// back as a typed edit, "01:30" as the start of a range is the FIRST 01:30, 05:30 UTC: an hour earlier than the
-    /// range that was held. So a picker write made by the tab itself must never reach the edit path.
-    /// </summary>
     [Fact]
-    public void ReadingTheRenderedServerTextBackAsAnEdit_MovesA0630ZStartTo0530Z()
+    public void WhatIsWritten_WholeHoursGoToTheLegacyKey_OtherPresetsToTheNewOne_ATypedRangeToNeither()
     {
-        var held = Held();
-        var serverZone = ServerTab.PickerZone(TimeDisplayMode.ServerTime, Eastern());
-        var shown = held.Render(serverZone)!.Value;
-        Assert.Equal(At(1, 1, 30), shown.From);
-
-        var edited = held.ApplyEdit(shown.From, BoundSide.From, serverZone);
-
-        Assert.Equal(At(1, 5, 30), edited);
-        Assert.Equal(At(1, 5, 30), held.FromUtc);
-        Assert.Equal(At(1, 7, 30), held.ToUtc);
+        Assert.Equal(((string?)null, (int?)4), LiteTimeRange.SettingsFor(TimeRangePresets.FromLegacyHours(4)!));
+        Assert.Equal(((string?)null, (int?)24), LiteTimeRange.SettingsFor(TimeRangePresets.FromLegacyHours(24)!));
+        Assert.Equal(("15m", (int?)null), LiteTimeRange.SettingsFor(TimeRangeSpec.Relative(TimeSpan.FromMinutes(15))));
+        Assert.Equal(("previous-week", (int?)null), LiteTimeRange.SettingsFor(TimeRangeSpec.ForPeriod(CalendarPeriod.PreviousWeek)));
+        Assert.Equal(((string?)null, (int?)null), LiteTimeRange.SettingsFor(TimeRangeSpec.FixedRange(At(10, 1, 0, 0), At(10, 2, 0, 0))));
+        Assert.Equal(((string?)null, (int?)null), LiteTimeRange.SettingsFor(TimeRangeSpec.SinceInstant(At(10, 1, 0, 0))));
     }
 
-    // ── The wiring: source pins on Lite/Controls/ServerTab.TimeRange.cs ──
-
-    /// <summary>
-    /// The display-mode switch draws the held range in the new zone and calls nothing that reads the pickers'
-    /// text: not the parse itself and not the capture that wraps it. Comments are stripped, so a sentence that names
-    /// them cannot fail the pin.
-    /// </summary>
     [Fact]
-    public void TheDisplayModeSwitch_DrawsTheHeldRange_AndParsesNothing()
+    public void TheTwoKeysNeverDisagree_ChoosingAWholeHourRangeClearsTheNewKey()
     {
-        var body = MethodBody(CodeOnly(ReadTimeRangeSource()), "private async void TimeDisplayMode_SelectionChanged(");
+        var root = new System.Text.Json.Nodes.JsonObject { ["default_time_range"] = "previous-week", ["default_time_range_hours"] = 4 };
 
-        Assert.Contains("RenderCustomRange();", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("GetDateTimeFromPickers", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("CaptureCustomRangeEdit", body, StringComparison.Ordinal);
+        App.WriteDefaultTimeRange(root, null, 12);
+        Assert.Equal(12, (int)root["default_time_range_hours"]!);
+        Assert.False(root.ContainsKey("default_time_range"));
+
+        App.WriteDefaultTimeRange(root, "30m", null);
+        Assert.Equal("30m", (string?)root["default_time_range"]);
+        Assert.Equal(12, (int)root["default_time_range_hours"]!);
     }
 
-    /// <summary>
-    /// <c>RenderCustomRange</c> raises <c>_renderingCustomRange</c> before its first picker write and lowers it in a
-    /// <c>finally</c>, and both picker handlers return on it before they reach <c>CaptureCustomRangeEdit</c>, so the
-    /// tab's own writes are never read as an edit.
-    /// </summary>
+    // ── Notes: the retention start and the collector's interval ──
+
     [Fact]
-    public void TheTabsOwnPickerWrites_AreMarked_AndBothPickerHandlersIgnoreThem()
+    public void TheDataStart_IsTheProbedFloor_ElseTheStaticRetentionEdge()
     {
-        var source = CodeOnly(ReadTimeRangeSource());
+        var now = At(10, 8, 12, 0);
+        var floor = At(10, 3, 14, 0);
 
-        var render = MethodBody(source, "private void RenderCustomRange(");
-        var raised = render.IndexOf("_renderingCustomRange = true;", StringComparison.Ordinal);
-        var firstWrite = render.IndexOf("FromDatePicker.SelectedDate", StringComparison.Ordinal);
-        var lowered = render.IndexOf("_renderingCustomRange = false;", StringComparison.Ordinal);
-        var finallyBlock = render.IndexOf("finally", StringComparison.Ordinal);
-        Assert.True(raised >= 0 && raised < firstWrite, "RenderCustomRange has to raise _renderingCustomRange before it writes a picker.");
-        Assert.True(finallyBlock > firstWrite && lowered > finallyBlock, "RenderCustomRange has to lower _renderingCustomRange in a finally.");
+        Assert.Equal(floor, LiteTimeRange.DataStartFor(floor, now));
+        Assert.Equal(RetentionService.OldestRetainedInstant(now), LiteTimeRange.DataStartFor(null, now));
 
-        foreach (var signature in new[] { "private async void CustomDateRange_Changed(", "private async void CustomTimeCombo_Changed(" })
+        /* The picker words it from the range: a start well before the data start shows the note, one after it does not. */
+        var long30 = Resolve(TimeRangeSpec.Relative(TimeSpan.FromDays(30)), now, TimeZoneInfo.Utc);
+        Assert.StartsWith("Data starts", TimeRangeNotes.DataStartNote(long30, floor));
+        Assert.Null(TimeRangeNotes.DataStartNote(Resolve(TimeRangeSpec.Relative(TimeSpan.FromHours(4)), now, TimeZoneInfo.Utc), floor));
+    }
+
+    [Theory]
+    [InlineData(1, 5, false)]
+    [InlineData(15, 30, true)]
+    [InlineData(5, 10, true)]
+    [InlineData(5, 15, false)]
+    [InlineData(0, 5, false)]
+    public void TheSampleInterval_IsTheCollectorsActualCadence_AndAShortSpanShowsTheNote(int minutes, int spanMinutes, bool noteShown)
+    {
+        var interval = LiteTimeRange.SampleIntervalFor(minutes);
+        var span = TimeSpan.FromMinutes(spanMinutes);
+
+        if (minutes == 0)
         {
-            var handler = MethodBody(source, signature);
-            var guard = Regex.Match(handler, @"\|\|\s*_renderingCustomRange\s*\)\s*return;");
-            var capture = handler.IndexOf("CaptureCustomRangeEdit(", StringComparison.Ordinal);
-
-            Assert.True(guard.Success, $"{signature} has to return while _renderingCustomRange is set.");
-            Assert.True(capture > guard.Index, $"{signature} has to return on _renderingCustomRange before CaptureCustomRangeEdit.");
+            Assert.Null(interval);
         }
+        else
+        {
+            Assert.Equal(TimeSpan.FromMinutes(minutes), interval);
+        }
+
+        Assert.Equal(noteShown, TimeRangeNotes.SampleIntervalNote(span, interval) != null);
+    }
+
+    // ── The wiring: source pins on the tab's files ──
+
+    [Fact]
+    public void TheDisplayModeSwitch_DrawsThePickerAgain_AndParsesNothing()
+    {
+        var body = MethodBody(CodeOnly(ReadControl("ServerTab.TimeRange.cs")), "private async void TimeDisplayMode_SelectionChanged(");
+
+        Assert.Contains("RangePicker.Refresh();", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheToolbar_HoldsTheSharedPicker_AndNoneOfTheOldControls()
+    {
+        var xaml = ReadControl("ServerTab.xaml");
+
+        Assert.Contains("<ui:TimeRangePicker x:Name=\"RangePicker\"", xaml, StringComparison.Ordinal);
+        foreach (var gone in new[] { "TimeRangeCombo", "FromDatePicker", "ToDatePicker", "FromHourCombo", "ToHourCombo", "FromMinuteCombo", "ToMinuteCombo" })
+        {
+            Assert.DoesNotContain(gone, xaml, StringComparison.Ordinal);
+        }
+
+        /* Apply to All, Compare and the display-mode combo stay beside it. */
+        Assert.Contains("ApplyTimeRangeToAll_Click", xaml, StringComparison.Ordinal);
+        Assert.Contains("CompareToCombo", xaml, StringComparison.Ordinal);
+        Assert.Contains("TimeDisplayModeBox", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ThePickersChoice_IsRemembered_AndNeverDropsAChangeBecauseARefreshIsRunning()
+    {
+        var body = MethodBody(CodeOnly(ReadControl("ServerTab.TimeRange.cs")), "private async void RangePicker_RangeChanged(");
+
+        Assert.DoesNotContain("_isRefreshing", body, StringComparison.Ordinal);
+        Assert.Contains("_suppressRangeRefresh", body, StringComparison.Ordinal);
+        Assert.Contains("PersistSelectedTimeRange(e.Spec);", body, StringComparison.Ordinal);
+        Assert.Contains("RefreshAllDataAsync()", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheQueryStatsProbe_FeedsThePickersDataStart_WithoutANewQuery()
+    {
+        var refresh = CodeOnly(ReadControl("ServerTab.Refresh.cs"));
+        var body = MethodBody(refresh, "private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(");
+
+        /* #5562 R7: every relation feeds, keyed by its collector, and the tab shows the floor of the page on screen. */
+        Assert.Contains("FeedDataStart(LiteTimeRange.CollectorOfRelation(relation), floor);", body, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(body, @"GetQueryWindowFloorAsync\("));
+    }
+
+    [Fact]
+    public void TheCurrentWindow_ComesFromThePicker_AndTheTabSetsItsZoneAndDefault()
+    {
+        var refresh = CodeOnly(ReadControl("ServerTab.Refresh.cs"));
+        Assert.Contains("LiteTimeRange.WindowFor(CurrentRange())", MethodBody(refresh, "private (int hoursBack, DateTime? fromUtc, DateTime? toUtc) GetCurrentWindowUtc("), StringComparison.Ordinal);
+
+        var ctor = CodeOnly(ReadControl("ServerTab.xaml.cs"));
+        Assert.Contains("RangePicker.ZoneProvider = GetPickerZone;", ctor, StringComparison.Ordinal);
+        Assert.Contains("RangePicker.Value = App.DefaultTimeRange;", ctor, StringComparison.Ordinal);
     }
 
     /* The text of the method that starts at the signature, up to its closing brace: these files indent members by four
@@ -195,7 +329,7 @@ public sealed class ServerTabHeldRangeTests
         return Regex.Replace(lf, @"//[^\n]*", string.Empty);
     }
 
-    private static string ReadTimeRangeSource([CallerFilePath] string thisFile = "") =>
+    private static string ReadControl(string name, [CallerFilePath] string thisFile = "") =>
         File.ReadAllText(Path.GetFullPath(Path.Combine(
-            Path.GetDirectoryName(thisFile)!, "..", "Lite", "Controls", "ServerTab.TimeRange.cs")));
+            Path.GetDirectoryName(thisFile)!, "..", "Lite", "Controls", name)));
 }
