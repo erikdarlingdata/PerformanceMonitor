@@ -27,7 +27,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 
 ### Important
 
-- **Upgrading from 3.9 runs the Darling store migrations V158 through V170 on the service's first start**
+- **Upgrading from 3.9 runs the Darling store migrations V158 through V173 on the service's first start**
 
 ### Added
 
