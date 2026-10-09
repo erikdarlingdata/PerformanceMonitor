@@ -1103,7 +1103,7 @@ public static class DarlingRetention
             tablesPurged = Math.Max(0, tablesPurged - (yieldGate?.TablesNotReached ?? 0));
             var yieldNote = yieldGate?.Describe();
 
-            var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
+            var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped, yieldGate?.TablesLeft ?? 0);
             if (yieldGate is { StoppedOnBudget: true })
             {
                 logger?.LogInformation(
@@ -2250,9 +2250,14 @@ public static class DarlingRetention
 /// (<paramref name="RowsDeleted"/>) and dropped Timescale chunks (<paramref name="ChunksDropped"/> —
 /// drop_chunks doesn't report per-row counts). <see cref="TotalPurged"/> is the single headline number the
 /// daily log and the on-demand <c>purge_now</c> log line report.
+/// <paramref name="TablesLeftOnBudget"/> (#5592) is how many tables still have rows because the pass stopped on its wall
+/// budget (never started, or stopped part-way); zero for a pass that drained every table, failed, or had no budget.
 /// </summary>
-public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, int ChunksDropped)
+public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, int ChunksDropped, int TablesLeftOnBudget = 0)
 {
+    /// <summary>True when the pass stopped on its wall budget with tables left (#5592).</summary>
+    public bool StoppedOnBudget => TablesLeftOnBudget > 0;
+
     /// <summary>Rows deleted plus whole chunks dropped — the coarse "how much did this purge remove" count.</summary>
     public int TotalPurged => RowsDeleted + ChunksDropped;
 }

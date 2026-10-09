@@ -300,6 +300,13 @@ internal sealed class RetentionCollectionYield
     /// <summary>Tables whose drain was never started because the budget was already spent.</summary>
     internal int TablesNotReached { get; private set; }
 
+    /// <summary>
+    /// Tables that still have rows to drain because of the budget: the ones never started plus the ones stopped part-way
+    /// (#5592). Above zero exactly when <see cref="StoppedOnBudget"/> is, and it is what the worker reads to schedule the
+    /// continuation pass.
+    /// </summary>
+    internal int TablesLeft { get; private set; }
+
     /// <summary>The clock a batch's run time is measured on.</summary>
     internal double NowSeconds => _secondsClock();
 
@@ -430,6 +437,7 @@ internal sealed class RetentionCollectionYield
         }
 
         TablesNotReached++;
+        TablesLeft++;
         return true;
     }
 
@@ -447,6 +455,7 @@ internal sealed class RetentionCollectionYield
         _stopPending = false;
         StoppedOnBudget = true;
         FirstStoppedTable ??= tableName;
+        TablesLeft++;
         if (rowsDeleted <= 0)
         {
             TablesNotReached++;

@@ -464,6 +464,7 @@ public sealed class RetentionCollectionYieldTests
         Assert.True(gate.StoppedOnBudget);
         Assert.Equal("first-skipped", gate.FirstStoppedTable);
         Assert.Equal(2, gate.TablesNotReached);
+        Assert.Equal(2, gate.TablesLeft);
     }
 
     [Fact]
@@ -479,6 +480,7 @@ public sealed class RetentionCollectionYieldTests
 
         Assert.Equal("before table_b", gate.StoppedPlace);
         Assert.Equal(2, gate.TablesNotReached);
+        Assert.Equal(2, gate.TablesLeft);
         Assert.Contains("time budget before table_b, with 2 table(s) not reached", gate.Describe(), StringComparison.Ordinal);
 
         /* Stopped part-way through a table: "in". */
@@ -486,6 +488,8 @@ public sealed class RetentionCollectionYieldTests
         var gate2 = GateOn(time2, new ScriptedPressure(null), budgetSeconds: 20);
         await PurgeLikeTheSweep(gate2, new FakeTable(time2, rows: 1_000, batchSeconds: 25), "table_x", TestContext.Current.CancellationToken);
         Assert.Equal("in table_x", gate2.StoppedPlace);
+        Assert.Equal(1, gate2.TablesLeft); /* #5592: stopped part-way still has rows left, though it is not "not reached" */
+        Assert.Equal(0, gate2.TablesNotReached);
         Assert.Contains("time budget in table_x", gate2.Describe(), StringComparison.Ordinal);
     }
 
@@ -498,6 +502,7 @@ public sealed class RetentionCollectionYieldTests
         await PurgeLikeTheSweep(calm, new FakeTable(time, rows: 250, batchSeconds: 2), "t", TestContext.Current.CancellationToken);
         Assert.True(calm.TotalPauseSeconds > 0);
         Assert.Null(calm.Describe());
+        Assert.Equal(0, calm.TablesLeft);
 
         var time2 = new FakeTime();
         var pushed = GateOn(time2, new ScriptedPressure(null, "behind", "behind"));
