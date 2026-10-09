@@ -159,6 +159,21 @@ public sealed class DarlingUpgradeShapesWorkflowTests
         Assert.DoesNotMatch(@"\b\d+\.\d+\.\d+\b", rest);
     }
 
+    /// <summary>
+    /// The upgrade-shape check found that Windows PowerShell 5.1 leaves <c>$PSScriptRoot</c> empty inside the
+    /// param() default of a <c>[CmdletBinding()]</c> script started with <c>-File</c>, so <c>-Source</c> resolved to
+    /// nothing and an upgrade run from its staging folder stopped at "No -Source given" (#5627). The body applies the
+    /// default; if it goes, the documented way to run the script fails on the engine an operator's prompt starts.
+    /// </summary>
+    [Fact]
+    public void TheUpgradeScript_AppliesItsSourceDefaultInTheBody()
+    {
+        var script = ReadRepoFileLf("Darling/tools/upgrade-darling.ps1");
+
+        Assert.Contains("[string]$Source = $PSScriptRoot,", script, StringComparison.Ordinal);
+        Assert.Contains("if ([string]::IsNullOrWhiteSpace($Source)) { $Source = $PSScriptRoot }", script, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheNightly_CallsTheWorkflow_GatedLikeItsOtherJobs_AndPublishDoesNotWaitOnIt()
     {

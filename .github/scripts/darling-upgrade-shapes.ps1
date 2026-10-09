@@ -236,3 +236,6 @@ switch ($Leg) {
 $secs = [int]$clock.Elapsed.TotalSeconds
 Write-Host "RESULT ${Leg}: PASS (${secs}s)"
 if ($env:GITHUB_STEP_SUMMARY) { "- $Leg - PASS (${secs}s)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8 }
+# The step's exit code is the last native command's unless the script says otherwise (a leg's sc.exe or icacls call
+# can leave a non-zero code behind), and every expectation above has already failed the leg by now.
+exit 0

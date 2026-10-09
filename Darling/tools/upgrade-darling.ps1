@@ -130,6 +130,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Windows PowerShell 5.1 leaves $PSScriptRoot EMPTY inside a [CmdletBinding()] script's param() defaults when the
+# script is started with -File, so the -Source default above can resolve to nothing and the run would stop at
+# "No -Source given" (#5627: measured by the upgrade-shape check on windows-2022 and windows-2025). The script body
+# does see $PSScriptRoot, so the default is applied here.
+if ([string]::IsNullOrWhiteSpace($Source)) { $Source = $PSScriptRoot }
+
 $serviceName = 'PerformanceMonitor Darling'
 $serviceExeName = 'PerformanceMonitor.Darling.Service.exe'
 $configName = 'darling.json'
