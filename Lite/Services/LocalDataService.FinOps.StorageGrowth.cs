@@ -17,7 +17,13 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Per-database size now, 7 days ago and 30 days ago. $1 server_id, $2 the 7-day cutoff, $3 the 30-day cutoff.
+    /// Per-database size now, 7 days ago and 30 days ago. $1 server_id, $2 the 7-day mark, $3 the 30-day mark.
+    ///
+    /// <para>Each baseline is the snapshot NEAREST its mark, and only when that snapshot is within one day of it
+    /// (86400 seconds). The older shape took the newest snapshot at or before the mark, however far
+    /// before: a store with 25 days of history then called its 25-day-old sample "30d ago" and measured Growth % and the daily
+    /// rate against it, and a store with a gap labeled whatever sample the gap left as the 7-day baseline. With no snapshot near
+    /// the mark the baseline is NULL, and the grid shows n/a with a tooltip saying no sample from that many days ago exists.</para>
     ///
     /// <para>A file whose row in the latest snapshot has no size is left out of all three sums, by one predicate
     /// (the <c>NOT EXISTS</c> against <c>log_service_files</c>) repeated in each. That file is the log of an Azure
@@ -28,13 +34,14 @@ public partial class LocalDataService
     /// already skips. A file that is gone from the latest snapshot has no row there, so it still counts on the
     /// past side, as shrinkage.</para>
     ///
-    /// <para>A row stored before the allocated/used fix for another database on an Azure SQL Database server holds that
-    /// database's USED space as its total, where every later row holds the ALLOCATED size
-    /// (<see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>). The same predicate leaves those rows out of
-    /// all three sums, so the one-time change reads as no history and not as growth: the database shows a blank past
-    /// size and growth n/a (null) until a newer sample is old enough to compare against, as a database added inside the window
-    /// does. Until the first collection after the upgrade the latest snapshot holds only old-shape rows, so the
-    /// database is not listed here at all.</para>
+    /// <para>#5498: a row named "(whole database)" for another database on an Azure SQL Database server is history from
+    /// before the collector read each user database on its own connection: it holds data space only, and the newest
+    /// snapshot of that database now holds its data and log files
+    /// (<see cref="PerformanceMonitor.Common.AzureSiblingDatabaseSize"/>). The 7-day and 30-day sums leave EVERY such
+    /// row out (<c>ExcludeAllSiblingRows</c>), so the log does not read as growth. The latest sum leaves out only the
+    /// old shape that holds no used space (<c>ExcludePreFixRows</c>), so a snapshot taken before the upgrade still
+    /// lists the database. A database with no comparable older row shows a blank past size and growth n/a (null), as
+    /// a database added inside the window does, until a newer sample is old enough to compare against.</para>
     ///
     /// <para>The <c>latest</c> CTE also flags each database whose size leaves its log out: <c>has_sibling_row</c> is true
     /// when the database has the one row another database on an Azure SQL Database server gets
@@ -43,7 +50,28 @@ public partial class LocalDataService
     /// the sums skip). Both come from the latest snapshot only, and the row's <c>Note</c> says which.</para>
     /// </summary>
     internal const string StorageGrowthSql = @"
-WITH log_service_files AS (
+WITH snaps AS (
+    SELECT DISTINCT collection_time AS t
+    FROM v_database_size_stats
+    WHERE server_id = $1
+),
+base_7d AS (
+    SELECT t
+    FROM snaps
+    WHERE t < (SELECT MAX(t) FROM snaps)
+    AND   abs(epoch(t) - epoch(CAST($2 AS TIMESTAMP))) <= 86400
+    ORDER BY abs(epoch(t) - epoch(CAST($2 AS TIMESTAMP))), t DESC
+    LIMIT 1
+),
+base_30d AS (
+    SELECT t
+    FROM snaps
+    WHERE t < (SELECT MAX(t) FROM snaps)
+    AND   abs(epoch(t) - epoch(CAST($3 AS TIMESTAMP))) <= 86400
+    ORDER BY abs(epoch(t) - epoch(CAST($3 AS TIMESTAMP))), t DESC
+    LIMIT 1
+),
+log_service_files AS (
     SELECT
         database_name,
         file_id
@@ -90,24 +118,14 @@ past_7d AS (
         MAX(s.collection_time) AS snap_time
     FROM v_database_size_stats AS s
     WHERE s.server_id = $1
-    AND   s.collection_time = (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-        AND   collection_time <= $2
-    )
-    AND   s.collection_time < (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-    )
+    AND   s.collection_time = (SELECT t FROM base_7d)
     AND   NOT EXISTS (
         SELECT 1
         FROM log_service_files AS ls
         WHERE ls.database_name = s.database_name
         AND   ls.file_id = s.file_id
     )
-    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
+    AND   " + AzureSiblingDatabaseSize.ExcludeAllSiblingRows + @"
     GROUP BY s.database_name
 ),
 past_30d AS (
@@ -117,24 +135,14 @@ past_30d AS (
         MAX(s.collection_time) AS snap_time
     FROM v_database_size_stats AS s
     WHERE s.server_id = $1
-    AND   s.collection_time = (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-        AND   collection_time <= $3
-    )
-    AND   s.collection_time < (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-    )
+    AND   s.collection_time = (SELECT t FROM base_30d)
     AND   NOT EXISTS (
         SELECT 1
         FROM log_service_files AS ls
         WHERE ls.database_name = s.database_name
         AND   ls.file_id = s.file_id
     )
-    AND   " + AzureSiblingDatabaseSize.ExcludePreFixRows + @"
+    AND   " + AzureSiblingDatabaseSize.ExcludeAllSiblingRows + @"
     GROUP BY s.database_name
 )
 SELECT
@@ -165,8 +173,12 @@ ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database
 
     /// <summary>
     /// Gets per-database storage growth trends comparing current size to 7d and 30d ago.
+    /// #5312: <paramref name="databaseNames"/> is the saved database filter (the Storage Growth grid also lists the databases the
+    /// table and index drill starts from); null or empty is every database. The rows are narrowed after the read, by exact
+    /// (ordinal) name, the same rule as the viewer's twin. The statement has no row cap, so the narrowing cannot lose a chosen
+    /// database. A row whose name was NULL reads as "" and never matches a chosen name.
     /// </summary>
-    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId)
+    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -198,6 +210,12 @@ ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database
                 HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });
         }
+        if (databaseNames is { Count: > 0 })
+        {
+            var chosen = new HashSet<string>(databaseNames, StringComparer.Ordinal);
+            items = items.Where(r => chosen.Contains(r.DatabaseName)).ToList();
+        }
+
         return items;
     }
 }

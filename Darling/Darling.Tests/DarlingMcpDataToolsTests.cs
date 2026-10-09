@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// a server the worker's way, plant rows across the collector tables, call the tool METHODS directly and
 /// assert each read round-trips its data-bearing envelope and an empty store returns the #1224 miss.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */
@@ -130,7 +131,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData("get_wait_types", "server_name,hours_back,as_of")]
     [InlineData("get_memory_stats", "server_name")]
     [InlineData("get_memory_clerks", "server_name")]
-    [InlineData("get_file_io_stats", "server_name")]
+    [InlineData("get_file_io_stats", "server_name,database_name")]
     [InlineData("get_tempdb_trend", "server_name,hours_back,as_of")]
     [InlineData("get_perfmon_stats", "server_name,counter_name,instance_name")]
     [InlineData("get_top_queries_by_cpu", "server_name,hours_back,top,database_name,parallel_only,min_dop,as_of")]
@@ -634,11 +635,15 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
            base table's inline query_text is NULL on every row written since. ("FROM v_query_stats" does not
            contain "FROM query_stats", so these two assertions name two different relations.) */
         var rankedRead = sql.IndexOf("FROM query_stats", StringComparison.Ordinal);
-        var lateral = sql.IndexOf("LEFT JOIN LATERAL", StringComparison.Ordinal);
-        var textRead = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        var lookupAt = sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal);
+        var dimRead = sql.IndexOf("query_text_dim", StringComparison.Ordinal);
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
-        Assert.True(textRead > lateral && lateral > rankedRead,
-            "the base-table aggregate comes first; the resolving view is read by the latest-text LATERAL");
+        /* #5309: the one latest-text lookup resolves the dimension itself (what v_query_stats' COALESCE does) for
+           the newest row only, instead of a per-row LATERAL over the view. */
+        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
+        Assert.True(dimRead > lookupAt && lookupAt > rankedRead,
+            "the base-table aggregate comes first; the dimension is read by the one latest-text lookup");
 
         Assert.Contains("SUM(delta_worker_time)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_elapsed_time)", sql, StringComparison.Ordinal);
@@ -646,7 +651,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
            hosts still collapse) and pins the LATERAL to the group's own rows. */
         Assert.Contains("GROUP BY database_name, query_hash, host_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("host_object_name IS NOT DISTINCT FROM r.host_object_name", sql, StringComparison.Ordinal);
-        Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal); /* optional db filter */
+        Assert.Contains("$5::text[] IS NULL OR database_name = ANY($5)", sql, StringComparison.Ordinal); /* optional db filter */
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);          /* over-fetch + trim */
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
     }
@@ -657,8 +662,8 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var sql = DarlingDataReader.TopProceduresSql;
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, schema_name, object_name, object_type", sql, StringComparison.Ordinal);
-        Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("$5::text[] IS NULL OR database_name = ANY($5)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_worker_time) AS rank_metric", TopRankings.Apply(sql, TopRanking.Cpu, hourly: false), StringComparison.Ordinal);
     }
 
     /* #3523: every by-CPU read RANKED by summed elapsed time — on a wait-bound server the real CPU
@@ -672,13 +677,16 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingDataReader.TopProceduresSql))]
     public void ByCpuReads_RankByWorkerTime_NeverElapsed(string sqlName)
     {
-        var sql = SqlByName(sqlName);
-        Assert.Contains("ORDER BY SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+        /* #5226: the const spells the ranking as the anchor; the CPU default is the const expanded to worker time. */
+        var sql = TopRankings.Apply(SqlByName(sqlName), TopRanking.Cpu, hourly: false);
+        Assert.Contains("SUM(delta_worker_time) AS rank_metric", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(delta_elapsed_time) AS rank_metric", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SUM(delta_elapsed_time) DESC", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("total_elapsed_us DESC", sql, StringComparison.Ordinal);
         if (sqlName != nameof(DarlingDataReader.TopProceduresSql))
         {
-            Assert.Contains("ORDER BY r.total_cpu_us DESC", sql, StringComparison.Ordinal);
+            Assert.Contains("ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST", sql, StringComparison.Ordinal);
         }
     }
 
@@ -691,7 +699,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         /* replica_role is a grouping key: an AG's shared Query Store (2022+) would otherwise report
            primary and secondary workload blended into one row. */
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
-        Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
+        Assert.Contains("$5::text[] IS NULL OR database_name = ANY($5)", sql, StringComparison.Ordinal);
         Assert.Contains("$6::text IS NULL OR execution_type_desc = $6", sql, StringComparison.Ordinal);
         Assert.Contains("r.execution_type_desc", sql, StringComparison.Ordinal);
         Assert.Contains("$7::text IS NULL OR module_name = $7", sql, StringComparison.Ordinal);
@@ -707,7 +715,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var rankedCte = sql.IndexOf("ranked AS", StringComparison.Ordinal);
         var dedupSurvivor = sql.IndexOf("WHERE rn = 1", rankedCte, StringComparison.Ordinal);
         var moduleFilter = sql.IndexOf("$7::text IS NULL OR module_name = $7", StringComparison.Ordinal);
-        var firstLimit = sql.IndexOf("LIMIT $4 + 5", StringComparison.Ordinal);
+        var firstLimit = sql.IndexOf("LIMIT $8", StringComparison.Ordinal);   /* #5313: the round's candidate limit, no longer top + 5 */
 
         Assert.True(dedupSurvivor > rankedCte && moduleFilter > dedupSurvivor,
             "module_name must filter only the latest cumulative interval snapshots");
@@ -719,7 +727,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     public void QueryStoreWindowFloor_RemainsACheapUnfilteredRetentionProbe()
     {
         var sql = DarlingDataReader.QueryStoreWindowFloorSql;
-        Assert.Contains("SELECT MIN(collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ROW_NUMBER", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("module_name", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("database_name", sql, StringComparison.Ordinal);
@@ -972,6 +980,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 /// serialized "live-postgres" collection and cleans up in finally.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class DarlingMcpDataToolsLivePostgresTests
 {
     private const string ServerName = "darling-mcp-data-e2e";
@@ -979,6 +988,34 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
     private const string Db = "StackOverflow";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    /* #4966: the window-floor cases of get_wait_stats, shared with the latch and spinlock reads (WindowNoticeAggregateCases). */
+    private static readonly WindowNoticeAggregateCases s_waitWindow = new(
+        "get_wait_stats", "wait_stats",
+        (ds, name, hours, end, limit) => DarlingMcpDataTools.GetWaitStats(ds, name, hours, limit, WebDataStartNote.FormatWindowEnd(end)),
+        (c, name, at, i) => DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_wait_time_ms, delta_signal_wait_time_ms, delta_waiting_tasks)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerIdHelper.GetDeterministicHashCode(name), name, "WINDOW_WAIT_" + i, 1000L - i, 100L, 5L),
+        "truncated");
+
+    [Fact]
+    public Task GetWaitStats_CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart_AgainstDevPostgres() => s_waitWindow.CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated_AgainstDevPostgres() => s_waitWindow.ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_AQuietStart_IsCovered_AgainstDevPostgres() => s_waitWindow.AQuietStart_IsCovered(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_TheNoRowsAnswer_StaysBare_AgainstDevPostgres() => s_waitWindow.TheNoRowsAnswer_StaysBare(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() => s_waitWindow.AShortWindow_WithRows_StartsNoProbe(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() => s_waitWindow.AFailedProbe_CostsTheNotice_NeverTheRows(ConnectionString);
 
     [Fact]
     public async Task DataTools_ReadPlantedRows_AgainstDevPostgres()

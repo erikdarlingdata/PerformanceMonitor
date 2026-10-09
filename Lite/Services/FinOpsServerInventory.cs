@@ -107,6 +107,7 @@ internal static class FinOpsServerInventory
             if (row.StorageTotalGb.HasValue) item.StorageTotalGb = row.StorageTotalGb;
             if (row.IdleDbCount.HasValue) item.IdleDbCount = row.IdleDbCount;
             if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
+            if (row.HealthScore.HasValue) item.HealthScore = row.HealthScore;
         }
         catch (Exception ex)
         {

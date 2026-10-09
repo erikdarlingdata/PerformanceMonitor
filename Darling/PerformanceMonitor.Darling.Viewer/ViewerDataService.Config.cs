@@ -29,14 +29,14 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     public const string ServerConfigSql = """
-        SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced
+        SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanced, capture_time
         FROM v_server_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
         ORDER BY configuration_name
         """;
 
-    /* 28 columns in Lite's exact SELECT order — the database-config reader below maps them by
+    /* 28 columns, then capture_time (#4966), in Lite's exact SELECT order — the database-config reader below maps them by
        incrementing ordinal, so this list's order is load-bearing and must stay byte-identical. */
     public const string DatabaseConfigSql = """
         SELECT database_name, state_desc, compatibility_level, collation_name, recovery_model,
@@ -46,7 +46,8 @@ public sealed partial class ViewerDataService
                is_query_store_on, is_encrypted, is_trustworthy_on, is_db_chaining_on,
                is_broker_enabled, is_cdc_enabled, is_mixed_page_allocation_on,
                log_reuse_wait_desc, page_verify_option, target_recovery_time_seconds, delayed_durability,
-               is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on
+               is_accelerated_database_recovery_on, is_memory_optimized_enabled, is_optimized_locking_on,
+               capture_time
         FROM v_database_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
@@ -55,7 +56,7 @@ public sealed partial class ViewerDataService
         """;
 
     public const string DatabaseScopedConfigSql = """
-        SELECT database_name, configuration_name, value, value_for_secondary
+        SELECT database_name, configuration_name, value, value_for_secondary, capture_time
         FROM v_database_scoped_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)
@@ -70,7 +71,7 @@ public sealed partial class ViewerDataService
        connect-time gate in ViewerDataService.cs holds at V137: a store below it has no such column and this
        read would throw on the Query Store grid. */
     public const string QueryStoreHealthSql = """
-        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode
+        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode, capture_time
         FROM v_query_store_health
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
@@ -90,7 +91,7 @@ public sealed partial class ViewerDataService
     /// pre-fix reading. <c>DarlingCurrentConfigReader.TraceFlagsSql</c> and Lite's twin carry the same test.
     /// </summary>
     public const string TraceFlagsSql = """
-        SELECT trace_flag, status, is_global, is_session
+        SELECT trace_flag, status, is_global, is_session, capture_time
         FROM v_trace_flags
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
@@ -120,7 +121,8 @@ public sealed partial class ViewerDataService
                 ValueConfigured = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 ValueInUse = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 IsDynamic = !reader.IsDBNull(3) && reader.GetBoolean(3),
-                IsAdvanced = !reader.IsDBNull(4) && reader.GetBoolean(4)
+                IsAdvanced = !reader.IsDBNull(4) && reader.GetBoolean(4),
+                CaptureTime = reader.GetDateTime(5)
             });
         }
 
@@ -172,6 +174,7 @@ public sealed partial class ViewerDataService
                 IsAcceleratedDatabaseRecoveryOn = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 IsMemoryOptimizedEnabled = !reader.IsDBNull(++ordinal) && reader.GetBoolean(ordinal),
                 IsOptimizedLockingOn = reader.IsDBNull(++ordinal) ? null : reader.GetBoolean(ordinal),
+                CaptureTime = reader.GetDateTime(++ordinal),
             });
         }
 
@@ -195,7 +198,8 @@ public sealed partial class ViewerDataService
                 DatabaseName = reader.GetString(0),
                 ConfigurationName = reader.GetString(1),
                 Value = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                ValueForSecondary = reader.IsDBNull(3) ? "" : reader.GetString(3)
+                ValueForSecondary = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                CaptureTime = reader.GetDateTime(4)
             });
         }
 
@@ -231,6 +235,7 @@ public sealed partial class ViewerDataService
                    and the display properties render it as the grid's absence glyph rather than as "". */
                 QueryCaptureMode = reader.IsDBNull(10) ? null : reader.GetString(10),
                 WaitStatsCaptureMode = reader.IsDBNull(11) ? null : reader.GetString(11),
+                CaptureTime = reader.GetDateTime(12),
             });
         }
 
@@ -253,7 +258,8 @@ public sealed partial class ViewerDataService
                 TraceFlag = reader.GetInt32(0),
                 Status = !reader.IsDBNull(1) && reader.GetBoolean(1),
                 IsGlobal = !reader.IsDBNull(2) && reader.GetBoolean(2),
-                IsSession = !reader.IsDBNull(3) && reader.GetBoolean(3)
+                IsSession = !reader.IsDBNull(3) && reader.GetBoolean(3),
+                CaptureTime = reader.GetDateTime(4)
             });
         }
 
@@ -266,6 +272,12 @@ public sealed partial class ViewerDataService
 
 public class ServerConfigRow
 {
+    /// <summary>#4966: when this row's snapshot was captured (UTC); every row of one snapshot shares it. The grid's Collected column sorts on it.</summary>
+    public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: <see cref="CaptureTime"/> to the second, in the display zone (the grid's Collected column).</summary>
+    public string CaptureTimeLocal => ViewerTimeHelper.FormatForDisplay(CaptureTime, "yyyy-MM-dd HH:mm:ss");
+
     public string ConfigurationName { get; set; } = "";
     public long ValueConfigured { get; set; }
     public long ValueInUse { get; set; }
@@ -278,6 +290,12 @@ public class ServerConfigRow
 
 public class DatabaseConfigRow
 {
+    /// <summary>#4966: when this row's snapshot was captured (UTC); every row of one snapshot shares it. The grid's Collected column sorts on it.</summary>
+    public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: <see cref="CaptureTime"/> to the second, in the display zone (the grid's Collected column).</summary>
+    public string CaptureTimeLocal => ViewerTimeHelper.FormatForDisplay(CaptureTime, "yyyy-MM-dd HH:mm:ss");
+
     public string DatabaseName { get; set; } = "";
     public string StateDesc { get; set; } = "";
     public int CompatibilityLevel { get; set; }
@@ -350,6 +368,12 @@ public class DatabaseConfigRow
 /// </summary>
 public class QueryStoreHealthRow
 {
+    /// <summary>#4966: when this row's snapshot was captured (UTC); every row of one snapshot shares it. The grid's Collected column sorts on it.</summary>
+    public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: <see cref="CaptureTime"/> to the second, in the display zone (the grid's Collected column).</summary>
+    public string CaptureTimeLocal => ViewerTimeHelper.FormatForDisplay(CaptureTime, "yyyy-MM-dd HH:mm:ss");
+
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
     public string DesiredState { get; set; } = "";
@@ -391,6 +415,12 @@ public class QueryStoreHealthRow
 
 public class DatabaseScopedConfigRow
 {
+    /// <summary>#4966: when this row's snapshot was captured (UTC); every row of one snapshot shares it. The grid's Collected column sorts on it.</summary>
+    public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: <see cref="CaptureTime"/> to the second, in the display zone (the grid's Collected column).</summary>
+    public string CaptureTimeLocal => ViewerTimeHelper.FormatForDisplay(CaptureTime, "yyyy-MM-dd HH:mm:ss");
+
     public string DatabaseName { get; set; } = "";
     public string ConfigurationName { get; set; } = "";
     public string Value { get; set; } = "";
@@ -399,6 +429,12 @@ public class DatabaseScopedConfigRow
 
 public class TraceFlagRow
 {
+    /// <summary>#4966: when this row's snapshot was captured (UTC); every row of one snapshot shares it. The grid's Collected column sorts on it.</summary>
+    public DateTime CaptureTime { get; set; }
+
+    /// <summary>#4966: <see cref="CaptureTime"/> to the second, in the display zone (the grid's Collected column).</summary>
+    public string CaptureTimeLocal => ViewerTimeHelper.FormatForDisplay(CaptureTime, "yyyy-MM-dd HH:mm:ss");
+
     public int TraceFlag { get; set; }
     public bool Status { get; set; }
     public bool IsGlobal { get; set; }

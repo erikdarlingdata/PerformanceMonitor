@@ -302,7 +302,7 @@ public sealed class SkipCreditFloorTests
         var source = ServerConnectBackoffTests.ReadWorkerSource().Replace("\r\n", "\n", StringComparison.Ordinal);
 
         /* The slot record goes through the floor, and no slot is recorded from the raw count. */
-        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));", source, StringComparison.Ordinal);
+        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));", source, StringComparison.Ordinal);
         Assert.DoesNotContain("RecordSlot(CollectorCadence.SkippedSlots(", source, StringComparison.Ordinal);
 
         /* The tick is the first thing in the sweep loop's pass, ahead of the reload and the pause gate. */
@@ -319,12 +319,18 @@ public sealed class SkipCreditFloorTests
 
         /* A pause marks the loop, and the first pass that runs collection again lifts the floor, before any body is launched. */
         const string resume = "_skipCreditFloor.Resume(DateTime.UtcNow);";
-        Assert.Equal(1, CountOf(source, resume));
+        /* #5479: a second lift, for the first pass the memory launch guard lets launch again after a hold; the held slots were
+           counted as they came due, so the first bodies must not count them again. Pinned in full by SelfAlertFleetPassTests. */
+        Assert.Equal(2, CountOf(source, resume));
         var gate = source.IndexOf("if (!ShouldRunCollection(_paused))", reload, StringComparison.Ordinal);
         var paused = source.IndexOf("pausedSinceLastRun = true;", gate, StringComparison.Ordinal);
         var resumeAt = source.IndexOf(resume, StringComparison.Ordinal);
         var launch = source.IndexOf("sweepTargets = servers.ToArray();", gate, StringComparison.Ordinal);
         Assert.True(gate > reload && paused > gate && resumeAt > paused && launch > resumeAt, "the resume must sit between the pause gate and the launch of the bodies");
+        var heldResume = source.IndexOf(resume, resumeAt + 1, StringComparison.Ordinal);
+        var launchLoop = source.IndexOf("foreach (var server in sweepTargets)", launch, StringComparison.Ordinal);
+        var firstBody = source.IndexOf("server.InFlightSweep = ProcessServerSweepAsync(", launchLoop, StringComparison.Ordinal);
+        Assert.True(heldResume > launchLoop && heldResume < firstBody, "the lift after a hold must sit in the launch loop, before the first body is launched");
     }
 
     private static int CountOf(string text, string value)

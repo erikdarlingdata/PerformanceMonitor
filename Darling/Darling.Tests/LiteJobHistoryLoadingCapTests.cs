@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// <c>ViewerPerfmonShapingParityTests</c> pins Viewer/Lite parity — a source scan, not a rendered control.
 /// The label text itself is pinned once, off this call path, by <c>JobHistoryCapLabelTests</c>.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class LiteJobHistoryLoadingCapTests
 {
     [Fact]
@@ -28,7 +29,9 @@ public sealed class LiteJobHistoryLoadingCapTests
         var cs = RepoFile.ReadRepoFile("Lite", "Controls", "JobHistoryTab.xaml.cs");
         var stripped = CSharpSourceWalker.StripCommentsAndStrings(cs);
 
-        Assert.Contains("JobHistoryCap.Label(", stripped, StringComparison.Ordinal);
+        /* #4966: the tab builds its count text through JobHistoryCap.CountText, which calls the shared Label; the writers of the text are
+           pinned in JobHistoryCountTextTests. */
+        Assert.Contains("JobHistoryCap.CountText(", stripped, StringComparison.Ordinal);
 
         /* The loading element is shown before the read starts and collapsed in a finally, so it clears on
            every exit path (success, the caught exception, and a superseded/early return). */

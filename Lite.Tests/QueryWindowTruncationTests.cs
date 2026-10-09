@@ -71,6 +71,7 @@ public sealed class QueryWindowTruncationTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         ServerTimeHelper.ActiveServerClock = _savedClock;
         ServerTimeHelper.CurrentDisplayMode = _savedMode;
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
@@ -84,7 +85,7 @@ public sealed class QueryWindowTruncationTests : IDisposable
         return connection;
     }
 
-    private async Task SeedQueryStatsAsync(DuckDBConnection connection, DateTime collected, string queryHash)
+    private async Task SeedQueryStatsAsync(DuckDBConnection connection, DateTime collected, string queryHash, int? serverId = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
@@ -96,7 +97,7 @@ INSERT INTO query_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collected });
-        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId ?? ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = "TestServer" });
         cmd.Parameters.Add(new DuckDBParameter { Value = "TestDb" });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
@@ -177,7 +178,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetTopQueriesByCpu_ReportsTruncation_WhenRawStartsAfterTheWindow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var collected = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
         using (var connection = await OpenSeedConnectionAsync())
             await SeedQueryStatsAsync(connection, collected, "0xTRUNC");
@@ -187,8 +188,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var root = doc.RootElement;
 
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
-        var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!).ToUniversalTime();
-        Assert.True(Math.Abs((effectiveStart - collected.ToUniversalTime()).TotalMinutes) < 2,
+        var effectiveStart = ParseEffectiveStart(root);
+        Assert.True(Math.Abs((effectiveStart - collected).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} should track the seeded floor {collected:o}");
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 46, 50);
         Assert.NotEqual(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
@@ -197,7 +198,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetTopProceduresByCpu_ReportsTruncation_WhenRawStartsAfterTheWindow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var collected = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
         using (var connection = await OpenSeedConnectionAsync())
             await SeedProcedureStatsAsync(connection, collected, "usp_Trunc");
@@ -207,8 +208,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var root = doc.RootElement;
 
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
-        var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!).ToUniversalTime();
-        Assert.True(Math.Abs((effectiveStart - collected.ToUniversalTime()).TotalMinutes) < 2,
+        var effectiveStart = ParseEffectiveStart(root);
+        Assert.True(Math.Abs((effectiveStart - collected).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} should track the seeded floor {collected:o}");
         Assert.NotEqual(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
     }
@@ -216,7 +217,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetQueryStoreTop_ReportsTruncation_WhenRawStartsAfterTheWindow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var collected = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
         using (var connection = await OpenSeedConnectionAsync())
             await SeedQueryStoreStatsAsync(connection, collected, 900001);
@@ -226,8 +227,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var root = doc.RootElement;
 
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
-        var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!).ToUniversalTime();
-        Assert.True(Math.Abs((effectiveStart - collected.ToUniversalTime()).TotalMinutes) < 2,
+        var effectiveStart = ParseEffectiveStart(root);
+        Assert.True(Math.Abs((effectiveStart - collected).TotalMinutes) < 2,
             $"effective_start {effectiveStart:o} should track the seeded floor {collected:o}");
         Assert.NotEqual(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
     }
@@ -240,7 +241,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetTopQueriesByCpu_NoNote_WhenFloorIsInsideTheSlack()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var requestedStart = DateTime.UtcNow.AddHours(-24);
         var collected = DateTime.SpecifyKind(requestedStart.AddMinutes(60), DateTimeKind.Unspecified);
         using (var connection = await OpenSeedConnectionAsync())
@@ -264,14 +265,20 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task FloorHelper_ReadsTheArchivedFloor_NotJustTheHotTable()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var archivedFloor = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-6), DateTimeKind.Unspecified);
         var hotStart = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-12), DateTimeKind.Unspecified);
 
         using (var connection = await OpenSeedConnectionAsync())
         {
-            for (var i = 0; i < 500; i++)
-                await SeedQueryStatsAsync(connection, archivedFloor.AddMinutes(i), $"0xARCH{i}");
+            /* One transaction per 500-row loop (#5208): 1,000 auto-committed single-row INSERTs were 1,000 WAL
+               commits. Each batch commits before the COPY / DELETE that follows, which see only committed rows. */
+            using (var archivedBatch = new SeedBatch(_duckDb, connection))
+            {
+                for (var i = 0; i < 500; i++)
+                    await SeedQueryStatsAsync(connection, archivedFloor.AddMinutes(i), $"0xARCH{i}");
+                archivedBatch.Commit();
+            }
 
             var parquetPath = Path.Combine(_archivePath, "20260101_0000_query_stats.parquet").Replace("\\", "/");
             using (var readLock = _duckDb.AcquireReadLock())
@@ -287,8 +294,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 await deleteCmd.ExecuteNonQueryAsync();
             }
 
-            for (var i = 0; i < 500; i++)
-                await SeedQueryStatsAsync(connection, hotStart.AddMinutes(i), $"0xHOT{i}");
+            using (var hotBatch = new SeedBatch(_duckDb, connection))
+            {
+                for (var i = 0; i < 500; i++)
+                    await SeedQueryStatsAsync(connection, hotStart.AddMinutes(i), $"0xHOT{i}");
+                hotBatch.Commit();
+            }
         }
 
         await _duckDb.CreateArchiveViewsAsync();
@@ -307,6 +318,218 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             $"floor {floor:o} should be the ARCHIVED start {archivedFloor:o}, not the hot table's {hotStart:o}");
     }
 
+    private static DateTime NaiveUtc(DateTime instant) => DateTime.SpecifyKind(instant, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// #4966: a Queries tool's effective_start as a UTC instant, asserting its trailing Z on the way. A cut window (the
+    /// floor the store held) and a covered one (the requested start) both name it with the Z, so the seeded naive-UTC
+    /// floors compare against it directly and the answer does not depend on the machine's time zone. These tests used
+    /// to parse the text as local time and shift the seeded floor the same way, which only agreed because the
+    /// payload carried no Z on the cut path.
+    /// </summary>
+    private static DateTime ParseEffectiveStart(JsonElement root)
+    {
+        var text = root.GetProperty("effective_start").GetString()!;
+        Assert.EndsWith("Z", text, StringComparison.Ordinal);
+        return DateTime.Parse(
+            text,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
+    }
+
+    /// <summary>
+    /// Quiet-start guard (Lite twin of #4953's data-start rule): a server with an old row before the window and
+    /// then a quiet stretch at the window's start (nothing collected until two hours ago) is not a window the
+    /// store failed to hold, so it must get no banner. A server that holds a row before the window has had the
+    /// window served whole, so the probe answers the REQUESTED START: not the first row inside the window (a probe
+    /// bounded below at the window's start reads the row from two hours ago and raises a false banner), and not
+    /// the oldest row the server holds either (finding that reads every archived row for the server, and no
+    /// caller needs it: <c>IsWindowTruncated</c> and <c>EffectiveWindowStart</c> give the same answer for any
+    /// floor at or before the start).
+    /// </summary>
+    [Fact]
+    public async Task FloorHelper_QuietStartInsideTheWindow_WithOlderRowsBeforeIt_IsNotTruncated()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var windowEnd = DateTime.UtcNow;
+        var requestedStart = windowEnd.AddDays(-7);
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
+            await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-20)), "0xOLD");
+            await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-2)), "0xRECENT");
+        }
+
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
+
+        Assert.NotNull(floor);
+        Assert.True(floor!.Value == requestedStart,
+            $"floor {floor:o} must be the requested start {requestedStart:o} (the server holds a row before it), not the window's first row");
+        Assert.Equal(requestedStart, McpQueryTools.EffectiveWindowStart(floor, requestedStart));
+        Assert.False(McpQueryTools.IsWindowTruncated(floor, requestedStart),
+            "a quiet start inside the window, with older rows in the store, must not raise the data-start banner");
+    }
+
+    /// <summary>
+    /// A server whose rows all end before the window: the window holds nothing, so the probe says NULL ("nothing
+    /// was read"), never an old row or the requested start, either of which would read as the whole window being
+    /// served. The older-row check runs only after the window's own first row is found, so it never answers for
+    /// a window with no row in it.
+    /// </summary>
+    [Fact]
+    public async Task FloorHelper_NoRowInsideTheWindow_ReturnsNull_EvenWhenOlderRowsExist()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var windowEnd = DateTime.UtcNow;
+        var requestedStart = windowEnd.AddDays(-7);
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
+            await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-20)), "0xOLD1");
+            await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-10)), "0xOLD2");
+        }
+
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
+
+        Assert.Null(floor);
+    }
+
+    /// <summary>A range that starts before the oldest stored row (retention, or a server added recently) is the case the banner exists for.</summary>
+    [Fact]
+    public async Task FloorHelper_RangeStartsBeforeTheOldestStoredRow_IsTruncated_AtTheOldestRow()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var windowEnd = DateTime.UtcNow;
+        var requestedStart = windowEnd.AddDays(-7);
+        var oldest = windowEnd.AddDays(-2);
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
+            await SeedQueryStatsAsync(connection, NaiveUtc(oldest), "0xFIRST");
+            await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-1)), "0xLATER");
+        }
+
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
+
+        Assert.NotNull(floor);
+        Assert.True(Math.Abs((floor!.Value - oldest).TotalMinutes) < 2, $"floor {floor:o} should be the oldest row {oldest:o}");
+        Assert.True(McpQueryTools.IsWindowTruncated(floor, requestedStart));
+    }
+
+    /// <summary>
+    /// A window the store fully covers (the server holds a row before the window's start) gets no banner, and the
+    /// probe answers the requested start.
+    /// </summary>
+    [Fact]
+    public async Task FloorHelper_WindowInsideTheStoredRows_IsNotTruncated_AndGivesTheStart()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var windowEnd = DateTime.UtcNow;
+        var requestedStart = windowEnd.AddDays(-7);
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
+            for (var day = 10; day >= 0; day--)
+                await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddDays(-day).AddMinutes(-5)), $"0xDAY{day}");
+        }
+
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
+
+        Assert.NotNull(floor);
+        Assert.True(floor!.Value == requestedStart, $"floor {floor:o} must be the requested start {requestedStart:o}");
+        Assert.False(McpQueryTools.IsWindowTruncated(floor, requestedStart));
+    }
+
+    /// <summary>
+    /// A row exactly at the window's start is inside the window (the bound is inclusive): the probe answers that
+    /// start, and the window is not truncated. Pins the boundary of the first, bounded step. The start is a whole
+    /// second so DuckDB's microsecond precision cannot move the row off it.
+    /// </summary>
+    [Fact]
+    public async Task FloorHelper_RowExactlyAtTheWindowStart_GivesTheStart_NotTruncated()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var now = DateTime.UtcNow;
+        var windowEnd = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        var requestedStart = windowEnd.AddDays(-7);
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
+            await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart), "0xATSTART");
+            await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-1)), "0xLATER");
+        }
+
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
+
+        Assert.NotNull(floor);
+        Assert.True(floor!.Value == requestedStart, $"floor {floor:o} must be the row at the window's start {requestedStart:o}");
+        Assert.False(McpQueryTools.IsWindowTruncated(floor, requestedStart));
+    }
+
+    /// <summary>
+    /// Another server's older rows are not this server's coverage: the older-row step is filtered on the server,
+    /// so a server whose rows begin late in the window still reports that first row and is truncated, however
+    /// much older history a neighbour holds.
+    /// </summary>
+    [Fact]
+    public async Task FloorHelper_OnlyAnotherServerHoldsOlderRows_ThisServerIsTruncated_AtItsFirstRow()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var windowEnd = DateTime.UtcNow;
+        var requestedStart = windowEnd.AddDays(-7);
+        var firstRow = windowEnd.AddDays(-2);
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
+            await SeedQueryStatsAsync(connection, NaiveUtc(requestedStart.AddDays(-20)), "0xNEIGHBOUR", serverId: ServerId + 1);
+            await SeedQueryStatsAsync(connection, NaiveUtc(firstRow), "0xFIRST");
+            await SeedQueryStatsAsync(connection, NaiveUtc(windowEnd.AddHours(-1)), "0xLATER");
+        }
+
+        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, ServerId, requestedStart, windowEnd);
+
+        Assert.NotNull(floor);
+        Assert.True(Math.Abs((floor!.Value - firstRow).TotalMinutes) < 2, $"floor {floor:o} should be this server's first row {firstRow:o}, not the start");
+        Assert.True(McpQueryTools.IsWindowTruncated(floor, requestedStart));
+    }
+
+    /// <summary>
+    /// The tool's twin of the quiet-start guard, and the clamp: with older rows before the window the probe answers
+    /// the requested start, and the tool must report the window it was asked for (effective_start never earlier
+    /// than the requested start, effective_hours_back never longer than hours_back), not the whole stored
+    /// history.
+    /// </summary>
+    [Fact]
+    public async Task GetTopQueriesByCpu_OlderRowsBeforeTheWindow_ReportsTheWholeWindow_NotTruncated()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var nowUtc = DateTime.UtcNow;
+        using (var connection = await OpenSeedConnectionAsync())
+        {
+            /* One transaction for this block's rows (#5208), committed when the block ends, before the read. */
+            using var seedBatch = new SeedBatch(_duckDb, connection);
+            await SeedQueryStatsAsync(connection, NaiveUtc(nowUtc.AddDays(-20)), "0xOLDER");
+            await SeedQueryStatsAsync(connection, NaiveUtc(nowUtc.AddHours(-2)), "0xQUIETSTART");
+        }
+
+        var json = await McpQueryTools.GetTopQueriesByCpu(new LocalDataService(_duckDb), _serverManager, "TestServer", hours_back: 24);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.False(root.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+        var effectiveStart = ParseEffectiveStart(root);
+        Assert.True(Math.Abs((effectiveStart - nowUtc.AddHours(-24)).TotalMinutes) < 2,
+            $"effective_start {effectiveStart:o} must be the requested start, never earlier ({nowUtc.AddHours(-24):o})");
+        Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 23.9, 24.0);
+    }
+
     /// <summary>
     /// #4231 ruling: "the WPF Top Queries, Top Procedures and Query Store grids show 'Showing since &lt;time&gt;'
     /// in the header when the window is cut short." Pins <see cref="ServerTab.SetWindowTruncatedBanner"/> --
@@ -320,7 +543,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     {
         var effectiveStart = new DateTime(2026, 1, 15, 8, 30, 0, DateTimeKind.Unspecified);
 
-        var (visibility, text) = OnStaThread(() =>
+        var (visibility, text) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.SetWindowTruncatedBanner(banner, truncated: true, effectiveStart, TimeZoneInfo.Utc);
@@ -344,7 +567,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
         var eastern = ServerClock.Resolve("Eastern Standard Time", -300).AsTimeZone();
 
-        string BannerText(DateTime instant, TimeZoneInfo zone) => OnStaThread(() =>
+        string BannerText(DateTime instant, TimeZoneInfo zone) => StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.SetWindowTruncatedBanner(banner, truncated: true, instant, zone);
@@ -367,7 +590,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public void SetWindowTruncatedBanner_NotTruncated_HidesBanner()
     {
-        var (visibility, text) = OnStaThread(() =>
+        var (visibility, text) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock
             {
@@ -380,28 +603,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         Assert.Equal(System.Windows.Visibility.Collapsed, visibility);
         Assert.Equal(string.Empty, text);
-    }
-
-    /// <summary>WPF objects require STA; same shape as MainWindowAccessKeyTests/ThemeColorOverrideTests.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
     }
 
     /// <summary>
@@ -500,9 +701,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     {
         var slicersSource = File.ReadAllText(ControlsFile("ServerTab.Slicers.cs"));
         var slicerBannerCallsOnUtc = Regex.Matches(slicersSource,
-            @"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*e\.StartUtc,\s*e\.EndUtc\)").Count;
-        Assert.True(slicerBannerCallsOnUtc == 3,
-            $"expected all 3 OnXSlicerChanged banner calls to pass e.StartUtc, e.EndUtc (found {slicerBannerCallsOnUtc}) " +
+            @"(?:RefreshWindowTruncatedBannerAsync|RefreshCappedGridBannerAsync)\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*e\.StartUtc,\s*e\.EndUtc[,)]").Count;
+        /* 3 -> 4: Active Queries' slicer handler joined the three Queries grids' (the Lite twin of #4953's data-start notice).
+           4 -> 6: the Blocked Process Reports and Deadlocks slicer handlers joined them (#4966). */
+        Assert.True(slicerBannerCallsOnUtc == 6,
+            $"expected all 6 OnXSlicerChanged banner calls to pass e.StartUtc, e.EndUtc (found {slicerBannerCallsOnUtc}) " +
             "-- fromServer/toServer are server-local and GetQueryWindowFloorAsync compares them straight against " +
             "UTC collection_time (#4279).");
         Assert.False(Regex.IsMatch(slicersSource, @"RefreshWindowTruncatedBannerAsync\([^)]*fromServer,\s*toServer\)"),
@@ -510,12 +713,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         var refreshSource = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs"));
         var refreshBannerCallsOnHelperOutput = Regex.Matches(refreshSource,
-            @"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*windowStart\d?,\s*windowEnd\d?\)").Count;
-        Assert.True(refreshBannerCallsOnHelperOutput == 6,
-            $"expected all 6 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
+            @"(?:RefreshWindowTruncatedBannerAsync|RefreshCappedGridBannerAsync)\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*windowStart\d?,\s*windowEnd\d?[,)]").Count;
+        /* 6 -> 10: Active Queries (sub-tab switch + full refresh) and Current Waits (sub-tab switch + full refresh)
+           each take their banner window from GetQueriesTabWindowUtc too (see DataStartBannerTests).
+           10 -> 14, and 10 -> 13 declarations: the Blocked Process Reports and Deadlocks banners (#4966) add two calls
+           to the sub-tab switch (one declaration each) and two to the full refresh (one shared declaration). */
+        /* 14 -> 15 (the pattern now counts the cap-aware step too): the Blocked Process Reports and Deadlocks banners (4 of the 14)
+           moved from RefreshWindowTruncatedBannerAsync to RefreshCappedGridBannerAsync (#4966), and the Collection Log's cap-aware
+           call (#4989) is one more call on a GetQueriesTabWindowUtc pair. */
+        Assert.True(refreshBannerCallsOnHelperOutput == 15,
+            $"expected all 15 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
             $"(windowStart/windowEnd) (found {refreshBannerCallsOnHelperOutput}) -- a server-local cStart must " +
             "not feed the banner (#4279/#4284).");
-        Assert.Equal(6, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
+        /* 10 -> 11: the Collection Log's cap-aware notice (RefreshCappedGridBannerAsync, #4989) takes its window from
+           GetQueriesTabWindowUtc too; it is not one of the RefreshWindowTruncatedBannerAsync calls counted above.
+           11 -> 14: the Blocked Process Reports and Deadlocks banners (#4966) add the three declarations noted above. */
+        Assert.Equal(14, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
     }
 
     private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);

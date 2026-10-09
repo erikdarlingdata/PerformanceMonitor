@@ -291,6 +291,18 @@ internal sealed class RdsCsvlogCarryBook
     /// </summary>
     private readonly Dictionary<string, RdsCsvlogCarry.CsvCarry> _carry = new(StringComparer.Ordinal);
 
+    /// <summary>#5003: the ingestor, and so this book, is shared by every RDS target of a collector, and the targets'
+    /// runs overlap. Each access to <see cref="_carry"/> takes this lock; none of them awaits while it is held.</summary>
+    private readonly object _lock = new();
+
+    private bool TryGetHeld(string key, out RdsCsvlogCarry.CsvCarry held)
+    {
+        lock (_lock)
+        {
+            return _carry.TryGetValue(key, out held);
+        }
+    }
+
     /// <summary>
     /// The carry to parse this chunk with, and the bookkeeping the eventual commit needs: the carry key
     /// (instance half of <paramref name="resumeKey"/>, or null when it is itself null/empty — the same case
@@ -310,7 +322,7 @@ internal sealed class RdsCsvlogCarryBook
         var carry = RdsCsvlogCarry.CsvCarry.Empty;
         var droppedByRotation = 0;
 
-        if (!string.IsNullOrEmpty(carryKey) && _carry.TryGetValue(carryKey, out var held))
+        if (!string.IsNullOrEmpty(carryKey) && TryGetHeld(carryKey, out var held))
         {
             if (string.Equals(held.FileName, currentFileName, StringComparison.Ordinal))
             {
@@ -358,13 +370,16 @@ internal sealed class RdsCsvlogCarryBook
 
         var nextCarryWithFile = nextCarry with { FileName = currentFileName };
 
-        if (nextCarryWithFile.Partial.Length == 0 && !nextCarryWithFile.StartKnown && !nextCarryWithFile.Skipping)
+        lock (_lock)
         {
-            _carry.Remove(carryKey);
-        }
-        else
-        {
-            _carry[carryKey] = nextCarryWithFile;
+            if (nextCarryWithFile.Partial.Length == 0 && !nextCarryWithFile.StartKnown && !nextCarryWithFile.Skipping)
+            {
+                _carry.Remove(carryKey);
+            }
+            else
+            {
+                _carry[carryKey] = nextCarryWithFile;
+            }
         }
 
         return droppedByRotation;

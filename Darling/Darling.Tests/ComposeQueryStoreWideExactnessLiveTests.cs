@@ -241,9 +241,10 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
         top.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(WindowStart, DateTimeKind.Unspecified) });
         top.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(WindowEnd, DateTimeKind.Unspecified) });
         top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 50 });
+        top.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());  /* #5245: the database list binds one text[] */
         top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
         top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
-        top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
+        top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(50) });  /* #5313: the round's candidate limit, bound last */
         await using var topReader = await top.ExecuteReaderAsync(ct);
         var queryIdColumn = topReader.GetOrdinal("query_id");
         var executionsColumn = topReader.GetOrdinal("total_executions");
@@ -345,7 +346,7 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
             };
 
         /* An anchor interval 45 days before windowStart (mirrors QueryStoreIntervalWideGridLiveTests'
-           SeedGridAsync): pushes this server's table floor comfortably past clause 3's IntervalSpanMargin
+           SeedGridAsync): pushes this server's table floor comfortably past clause 3's PurgeEdgeMargin
            check, so windowStart itself can sit exactly on the seeded span without the gate refusing on table
            floor alone. Outside the compared window, so it never appears in either side's rows. */
         var anchor = windowStart.AddDays(-45);

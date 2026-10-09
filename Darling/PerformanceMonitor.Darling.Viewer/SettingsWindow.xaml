@@ -179,14 +179,10 @@
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                     <TextBlock Text="Default time range:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                    <ComboBox x:Name="DefaultTimeRangeCombo" Width="140" VerticalAlignment="Center"
-                              ToolTip="Time window each newly-opened server tab starts on">
-                        <ComboBoxItem Content="Last 1 hour"/>
-                        <ComboBoxItem Content="Last 4 hours"/>
-                        <ComboBoxItem Content="Last 12 hours"/>
-                        <ComboBoxItem Content="Last 24 hours"/>
-                        <ComboBoxItem Content="Last 7 days"/>
-                    </ComboBox>
+                    <!-- #5562: the shared picker. A fixed range is not kept as a default (it names concrete dates). -->
+                    <ui:TimeRangePicker x:Name="DefaultTimeRangeCombo" VerticalAlignment="Center"
+                                        ToolTip="Time window each newly-opened server tab starts on"
+                                        RangeChanged="DefaultTimeRange_RangeChanged"/>
                 </StackPanel>
                 <!-- Folded in from #1401: the auto-refresh defaults for newly-opened server tabs. -->
                 <CheckBox x:Name="AutoRefreshCheckBox" Content="Auto-refresh newly-opened server tabs"
@@ -283,8 +279,8 @@
                           Foreground="{DynamicResource ForegroundBrush}"
                           ToolTip="Off = the classic behavior: the first connect attempt is a silent baseline, even when it fails."/>
                 <StackPanel Orientation="Horizontal" Margin="36,4,0,0"
-                            ToolTip="0 = off (one alert per outage). Re-alerts use the same 'Server Unreachable' metric name, so webhook automation keyed on it re-triggers.">
-                    <TextBlock Text="Re-alert while still down every" VerticalAlignment="Center"
+                            ToolTip="0 = off (one alert per occurrence). Covers a server that is unreachable, Collection Stopped, and the other self-alerts for a lasting problem. Each repeat uses that alert's own metric name, so webhook automation keyed on it re-triggers.">
+                    <TextBlock Text="Re-alert while a problem lasts every" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="ConnectionRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
@@ -864,6 +860,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Grid.Column="0" Text="Routing Key:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
@@ -874,12 +871,17 @@
                     <CheckBox Grid.Row="1" Grid.Column="1" x:Name="PagerDutyEuRegionCheckBox" Content="Use EU data center (events.eu.pagerduty.com)"
                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
 
-                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="" VerticalAlignment="Center" Margin="0,0,8,4"/>
+                    <CheckBox Grid.Row="2" Grid.Column="1" x:Name="PagerDutyAutoResolveCheckBox" Content="Auto-resolve the incident when the alert's condition clears"
+                              Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"
+                              ToolTip="Sends a PagerDuty 'resolve' event when an edge-type alert's condition clears (a server comes back, a replica reconnects), closing the incident the firing edge's trigger opened. Off by default: the closing edge is sent as an info-level alert and the incident stays open. Replica cooldowns: when PagerDuty is set up for the alert, Teams, Slack and the generic webhook keep one cooldown per replica, so each replica gets its own outage and recovery notices. Email stays per server."/>
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="PagerDutyProxyAddressBox" Margin="0,0,0,4"
+                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="PagerDutyProxyAddressBox" Margin="0,0,0,4"
                              ToolTip="Optional. HTTP proxy for reaching PagerDuty (e.g. http://proxy.corp.local:8080). Leave blank to connect directly."/>
 
-                    <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+                    <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                         <Button x:Name="TestPagerDutyButton" Content="Send Test Notification" Click="TestPagerDutyButton_Click"/>
                         <TextBlock x:Name="PagerDutyStatusText" FontSize="11" FontStyle="Italic"
                                    Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>

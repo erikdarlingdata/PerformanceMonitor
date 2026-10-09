@@ -207,7 +207,9 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         string serverKey, CancellationToken cancellationToken = default)
     {
         var serverId = ParseServerKey(serverKey);
-        return await Task.Run(() => _dataService.GetForcePlanFailuresAsync(serverId), cancellationToken);
+        /* #5377: the token reaches the read too, because it waits for a slot of the shared archive-read limiter
+           and a cancelled alert pass must leave that queue, not wait out its turn. */
+        return await Task.Run(() => _dataService.GetForcePlanFailuresAsync(serverId, cancellationToken), cancellationToken);
     }
 
     private int ResolveRunningJobsCadence(int serverId) =>

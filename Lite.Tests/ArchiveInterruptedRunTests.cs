@@ -30,6 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("CollectionResetGate")]
 public sealed class ArchiveInterruptedRunTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly string _archiveDir;
@@ -45,6 +47,11 @@ public sealed class ArchiveInterruptedRunTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -92,7 +99,8 @@ public sealed class ArchiveInterruptedRunTests : IDisposable
     private async Task<DuckDbInitializer> SeedAsync()
     {
         var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
 
         await ExecAsync(@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
@@ -221,8 +229,8 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
     [Fact]
     public async Task StaleTempFiles_AreRemovedAtTheStartOfTheNextRun()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
 
         /* What a process killed inside a COPY, a compaction merge or a journal write leaves behind. */
         File.WriteAllText(P("20260901_0000_wait_stats.parquet.tmp"), "partial COPY");
@@ -239,8 +247,8 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
     [Fact]
     public async Task ATempNamedByASwapJournalThatIsStillLive_IsKept_WhileOtherTempsGo()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
 
         MakeParquet("202609_t.parquet", 0, 1_000);              /* merged output, in place */
         MakeParquet("20260928_1400_t.parquet", 500, 1_000);      /* folded into the output, not yet deleted */

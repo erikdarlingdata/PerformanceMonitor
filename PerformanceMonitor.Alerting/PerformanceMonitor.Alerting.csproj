@@ -20,4 +20,11 @@
          project already references Common directly. -->
     <ProjectReference Include="..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- #5320: AlertStatementFilter.MarkJudged is internal (marking without judging must not be callable from
+         product code outside the engine); the two test projects pin it directly. -->
+    <InternalsVisibleTo Include="Darling.Tests" />
+    <InternalsVisibleTo Include="Lite.Tests" />
+  </ItemGroup>
 </Project>

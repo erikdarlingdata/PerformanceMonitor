@@ -473,6 +473,7 @@ FROM cur JOIN prv ON cur.database_name = prv.database_name AND cur.object_id = p
 WHERE (SELECT t FROM latest) <> (SELECT t FROM prior)
 AND   cur.mb - prv.mb >= $2
 AND   (CASE WHEN prv.mb > 0 THEN (cur.mb - prv.mb) * 100.0 / prv.mb ELSE 0 END) >= $3
+/*SEC*/
 ORDER BY growth_mb DESC LIMIT 1";
 
     public const string ObjectContentionSql = @"
@@ -512,6 +513,9 @@ ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(ObjectGrowthMbThreshold);
                 cmd.Parameters.AddWithValue(ObjectGrowthPctThreshold);
+                /* #5558: object sizes (reserved_mb) mirror the primary, so a secondary copy's growth is the primary's to
+                   report. Only this growth query is filtered; the contention anomaly stays node-local. */
+                PgSecondaryReplicaScope.Apply(cmd, context, "ANOMALY_OBJECT_GROWTH", "cur.database_name");
 
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))

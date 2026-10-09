@@ -48,6 +48,7 @@ namespace PerformanceMonitorLite.Tests;
 /// (<c>AnalysisService.ResolveTraceAnchorAsync</c>) and the long-running job read
 /// (<c>LocalDataService.GetAnomalousJobsAsync</c>).</para>
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 48210;

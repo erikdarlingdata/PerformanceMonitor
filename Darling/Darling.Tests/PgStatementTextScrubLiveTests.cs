@@ -41,6 +41,7 @@ public sealed class PgStatementTextScrubLiveTests
     private static readonly DateTime WideChunkDayTwo = DateTime.SpecifyKind(new DateTime(2026, 2, 11, 0, 0, 0), DateTimeKind.Unspecified);
 
     private const string Secret = "ALTER ROLE app PASSWORD 'secret-x'";
+    private const string WiderOnly = "SELECT * FROM OPENDATASOURCE('SQLNCLI', 'Data Source=x').db.dbo.t";
     private const string Neighbor = "SELECT * FROM t WHERE password_changed_at > $1";
 
     [Fact]
@@ -192,6 +193,76 @@ public sealed class PgStatementTextScrubLiveTests
             "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3",
             DarlingObservability.FleetServerId, PgStatementTextScrub.StateCollectorName, PgStatementTextScrub.ScrubVersionStateKey, ct);
         Assert.Equal(PgStatementTextScrub.ScrubVersion.ToString(CultureInfo.InvariantCulture), markerValue);
+    }
+
+    /// <summary>The stored-text scrub keeps its version 1 pattern (Erik's ruling, 2026-10-06: no stored row is
+    /// rewritten by the wider statement filter). With no marker, a stored statement text and a stored blocking
+    /// edge that only the wider shared pattern names stay byte-identical after the scrub, while a row the
+    /// version 1 pattern names is withheld as on dev. The seed is first checked against both patterns so the
+    /// pin cannot pass vacuously.</summary>
+    [Fact]
+    public async Task TheScrubKeepsItsVersionOnePattern_AWiderOnlyRowIsUntouched_AndAVersionOneRowIsWithheld()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4348 frozen-pattern statement-text scrub (it mints its own scratch database).");
+
+        Assert.Equal(1, PgStatementTextScrub.ScrubVersion);
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using (var setupConnection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setupConnection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setupConnection, ct);
+
+            /* Named by the wider shared pattern only (a linked-source function the version 1 pattern lacks). */
+            Assert.False(await MatchesAsync(setupConnection, WiderOnly, PgStatementTextScrub.Version1Pattern, ct),
+                "the seeded wider-only statement must not match the version 1 pattern");
+            Assert.True(await MatchesAsync(setupConnection, WiderOnly, PerformanceMonitor.Common.SensitiveStatements.Pattern, ct),
+                "the seeded wider-only statement must match the wider shared pattern");
+            Assert.True(await MatchesAsync(setupConnection, Secret, PgStatementTextScrub.Version1Pattern, ct));
+
+            await InsertStatementTextAsync(setupConnection, ServerA, 3001, WiderOnly, ct);
+            await InsertStatementTextAsync(setupConnection, ServerA, 3002, Secret, ct);
+            await InsertBlockingEdgeAsync(setupConnection, ServerA, Day, 301, WiderOnly, Secret, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var run = await PgStatementTextScrub.RunAsync(postgres, logger: null, ct);
+        Assert.False(run.AlreadyDone);
+        Assert.Equal(1, run.StatementTextRowsUpdated);
+        Assert.Equal(1, run.BlockingEdgesRowsUpdated);
+
+        await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await verifyConnection.OpenAsync(ct);
+
+        var placeholder = PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText;
+        Assert.Equal(WiderOnly,
+            await ScalarTextAsync(verifyConnection, "SELECT query_text FROM collect.pg_statement_text WHERE server_id = $1 AND queryid = $2", ServerA, 3001, ct));
+        Assert.Equal(placeholder,
+            await ScalarTextAsync(verifyConnection, "SELECT query_text FROM collect.pg_statement_text WHERE server_id = $1 AND queryid = $2", ServerA, 3002, ct));
+        Assert.Equal(WiderOnly,
+            await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerA, 301, ct));
+        Assert.Equal(placeholder,
+            await ScalarTextAsync(verifyConnection, "SELECT blocking_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerA, 301, ct));
+
+        var markerValue = await ScalarTextAsync(
+            verifyConnection,
+            "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3",
+            DarlingObservability.FleetServerId, PgStatementTextScrub.StateCollectorName, PgStatementTextScrub.ScrubVersionStateKey, ct);
+        Assert.Equal("1", markerValue);
+    }
+
+    private static async Task<bool> MatchesAsync(NpgsqlConnection connection, string text, string pattern, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT $1::text ~* $2::text", connection);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = text });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = pattern });
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static async Task<bool> ContainsSecretAsync(NpgsqlConnection connection, CancellationToken ct)

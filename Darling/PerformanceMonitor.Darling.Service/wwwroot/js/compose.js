@@ -20,9 +20,9 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc } from "./util.js";
-import { renderLineChart, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
-import { navigateServer } from "./panels.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
+import { renderLineChart, zoomChip, getChartHidden, setChartHidden, nextHiddenKeys, chartZoomScope, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
+import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
 
 /** The most series a time chart draws before pooling the rest into a "+N more" note (readability + palette size). */
@@ -40,13 +40,13 @@ const OTHER_SERIES_LABEL = "(other)";
  * shape (title + span-2 + a body that shows a loading strip, then the chart / a state). `scope` is the view-level
  * run context {server, hours, variables, values}; flipping it and re-rendering re-scopes every panel at once.
  */
-export function renderComposedPanelCard(panelSpec, scope, onSettled) {
+export function renderComposedPanelCard(panelSpec, scope, onSettled, slot = null) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (panelSpec.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [panelSpec.title || measureLabel(panelSpec), pinBadge(panelSpec)]),
     body,
   ]);
-  driveComposedPanel(body, panelSpec, scope, onSettled);
+  driveComposedPanel(body, panelSpec, scope, onSettled, slot);
   return panel;
 }
 
@@ -198,7 +198,7 @@ function pinHoursLabel(hours) {
  * never persisted (the stored definition renders verbatim), and a "clear" chip pops back to the base spec. Each new
  * selection REPLACES the drill (a simple "you are viewing X" model), so drilling never stacks into a dead end.
  */
-function driveComposedPanel(body, panelSpec, scope, onSettled) {
+function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null) {
   let drill = null; // { keys: [{dimension, value}] } or null
   let zoom = null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
   let firstRun = true; // onSettled (#4222) fires once, for the initial load only — a later drill/zoom re-run is
@@ -215,7 +215,7 @@ function driveComposedPanel(body, panelSpec, scope, onSettled) {
     const spec = drill ? withDrillFilters(panelSpec, drill) : panelSpec;
     const done = firstRun ? onSettled : null;
     firstRun = false;
-    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange }).finally(() => {
+    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange, panelSlot: slot }).finally(() => {
       if (done) done();
     });
   }
@@ -228,6 +228,27 @@ function driveComposedPanel(body, panelSpec, scope, onSettled) {
 function withDrillFilters(spec, drill) {
   const extra = drill.keys.map((k) => ({ dimension: k.dimension, op: "eq", value: k.value }));
   return { ...spec, filters: [...(Array.isArray(spec.filters) ? spec.filters : []), ...extra] };
+}
+
+/** The run's partial-window notice in the browser's zone (#4966). The server writes `notice` with its instants in UTC,
+ *  which is all an MCP client can use, but every time this page prints is in the browser's zone (localTime): a notice
+ *  that said "2026-01-02 00:00 UTC" above a chart on a local axis mixed two clocks. When the notice is the data-start
+ *  one, the answer also carries the instants it names (`data_start_utc`, `window_start_utc`, `window_end_utc`) and the
+ *  sentence itself (`data_start_note`), so the sentence is written again by windowNoteText, the composition the server
+ *  page's grid notes use, and put back in place; a row-cap sentence beside it stays as sent. A field that is missing or
+ *  unreadable, or a notice that does not hold the sentence (the tier notice, which names no instant), is drawn as sent. */
+export function composedNoticeText(data) {
+  const notice = data.notice;
+  const sentence = data.data_start_note;
+  if (typeof notice !== "string" || typeof sentence !== "string" || !sentence || !notice.includes(sentence)) return notice;
+  const local = windowNoteText({
+    window_truncated: true,
+    truncation_note: sentence,
+    data_start_utc: data.data_start_utc,
+    window_start_utc: data.window_start_utc,
+    window_end_utc: data.window_end_utc,
+  });
+  return typeof local === "string" && local ? notice.split(sentence).join(local) : notice;
 }
 
 /** Run a composed panel and fill `body` with the chart (or the empty/error state). Used by the card + the live
@@ -256,10 +277,12 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
        scope), so the drawn axis matches the window the rows were fetched over. renderComposedResult has no
        `scope`, so it is resolved here (where scope + zoom both live) and threaded through opts. */
     const chartWindow = resolveChartWindow(panelSpec, scope, opts.zoom);
-    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow })];
-    /* The run endpoint's partial-window notice (#1665): the chosen tier could not retain the whole
-       requested window on this store — good data, honestly caveated, above the chart. */
-    if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(data.notice));
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow, scope })];
+    /* The run endpoint's partial-window notice (#1665, #4953): a caveat that the panel did not cover the whole
+       requested window. The chosen tier's retention could not cover it, OR the panel's own data starts after
+       the window does, OR the row cap truncated the result. Good data, honestly caveated, above the chart.
+       No notice means the window was served whole. */
+    if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(composedNoticeText(data)));
     mount(body, nodes);
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
@@ -337,6 +360,9 @@ function toRunPanel(p) {
 export function renderComposedResult(result, panelSpec, opts = {}) {
   const rows = Array.isArray(result.rows) ? result.rows : [];
   const nodes = [];
+  /* The panel's identity also keys the width its chart was last measured at (#5586), so a poll's rebuild is drawn at it. Unlike the
+     legend-hide state this holds nothing a collision could mix up, so a panel with no slot (the editor preview) gets a key too. */
+  const widthId = composedPanelId(panelSpec, opts.scope, opts.panelSlot);
 
   /* The transient drill-down chip (design D6) sits above the chart whenever a drill is active — with the pinned
      filter(s), a clear, and (for a server dimension) a jump to that server's detail page. The zoom chip (#1606)
@@ -396,8 +422,15 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
          string alone would strip that real member's drill and hold it out of the series cap. */
       const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;
       const { points, series, hidden } = pivotTimeSeries(rows, groupDims, measureLabel(panelSpec), hasResidual);
-      nodes.push(
-        renderLineChart({
+      /* #5247: the legend hide/isolate state is held under the panel's identity and the page address + range, like the
+         zoom of a built-in chart, so it survives the poll's rebuild. A panel with no slot (the editor preview) has no
+         stable identity, so it gets no switch rather than a key that might collide. */
+      const hiddenId = opts.panelSlot != null ? composedPanelId(panelSpec, opts.scope, opts.panelSlot) : null;
+      const hiddenScope = chartZoomScope(opts.scope ? opts.scope.hours : null);
+      const allKeys = series.map((x) => x.key).concat(overlaySeries ? [overlaySeries.key] : []);
+      const chartHost = hiddenId != null ? el("div", { class: "zoomable-chart" }) : null;
+      const drawChart = () => renderLineChart({
+          widthKey: widthId,
           points,
           xKey: "bucket",
           series,
@@ -418,8 +451,22 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
              absolute window, and resolveChartWindow returns that same window — the zoom keeps winning. */
           windowStart: opts.chartWindow ? opts.chartWindow.windowStart : null,
           windowEnd: opts.chartWindow ? opts.chartWindow.windowEnd : null,
-        })
-      );
+          ...(hiddenId != null
+            ? {
+                hiddenKeys: getChartHidden(hiddenId, hiddenScope),
+                onLegend: (action, key) => {
+                  setChartHidden(hiddenId, hiddenScope, nextHiddenKeys(allKeys, getChartHidden(hiddenId, hiddenScope), action, key));
+                  mount(chartHost, drawChart());
+                },
+              }
+            : {}),
+        });
+      if (chartHost) {
+        mount(chartHost, drawChart());
+        nodes.push(chartHost);
+      } else {
+        nodes.push(drawChart());
+      }
       if (hidden > 0) {
         /* On a rank-then-bucket panel the hidden series are members the author explicitly ASKED to rank, not
            incidental low-priority groups, so the note has to say which promise the chart is not keeping. */
@@ -434,7 +481,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
       break;
     }
     case "bar":
-      nodes.push(renderBarChart({ items: rankedItems(rows, groupDims), formatValue: fmt, unit: axisUnit(unit), thresholds, onSelect }));
+      nodes.push(renderBarChart({ items: rankedItems(rows, groupDims), formatValue: fmt, unit: axisUnit(unit), thresholds, onSelect, widthKey: widthId }));
       break;
     case "pie":
       nodes.push(renderPieChart({ items: rankedItems(rows, groupDims), formatValue: fmt, onSelect }));
@@ -451,6 +498,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           unitX: axisUnit(unit),
           unitY: axisUnit(overlayUnit),
           onSelect,
+          widthKey: widthId,
         })
       );
       break;
@@ -460,7 +508,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
       break;
     case "table":
     default:
-      nodes.push(renderComposedTable(rows, unit));
+      nodes.push(renderComposedTable(rows, unit, panelSpec, opts.scope, opts.panelSlot));
       break;
   }
 
@@ -616,30 +664,31 @@ function renderScalar(rows, panelSpec, fmt) {
   ]);
 }
 
-/** Any result as a table of its returned columns — bucket localized, value formatted in the unit, dims as text. */
-function renderComposedTable(rows, unit) {
-  const cols = Object.keys(rows[0] || {});
-  if (!cols.length) return emptyStrip("No columns to show.");
-  const head = el(
-    "tr",
-    {},
-    cols.map((c) => el("th", { text: columnLabel(c), class: c === "value" ? "num" : null }))
-  );
-  const bodyRows = rows.map((row) =>
-    el(
-      "tr",
-      {},
-      cols.map((c) => {
-        if (c === "value") return el("td", { class: "num", text: formatComposedValue(row[c], unit) });
-        if (c === "bucket") return el("td", { text: localBucket(row[c]) });
-        const v = row[c];
-        return el("td", { text: v == null || v === "" ? "—" : String(v) });
-      })
-    )
-  );
-  return el("div", { class: "table-wrap" }, [
-    el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, bodyRows)]),
-  ]);
+/** Any result as a table of its returned columns — bucket localized, value formatted in the unit, dims as text.
+ *  Drawn through the shared grid (panels.js gridTable) so it sorts, filters, copies and exports like every other
+ *  table. Sort, Copy and the CSV read the RAW row (the stored bucket instant, the value as returned); the cells show
+ *  the formatted text. The grid's state is keyed by the panel's identity and the server it ran for. */
+function renderComposedTable(rows, unit, panelSpec = {}, scope = null, slot = null) {
+  const keys = Object.keys(rows[0] || {});
+  if (!keys.length) return emptyStrip("No columns to show.");
+  const columns = keys.map((c) => {
+    if (c === "value") return { key: c, label: columnLabel(c), align: "right", display: (r) => formatComposedValue(r[c], unit) };
+    if (c === "bucket") return { key: c, label: columnLabel(c), format: "time", display: (r) => localBucket(r[c]) };
+    return { key: c, label: columnLabel(c), display: (r) => (r[c] == null || r[c] === "" ? "—" : String(r[c])) };
+  });
+  /* An untitled composed panel has title "" and no id, so the name alone would give every one the same key. `||`
+     lets an empty title fall through to the measure, and `slot` (the panel's position on its view, from the caller)
+     keeps two panels with the same title or measure apart. */
+  const id = composedPanelId(panelSpec, scope, slot);
+  return gridTable(rows, { id, title: panelSpec.title || measureLabel(panelSpec), columns });
+}
+
+/** The stable identity of a composed panel on its view: its position (`slot`), its own id/title/measure and the server
+ *  it ran for. Nothing in it changes when the panel is rebuilt (the poll) — no row count, no timestamp, no array
+ *  index of the result — so state held under it (the grid's sort, a chart's hidden legend entries) survives a repaint
+ *  and cannot reach another panel. */
+function composedPanelId(panelSpec, scope, slot) {
+  return "composed|" + (slot ?? "") + "|" + (panelSpec.id || panelSpec.title || panelSpec.measure || panelSpec.ratio || "") + "|" + (scope && scope.server != null ? scope.server : "");
 }
 
 /** A table header for a result column: "Value" gains its unit, "bucket" -> "Time", a dim name is humanized. */
@@ -766,25 +815,6 @@ function annotationMetaMap() {
 /** The dual-axis overlay's FIXED series color (#1606) — the tail of CATEGORICAL_COLORS, so it can never
  *  collide with the primary series' CATEGORICAL_COLORS[0] on an ungrouped chart. */
 const OVERLAY_COLOR = "#ba68c8";
-
-/**
- * The transient zoom chip (#1606): the brushed window as local time, plus a clear that re-runs the panel on
- * its original window. View-state only — the stored definition is never touched (the drill-chip idiom).
- */
-function zoomChip(zoom, onZoomChange) {
-  const from = new Date(zoom.startIso);
-  const to = new Date(zoom.endIso);
-  const label = isNaN(from.getTime()) || isNaN(to.getTime())
-    ? "custom window"
-    : from.toLocaleString() + " → " + to.toLocaleString();
-  const chip = el("div", { class: "drill-chip zoom-chip" }, [
-    el("span", { class: "drill-label", text: "Zoomed: " + label }),
-  ]);
-  const clear = el("button", { class: "btn small drill-clear", type: "button", title: "Reset zoom", "aria-label": "Reset zoom", text: "×" });
-  clear.addEventListener("click", () => onZoomChange(null));
-  chip.appendChild(clear);
-  return chip;
-}
 
 function drillChip(drill, onDrill) {
   const parts = drill.keys.map((k) => humanize(k.dimension) + " = " + k.value);

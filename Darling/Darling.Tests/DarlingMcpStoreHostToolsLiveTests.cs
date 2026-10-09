@@ -29,7 +29,7 @@ namespace Darling.Tests;
 /// row assertion here rather than as a silent gap nobody caught before a real least-privilege deployment hit
 /// it.
 ///
-/// <para>Uses distinct <c>host_mcp_test</c>/<c>host_viewer_test</c> roles (the
+/// <para>Uses distinct <c>host_mcp_</c>/<c>host_viewer_</c> roles, each with a suffix unique to the run (the
 /// <c>DarlingSecuritySplitLiveTests</c> pattern) rather than the literal <c>mcp</c>/<c>viewer</c> names
 /// <c>DarlingManagedRoles.BuildProvisioningSql</c> renders, so this test can run against a shared rig without
 /// colliding with a real provisioning run. Granted the schema-level surface that provisioning gives the real
@@ -43,8 +43,12 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class DarlingMcpStoreHostToolsLiveTests
 {
-    private const string McpRole = "host_mcp_test";
-    private const string ViewerRole = "host_viewer_test";
+    /* #4981: a role belongs to the whole cluster, so a constant name made two runs on one cluster share a role: the
+       second CREATE ROLE could fail with a duplicate, and the first run's DROP ROLE removed the role the second was
+       using. One suffix per run (8 lowercase hex characters) keeps each name a valid unquoted identifier. */
+    private static readonly string RunSuffix = Guid.NewGuid().ToString("N")[..8];
+    private static readonly string McpRole = "host_mcp_" + RunSuffix;
+    private static readonly string ViewerRole = "host_viewer_" + RunSuffix;
 
     /// <summary>Round-1 review, Low 6: a hardcoded password here is public in this repository, and each of
     /// these two LOGIN roles gets SELECT on every table in <c>collect</c>. Cleanup runs in <c>finally</c>, but a

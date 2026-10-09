@@ -3,6 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
              mc:Ignorable="d"
              d:DesignHeight="450" d:DesignWidth="800">
     <!-- The full Alert History surface (W2a viewer copy-parity), copied from Lite's
@@ -81,14 +82,9 @@
                        Foreground="{DynamicResource ForegroundBrush}"/>
             <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ComboBox x:Name="TimeRangeComboBox" Width="100" VerticalAlignment="Center"
-                      SelectionChanged="TimeRangeComboBox_SelectionChanged">
-                <ComboBoxItem Content="Last 1 Hour" Tag="1"/>
-                <ComboBoxItem Content="Last 4 Hours" Tag="4"/>
-                <ComboBoxItem Content="Last 24 Hours" Tag="24" IsSelected="True"/>
-                <ComboBoxItem Content="Last 7 Days" Tag="168"/>
-                <ComboBoxItem Content="All" Tag="8760"/>
-            </ComboBox>
+            <!-- #5562: the shared time range picker. The old "All" (8760 hours) is the picker's longest choice again, the span the alert table keeps (DarlingRetentionHorizons.AlertHistoryRetentionDays, 90 days); the code sets it. -->
+            <ui:TimeRangePicker x:Name="TimeRangePickerControl" Compact="True" VerticalAlignment="Center"
+                                RangeChanged="TimeRangePicker_RangeChanged"/>
             <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <ComboBox x:Name="ServerFilterComboBox" Width="160" VerticalAlignment="Center"
@@ -126,7 +122,7 @@
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                <TextBlock Text="Time" FontWeight="Bold" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="AlertTimeHeaderText" Text="Time" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>

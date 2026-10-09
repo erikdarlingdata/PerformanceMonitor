@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// the same PR; regenerate ONLY via <c>PM_PIN_REGEN=1</c>. Text-scans SOURCE, located from this file's
 /// compile-time path -- NO WPF / assembly load.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PlanViewerCapabilityPinTests
 {
     /* Probe = (stable capability name, a substring that proves it is still present). Wire probes use the

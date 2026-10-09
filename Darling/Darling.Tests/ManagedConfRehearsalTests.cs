@@ -27,13 +27,13 @@ namespace Darling.Tests;
 /// stay exactly where it is); and <c>log_timezone = 'UTC'</c> at the end (a key no managed block owns, so it
 /// stays exactly where it is too).
 ///
-/// <para><b>This fixture's numbers</b> are 69 lines removed / 27 managed keys / 1 operator line moved.
+/// <para><b>This fixture's numbers</b> are 69 lines removed / 34 managed keys / 1 operator line moved.
 /// The "1 operator line moved" is exactly what the rewrite logic requires. The counts below explain why they
-/// are 69/27 rather than some other plausible pair, given how today's builders emit their blocks:
+/// are 69/34 rather than some other plausible pair, given how today's builders emit their blocks:
 /// <list type="bullet">
-/// <item><b>managed keys 27 vs 23.</b> <see cref="ManagedConfFile.RenderBody"/> emits one line per key
+/// <item><b>managed keys 34 vs 23.</b> <see cref="ManagedConfFile.RenderBody"/> emits one line per key
 /// <see cref="DarlingManagedPostgres.ParseConfText"/> reads back from calling every <c>Build*ConfAppend</c> in
-/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 27 keys.
+/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 34 keys.
 /// One extra key is <c>min_wal_size</c>: v12's WAL-sizing block
 /// (<see cref="DarlingManagedPostgres.BuildWalSizingConfAppend"/>) writes both <c>max_wal_size</c> AND
 /// <c>min_wal_size</c>, and nothing later in the v1-v14 order overwrites the second one, so it survives the
@@ -115,7 +115,7 @@ public sealed class ManagedConfRehearsalTests
         throw new FileNotFoundException($"Could not locate '{relativePath}' walking up from '{AppContext.BaseDirectory}'.");
     }
 
-    /// <summary>The rehearsal's headline numbers (see the class doc comment for why 69/27 rather than the
+    /// <summary>The rehearsal's headline numbers (see the class doc comment for why 69/34 rather than the
     /// design's 48/23): lines removed, managed keys in the map handed to <c>Rewrite</c>, and operator lines
     /// moved below the include — the last of which holds exactly at 1, as required.</summary>
     [Fact]
@@ -130,9 +130,31 @@ public sealed class ManagedConfRehearsalTests
         var afterLineCount = result.NewConfText.Split('\n').Length;
 
         Assert.Equal(69, beforeLineCount - afterLineCount);
-        Assert.Equal(27, managedValues.Count);
+        Assert.Equal(34, managedValues.Count);
         Assert.Single(result.ExcludedKeys);
         Assert.Contains("max_connections", result.ExcludedKeys);
+    }
+
+    /// <summary>v18 (auto_explain, part of #5097): the fixture with a v18 block appended, the way a Legacy
+    /// store that has just been healed carries it, migrates with every v18 line dropped as OURS -- none of the
+    /// seven <c>auto_explain.*</c> settings and no v18 marker is left in <c>postgresql.conf</c> -- and the
+    /// operator line still moves exactly once. The managed file carries them instead
+    /// (<see cref="BuildManagedValues"/>).</summary>
+    [Fact]
+    public void Rewrite_RehearsalFixtureWithV18Appended_DropsEveryV18Line_AndMovesTheSameOperatorLine()
+    {
+        var withV18 = ReadFixture() + DarlingManagedPostgres.BuildSlowPlanConfAppend("timescaledb,pg_stat_statements");
+        var managedValues = BuildManagedValues();
+
+        var result = Rewrite(withV18, managedValues, configuredPort: 5432);
+
+        Assert.DoesNotContain("auto_explain", result.NewConfText, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV18, result.NewConfText, StringComparison.Ordinal);
+        Assert.Equal("10s", managedValues["auto_explain.log_min_duration"]);
+        Assert.Equal("timescaledb,pg_stat_statements,auto_explain", managedValues["shared_preload_libraries"]);
+        Assert.Single(result.ExcludedKeys);
+        Assert.Contains("max_connections", result.ExcludedKeys);
+        Assert.Equal(1, result.NewConfText.Split('\n').Count(l => l == "max_connections = 300"));
     }
 
     /// <summary><c>max_connections = 300</c> (between v4 and v5, the last assignment of that key anywhere in

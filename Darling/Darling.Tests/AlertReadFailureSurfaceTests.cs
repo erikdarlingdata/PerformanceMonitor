@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// down), and the counts are asserted in both directions so a walk that silently stopped reaching cannot
 /// report clean.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AlertReadFailureSurfaceTests
 {
     /* ---------------- the counter's own behaviour ---------------- */
@@ -922,7 +923,7 @@ public sealed class AlertReadFailureSurfaceTests
            DarlingWorker. 16th exempt since #4750: EvaluateNotificationChannelsAsync's wrapper catch — the
            webhook channels' failure counts are read from the webhook service's memory, so there is no store
            read for the condition to swallow. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 17),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 18),
     };
 
     /// <summary>
@@ -967,7 +968,7 @@ public sealed class AlertReadFailureSurfaceTests
     /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
     private const int WorkerCountedSites = 11;
-    private const int WorkerExemptSites = 11;
+    private const int WorkerExemptSites = 12;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1010,9 +1011,11 @@ public sealed class AlertReadFailureSurfaceTests
     /// shape at the store's own health. And a THIRTEENTH since #4215: the store-settings
     /// self-alert's rejected-verdict read, moved from exempt to counted because a RejectedValue row is one of
     /// the three conditions the alert fires on — losing it leaves that condition unjudgeable, and the original
-    /// exempt classification would let one failed read write a false "Store Settings Resolved".</para>
+    /// exempt classification would let one failed read write a false "Store Settings Resolved". And a
+    /// THIRTY-EIGHTH since #5450: the daily retained-history audit's per-rollup read, counted because a swallowed
+    /// read skips that rollup for the day, and the audit is the only place the day's thin hours are ever named.</para>
     /// </summary>
-    private const int CountedSites = 37;
+    private const int CountedSites = 38;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1029,6 +1032,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
+        ["Collection gap at start self-alert failed"] = "handed its evidence as parameters",
         ["Store TimescaleDB self-alert failed"] = "handed its evidence as parameters; the version was read by the bootstrap (#3908)",
         /* #3816 renamed this line with the check: the same catch, one family over — the self-heal now covers
            every policy family, so "Compression-job health" would have named a third of what it isolates. */
@@ -1039,7 +1043,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Notification-channel self-alert failed"] = "reads the webhook channels' failure counts from the webhook service's memory and performs no store read at all - there is no read for this condition to be the swallowing of",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
         ["Fleet gate self-alert failed"] = "handed its evidence (the worker's in-memory gate counts) as a parameter and performs no store read at all",
-        ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the web host's in-memory WebTlsCertificateState publish) as a parameter and performs no store read at all",
+        ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the listener host's in-memory TLS certificate state publish: WebTlsCertificateState for the web host, McpTlsCertificateState for the MCP host) as a parameter and performs no store read at all; one shared catch covers both listeners",
         ["Store settings self-alert failed"] = "handed its evidence as a parameter; the one store read behind it (the rejected-verdict names) is isolated in its own COUNTED catch in DarlingWorker (#4215) rather than exempted",
         ["Failed to record resolution"] = "an audit-row write",
         ["Could not record Postgres alert resolution"] = "a history write",
@@ -1056,6 +1060,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["CONVERTS the fault into the unreadable count"] = "a parse arm, not a read: the fleet-sweep rollup's store read is counted above it, and a document that does not parse becomes the rollup's own reportable unreadable count - the fault is evidence, not a swallow",
         ["Could not resolve Agent job names"] = "reads the monitored server's msdb through the host resolver, not the store - the Recently-failed-job precedent one seam over; the card degrades to the unresolved form whose raw marker keeps the gap visible, and the page still delivers",
         ["delivery stamp could not be written"] = "a write (#3580): the daily document was already delivered and process memory already gates it; the dropped stamp costs one re-announcement at the next restart and never a delivery - the stamp READ beside it is the read, and it is counted",
+        ["Store statement history is still failing"] = "the Debug repeat of a telemetry write sweep (#5097); the first failure warns, no alert is judged on its result",
         ["Read-latency flush failed"] = "the read-latency histogram flush writes instrumentation; losing an hour's rows can't hide an alert condition",
     };
 
@@ -1241,8 +1246,11 @@ public sealed class AlertReadFailureSurfaceTests
            flush's catch, a telemetry write whose loss costs an hour's histogram rows and never an alert.
            33rd since #4750: the Notification Channel Failing self-alert's catch, whose counts come from the
            webhook service's memory rather than the store. 34th since #4732: the Collection Falling Behind
-           self-alert's wrapper catch, whose counts come from the worker's in-memory gate statistics. */
-        Assert.Equal(34, totalExempt);
+           self-alert's wrapper catch, whose counts come from the worker's in-memory gate statistics. 35th since
+           #5097: the store statement history snapshot's catch, a telemetry write sweep whose loss costs an hour's
+           capture and never an alert. 36th since #5450: the Collection Gap At Start self-alert's catch, handed
+           its evidence as a parameter. */
+        Assert.Equal(36, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

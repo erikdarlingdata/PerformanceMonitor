@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -40,36 +41,38 @@ public sealed class ViewerQueryStatsRow
     public long TotalExecutions { get; set; }
     public long TotalCpuUs { get; set; }
     public long TotalElapsedUs { get; set; }
-    public long TotalLogicalReads { get; set; }
-    public long TotalRows { get; set; }
-    public long TotalLogicalWrites { get; set; }
-    public long TotalPhysicalReads { get; set; }
-    public long TotalSpills { get; set; }
-    public int MinDop { get; set; }
-    public int MaxDop { get; set; }
-    public long MinCpuUs { get; set; }
-    public long MaxCpuUs { get; set; }
-    public long MinElapsedUs { get; set; }
-    public long MaxElapsedUs { get; set; }
-    public long MinPhysicalReads { get; set; }
-    public long MaxPhysicalReads { get; set; }
-    public long MinRows { get; set; }
-    public long MaxRows { get; set; }
-    public long MinGrantKb { get; set; }
-    public long MaxGrantKb { get; set; }
-    public long MinUsedGrantKb { get; set; }
-    public long MaxUsedGrantKb { get; set; }
-    public long MinIdealGrantKb { get; set; }
-    public long MaxIdealGrantKb { get; set; }
-    public long MinReservedThreads { get; set; }
-    public long MaxReservedThreads { get; set; }
-    public long MinUsedThreads { get; set; }
-    public long MaxUsedThreads { get; set; }
-    public long TotalClrUs { get; set; }
-    public long MinSpills { get; set; }
-    public long MaxSpills { get; set; }
-    public long PlanGenerationNum { get; set; }
-    public double WorkerTimePerSecond { get; set; }
+    public long? TotalLogicalReads { get; set; }
+    public long? TotalRows { get; set; }
+    public long? TotalLogicalWrites { get; set; }
+    public long? TotalPhysicalReads { get; set; }
+    public long? TotalSpills { get; set; }
+    public int? MinDop { get; set; }
+    public int? MaxDop { get; set; }
+    /* #5329: null on the hourly route. The rollup keeps min/max of per-collection deltas (sums over many
+       executions), not the per-execution extremes the raw route reads, so showing them would be a wrong number. */
+    public long? MinCpuUs { get; set; }
+    public long? MaxCpuUs { get; set; }
+    public long? MinElapsedUs { get; set; }
+    public long? MaxElapsedUs { get; set; }
+    public long? MinPhysicalReads { get; set; }
+    public long? MaxPhysicalReads { get; set; }
+    public long? MinRows { get; set; }
+    public long? MaxRows { get; set; }
+    public long? MinGrantKb { get; set; }
+    public long? MaxGrantKb { get; set; }
+    public long? MinUsedGrantKb { get; set; }
+    public long? MaxUsedGrantKb { get; set; }
+    public long? MinIdealGrantKb { get; set; }
+    public long? MaxIdealGrantKb { get; set; }
+    public long? MinReservedThreads { get; set; }
+    public long? MaxReservedThreads { get; set; }
+    public long? MinUsedThreads { get; set; }
+    public long? MaxUsedThreads { get; set; }
+    public long? TotalClrUs { get; set; }
+    public long? MinSpills { get; set; }
+    public long? MaxSpills { get; set; }
+    public long? PlanGenerationNum { get; set; }
+    public double? WorkerTimePerSecond { get; set; }
     public string QueryPlanHash { get; set; } = "";
     public string SqlHandle { get; set; } = "";
     public string PlanHandle { get; set; } = "";
@@ -113,13 +116,13 @@ public sealed class ViewerQueryStatsRow
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public double AvgCpuMs => TotalExecutions > 0 ? TotalCpuMs / TotalExecutions : 0;
     public double AvgElapsedMs => TotalExecutions > 0 ? TotalElapsedMs / TotalExecutions : 0;
-    public double AvgReads => TotalExecutions > 0 ? (double)TotalLogicalReads / TotalExecutions : 0;
-    public double MinCpuMs => MinCpuUs / 1000.0;
-    public double MaxCpuMs => MaxCpuUs / 1000.0;
-    public double MinElapsedMs => MinElapsedUs / 1000.0;
-    public double MaxElapsedMs => MaxElapsedUs / 1000.0;
+    public double? AvgReads => TotalLogicalReads is null ? null : TotalExecutions > 0 ? (double)TotalLogicalReads.Value / TotalExecutions : 0;
+    public double? MinCpuMs => MinCpuUs is null ? null : MinCpuUs / 1000.0;
+    public double? MaxCpuMs => MaxCpuUs is null ? null : MaxCpuUs / 1000.0;
+    public double? MinElapsedMs => MinElapsedUs is null ? null : MinElapsedUs / 1000.0;
+    public double? MaxElapsedMs => MaxElapsedUs is null ? null : MaxElapsedUs / 1000.0;
     // total_clr_time is stored in microseconds (like worker/elapsed time)
-    public double TotalClrMs => TotalClrUs / 1000.0;
+    public double? TotalClrMs => TotalClrUs / 1000.0;
 }
 
 public sealed partial class ViewerDataService
@@ -132,23 +135,25 @@ public sealed partial class ViewerDataService
     /// (database_name, query_hash, host_object_name) over the window (#2012 stage 2 — the host object
     /// splits same-hash statements hosted by different procs, e.g. INSERT...EXEC callers; SQL GROUP BY
     /// treats NULLs as equal so ad-hoc rows still collapse), sum the deltas + carry the min/max spreads,
-    /// fetch each group's latest non-null query text via a LATERAL join constrained to the group's own
-    /// host object, drop WAITFOR shells (over-fetch by 5
-    /// exactly like Lite's <c>LIMIT top + 5</c> → filter → <c>LIMIT top</c>), and cap at top.
+    /// fetch each group's latest non-null query text with ONE lookup for every ranked group (#5309),
+    /// constrained to the group's own host object, drop WAITFOR shells (over-fetch by 5 as Lite's
+    /// <c>LIMIT top + 5</c> → filter → <c>LIMIT top</c> does, and refill while the page is short and more
+    /// candidates exist, #5313), and cap at top.
     /// Viewer deviations from Lite: (1) Postgres <c>SUM(bigint)</c> is numeric, so each summed aggregate
     /// is CAST back to bigint for the typed GetInt64 readers (MIN/MAX of bigint stay bigint, no cast);
     /// (2) Lite's server-local <c>last_execution_time</c> staleness filter and its utcOffsetMinutes
     /// parameter are dropped (the viewer has no per-server UTC offset; the delta HAVING already excludes
-    /// plans that never ran in the window); (3) the LATERAL fetches only query_text; the collected
+    /// plans that never ran in the window); (3) the text lookup fetches only query_text; the collected
     /// query_plan_xml is not carried per row (it can be multi-KB) — instead a bool_or presence test rides
     /// back as has_query_plan to gate the grid's Query Plan column, and the plan itself is
     /// fetched on demand by <see cref="GetQueryStatsPlanXmlAsync"/>. The flag answers "the server had a plan
     /// for this row", which is what the on-demand fetch can act on; it has never promised the fetch will
     /// find content, since a digest can outlive the dimension row the GC pruned.
-    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database filter, $6 the candidate
+    /// limit (#5313: top + 5 first, larger on a refill round).
     /// </summary>
     public const string TopQueriesSql = """
-        WITH ranked AS (
+        WITH ranked AS MATERIALIZED (
             SELECT
                 database_name,
                 query_hash,
@@ -195,7 +200,7 @@ public sealed partial class ViewerDataService
                    CTE aggregates the whole window and needs only a presence flag, and reading the
                    resolving view would make Postgres join the plan dimension per row to evaluate
                    it (it can drop an unreferenced unique join, but the COALESCE references it).
-                   The LATERAL below, which needs the actual text, does read the view.
+                   The latest_text lookup below resolves the text from the dimension itself, for the newest row of each group only.
 
                    The third term is the capped rows (#3392), and it needs no cap literal to find
                    them: DATALENGTH of a NULL plan is NULL, so a non-null query_plan_xml_bytes
@@ -211,8 +216,47 @@ public sealed partial class ViewerDataService
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-            ORDER BY SUM(delta_elapsed_time) DESC
-            LIMIT $4 + 5
+            ORDER BY SUM(delta_elapsed_time) DESC, database_name, query_hash, host_object_name
+            /* #5313: $6 is the candidate limit, not a fixed over-fetch of five. The caller starts at top plus five and, when the
+               WAITFOR trim below leaves fewer than top rows while more candidates exist, asks again with a
+               larger $6 (TopFill, at most three rounds). The final LIMIT stays $4. */
+            LIMIT $6
+        ),
+        latest_text AS MATERIALIZED (
+            /* #5309: the representative text of EVERY ranked group in ONE lookup. This was a lateral
+               lookup of the newest row, one per ranked row, which on a store without TimescaleDB scanned the
+               raw table once per row. One pass reads the window's rows for the ranked keys and keeps the
+               newest row per key; the text is resolved from the dimension for that one row afterwards, so the
+               sort never carries a wide text. A row counts as having text when its inline text or its
+               dimension row exists, the rule v_query_stats' COALESCE gives. The key match is NULL-safe (ad-hoc
+               rows carry a NULL host object) with the COALESCE equality as the hashable pre-filter. The
+               group's own host object keeps one caller's text from labelling another's (#2012). */
+            SELECT
+                l.database_name,
+                l.query_hash,
+                l.host_object_name,
+                COALESCE(l.query_text, d.query_text) AS query_text
+            FROM
+            (
+                SELECT DISTINCT ON (q.database_name, q.query_hash, q.host_object_name)
+                    q.database_name,
+                    q.query_hash,
+                    q.host_object_name,
+                    q.query_text,
+                    q.query_text_digest
+                FROM query_stats AS q
+                JOIN ranked AS rk
+                    ON  COALESCE(q.query_hash, '') = COALESCE(rk.query_hash, '')
+                    AND q.database_name IS NOT DISTINCT FROM rk.database_name
+                    AND q.query_hash IS NOT DISTINCT FROM rk.query_hash
+                    AND q.host_object_name IS NOT DISTINCT FROM rk.host_object_name
+                WHERE q.server_id = $1
+                AND   q.collection_time >= $2
+                AND   q.collection_time <= $3
+                AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC, q.collection_id DESC
+            ) AS l
+            LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
         module AS (
             /* #1568 module attribution: one procedure_stats identity per sql_handle (latest
@@ -239,7 +283,8 @@ public sealed partial class ViewerDataService
                 AND   sql_handle <> ''
             ) AS ranked_modules
             WHERE rn = 1
-        )
+        ),
+        page AS (
         SELECT
             r.database_name,
             r.query_hash,
@@ -286,26 +331,27 @@ public sealed partial class ViewerDataService
             m.object_name AS module_object_name,
             m.schema_name AS module_schema_name,
             m.database_name AS module_database_name,
-            r.host_object_name
+            r.host_object_name,
+            /* #5313: candidates the ranking produced (last column), so the caller can tell a short page that
+               has more candidates behind it from one that has run out. Every earlier ordinal is unchanged. */
+            ROW_NUMBER() OVER (ORDER BY r.total_elapsed_us DESC, r.database_name, r.query_hash, r.host_object_name) AS page_ord
         FROM ranked AS r
-        LEFT JOIN LATERAL (
-            SELECT query_text
-            FROM v_query_stats
-            WHERE server_id = $1
-            AND   query_hash = r.query_hash
-            AND   database_name = r.database_name
-            /* #2012 stage 2: the representative text must come from THIS group's own rows — without
-               the host constraint a hash shared across host objects could label one caller's row
-               with another caller's text (NOT DISTINCT FROM so ad-hoc NULL hosts still match). */
-            AND   host_object_name IS NOT DISTINCT FROM r.host_object_name
-            AND   query_text IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
-        ) AS t ON TRUE
+        LEFT JOIN latest_text AS t
+            ON  t.database_name IS NOT DISTINCT FROM r.database_name
+            AND t.query_hash IS NOT DISTINCT FROM r.query_hash
+            AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
         LEFT JOIN module AS m ON m.sql_handle = r.sql_handle
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_elapsed_us DESC
+        ORDER BY r.total_elapsed_us DESC, r.database_name, r.query_hash, r.host_object_name
         LIMIT $4
+        )
+        /* The candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed still reports it (an empty page used to read as exhausted). page_ord is NULL on that
+           row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
         """;
 
     /// <summary>Grid cell preview cap for query/SQL text (single line).</summary>
@@ -325,8 +371,9 @@ public sealed partial class ViewerDataService
     /// <c>DarlingDataReader.GetTopQueriesByCpuRoutedAsync</c> does — the tier decided over
     /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (out of scope for this lane).
     /// An hourly-routed page carries only what the rollup has: <c>host_object_name</c>/
-    /// <c>module_*</c>/DOP/grant/spill/thread columns are unavailable and read as their defaults, exactly the
-    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. An hourly-routed page
+    /// <c>module_*</c> are empty, and the reads/writes/physical-reads/rows/spill/DOP/grant/thread/CLR columns the rollup
+    /// keeps no copy of are NULL on the row (#5329), so the grid shows them blank instead of a false 0 — the same
+    /// disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). When the io hourly rollup (<see cref="IoHourlyCoversWindow"/>) reaches the window's start, the page reads it instead and fills logical reads, physical reads and logical writes from its sums (#5329). An hourly-routed page
     /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
     /// does not add the hour that begins there). Use
     /// <see cref="GetTopQueriesByCpuTierAsync"/> to also learn which tier answered.</para>
@@ -343,6 +390,16 @@ public sealed partial class ViewerDataService
     public async Task<(List<ViewerQueryStatsRow> Rows, string Tier)> GetTopQueriesByCpuTierAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
+        var read = await GetTopQueriesByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        return (read.Rows, read.Tier);
+    }
+
+    /// <summary>#5329: <see cref="GetTopQueriesByCpuTierAsync"/> with the window's real edges: an hourly-routed read also
+    /// answers <see cref="ViewerRoutedRead{TRow}.HourlyEdgesNote"/> (<see cref="HourlyEdgesNote"/>), the text the MCP tool
+    /// puts in its precision note; a raw read answers none.</summary>
+    public async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuRoutedAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
@@ -354,100 +411,175 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            var hourlyRows = await GetTopQueriesByCpuHourlyAsync(coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
-            return (hourlyRows, "hourly");
+            return await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
         }
 
-        return (await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw");
+        return new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
     }
 
     /// <summary>#4231 stage 3: the hourly-rollup arm — builds its FROM clause ONLY through
     /// <see cref="RollupCoverage.StitchedRelationSql"/> (never a literal rollup name), groups by
     /// <c>(database_name, query_hash)</c> (the rollup has no host_object_name), and resolves each row's
     /// <c>query_text</c> with a follow-up lookup mirroring <see cref="DarlingDataReader"/>'s MCP twin.</summary>
-    private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
-        RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
+    private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
+        RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
         IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
-        var fromClause = coverage.StitchedRelationSql(
-            TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = BuildTopQueriesHourlySql(fromClause);
+        /* #5329: when the io hourly rollup reaches the window's start, read it instead of the interval rollup (it
+           carries every column the interval one does) and fill reads, physical reads and writes from its three sums.
+           Otherwise today's route and today's blank columns. The io view is named only through StitchedRelationSql
+           (it has no successor, so that answers just its own relation). */
+        var useIo = IoHourlyCoversWindow(rollups, coverage, TimescaleSupport.QueryStatsIoHourlyView, startUtc);
+        var answeringView = useIo ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView;
+        var fromClause = coverage.StitchedRelationSql(answeringView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        /* #5329: bound the read at the materialization ceiling of the relation that answers the window's END, as the
+           service's twin does (RollupCoverage.HourlyEndCeiling); null = no bound. */
+        var ceiling = coverage.HourlyEndCeiling(answeringView, startUtc);
+        var sql = BuildTopQueriesHourlySql(fromClause, withIo: useIo, ceiling: ceiling);
+        /* #5329: the first bucket THIS server holds in the window, from the same per-server probe the service's tools run
+           (RollupCoverage.GetHourlyFirstBucketAsync), beside the grid read. The store-wide floor belongs to the oldest
+           server, so a server added later would otherwise get no start edge. */
+        var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
+            _dataSource, answeringView, serverId, startUtc, endUtc, ceiling, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
-        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long MinWorkerTime, long MaxWorkerTime)>();
-        await using (var command = _dataSource.CreateCommand(sql))
+        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long? Reads, long? PhysicalReads, long? Writes)>();
+        List<ViewerQueryStatsRow> rows;
+        try
         {
-            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            AddServerWindowParameters(command, serverId, startUtc, endUtc);
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
-            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            await using (var command = _dataSource.CreateCommand(sql))
             {
-                ranked.Add((
-                    reader.IsDBNull(0) ? "" : reader.GetString(0),
-                    reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                    reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                    reader.IsDBNull(6) ? 0 : reader.GetInt64(6)));
-            }
-        }
-
-        var rows = new List<ViewerQueryStatsRow>(ranked.Count);
-        foreach (var r in ranked)
-        {
-            var queryText = "";
-            await using (var textCommand = _dataSource.CreateCommand(
-                "SELECT query_text FROM v_query_stats WHERE server_id = $1 AND database_name = $2 AND query_hash = $3 AND query_text IS NOT NULL ORDER BY collection_time DESC LIMIT 1"))
-            {
-                textCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                textCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.Database });
-                textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.QueryHash });
-                var textResult = await textCommand.ExecuteScalarAsync(cancellationToken);
-                if (textResult is string text)
+                command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                AddServerWindowParameters(command, serverId, startUtc, endUtc);
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
+                command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+                AddHourlyCeilingParameter(command, ceiling);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                 {
-                    queryText = text;
+                    ranked.Add((
+                        reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                        reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                        useIo && !reader.IsDBNull(5) ? reader.GetInt64(5) : null,
+                        useIo && !reader.IsDBNull(6) ? reader.GetInt64(6) : null,
+                        useIo && !reader.IsDBNull(7) ? reader.GetInt64(7) : null));
                 }
             }
 
-            rows.Add(new ViewerQueryStatsRow
+            /* Walk finding D15: ONE statement for every ranked row's text. This was one v_query_stats statement per row
+               (50 sequential round trips per load, each planned on its own), which on a 7 day window over a network was
+               most of the load. */
+            var texts = await ReadHourlyQueryTextsAsync(serverId, ranked.Select(r => r.Database).ToArray(), ranked.Select(r => r.QueryHash).ToArray(), cancellationToken);
+            rows = new List<ViewerQueryStatsRow>(ranked.Count);
+            for (var i = 0; i < ranked.Count; i++)
             {
-                DatabaseName = r.Database,
-                QueryHash = r.QueryHash,
-                TotalExecutions = r.TotalExecutions,
-                TotalCpuUs = r.TotalCpuUs,
-                TotalElapsedUs = r.TotalElapsedUs,
-                MinCpuUs = r.MinWorkerTime,
-                MaxCpuUs = r.MaxWorkerTime,
-                QueryText = queryText,
-                /* #4231 stage 3: the rollup has no host_object_name column. */
-                HostObjectName = null,
-            });
+                var r = ranked[i];
+                var queryText = texts[i];
+
+                rows.Add(new ViewerQueryStatsRow
+                {
+                    DatabaseName = r.Database,
+                    QueryHash = r.QueryHash,
+                    TotalExecutions = r.TotalExecutions,
+                    TotalCpuUs = r.TotalCpuUs,
+                    TotalElapsedUs = r.TotalElapsedUs,
+                    /* #5329: from the io rollup's sums when it covers the window, else null (blank, never 0). */
+                    TotalLogicalReads = r.Reads,
+                    TotalPhysicalReads = r.PhysicalReads,
+                    TotalLogicalWrites = r.Writes,
+                    /* #5329: MinCpuUs, MaxCpuUs, MinElapsedUs and MaxElapsedUs stay null here. */
+                    QueryText = queryText,
+                    /* #4231 stage 3: the rollup has no host_object_name column. */
+                    HostObjectName = null,
+                });
+            }
+        }
+        catch
+        {
+            /* #5329: the probe is no longer wanted, so observe its fault (never throw it over this one): otherwise one failure logs twice. */
+            await ObserveAsync(firstBucketTask);
+            throw;
         }
 
-        return rows;
+        var firstBucket = await firstBucketTask;
+        return new ViewerRoutedRead<ViewerQueryStatsRow>(rows, "hourly", HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling), useIo, firstBucket);
     }
 
+    /// <summary>The hourly arm's text lookup for every ranked row in one statement (walk finding D15; it was one statement per row).
+    /// Each (database, query hash) key takes the text of its newest row that has one, from <c>v_query_stats</c> (the view resolves
+    /// the #1767 dimension), exactly as the per-row lookup it replaces did; a key with no text is simply absent from the answer.
+    /// $1 server_id, $2 database names, $3 query hashes (parallel arrays), answered as (ordinal, query_text).</summary>
+    internal const string HourlyTextBatchSql = """
+        SELECT k.ord, t.query_text
+        FROM unnest($2::text[], $3::text[]) WITH ORDINALITY AS k(database_name, query_hash, ord)
+        CROSS JOIN LATERAL
+        (
+            SELECT v.query_text
+            FROM v_query_stats AS v
+            WHERE v.server_id = $1
+            AND   v.database_name = k.database_name
+            AND   v.query_hash = k.query_hash
+            AND   v.query_text IS NOT NULL
+            ORDER BY v.collection_time DESC
+            LIMIT 1
+        ) AS t
+        """;
+
+    /// <summary>One <see cref="HourlyTextBatchSql"/> round trip: the text per ranked row, in the same order, "" where none.</summary>
+    internal async Task<string[]> ReadHourlyQueryTextsAsync(int serverId, string[] databases, string[] hashes, CancellationToken cancellationToken)
+    {
+        var texts = new string[databases.Length];
+        Array.Fill(texts, "");
+        if (databases.Length == 0)
+        {
+            return texts;
+        }
+
+        await using var command = _dataSource.CreateCommand(HourlyTextBatchSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = databases });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = hashes });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(1))
+            {
+                texts[(int)reader.GetInt64(0) - 1] = reader.GetString(1);
+            }
+        }
+
+        return texts;
+    }
+
+    /// <summary>#5329: the three columns the io hourly rollups add, appended to the hourly arm's select list
+    /// (positions 5, 6 and 7) when the io view is the relation: logical reads, physical reads and logical writes.</summary>
+    internal const string IoSumsSelectSql = """
+        ,
+            CAST(SUM(logical_reads_sum) AS bigint) AS total_logical_reads,
+            CAST(SUM(physical_reads_sum) AS bigint) AS total_physical_reads,
+            CAST(SUM(logical_writes_sum) AS bigint) AS total_logical_writes
+        """;
+
     /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
-    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>): a range whose To is 14:00 sums the
+    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>), and (#5329) a known materialization
+    /// <paramref name="ceiling"/> adds <c>bucket &lt; $6</c> (see <see cref="HourlyCeilingSql"/>): a range whose To is 14:00 sums the
     /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
     /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
     /// test can read the text.</summary>
-    internal static string BuildTopQueriesHourlySql(string fromClause) => $"""
+    internal static string BuildTopQueriesHourlySql(string fromClause, bool withIo = false, DateTime? ceiling = null) => $"""
         SELECT
             database_name,
             query_hash,
             CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
             CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
-            MIN(worker_time_min) AS min_worker_time,
-            MAX(worker_time_max) AS max_worker_time
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us{(withIo ? IoSumsSelectSql : "")}
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
-        AND   bucket < $3
+        AND   bucket < $3{HourlyCeilingSql(ceiling)}
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         GROUP BY database_name, query_hash
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -460,16 +592,29 @@ public sealed partial class ViewerDataService
     private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuRawAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
+        /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
+           while more candidates exist, under its bound. */
+        return await TopFill.RunAsync(top, async candidates =>
+        {
         var rows = new List<ViewerQueryStatsRow>();
+        var candidateCount = 0;
 
         await using var command = _dataSource.CreateCommand(TopQueriesSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = candidates });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* #5313: the count rides on a row of its own too; page_ord (46) is NULL on that one, so it is not a page row. */
+            candidateCount = reader.IsDBNull(47) ? 0 : Convert.ToInt32(reader.GetValue(47), System.Globalization.CultureInfo.InvariantCulture);
+            if (reader.IsDBNull(46))
+            {
+                continue;
+            }
+
             rows.Add(new ViewerQueryStatsRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -521,7 +666,8 @@ public sealed partial class ViewerDataService
             });
         }
 
-        return rows;
+        return (rows, candidateCount);
+        });
     }
 
     /// <summary>
@@ -529,12 +675,25 @@ public sealed partial class ViewerDataService
     /// — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied floor query. The
     /// Queries tab's <c>LoadTopQueriesAsync</c> reads this beside
     /// <see cref="GetTopQueriesByCpuAsync"/> so the grid header can disclose a window the raw tier no longer
-    /// fully holds, the same fact <c>get_top_queries_by_cpu</c> reports over MCP.
+    /// fully holds, the same fact <c>get_top_queries_by_cpu</c> reports over MCP. A window no longer than
+    /// <see cref="DurationTrendRouting.TruncationSlack"/> answers null without a store read (#4966): no banner can show for one.
     /// </summary>
     public Task<DateTime?> GetQueryStatsWindowFloorAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc,
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        /* #4966: a window no longer than the truncation slack can never get a coverage note. The answer is at or before the window's
+           end, and RawWindowFloor.IsTruncated needs it MORE than the slack after the window's start, so the tab's banner could not
+           show it. The probe would read the store for nothing: it starts no query, as DataWindowFloor.GetForServerAsync's does not.
+           The skip is here, in the viewer's methods, and not in RawWindowFloor.GetAsync: Darling's MCP tools share that probe and
+           read its null as "nothing was read" (see its remarks). */
+        if (endUtc - startUtc <= DurationTrendRouting.TruncationSlack)
+        {
+            return Task.FromResult<DateTime?>(null);
+        }
+
+        return RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
 
     /// <summary>
     /// Top-Queries comparison — Lite's <c>GetQueryStatsComparisonAsync</c> ported. Unions the top-100
@@ -542,10 +701,13 @@ public sealed partial class ViewerDataService
     /// per-execution averages, and FULL OUTER JOINs the two so NEW / GONE queries surface. Returns the
     /// shared <see cref="QueryStatsComparisonItem"/> the .Ui comparison grid binds (delta % + badges).
     /// PG dialect deviations from Lite's DuckDB: <c>::double precision</c> casts on the summed bigints
-    /// before the per-execution division; the CTE INNER JOINs keep Lite's null-safe
-    /// <c>IS NOT DISTINCT FROM</c>, but the outer FULL JOIN uses <c>COALESCE(key,'')</c> equality —
-    /// Postgres only FULL-JOINs on merge/hash-joinable conditions and <c>IS NOT DISTINCT FROM</c> is
-    /// neither (query_hash / database_name are never the empty string, so the sentinel is collision-free).
+    /// before the per-execution division; the period joins are null-safe like Lite's
+    /// <c>IS NOT DISTINCT FROM</c> but written as <c>COALESCE(key,'') = COALESCE(key,'')</c> plus an
+    /// <c>IS NULL</c> pair (#5420), and the outer FULL JOIN uses the same pair — Postgres only joins on
+    /// merge/hash-joinable conditions and <c>IS NOT DISTINCT FROM</c> is neither, so it ran as a nested
+    /// loop over every window row. The <c>IS NULL</c> half of the pair keeps a NULL key and an
+    /// empty-string key apart in the outer join too (#5420): the <c>COALESCE</c> alone would merge
+    /// the two groups and fan a row out.
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string QueryStatsComparisonSql = """
@@ -579,37 +741,55 @@ public sealed partial class ViewerDataService
                 SELECT * FROM top_baseline
             ) AS combined
         ),
+        /* #5420: each period aggregates its window ONCE (the derived table w) and the top list joins to that, on the
+           null-safe pair COALESCE(x,'') = COALESCE(y,'') AND (x IS NULL) = (y IS NULL). The old form joined the top list
+           (at most 200 hashes) to the window's rows with IS NOT DISTINCT FROM, which PostgreSQL can only run as a
+           nested loop that filters every window row against every hash: seconds on a 24 hour window, 10 to 24 s on 7 days. */
         current_period AS (
             SELECT th.database_name, th.query_hash,
-                   SUM(qs.delta_execution_count) AS exec_count,
-                   SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
-                   MAX(qs.query_text) AS query_text
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.query_text
             FROM top_hashes th
-            INNER JOIN v_query_stats qs
-              ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
-              AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            WHERE qs.server_id = $1
-            AND   qs.collection_time >= $2 AND qs.collection_time <= $3
-            AND   qs.delta_execution_count > 0
-            GROUP BY th.database_name, th.query_hash
+            INNER JOIN (
+                SELECT qs.database_name, qs.query_hash,
+                       SUM(qs.delta_execution_count) AS exec_count,
+                       SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
+                       MAX(qs.query_text) AS query_text
+                FROM v_query_stats qs
+                WHERE qs.server_id = $1
+                AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+                AND   ($6::text[] IS NULL OR qs.database_name = ANY($6))
+                AND   qs.delta_execution_count > 0
+                GROUP BY qs.database_name, qs.query_hash
+            ) w
+              ON  COALESCE(w.query_hash, '') = COALESCE(th.query_hash, '')
+              AND (w.query_hash IS NULL) = (th.query_hash IS NULL)
+              AND COALESCE(w.database_name, '') = COALESCE(th.database_name, '')
+              AND (w.database_name IS NULL) = (th.database_name IS NULL)
         ),
         baseline_period AS (
             SELECT th.database_name, th.query_hash,
-                   SUM(qs.delta_execution_count) AS exec_count,
-                   SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
-                   MAX(qs.query_text) AS query_text
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.query_text
             FROM top_hashes th
-            INNER JOIN v_query_stats qs
-              ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
-              AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            WHERE qs.server_id = $1
-            AND   qs.collection_time >= $4 AND qs.collection_time <= $5
-            AND   qs.delta_execution_count > 0
-            GROUP BY th.database_name, th.query_hash
+            INNER JOIN (
+                SELECT qs.database_name, qs.query_hash,
+                       SUM(qs.delta_execution_count) AS exec_count,
+                       SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
+                       MAX(qs.query_text) AS query_text
+                FROM v_query_stats qs
+                WHERE qs.server_id = $1
+                AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+                AND   ($6::text[] IS NULL OR qs.database_name = ANY($6))
+                AND   qs.delta_execution_count > 0
+                GROUP BY qs.database_name, qs.query_hash
+            ) w
+              ON  COALESCE(w.query_hash, '') = COALESCE(th.query_hash, '')
+              AND (w.query_hash IS NULL) = (th.query_hash IS NULL)
+              AND COALESCE(w.database_name, '') = COALESCE(th.database_name, '')
+              AND (w.database_name IS NULL) = (th.database_name IS NULL)
         )
         SELECT COALESCE(c.database_name, b.database_name) AS database_name,
                COALESCE(c.query_hash, b.query_hash) AS query_hash,
@@ -623,6 +803,8 @@ public sealed partial class ViewerDataService
         FULL OUTER JOIN baseline_period b
           ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
           AND COALESCE(c.query_hash, '') = COALESCE(b.query_hash, '')
+          AND (c.database_name IS NULL) = (b.database_name IS NULL)
+          AND (c.query_hash IS NULL) = (b.query_hash IS NULL)
         """;
 
     /// <summary>Top-Queries current-vs-baseline comparison rows (shared .Ui item; delta % + NEW/GONE badges).</summary>

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -111,6 +112,16 @@ internal static class DarlingObjectStatsReader
         double ReservedMb, long TotalRows, long RowLockWaitCount, long RowLockWaitInMs, long PageLockWaitCount,
         long PageLockWaitInMs, long IndexLockPromotionCount, long PageLatchWaitInMs, long PageIoLatchWaitInMs);
 
+    /// <summary>
+    /// #5311: the four counters of one index's locking detail pane, the ones the Locking list leaves out (row lock count,
+    /// page lock count, page latch wait count, page I/O latch wait count). <c>CollectionTime</c> is the snapshot's own
+    /// stamp, first for the reason <see cref="IndexLockingRow"/> carries it first.
+    /// </summary>
+    public sealed record IndexLockingDetailRow(
+        DateTime CollectionTime,
+        string DatabaseName, string SchemaName, string TableName, string? IndexName,
+        long RowLockCount, long PageLockCount, long PageLatchWaitCount, long PageIoLatchWaitCount);
+
     /// <summary>One database file's latest size snapshot. <c>TotalSizeMb</c> is null for the LOG file of an Azure SQL
     /// Database Hyperscale database (the log service): see <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.
     /// <c>FileId</c> is null for the one row another database on an Azure SQL Database server gets, which holds
@@ -132,6 +143,10 @@ internal static class DarlingObjectStatsReader
     /// Postgres: roll indexes up per (database, schema, table) at the latest snapshot, and read the same
     /// table's reserved size at the newest snapshot at/older-than the 7-day ($2) and 30-day ($3) cutoffs and
     /// at the store's earliest snapshot. Ranks by current reserved size descending, cap $4. $1 server_id.
+    /// <para>#5244: $5 is the database filter (a text[], NULL = every database; the shape of <see cref="DatabaseFilter.Clause"/>).
+    /// It sits on the four snapshot CTEs and NOT on <c>boundaries</c>, so the snapshot anchors, the store's span and
+    /// the 7-day and 30-day baselines stay the server's: a filtered and an unfiltered call read the same captures,
+    /// and the cap $4 applies after the filter, so the page is the largest N tables of the chosen databases.</para>
     /// <para><b>Baselines are projected RAW, not folded (#3541 A12).</b> The previous shape derived the growth
     /// columns in SQL through <c>COALESCE(p30, p7, oldest, current)</c>, so a baseline the store did not hold
     /// was silently replaced by a nearer one and labelled with the farther window's name — and a table in no
@@ -160,24 +175,28 @@ internal static class DarlingObjectStatsReader
                 COUNT(*) AS index_count
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT latest_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         past_7d AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT snapshot_7d_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         past_30d AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT snapshot_30d_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         oldest AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT earliest_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         )
         SELECT
@@ -205,8 +224,16 @@ internal static class DarlingObjectStatsReader
         LIMIT $4
         """;
 
+    public static Task<List<ObjectSizeGrowthRow>> GetObjectSizeGrowthAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, CancellationToken cancellationToken = default) =>
+        GetObjectSizeGrowthAsync(postgres, serverId, cutoff7dUtc, cutoff30dUtc, top, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5244: <see cref="GetObjectSizeGrowthAsync(NpgsqlDataSource,int,DateTime,DateTime,int,CancellationToken)"/> over
+    /// a SET of databases (<see cref="DatabaseFilter.All"/> = every database). Rows of the chosen databases only, capped after
+    /// the filter; the snapshot anchors stay the server's.</summary>
     public static async Task<List<ObjectSizeGrowthRow>> GetObjectSizeGrowthAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<ObjectSizeGrowthRow>();
         await using var command = postgres.CreateCommand(ObjectSizeGrowthSql);
@@ -215,6 +242,7 @@ internal static class DarlingObjectStatsReader
         DarlingMcpReadParameters.AddTimestamp(command, cutoff7dUtc);
         DarlingMcpReadParameters.AddTimestamp(command, cutoff30dUtc);
         DarlingMcpReadParameters.AddInt(command, top);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -246,7 +274,7 @@ internal static class DarlingObjectStatsReader
     /// Per-index usage at the latest snapshot — Lite's <c>GetIndexUsageAsync</c> ported to Postgres:
     /// seeks/scans/lookups/updates with the Unused / Write-only / Active classification, unused-first then
     /// largest reserved. Counters are cumulative since the last restart.
-    /// <para>$1 server_id, $2 database filter (NULL = every database), $3 cap.</para>
+    /// <para>$1 server_id, $2 database filter (a text[], NULL = every database; #5245, the shape of <see cref="DatabaseFilter.Clause"/>), $3 cap.</para>
     /// <para>#2636: the ordering and the cap interact badly and a field report found the sharp edge. Unused
     /// sorts ahead of everything SERVER-WIDE, so on an instance with 200+ unused indexes concentrated in one
     /// legacy database, the entire capped result is consumed by that database and every Active index in every
@@ -306,7 +334,7 @@ internal static class DarlingObjectStatsReader
         FROM v_index_object_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
-        AND   ($2::text IS NULL OR database_name = $2::text)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY
             CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
             reserved_mb DESC NULLS LAST,
@@ -330,22 +358,35 @@ internal static class DarlingObjectStatsReader
         FROM v_index_object_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
-        AND   ($2::text IS NULL OR database_name = $2::text)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         """;
 
     /// <summary>
     /// The rows the cap allowed. <paramref name="databaseName"/> null means every database — the shape the
-    /// tool had before #2636, kept so callers that genuinely want a server-wide sweep still get one.
+    /// tool had before #2636, kept so callers that genuinely want a server-wide sweep still get one. One name:
+    /// <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/> with
+    /// <see cref="DatabaseFilter.One"/>.
+    /// </summary>
+    public static Task<List<IndexUsageRow>> GetIndexUsageAsync(
+        NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        GetIndexUsageAsync(postgres, serverId, top, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,string,CancellationToken)"/> over a SET of databases.
+    /// <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for every database; otherwise the rows are
+    /// the unused-first, largest-first top <paramref name="top"/> of the CHOSEN databases only (the cap applies after
+    /// the filter, in SQL). The snapshot anchor stays the server's newest capture, so a filtered and an unfiltered
+    /// call read the same capture.
     /// </summary>
     public static async Task<List<IndexUsageRow>> GetIndexUsageAsync(
-        NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexUsageRow>();
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(IndexUsageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -376,15 +417,25 @@ internal static class DarlingObjectStatsReader
 
     /// <summary>
     /// How many index rows the same server and database filter match at the latest snapshot, ignoring the
-    /// cap (#2636).
+    /// cap (#2636). One name, or null for every database.
+    /// </summary>
+    public static Task<long> GetIndexUsageMatchCountAsync(
+        NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        GetIndexUsageMatchCountAsync(postgres, serverId, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetIndexUsageMatchCountAsync(NpgsqlDataSource,int,string,CancellationToken)"/> over a SET of
+    /// databases: the count of the CHOSEN databases' rows, the population
+    /// <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/> pages over.
+    /// <see cref="DatabaseFilter.All"/> is the server-wide count.
     /// </summary>
     public static async Task<long> GetIndexUsageMatchCountAsync(
-        NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(IndexUsageMatchCountSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
+        command.Parameters.Add(databases.Parameter());
 
         return await command.ExecuteScalarAsync(cancellationToken) is long count ? count : 0;
     }
@@ -395,7 +446,7 @@ internal static class DarlingObjectStatsReader
     /// Per-index locking / latch contention at the SERVER's latest capture — the viewer's
     /// <c>IndexLockingAllSql</c> projected to the columns get_object_locking surfaces: only rows with a
     /// nonzero lock/latch wait or promotion, most contended first. Counters are cumulative since the last
-    /// restart. $1 server_id, $2 cap.
+    /// restart. $1 server_id, $2 database filter (a text[], NULL = every database; #5245), $3 cap.
     ///
     /// <para><b>#3878: this read used to resolve "latest" PER <c>database_name</c></b> —
     /// <c>MAX(collection_time)</c> GROUPed BY the name string, joined back to the rows — which made every
@@ -425,6 +476,9 @@ internal static class DarlingObjectStatsReader
     /// <c>get_object_locking</c> publishes <c>captured_at</c>. A second <c>MAX(collection_time)</c> read to
     /// fetch the stamp would have been the dishonest alternative: it can resolve to the NEXT capture landing
     /// between the two queries, which is the rule <c>McpLatestSnapshotStampTests</c> pins per read.</para>
+    /// <para>#5372 L1: the order ends in a total one (lock promotions, then database, schema, table and index name, as
+    /// <c>get_index_usage</c> does), so two runs over a set that ties at the cap return the same rows. The rows listed
+    /// only for a lock promotion all sum to 0 and tie.</para>
     /// </summary>
     public const string IndexLockingSql = """
         SELECT
@@ -453,10 +507,13 @@ internal static class DarlingObjectStatsReader
             OR COALESCE(ios.page_io_latch_wait_in_ms, 0) > 0
             OR COALESCE(ios.index_lock_promotion_count, 0) > 0
         )
+        AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
         ORDER BY
             COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-            + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
-        LIMIT $2
+            + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+            COALESCE(ios.index_lock_promotion_count, 0) DESC,
+            ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
+        LIMIT $3
         """;
 
     /// <summary>
@@ -464,36 +521,62 @@ internal static class DarlingObjectStatsReader
     /// <c>capture_time</c> of the whole server, as <see cref="DarlingCurrentConfigReader.DatabaseConfigSql"/> reads
     /// it: one collection run writes every database with one capture time, so that capture is the server's whole
     /// snapshot, and a dropped database's old true flag does not outlive it. <c>capture_time</c> is projected so the
-    /// latest-anchor census sees the anchor. A NULL flag means unknown. $1 server_id.
+    /// latest-anchor census sees the anchor. A NULL flag means unknown. $1 server_id, $2 database filter (a text[], NULL = every database; #5245: the
+    /// anchor stays the server's capture, only WHICH databases' flags count changes).
     /// </summary>
     public const string OptimizedLockingFlagsSql = """
         SELECT is_optimized_locking_on, capture_time
         FROM database_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         """;
 
-    /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise.</summary>
+    /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise. #5245: with a
+    /// <paramref name="databases"/> selection only the CHOSEN databases' flags count, so the note never warns about a
+    /// database the page does not show.</summary>
+    public static Task<string?> GetOptimizedLockingNoteAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        GetOptimizedLockingNoteAsync(postgres, serverId, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>The note over a selection: see <see cref="GetOptimizedLockingNoteAsync(NpgsqlDataSource,int,CancellationToken)"/>;
+    /// only the <paramref name="databases"/> chosen count (#5245).</summary>
     public static async Task<string?> GetOptimizedLockingNoteAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var flags = new List<bool?>();
         await using var command = postgres.CreateCommand(OptimizedLockingFlagsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
             flags.Add(reader.IsDBNull(0) ? null : reader.GetBoolean(0));
         return OptimizedLockingNote.For(flags);
     }
 
+    /// <summary>The server's latest-capture locking rows over every database, most contended first, at most
+    /// <paramref name="top"/>: <see cref="GetIndexLockingAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/>
+    /// with <see cref="DatabaseFilter.All"/>.</summary>
+    public static Task<List<IndexLockingRow>> GetIndexLockingAsync(
+        NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default) =>
+        GetIndexLockingAsync(postgres, serverId, top, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// #5245: the server's latest-capture locking rows, most contended first, at most <paramref name="top"/>.
+    /// <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for every database; otherwise only the CHOSEN
+    /// databases' rows are ranked and capped, so the page is the top N of those databases. The snapshot anchor stays
+    /// the server's newest capture (a filter picks rows, it never picks a different capture), so a filtered and an
+    /// unfiltered call read the same instant. The names bind as one text[] and are never spliced into the statement.
+    /// </summary>
     public static async Task<List<IndexLockingRow>> GetIndexLockingAsync(
-        NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexLockingRow>();
         await using var command = postgres.CreateCommand(IndexLockingSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -520,6 +603,66 @@ internal static class DarlingObjectStatsReader
         return rows;
     }
 
+    /// <summary>
+    /// #5311: ONE index's four detail counters at the server's latest capture, for the web Locking page's detail pane
+    /// (the desktop's <c>ShowLockingDetail</c>). The index is named exactly by database ($2, the database filter's one
+    /// <c>text[]</c> parameter as the list read binds it), schema ($3), table ($4) and index name ($5; NULL names a heap,
+    /// which is why it compares with <c>IS NOT DISTINCT FROM</c>). Every name is a bound parameter, never part of the
+    /// statement text. The snapshot anchor is the list read's: the server's newest capture, so a detail row is the same
+    /// instant the list row it came from showed.
+    /// </summary>
+    public const string IndexLockingDetailSql = """
+        SELECT
+            ios.collection_time,
+            ios.database_name,
+            ios.schema_name,
+            ios.table_name,
+            ios.index_name,
+            COALESCE(ios.row_lock_count, 0) AS row_lock_count,
+            COALESCE(ios.page_lock_count, 0) AS page_lock_count,
+            COALESCE(ios.page_latch_wait_count, 0) AS page_latch_wait_count,
+            COALESCE(ios.page_io_latch_wait_count, 0) AS page_io_latch_wait_count
+        FROM v_index_object_stats ios
+        WHERE ios.server_id = $1
+        AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
+        AND   ios.schema_name = $3
+        AND   ios.table_name = $4
+        AND   ios.index_name IS NOT DISTINCT FROM $5
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// #5311: the one index <see cref="IndexLockingDetailSql"/> names, or null when the latest capture holds no such
+    /// index. <paramref name="database"/> must name a database (a blank name would be the "every database" filter, and
+    /// a selector never widens): the caller refuses a blank one.
+    /// </summary>
+    public static async Task<IndexLockingDetailRow?> GetIndexLockingDetailAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter database, string schema, string table, string? index,
+        CancellationToken cancellationToken = default)
+    {
+        if (database.IsAll) throw new ArgumentException("A detail read names one database.", nameof(database));
+        await using var command = postgres.CreateCommand(IndexLockingDetailSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(database.Parameter());
+        DarlingMcpReadParameters.AddText(command, schema);
+        DarlingMcpReadParameters.AddText(command, table);
+        DarlingMcpReadParameters.AddNullableText(command, index);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        return new IndexLockingDetailRow(
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? "" : reader.GetString(1),
+            reader.IsDBNull(2) ? "" : reader.GetString(2),
+            reader.IsDBNull(3) ? "" : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+            reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            reader.IsDBNull(8) ? 0 : reader.GetInt64(8));
+    }
+
     /* ─────────────────────────── database sizes ─────────────────────────── */
 
     /// <summary>
@@ -534,6 +677,8 @@ internal static class DarlingObjectStatsReader
     /// of planning against 2.6 ms of execution in the field, over 71 chunks. <see cref="GetLatestSnapshotTimeAsync"/>
     /// resolves the snapshot as its own round trip first, so this statement only ever binds a literal
     /// <c>collection_time</c> the planner can exclude every other chunk against at plan time.</para>
+    /// <para>#5244: $3 is the database filter (a text[], NULL = every database; the shape of <see cref="DatabaseFilter.Clause"/>).
+    /// The snapshot $2 stays the server's newest, so a filtered and an unfiltered call read the same capture.</para>
     /// </summary>
     public const string DatabaseSizeLatestSql = """
         SELECT
@@ -552,6 +697,7 @@ internal static class DarlingObjectStatsReader
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time = $2
+        AND   ($3::text[] IS NULL OR database_name = ANY($3))
         ORDER BY database_name, file_type_desc, file_name
         """;
 
@@ -575,8 +721,14 @@ internal static class DarlingObjectStatsReader
         WHERE server_id = $1
         """;
 
+    public static Task<List<DatabaseSizeRow>> GetLatestDatabaseSizesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        GetLatestDatabaseSizesAsync(postgres, serverId, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5244: <see cref="GetLatestDatabaseSizesAsync(NpgsqlDataSource,int,CancellationToken)"/> over a SET of databases
+    /// (<see cref="DatabaseFilter.All"/> = every database): the files of the chosen databases at the server's newest snapshot.</summary>
     public static async Task<List<DatabaseSizeRow>> GetLatestDatabaseSizesAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<DatabaseSizeRow>();
         var snapshotTime = await GetLatestSnapshotTimeAsync(postgres, serverId, cancellationToken);
@@ -589,6 +741,7 @@ internal static class DarlingObjectStatsReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, snapshotTime.Value);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -624,7 +777,7 @@ internal static class DarlingObjectStatsReader
     /// database-size history at all. <b>Neither probe bounds above by "now"</b> — this is a latest read, and
     /// the collector host's clock is not this reader's clock; a snapshot stamped a few minutes into this
     /// reader's future is still the latest snapshot that exists (#4245 follow-up).</summary>
-    private static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    internal static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
 

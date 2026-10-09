@@ -21,6 +21,7 @@ using System.Windows.Navigation;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Mcp;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
@@ -43,6 +44,11 @@ public partial class SettingsWindow : Window
         MuteRuleService? muteRuleService = null)
     {
         InitializeComponent();
+        /* The window asks for 750 DIPs of height; on a work area shorter than that (a small laptop screen with the taskbar up)
+           the bottom of the form, and the Save button under it, sat off-screen. Cap it to the monitor's work area the way the
+           Add Server dialog does, once there is an HWND to ask which monitor, and again when the window is dragged to another. */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        LocationChanged += (_, _) => WindowWorkArea.Clamp(this);
         _scheduleManager = scheduleManager;
         _serverManager = serverManager;
         _backgroundService = backgroundService;
@@ -55,6 +61,7 @@ public partial class SettingsWindow : Window
         UpdateMcpStatus();
         LoadDefaultTimeRange();
         LoadConnectionTimeout();
+        LoadDuckDbMemoryLimit();
         LoadCsvSeparator();
         LoadColorTheme();
         LoadTimeDisplayMode();
@@ -67,12 +74,18 @@ public partial class SettingsWindow : Window
     private void LoadServerScheduleSummary()
     {
         var servers = _serverManager.GetAllServers();
-        var rows = servers.Select(s => new ServerScheduleRow
+        var rows = servers.Select(s =>
         {
-            ServerId = s.Id,
-            ServerName = s.DisplayName,
-            Preset = _scheduleManager.GetActivePresetForServer(s.Id),
-            Status = _scheduleManager.HasServerOverride(s.Id) ? "Customized" : "Default"
+            /* One read per row, so Preset, Status and the tooltip all describe the same schedule list. */
+            var summary = _scheduleManager.GetServerScheduleSummary(s.Id);
+            return new ServerScheduleRow
+            {
+                ServerId = s.Id,
+                ServerName = s.DisplayName,
+                Preset = summary.Preset,
+                Status = summary.Status,
+                PresetDetail = summary.PresetDetail
+            };
         }).ToList();
 
         ServerScheduleGrid.ItemsSource = rows;
@@ -149,6 +162,7 @@ public partial class SettingsWindow : Window
         public string ServerName { get; set; } = "";
         public string Preset { get; set; } = "";
         public string Status { get; set; } = "";
+        public string PresetDetail { get; set; } = "";
     }
 
     private void UpdateCollectionStatus()
@@ -258,7 +272,7 @@ public partial class SettingsWindow : Window
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         JsonNode root;
-        bool mcpChanged, mcpValid, alertsValid, webhooksValid;
+        bool mcpChanged, mcpValid, alertsValid, webhooksValid, memoryLimitValid;
 
         /* The read AND every mutator, under one catch. Before the consolidation each writer carried its
            own try, so an exception thrown while BUILDING a value -- not just on the disk I/O -- was caught,
@@ -273,6 +287,7 @@ public partial class SettingsWindow : Window
             (mcpChanged, mcpValid) = await SaveMcpSettingsAsync(root);
             SaveDefaultTimeRange(root);
             SaveConnectionTimeout(root);
+            memoryLimitValid = SaveDuckDbMemoryLimit(root);
             SaveCsvSeparator(root);
             SaveColorTheme(root);
             SaveTimeDisplayMode(root);
@@ -319,7 +334,7 @@ public partial class SettingsWindow : Window
             UpdateMcpStatus();
         }
 
-        switch (SettingsSaveReport.Classify(written, mcpChanged, alertsValid, mcpValid, webhooksValid))
+        switch (SettingsSaveReport.Classify(written, mcpChanged, alertsValid, mcpValid, webhooksValid, memoryLimitValid))
         {
             case SettingsSaveOutcome.NothingWritten:
                 MessageBox.Show(
@@ -337,14 +352,68 @@ public partial class SettingsWindow : Window
 
             case SettingsSaveOutcome.SavedAndMcpNeedsRestart:
                 MessageBox.Show(
-                    "Settings saved. MCP changes take effect after restarting the application.",
+                    "Settings saved. MCP changes take effect after restarting the application."
+                    + MemoryLimitRestartNote(),
                     "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
 
             default:
-                MessageBox.Show("Settings saved.", "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show("Settings saved." + MemoryLimitRestartNote(), "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
         }
+    }
+
+    /* #5457: the DuckDB memory limit last saved on this page when it differs from the value the running
+       process started with. memory_limit belongs to a DuckDB instance, so a change takes effect at the next
+       start and the save dialogs say so. */
+    private int? _pendingDuckDbMemoryLimitGb;
+
+    private string MemoryLimitRestartNote() =>
+        _pendingDuckDbMemoryLimitGb is int gb && gb != Database.DuckDbInitializer.ConfiguredMemoryLimitGb
+            ? $"\n\nThe DuckDB memory limit ({gb} GB) takes effect after Lite restarts."
+            : "";
+
+    /// <summary>
+    /// Shows the stored value (not the running one), so a value saved earlier in this session and still waiting
+    /// for a restart is what the box shows when the window is opened again.
+    /// </summary>
+    private void LoadDuckDbMemoryLimit()
+    {
+        var settings = SettingsFileGuard.Read(System.IO.Path.Combine(App.ConfigDirectory, "settings.json"));
+        var gb = DuckDbMemoryLimitSetting.Resolve(
+            settings.State == SettingsFileState.Unreadable ? null : settings.Text,
+            DuckDbMemoryLimitSetting.PhysicalMemoryBytes(),
+            out _);
+        DuckDbMemoryLimitBox.Text = gb.ToString(CultureInfo.InvariantCulture);
+        DuckDbMemoryLimitHint.Text =
+            $"GB ({DuckDbMemoryLimitSetting.RangeText(DuckDbMemoryLimitSetting.PhysicalMemoryBytes())}; default "
+            + $"{DuckDbMemoryLimitSetting.DefaultGb}). Raise it if a tab reports DuckDB out of memory. "
+            + "Takes effect after Lite restarts.";
+    }
+
+    /// <summary>
+    /// Validates the DuckDB memory limit box and writes it to the shared document. An entry outside the range is
+    /// rejected with a message that states the range and the stored value is left as it was; returns false for
+    /// that so the save report says the page was written with an objection.
+    /// </summary>
+    private bool SaveDuckDbMemoryLimit(JsonNode root)
+    {
+        var physical = DuckDbMemoryLimitSetting.PhysicalMemoryBytes();
+        var text = DuckDbMemoryLimitBox.Text.Trim();
+
+        if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var gb)
+            || !DuckDbMemoryLimitSetting.IsInRange(gb, physical))
+        {
+            MessageBox.Show(
+                $"The DuckDB memory limit must be {DuckDbMemoryLimitSetting.RangeText(physical)}. "
+                + $"\"{DuckDbMemoryLimitBox.Text}\" was not saved; the other settings were.",
+                "DuckDB memory limit", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        root[DuckDbMemoryLimitSetting.SettingsKey] = gb;
+        _pendingDuckDbMemoryLimitGb = gb;
+        return true;
     }
 
     /// <summary>
@@ -421,15 +490,9 @@ public partial class SettingsWindow : Window
 
     private void LoadDefaultTimeRange()
     {
-        DefaultTimeRangeCombo.SelectedIndex = App.DefaultTimeRangeHours switch
-        {
-            1 => 0,
-            4 => 1,
-            12 => 2,
-            24 => 3,
-            168 => 4,
-            _ => 1
-        };
+        /* The default is a preset or a calendar period: default_time_range, else the legacy hours key through
+           FromLegacyHours (#5562). The picker's zone is this machine's, since no server is in play here. */
+        DefaultTimeRangePicker.Value = App.DefaultTimeRange;
     }
 
     /* The local WriteSetting alias is gone with #2433: every Save* below now mutates the one document
@@ -439,19 +502,16 @@ public partial class SettingsWindow : Window
 
     private void SaveDefaultTimeRange(JsonNode root)
     {
-        var hours = DefaultTimeRangeCombo.SelectedIndex switch
+        /* A typed or picked fixed range is not a default (it would reopen on a window that has moved on): the saved
+           default is left as it was. Everything else follows the one split the toolbar uses, so the two keys never disagree. */
+        var (rangeId, hours) = LiteTimeRange.SettingsFor(DefaultTimeRangePicker.Value);
+        if (rangeId == null && hours == null)
         {
-            0 => 1,
-            1 => 4,
-            2 => 12,
-            3 => 24,
-            4 => 168,
-            _ => 4
-        };
+            return;
+        }
 
-        App.DefaultTimeRangeHours = hours;
-
-        root["default_time_range_hours"] = hours;
+        App.ApplyDefaultTimeRange(rangeId, hours);
+        App.WriteDefaultTimeRange(root, rangeId, hours);
     }
 
     private void CopyMcpCommandButton_Click(object sender, RoutedEventArgs e)
@@ -641,7 +701,6 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsChecked = App.AlertDeadlockEnabled;
         AlertDeadlockThresholdBox.Text = App.AlertDeadlockThreshold.ToString();
         AlertPoisonWaitCheckBox.IsChecked = App.AlertPoisonWaitEnabled;
-        AlertPoisonWaitThresholdBox.Text = App.AlertPoisonWaitThresholdMs.ToString();
         AlertLongRunningQueryCheckBox.IsChecked = App.AlertLongRunningQueryEnabled;
         AlertLongRunningQueryThresholdBox.Text = App.AlertLongRunningQueryThresholdMinutes.ToString();
         AlertLongRunningQueryMaxResultsBox.Text = App.AlertLongRunningQueryMaxResults.ToString();
@@ -731,8 +790,6 @@ public partial class SettingsWindow : Window
         if (int.TryParse(AlertDeadlockThresholdBox.Text, out var deadlock) && deadlock > 0)
             App.AlertDeadlockThreshold = deadlock;
         App.AlertPoisonWaitEnabled = AlertPoisonWaitCheckBox.IsChecked == true;
-        if (int.TryParse(AlertPoisonWaitThresholdBox.Text, out var poisonWait) && poisonWait > 0)
-            App.AlertPoisonWaitThresholdMs = poisonWait;
         App.AlertLongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             App.AlertLongRunningQueryThresholdMinutes = lrq;
@@ -915,7 +972,6 @@ public partial class SettingsWindow : Window
         AlertBlockingThresholdBox.Text = "1";
         AlertBlockingWaitSecondsBox.Text = "0";
         AlertDeadlockThresholdBox.Text = "1";
-        AlertPoisonWaitThresholdBox.Text = "500";
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertLongRunningQueryMaxResultsBox.Text = "5";
         AlertTempDbSpaceThresholdBox.Text = "80";
@@ -1015,10 +1071,6 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
-        /* #3539 A4: the poison-wait ms box is retired (nothing reads it) and stays disabled regardless of the
-           master switch — the XAML sets IsEnabled="False", and this loop must not re-enable it on load or
-           on toggle, or the operator is back to tuning a number the engine ignores. */
-        AlertPoisonWaitThresholdBox.IsEnabled = false;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;
@@ -1217,6 +1269,7 @@ public partial class SettingsWindow : Window
         PagerDutyWebhookEnabledCheckBox.IsChecked = App.PagerDutyWebhookEnabled;
         PagerDutyRoutingKeyBox.Text = App.PagerDutyRoutingKey;
         PagerDutyEuRegionCheckBox.IsChecked = App.PagerDutyUseEuRegion;
+        PagerDutyAutoResolveCheckBox.IsChecked = App.PagerDutyAutoResolve;
         PagerDutyProxyAddressBox.Text = App.PagerDutyProxyAddress;
         UpdateTeamsControlStates();
         UpdateSlackControlStates();
@@ -1263,6 +1316,7 @@ public partial class SettingsWindow : Window
         App.PagerDutyWebhookEnabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
         App.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
         App.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
+        App.PagerDutyAutoResolve = PagerDutyAutoResolveCheckBox.IsChecked == true;
         App.PagerDutyProxyAddress = PagerDutyProxyAddressBox.Text?.Trim() ?? "";
 
         /* Save webhook URLs to Credential Manager instead of settings.json. The generic channel's headers
@@ -1289,6 +1343,7 @@ public partial class SettingsWindow : Window
         root["pagerduty_webhook_enabled"] = App.PagerDutyWebhookEnabled;
         root["pagerduty_use_eu_region"] = App.PagerDutyUseEuRegion;
         root["pagerduty_proxy_address"] = App.PagerDutyProxyAddress;
+        root["pagerduty_auto_resolve"] = App.PagerDutyAutoResolve;
 
         /* Remove legacy plaintext webhook URLs from settings.json */
         if (root is JsonObject obj)
@@ -1365,6 +1420,7 @@ public partial class SettingsWindow : Window
         bool enabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
         PagerDutyRoutingKeyBox.IsEnabled = enabled;
         PagerDutyEuRegionCheckBox.IsEnabled = enabled;
+        PagerDutyAutoResolveCheckBox.IsEnabled = enabled;
         PagerDutyProxyAddressBox.IsEnabled = enabled;
         TestPagerDutyButton.IsEnabled = enabled;
     }

@@ -992,7 +992,11 @@ internal static class FindingMessageFormatter
         {
             var events = blockingRows.Select(r => new BlockingIncidentGrouper.BlockedEvent(
                 GetField(r, "database"), GetField(r, "contentious_object"),
-                GetField(r, "blocked_sql"), GetField(r, "blocking_sql"), GetLongField(r, "wait_time_ms")));
+                GetField(r, "blocked_sql"), GetField(r, "blocking_sql"), GetLongField(r, "wait_time_ms"),
+                /* #4348: the withheld-chain key reads the lock mode, so this producer must pass it too (both
+                   drill-down collectors emit lock_mode on every top_blocking_chains row), or one chain gets
+                   one dedup key here and another from the live alert and get_blocking. */
+                GetField(r, "lock_mode")));
             result.AddRange(BlockingIncidentGrouper.Group(server, events).Select(g => g.Incident));
             return result;
         }

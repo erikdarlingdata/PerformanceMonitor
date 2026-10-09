@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Services;
@@ -77,18 +78,17 @@ public partial class LocalDataService
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var bucketIndex = 4 + dbValues.Count;
         var limitIndex = 5 + dbValues.Count;
-        var previewIndex = 6 + dbValues.Count;
 
-        /* Preview width is a bound parameter, not the literal 120 (#4198): fetched at previewLength + 1
-           characters (Darling's twin over-fetch-by-one idiom, DarlingQueryHeatmapReader), so the one extra
-           character IS the truncation signal read back in C# below rather than a second round trip. */
+        /* The top statement comes back WHOLE (#5320): the statement filter judges the whole text and the preview is cut
+           from the judged text in C# below, so no cut can end inside a value whose naming text lies past it. The
+           truncation signal (#4198) is the judged text running past previewLength. */
         command.CommandText = $@"
 WITH per_query AS (
     SELECT
         time_bucket(to_minutes(CAST(${bucketIndex} AS INTEGER)), collection_time, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
         {metricExpr} AS metric_value,
         query_hash,
-        LEFT(query_text, ${previewIndex}) AS query_preview,
+        query_text AS query_preview,
         delta_execution_count
     FROM v_query_stats
     WHERE server_id = $1
@@ -132,13 +132,14 @@ LIMIT ${limitIndex}";
             command.Parameters.Add(new DuckDBParameter { Value = db });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
-        command.Parameters.Add(new DuckDBParameter { Value = previewLength + 1 });
 
         var rows = new List<QueryHeatmapCellRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            var fetchedText = reader.IsDBNull(4) ? "" : reader.GetString(4);
+            /* #5320: the WHOLE statement is judged first, then cut, so a preview never ends inside a value whose naming
+               text lies past the cut. A named statement is the placeholder, which is no cut at all. */
+            var fetchedText = SensitiveStatements.Text(reader.IsDBNull(4) ? "" : reader.GetString(4)) ?? "";
             var truncated = fetchedText.Length > previewLength;
             rows.Add(new QueryHeatmapCellRow
             {
@@ -146,7 +147,7 @@ LIMIT ${limitIndex}";
                 BucketIndex = reader.IsDBNull(1) ? 0 : (int)ToDouble(reader.GetValue(1)),
                 QueryCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
                 TopQueryHash = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                TopQueryText = truncated ? fetchedText[..previewLength] : fetchedText,
+                TopQueryText = truncated ? fetchedText[..McpHelpers.TextElementCutLength(fetchedText, previewLength)] : fetchedText,
                 TopQueryTextTruncated = truncated,
             });
         }

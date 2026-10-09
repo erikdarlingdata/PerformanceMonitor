@@ -27,17 +27,21 @@ namespace Darling.Tests;
 /// already-COMPRESSED TimescaleDB hypertable survives ALTER TABLE ... SET SCHEMA and stays readable
 /// by the least-privilege role.
 ///
-/// <para>Uses distinct <c>sec_admin_test</c>/<c>sec_viewer_test</c> roles (not the real
+/// <para>Uses distinct <c>sec_admin_</c>/<c>sec_viewer_</c> roles, each with a suffix unique to the run (not the real
 /// admin/viewer) so a shared dev store running an actual service is never clobbered, and grants on
 /// the schemas only (no REVOKE on a named database), so the test does not depend on the store's
 /// database name. Every object it creates is cleaned up.</para>
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class DarlingSecuritySplitLiveTests
 {
-    private const string AdminRole = "sec_admin_test";
-    private const string ViewerRole = "sec_viewer_test";
-    private const string McpRole = "sec_mcp_test";
+    /* #4981: a role belongs to the whole cluster, so a constant name made two runs on one cluster share a role: the
+       second CREATE ROLE could fail with a duplicate, and the first run's DROP ROLE removed the role the second was
+       using. One suffix per run (8 lowercase hex characters) keeps each name a valid unquoted identifier. */
+    private static readonly string RunSuffix = Guid.NewGuid().ToString("N")[..8];
+    private static readonly string AdminRole = "sec_admin_" + RunSuffix;
+    private static readonly string ViewerRole = "sec_viewer_" + RunSuffix;
+    private static readonly string McpRole = "sec_mcp_" + RunSuffix;
     private const string RolePassword = "SecSplitTestPw0123456789abcdef01"; // alnum, like the real generator
 
     private static string RequireLivePostgres()
@@ -431,6 +435,41 @@ public sealed class DarlingSecuritySplitLiveTests
         }
     }
 
+    /// <summary>#5555: the status bar's store size is the self-metrics row the Viewer reads as its least-privilege role. If that
+    /// role could not SELECT <c>collect.store_metrics</c> the recorded read would always fail and the live walk would run again every
+    /// five minutes. The standard install covers it twice: the blanket <c>GRANT SELECT ON ALL TABLES IN SCHEMA collect</c> (a store
+    /// upgraded from before the table existed picks it up when the service re-provisions the roles, which it does on every start) and the default privileges that
+    /// grant every table created later.</summary>
+    [Fact]
+    public async Task Roles_ViewerCanRunTheRecordedStoreSizeRead_OnCollectStoreMetrics()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var owner = new NpgsqlConnection(connectionString);
+        await owner.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(owner, ct);
+
+        await CreateTestRolesAndGrantsAsync(owner, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var viewer = new NpgsqlConnection(RoleConnectionString(connectionString, ViewerRole));
+            await viewer.OpenAsync(ct);
+            Assert.True(await HasPrivAsync(viewer, "collect.store_metrics", "SELECT", ct));
+            await using var recorded = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeSql, viewer);
+            _ = await recorded.ExecuteScalarAsync(ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DropTestRolesAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     [Fact]
     public async Task CompressedHypertable_SetSchema_StaysReadableByLeastPrivilegeRole()
     {
@@ -504,7 +543,7 @@ public sealed class DarlingSecuritySplitLiveTests
         /* A throwaway role name (NOT admin/viewer) so this exercises the guard MECHANISM with zero
            side effects on the shared store — the DarlingManagedRoles.BuildProvisioningSql string that
            applies this same pattern to admin/viewer is pinned separately by the ungated shape test. */
-        const string role = "darling_marker_probe";
+        var role = "darling_marker_probe_" + Guid.NewGuid().ToString("N")[..8]; // #4981: unique to the run, roles are cluster-wide
         string Guard() => $@"
 DO $$
 BEGIN
@@ -542,6 +581,74 @@ END $$;";
                 await new LiveCleanupBatch(cleanup).DropRolesAsync(
                     $"DROP ROLE IF EXISTS {role}", [role], cleanupCt));
         }
+    }
+
+    [Fact]
+    public async Task TheFullyProvisionedManagedViewer_ReadsFalseOnTheViewerReadOnlyProbe_YetCanDismiss()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+
+        await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            /* The managed roles carry fixed names and a role is cluster-wide: never adopt or drop a set that
+               belongs to something else on a shared rig. */
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
+        }
+
+        var bodySucceeded = false;
+        try
+        {
+            await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await owner.OpenAsync(ct);
+
+                /* The shipped batch, run whole: every grant the managed viewer really holds. The compose target keeps
+                   the database-level revoke and the owner's name out of this scratch database. */
+                var batch = DarlingManagedRoles.BuildProvisioningSql(
+                    ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+                    15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName));
+                await ExecAsync(owner, batch, ct);
+                await ExecAsync(owner,
+                    "INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value) " +
+                    "VALUES ('2026-10-04 10:00:00', -7001, 'srv', 'High CPU', 90, 80)", ct);
+            }
+
+            var viewerString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = "viewer",
+                Password = ProvisioningTestSecrets.ViewerPassword,
+                SearchPath = "collect,config,public",
+                Pooling = false,
+            }.ConnectionString;
+            await using var viewer = new NpgsqlConnection(viewerString);
+            await viewer.OpenAsync(ct);
+
+            /* The product's own probe text, as the fully provisioned role. A table-level grant spelled any way
+               (including ON TABLE ...) flips this to true; the text pins would miss that spelling. */
+            Assert.False(await ScalarAsync<bool>(viewer, PerformanceMonitor.Darling.Viewer.ViewerDataService.ReadOnlyProbeSql, ct));
+
+            /* ... while the column grant really lets it dismiss. */
+            await ExecAsync(viewer, "UPDATE config_alert_log SET dismissed = TRUE WHERE server_id = -7001", ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await ExecAsync(cleanup,
+                    "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
+        }
+    }
+
+    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return (T)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static async Task CreateTestRolesAndGrantsAsync(NpgsqlConnection owner, System.Threading.CancellationToken ct)

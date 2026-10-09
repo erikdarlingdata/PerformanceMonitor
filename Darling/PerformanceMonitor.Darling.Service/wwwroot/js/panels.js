@@ -30,17 +30,40 @@ import {
   emptyStrip,
   noticeStrip,
   keptWindowStrip,
+  windowFloorStrip,
   readTool,
   readWithinKeptHistory,
   apiGet,
   buildQuery,
   getPath,
+  parseUtc,
   applyFormat,
   bandClass,
   sevClass,
   windowFromHours,
+  dbScopeChip,
+  dbFilteredEmptyText,
+  sourceStrip,
 } from "./util.js";
-import { renderLineChart, SERIES_COLORS } from "./charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
+import { plainText, plainTextNamed } from "./plain-text.js";
+import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
+import {
+  VALUE_LIST_MAX_LEN,
+  VALUE_LIST_CAP,
+  FILTER_STORE_KEY,
+  NO_VALUES,
+  valueKey,
+  listableColumn,
+  valuesOn,
+  collectValues,
+  compileValues,
+  valuePasses,
+  nextValues,
+  valuesPhrase,
+  serializeFilters,
+  parseFilters,
+} from "./grid-value-filter.js";
 
 /* The AbortSignal for the render currently building panels (#4191). A page sets it (setPanelSignal)
    synchronously, immediately before calling a tab's build()/a page's descriptor array, and renderPanel below
@@ -57,6 +80,11 @@ export function setPanelSignal(signal) {
   panelSignal = signal;
 }
 
+/** The signal the next renderPanel() would capture, so a caller can swap its own in for one panel and put this back (#5227). */
+export function getPanelSignal() {
+  return panelSignal;
+}
+
 /**
  * Build a panel node. It returns immediately with a loading strip and fills itself once the fetch resolves,
  * mapping the API response kinds (data / empty envelope / error / aborted / auth) to the right UI.
@@ -65,7 +93,12 @@ export function renderPanel(desc, onSettled) {
   const signal = panelSignal;
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : "") }, [
-    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null]),
+    /* The database-scope chip (#5245): while the page's database filter is active it says whether this panel's read took it
+       (dbScopeChip in util.js; `desc.dbScope` overrides the read's own class for a panel fed by a shared read). */
+    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, dbScopeChip(desc.read, desc.dbScope)]),
+    /* #5226: an optional control node under the title (the Top Queries / Top Procedures ranking selector), drawn before the body so a
+       load that replaces the body never replaces it. Absent on every other panel. */
+    desc.control || null,
     body,
   ]);
   loadPanel(desc, body, signal, onSettled);
@@ -107,8 +140,32 @@ async function loadPanelBody(desc, body, signal) {
     return;
   }
   const kept = keptWindowStrip(res);
+  /* A panel that does not apply to this kind of server and says `hideWhenNotCollected` is not drawn at all (the Instance CPU
+     panel on a PostgreSQL server that is not Aurora): one panel that can never fill is clutter, not information. */
+  if (res.kind === "empty" && res.status === "not_collected" && desc.hideWhenNotCollected && body.parentNode) {
+    if (body.parentNode.style) body.parentNode.style.display = "none";
+    body.parentNode.hidden = true;
+    return;
+  }
+  /* A panel on a PostgreSQL FinOps target that does not apply says one short line (`notCollectedLine`) instead of the server's gate paragraph. */
+  if (res.kind === "empty" && res.status === "not_collected" && desc.notCollectedLine) {
+    mount(body, emptyStrip(desc.notCollectedLine));
+    return;
+  }
+  /* A panel whose collector reads one optional PostgreSQL extension says plainly that the extension is not installed when the
+     server's precondition answer says that (pg_stat_kcache behind OS CPU by Query), a fixable state. It is not the
+     "does not apply to this kind of server" line, which is for a server that can never have the data. */
+  if (res.kind === "empty" && res.status === "precondition" && desc.extensionMissingLine
+      && typeof res.message === "string" && res.message.includes("extension it reads is not installed")) {
+    mount(body, emptyStrip(desc.extensionMissingLine));
+    return;
+  }
   if (res.kind === "empty") {
-    mount(body, [kept, emptyStrip(res.message)]);
+    /* #4966: a grid that looked and found nothing still says where its table's data starts when that is after the
+       window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
+       new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
+       without the note. */
+    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(res.message)]);
     return;
   }
 
@@ -133,6 +190,8 @@ async function loadPanelBody(desc, body, signal) {
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
     /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
     const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
+    /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
+    const floor = windowFloorStrip(res.data, desc);
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
@@ -140,6 +199,9 @@ async function loadPanelBody(desc, body, signal) {
 
     mount(body, [
       kept,
+      floor,
+      /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
+      sourceStrip(res.data, desc),
       typeof note === "string" && note.trim() ? noticeStrip(note) : null,
       ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
       rendered,
@@ -171,25 +233,957 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,sevKey,statusSev}] } */
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+
+   Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
+   indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
+   (never the formatted cell): numbers numerically, `time`/`reltime` columns by the stored instant, text without case,
+   null/undefined/"" last in BOTH directions, and ties keep the server's order. `sortable: false` on the descriptor
+   opts a table out (an order that carries meaning, e.g. a chronological trend the desktop grid also leaves unsorted);
+   on a column it opts that column out. A column's `sortValue(row)` supplies the sort value when the cell is a custom
+   render over a derived value. */
 function vizTable(data, desc) {
+  if (!(Array.isArray(desc.columns) && desc.columns.length)) return emptyStrip(NO_FIELDS_MSG);
+  /* rowsKey "." is a read whose payload is one object, drawn as one row. */
+  const read = desc.rowsKey === "." ? (data ? [data] : []) : getPath(data, desc.rowsKey) || [];
+  /* A grid whose natural order is not the one to open on (a calendar oldest first, collectors A to Z) names `orderRows`,
+     a function from the rows to the rows in the order to show. A header click still sorts from there. */
+  const rows = typeof desc.orderRows === "function" && Array.isArray(read) ? desc.orderRows(read) : read;
+  /* #5244: a filtered read that has a snapshot but no row for the chosen databases must not say there is no snapshot. */
+  return gridTable(rows, rows.length ? desc : { ...desc, emptyText: dbFilteredEmptyText(desc.read, desc.emptyText, desc.dbScope) });
+}
+
+/** The grid every table on the web draws through (#4843): sort, column groups, per-column filters, Copy cell / row /
+    all and Export CSV, with their state at module scope under gridSortKey(). vizTable feeds it a read's rows; a page
+    that builds its own rows (a composed panel, the alert-rule test, the sweep tables) calls it with the rows and a
+    descriptor of the same shape, so every table gets the same tools from one implementation. Beyond the vizTable
+    column fields, a column may carry `display(row)` (the text to show, over a raw value or none) and
+    `cellClass(row)` (a class for the cell, such as a severity colour). `desc.id` (or `sortId`) names the table and
+    MUST carry whatever else tells two tables with the same columns apart (the server, the panel): the key is what
+    keeps their sort, filter and picked cell separate. */
+export function gridTable(rows, desc) {
   const allCols = Array.isArray(desc.columns) ? desc.columns : [];
   if (!allCols.length) return emptyStrip(NO_FIELDS_MSG);
-  /* rowsKey "." is a read whose payload is one object, drawn as one row. */
-  const rows = desc.rowsKey === "." ? (data ? [data] : []) : getPath(data, desc.rowsKey) || [];
   if (!rows.length) return emptyStrip(desc.emptyText || "No rows in this window.");
   const cols = visibleColumns(allCols, rows);
 
+  const grid = desc.sortable === false ? null : makeGridSort(desc, cols, rows);
+  const bodyRows = rows.map((row) => {
+    const rc = typeof desc.rowClass === "function" ? desc.rowClass(row) : desc.rowClass;
+    const tr = el("tr", { class: typeof rc === "string" && rc ? rc : null }, cols.map((c) => cell(row, c)));
+    trRow.set(tr, row);
+    if (typeof desc.onRow === "function") desc.onRow(row, tr);
+    return tr;
+  });
+  /* The rows are classified when the body attaches, so the headers are built after the grid has seen them. */
+  const tbody = el("tbody", {}, bodyRows);
+  if (grid) grid.attach(tbody, bodyRows);
   const head = el(
     "tr",
     {},
-    cols.map((c) => el("th", { text: c.label, class: isNumericCol(c) ? "num" : null }))
+    cols.map((c, i) => (grid && grid.eligible[i] ? grid.headerCell(c, i) : headerCell(c)))
   );
-  const bodyRows = rows.map((row) => el("tr", {}, cols.map((c) => cell(row, c))));
+  if (grid) grid.syncHeads();
 
-  return el("div", { class: "table-wrap" }, [
-    el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, bodyRows)]),
+  const filterBar = desc.filter === false ? null : gridFilter(desc, cols, head, tbody);
+  const table = el("table", { class: "data" }, [el("thead", {}, [head]), tbody]);
+  const wrap = el("div", { class: "table-wrap" }, filterBar ? [filterBar, table] : [table]);
+  const picker = columnPicker(desc, cols, head, tbody);
+  if (desc.tools === false) return picker ? el("div", { class: "grid-box" }, [picker, wrap]) : wrap;
+  return el("div", { class: "grid-box" }, picker ? [picker, gridTools(desc, cols, tbody), wrap] : [gridTools(desc, cols, tbody), wrap]);
+}
+
+/* Column groups (#4843). A descriptor with `groups: ["Memory detail", ...]` and `defaultGroups: [...]` marks wide
+   grids: a column carrying `group: "<name>"` is drawn only while its group is on, and a column with no group (or a
+   group the list does not name) is always shown. A "Columns:" strip above the table carries one toggle per group.
+   Every column is still built, and a hidden one is only display:none, so the sort, Copy and CSV indexes stay
+   aligned and Copy / CSV carry ALL columns, the way the desktop grid's export iterates every column whether or not
+   it is shown. A column the user sorted by stays the sort key after its group is hidden. The toggles live at module
+   scope under the table's key (route + identity + columns), so the 60 s repaint keeps them and another server's
+   grid starts from the defaults. Returns null for a descriptor without groups. */
+function columnPicker(desc, cols, head, tbody) {
+  const groups = Array.isArray(desc.groups) ? desc.groups.filter((g) => cols.some((c) => c.group === g)) : [];
+  if (!groups.length) return null;
+  const key = gridSortKey(desc, cols);
+  const on = () => gridGroupsOn.get(key) || new Set(Array.isArray(desc.defaultGroups) ? desc.defaultGroups : []);
+  const shown = (c) => !c.group || !groups.includes(c.group) || on().has(c.group);
+  const show = (node, yes) => {
+    if (node && node.style) node.style.display = yes ? "" : "none";
+  };
+  const buttons = new Map();
+  const apply = () => {
+    const rowsAll = [head, ...tbody.children];
+    cols.forEach((c, i) => {
+      const yes = shown(c);
+      for (const tr of rowsAll) show(tr.children[i], yes);
+    });
+    for (const [g, b] of buttons) {
+      const live = on().has(g);
+      b.setAttribute("aria-pressed", live ? "true" : "false");
+      b.className = "btn col-toggle" + (live ? " on" : "");
+    }
+  };
+  const toggles = groups.map((g) => {
+    const b = el("button", { type: "button", class: "btn col-toggle", text: g, title: "Show or hide the " + g + " columns" });
+    b.addEventListener("click", () => {
+      const next = new Set(on());
+      if (next.has(g)) next.delete(g);
+      else next.add(g);
+      gridGroupsOn.set(key, next);
+      apply();
+    });
+    buttons.set(g, b);
+    return b;
+  });
+  apply();
+  return el("div", { class: "col-picker" }, [el("span", { class: "col-picker-label", text: "Columns:" }), ...toggles]);
+}
+
+/* Copy and CSV for one table (#4843). Both read the tbody as it stands, so they follow the active sort and any
+   in-place reconcile. Copy puts what the user sees on the clipboard: the cells' text, tab-separated, with a header
+   row on Copy All. The CSV carries RAW values (the stored ISO instant, the unformatted number) under the column
+   labels, quoted per RFC 4180 and with a leading ' on a text cell a spreadsheet would run as a formula. A column
+   whose values are arrays or objects has no one-cell form, so the CSV leaves it out, and so does `csv: false` on a column (a link-only cell), and `copy: false` leaves a column out of Copy row and Copy all; a column's `copyValue(row)` supplies the full text for Copy and the CSV when its cell shows a summary (Copy keeps it: it copies the
+   cell's text). A custom-render column over a key the rows do not carry has no raw value, so its CSV cell is the
+   text it shows. Set `tools: false` on the descriptor to draw a table without the strip. */
+function gridTools(desc, cols, tbody) {
+  const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
+  const key = gridSortKey(desc, cols);
+  const say = (m) => {
+    status.textContent = m;
+  };
+  const allTrs = () => [...tbody.children];
+  /* Copy all and the CSV carry the rows the column filters leave showing, in the order shown. */
+  const trs = () => allTrs().filter((tr) => !filteredOut.has(tr));
+  /* The text a cell copies: the column's copyValue(row) when it has one (a custom-render cell whose visible text is a
+     summary), else the text shown. */
+  const textOf = (tr, i) => {
+    const c = cols[i];
+    const row = trRow.get(tr);
+    return c && typeof c.copyValue === "function" && row ? String(c.copyValue(row) ?? "") : tr.children[i].textContent;
+  };
+  const textRows = (list) => list.map((tr) => [...tr.children].map((_, i) => textOf(tr, i)));
+  /* Copy row and Copy table leave out a `copy: false` column (a control column such as a checkbox); the picked-cell
+     signature and Copy cell still see every column. */
+  const copyIdx = (n) => Array.from({ length: n }, (_, i) => i).filter((i) => !(cols[i] && cols[i].copy === false));
+  const copyRows = (list) => textRows(list).map((r) => copyIdx(r.length).map((i) => r[i]));
+  /* The picked cell is remembered as the row's text plus the column, at module scope under the table's key, so the
+     60 s repaint (a new tbody, new cells) and an in-place reconcile both resolve it against what is on screen now;
+     a row that is gone resolves to nothing. */
+  const rowSig = (tr) => textRows([tr])[0].join("\u0001");
+  const pickedCell = () => {
+    const pick = gridPicked.get(key);
+    const tr = pick ? allTrs().find((t) => rowSig(t) === pick.sig) : null;
+    return tr && tr.children[pick.col] ? { tr, td: tr.children[pick.col], col: pick.col } : null;
+  };
+  const initial = pickedCell();
+  if (initial && initial.td.classList) initial.td.classList.add("cell-picked");
+  tbody.addEventListener("click", (e) => {
+    const td = e && e.target && typeof e.target.closest === "function" ? e.target.closest("td") : null;
+    const tr = td && td.parentNode;
+    if (!tr) return;
+    const prev = pickedCell();
+    if (prev && prev.td.classList) prev.td.classList.remove("cell-picked");
+    gridPicked.set(key, { sig: rowSig(tr), col: [...tr.children].indexOf(td) });
+    if (td.classList) td.classList.add("cell-picked");
+  });
+  const finish = async (text, what) => {
+    const r = await copyText(text);
+    say(r.ok ? "Copied " + what + "." : r.message);
+  };
+  const copyCell = () => {
+    const p = pickedCell();
+    if (!p) return say("Click a cell first, then choose Copy cell.");
+    return finish(textOf(p.tr, p.col), "the cell");
+  };
+  const copyRow = () => {
+    const p = pickedCell();
+    if (!p) return say("Click a cell first, then choose Copy row.");
+    return finish(toTsv(copyRows([p.tr])), "the row");
+  };
+  const copyAll = () => finish(toTsv([cols.filter((c) => c.copy !== false).map((c) => c.label), ...copyRows(trs())]), "the table");
+  const exportCsv = () => {
+    const list = trs();
+    const objs = list.map((tr) => trRow.get(tr));
+    const keep = cols
+      .map((c, i) => {
+        if (c.csv === false) return null;
+        const hasCopy = typeof c.copyValue === "function";
+        const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : getPath(r, c.key)) : undefined));
+        if (raw.some(isListValue)) return null;
+        const textOnly = (typeof c.render === "function" || typeof c.display === "function") && raw.every((v) => v === undefined);
+        return { i, c, raw, textOnly };
+      })
+      .filter(Boolean);
+    const lines = [keep.map((k) => k.c.label), ...list.map((tr, ri) => keep.map((k) => (k.textOnly ? tr.children[k.i].textContent : k.raw[ri])))];
+    try {
+      downloadCsv(csvFileName(desc.title ?? desc.sortId ?? desc.id ?? desc.rowsKey), toCsv(lines));
+      say("Exported " + list.length + " row" + (list.length === 1 ? "" : "s") + ".");
+    } catch (e) {
+      say("Export failed: " + (e && e.message ? e.message : "the browser refused the download."));
+    }
+  };
+  const btn = (label, title, fn) => el("button", { type: "button", class: "btn grid-tool", title, onClick: fn, text: label });
+  return el("div", { class: "grid-tools" }, [
+    btn("Copy cell", "Copy the last cell you clicked", copyCell),
+    btn("Copy row", "Copy the row of the last cell you clicked", copyRow),
+    btn("Copy all", "Copy the table with its header row, tab-separated", copyAll),
+    btn("Export CSV", "Download the rows in their current order as a CSV file", exportCsv),
+    status,
   ]);
+}
+
+/* Column filters (#4843). Every column that has text to match carries a small header button (`filter: false` on a
+   column or the descriptor opts out; a `copy: false` control column has none) that opens a text box above the
+   table. Typing alone is a case-insensitive substring match of the cell's rendered text, so it matches what the
+   user sees, a list-valued cell included. A small "Match" list beside the box offers the desktop's other operators
+   for the column's kind (the kind the sort decides, sortKindOf): a number column adds Equals, Not equals, >, >=, <
+   and <=, which compare the SAME raw value the sort orders by (sortKeyOf over columnValue), never the formatted text,
+   so "> 900" does not match "1,000" the way a string comparison would; a text column adds Equals, Not equals, Starts
+   with and Ends with (a comma separates alternatives); a time column offers only the two empty tests. Is empty and Is
+   not empty work on every column: a cell is empty when its raw value is null, undefined, "", blank, NaN or an empty
+   list (a column drawn by display() or render() with no value of its own is empty when it shows nothing or the
+   dash); 0 and false are values, and a literal "-" is a value. Several filters combine with AND. A row that fails is display:none and is recorded
+   in `filteredOut`, which Copy all and Export CSV read so they carry exactly the shown rows (all columns, hidden
+   and grouped-away ones too, in the current sort order). A strip under the header lists each active filter with a
+   button to clear it, a Clear all button and "Showing N of M rows". The filter texts and which box is open live at
+   module scope under gridSortKey(), so the 60 s repaint keeps them and another server's grid starts unfiltered.
+   Escape closes the box and returns focus to its header button; focus leaving the box closes it.
+
+   A text column also offers a list of its values to tick, like Excel's (#5565): "Select All", a search box, a
+   "(Blanks)" entry and a checkbox per distinct value of the rows the grid holds now, compared ignoring case. The
+   filter then is { op, text, values: { mode, set, blank } }, the value part as grid-value-filter.js defines it, and a
+   row has to pass both parts. The list is not offered on a number or time column, on a column marked
+   `valueList: false` (query and statement text, XML, definitions) or on one whose longest value is over
+   VALUE_LIST_MAX_LEN characters; those keep the text match. A column is also left without a list when its key is
+   named like a statement or prose (the shared name rule in grid-value-filter.js: text, sql, query, plan, xml, message,
+   detail, description, error, script, info and the rest, which the desktop pins to the same list). The list holds the
+   cell's raw value, not the text it draws, and the search folds case as .NET OrdinalIgnoreCase does. Every value
+   reaches the page as a text node. The active filters are also kept in localStorage (FILTER_STORE_KEY), per route
+   (which carries the server) + grid + columns, so a reload or a restart of the browser keeps them; the write waits
+   300 ms of quiet and is flushed on pagehide. A text match on a column that gets no list is kept for the session only
+   (never written, never read back); a value part kept on such a column shows read-only in the box with a Clear button.
+   A missing, unreadable or refused store starts empty and never stops a grid from drawing. */
+const gridFilters = new Map(); // table key -> Map(column id -> { op, text, values? }), least recently used first; the kept copy holds the newest 200 grids
+let gridFiltersLoaded = false;
+let gridFilterStoreWarned = false;
+const gridValueSearch = new Map(); // table key -> the value list's search text while its box is open
+const gridValueTyping = new Set(); // table keys whose value search box had the focus when the page was last drawn
+const gridFilterOpen = new Map(); // table key -> column id of the open box
+const gridFilterTyping = new Set(); // table keys whose box had the focus when the page was last drawn
+const filteredOut = new WeakSet();
+const tbodyFilter = new WeakMap();
+
+const FILTER_OP_LABELS = {
+  contains: "Contains",
+  equals: "Equals",
+  notEquals: "Not equals",
+  gt: ">",
+  gte: ">=",
+  lt: "<",
+  lte: "<=",
+  startsWith: "Starts with",
+  endsWith: "Ends with",
+  isEmpty: "Is empty",
+  isNotEmpty: "Is not empty",
+};
+const FILTER_OPS_BY_KIND = {
+  number: ["contains", "equals", "notEquals", "gt", "gte", "lt", "lte", "isEmpty", "isNotEmpty"],
+  time: ["contains", "isEmpty", "isNotEmpty"],
+  text: ["contains", "equals", "notEquals", "startsWith", "endsWith", "isEmpty", "isNotEmpty"],
+};
+const filterNeedsNoText = (op) => op === "isEmpty" || op === "isNotEmpty";
+/* Whether the text part of a filter narrows anything, and whether the filter as a whole does. */
+const filterTextOn = (f) => !!f && (filterNeedsNoText(f.op) || !!String(f.text ?? "").trim());
+const filterIsOn = (f) => filterTextOn(f) || (!!f && valuesOn(f.values));
+
+/* The kept copy of the active filters (#5565). Every touch of the store is guarded: a browser that refuses
+   localStorage, or holds something unreadable, leaves the filters in the page only, and says so once. */
+function warnFilterStore(e) {
+  if (gridFilterStoreWarned) return;
+  gridFilterStoreWarned = true;
+  if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+    console.warn("Column filters are not kept across a reload: " + (e && e.message ? e.message : String(e)));
+  }
+}
+
+function loadGridFilters() {
+  if (gridFiltersLoaded) return;
+  gridFiltersLoaded = true;
+  try {
+    if (typeof localStorage === "undefined") return;
+    const text = localStorage.getItem(FILTER_STORE_KEY);
+    if (!text) return;
+    for (const [k, cols] of parseFilters(text, Object.keys(FILTER_OP_LABELS))) {
+      if (!gridFilters.has(k)) gridFilters.set(k, cols);
+    }
+  } catch (e) {
+    warnFilterStore(e);
+  }
+}
+
+function writeGridFilters() {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (gridFilters.size) localStorage.setItem(FILTER_STORE_KEY, serializeFilters(gridFilters));
+    else localStorage.removeItem(FILTER_STORE_KEY);
+  } catch (e) {
+    warnFilterStore(e);
+  }
+}
+
+/* The kept copy is written at most once per FILTER_SAVE_DELAY_MS of quiet, so typing in the text match or ticking
+   through a long list does not serialize and write the whole store on every keystroke and click. The page's copy
+   is the live one; the write is flushed when the page is hidden or closed (pagehide), so nothing a reader did is lost. */
+const FILTER_SAVE_DELAY_MS = 300;
+let gridFilterSaveTimer = null;
+
+function saveGridFilters() {
+  if (gridFilterSaveTimer !== null) clearTimeout(gridFilterSaveTimer);
+  gridFilterSaveTimer = setTimeout(() => {
+    gridFilterSaveTimer = null;
+    writeGridFilters();
+  }, FILTER_SAVE_DELAY_MS);
+}
+
+/** Write a pending change now. Runs on pagehide; the tests call it for "the reader closed the page". */
+export function flushGridFilters() {
+  if (gridFilterSaveTimer === null) return;
+  clearTimeout(gridFilterSaveTimer);
+  gridFilterSaveTimer = null;
+  writeGridFilters();
+}
+
+if (typeof window !== "undefined" && window && typeof window.addEventListener === "function") {
+  window.addEventListener("pagehide", flushGridFilters);
+}
+
+/* A typed number: thousands separators, a percent sign, a dollar sign and spaces are dropped, as the desktop does. */
+function parseFilterNumber(t) {
+  const clean = String(t ?? "").trim().replace(/[,%$\s]/g, "");
+  if (clean === "") return null;
+  const n = Number(clean);
+  return Number.isNaN(n) ? null : n;
+}
+
+function filterCellEmpty(c, raw, text) {
+  const rawEmpty = isEmptyValue(raw) || (typeof raw === "string" && raw.trim() === "") || (Array.isArray(raw) && raw.length === 0);
+  if (!rawEmpty) return false;
+  if (typeof c.display !== "function" && typeof c.render !== "function") return true;
+  const t = text.trim();
+  return t === "" || t === "\u2014";
+}
+
+/* Whether one cell passes one filter. `kind` is the column's sort kind, `text` the rendered cell text, `raw` the
+   value the sort reads. A numeric operator needs a number on both sides; otherwise the row does not match. */
+function filterPasses(op, kind, term, c, raw, text) {
+  if (op === "isEmpty") return filterCellEmpty(c, raw, text);
+  if (op === "isNotEmpty") return !filterCellEmpty(c, raw, text);
+  const lower = text.toLowerCase();
+  const t = String(term).trim().toLowerCase();
+  if (op === "contains") return lower.includes(t);
+  if (kind === "number" && op !== "startsWith" && op !== "endsWith") {
+    const want = parseFilterNumber(term);
+    const have = sortKeyOf("number", raw);
+    if (want !== null && have !== null) {
+      return op === "equals" ? have === want : op === "notEquals" ? have !== want : op === "gt" ? have > want : op === "gte" ? have >= want : op === "lt" ? have < want : have <= want;
+    }
+    /* Not both numbers: Equals and Not equals fall back to the text, as the desktop does; an ordering has no answer. */
+    if (op === "equals") return lower === t;
+    if (op === "notEquals") return lower !== t;
+    return false;
+  }
+  const terms = t.split(",").map((x) => x.trim()).filter(Boolean);
+  if (!terms.length) return true;
+  if (op === "equals") return terms.some((x) => lower === x);
+  if (op === "notEquals") return terms.every((x) => lower !== x);
+  if (op === "startsWith") return terms.some((x) => lower.startsWith(x));
+  if (op === "endsWith") return terms.some((x) => lower.endsWith(x));
+  return true;
+}
+
+function gridFilter(desc, cols, head, tbody) {
+  const key = gridSortKey(desc, cols);
+  const idx = cols.map((_, i) => i).filter((i) => cols[i].filter !== false && cols[i].copy !== false);
+  if (!idx.length) return null;
+  loadGridFilters();
+  /* Drawing a grid uses it: the one the reader came back to is the last the store lets go of. */
+  if (gridFilters.has(key)) {
+    const mine = gridFilters.get(key);
+    gridFilters.delete(key);
+    gridFilters.set(key, mine);
+  }
+  /* A text match read back from the kept copy on a column that gets no list (valueList: false) is dropped: that text lasts
+     the session only. A value part it holds stays, shown read-only in the box with a way to clear it. */
+  const loaded = gridFilters.get(key);
+  if (loaded) {
+    let pruned = false;
+    for (const c of cols) {
+      const f = loaded.get(colId(c));
+      if (!f || f.session || listableColumn(c)) continue;
+      pruned = true;
+      if (valuesOn(f.values)) loaded.set(colId(c), { op: "contains", text: "", values: f.values, session: true });
+      else loaded.delete(colId(c));
+    }
+    if (pruned) {
+      if (!loaded.size) gridFilters.delete(key);
+      saveGridFilters();
+    }
+  }
+  const active = () => gridFilters.get(key) || new Map();
+  const bar = el("div", { class: "grid-filter-bar", role: "group", "aria-label": "Column filters" });
+  const popHolder = el("div", { class: "grid-filter-holder" });
+  const chips = el("div", { class: "grid-filter-chips" });
+  bar.appendChild(popHolder);
+  bar.appendChild(chips);
+  const btns = new Map();
+  /* A filter is { op, text, values? }; the value-less operators are active with no text, and a value part is active
+     when it hides or shows a chosen set. */
+  const isOn = filterIsOn;
+  let valuesRefresh = null; // rebuilds the open value list from the rows now
+  let valueSearchBox = null; // the open value list's search box
+  /* The sort kind of column i over the rows now in the body: number, time or text. */
+  const kindOf = (i) =>
+    sortKindOf(
+      cols[i],
+      Array.from(tbody.children, (tr) => (trRow.has(tr) ? columnValue(trRow.get(tr), cols[i]) : undefined))
+    );
+  /* The operator in force: a stored one the column's kind does not offer (the rows changed under it) falls back to Contains. */
+  const opFor = (f, kind) => (f && FILTER_OPS_BY_KIND[kind].includes(f.op) ? f.op : "contains");
+
+  /* What one cell is in the value list: the column's raw value, not the rendered text (#5565). A cell is blank when its
+     raw value is null, empty or whitespace, whatever the cell draws. A text column's raw value is the string the cell
+     renders, so for plain text the two are the same; they differ only where a column draws something other than its
+     value (a format, a badge), and then the raw value is what the desktop's list reads too. A raw value that is a list
+     or an object has no text of its own, so the rendered text stands for it. A row with no raw field at all
+     (undefined) under a column that draws its cell with `render` or `display` is a column built from other fields
+     (the Alerts Status column): the shown text stands for it, as it did before the list read raw values, so the list
+     holds what the cells show and a stored value that names a shown label still matches. */
+  function listCell(c, raw, text) {
+    if (raw === undefined && (typeof c.display === "function" || typeof c.render === "function")) {
+      return filterCellEmpty(c, raw, text) ? { blank: true, text: "" } : { blank: false, text };
+    }
+    if (isEmptyValue(raw) || (typeof raw === "string" && raw.trim() === "") || (Array.isArray(raw) && raw.length === 0)) return { blank: true, text: "" };
+    if (typeof raw === "string") return { blank: false, text: raw };
+    if (typeof raw === "number" || typeof raw === "boolean" || typeof raw === "bigint") return { blank: false, text: String(raw) };
+    return { blank: text.trim() === "", text };
+  }
+
+  function applyRows() {
+    const tests = [];
+    cols.forEach((c, i) => {
+      const f = active().get(colId(c));
+      if (isOn(f)) {
+        const kind = kindOf(i);
+        tests.push({ i, op: opFor(f, kind), kind, term: f.text ?? "", textOn: filterTextOn(f), vals: valuesOn(f.values) ? compileValues(f.values) : null });
+      }
+    });
+    let shown = 0;
+    let total = 0;
+    for (const tr of tbody.children) {
+      total++;
+      const out = tests.some(({ i, op, kind, term, textOn, vals }) => {
+        const td = tr.children[i];
+        if (!td) return true;
+        const raw = trRow.has(tr) ? columnValue(trRow.get(tr), cols[i]) : undefined;
+        if (textOn && !filterPasses(op, kind, term, cols[i], raw, td.textContent)) return true;
+        if (!vals) return false;
+        const cell = listCell(cols[i], raw, td.textContent);
+        return !valuePasses(vals, cell.blank, cell.text);
+      });
+      if (out) filteredOut.add(tr);
+      else {
+        filteredOut.delete(tr);
+        shown++;
+      }
+      if (tr.style) tr.style.display = out ? "none" : "";
+    }
+    return { shown, total, tests: tests.length };
+  }
+
+  /* Change one column's filter: `patch` is merged over what it holds, a filter that narrows nothing is dropped, and
+     the active filters are kept. The text part and the value part change on their own. */
+  function patchFilter(c, patch) {
+    const next = new Map(active());
+    const cur = next.get(colId(c)) || { op: "contains", text: "" };
+    const merged = { ...cur, ...patch };
+    if (!valuesOn(merged.values)) delete merged.values;
+    /* A text match on a column that gets no list (statement, query, plan, XML, message...) lasts the session: it is
+       never written to the kept copy, and never read back (serializeFilters, parseFilters). */
+    if (!listableColumn(c)) merged.session = true;
+    if (isOn(merged)) next.set(colId(c), merged);
+    else next.delete(colId(c));
+    gridFilters.delete(key);
+    if (next.size) gridFilters.set(key, next);
+    saveGridFilters();
+  }
+  const setFilter = (c, op, text) => patchFilter(c, { op, text });
+  const clearColumn = (c) => patchFilter(c, { op: "contains", text: "", values: NO_VALUES });
+
+  function renderChips() {
+    const r = applyRows();
+    chips.textContent = "";
+    if (r.tests) {
+      for (const i of idx) {
+        const c = cols[i];
+        const f = active().get(colId(c));
+        if (!isOn(f)) continue;
+        const op = opFor(f, kindOf(i));
+        const textChip = !filterTextOn(f) ? "" : op === "contains" ? String(f.text).trim() : FILTER_OP_LABELS[op] + (filterNeedsNoText(op) ? "" : " " + String(f.text).trim());
+        const chipText = [valuesPhrase(f.values), textChip].filter(Boolean).join(", ");
+        const x = el("button", { type: "button", class: "grid-filter-x", text: "×", title: "Clear the filter on " + c.label, "aria-label": "Clear the filter on " + c.label });
+        x.addEventListener("click", () => {
+          clearColumn(c);
+          renderPop();
+          renderChips();
+        });
+        chips.appendChild(el("span", { class: "grid-filter-chip" }, [el("span", { text: c.label + ": " + chipText }), x]));
+      }
+      const all = el("button", { type: "button", class: "btn grid-filter-clear-all", text: "Clear all filters" });
+      all.addEventListener("click", () => {
+        gridFilters.delete(key);
+        saveGridFilters();
+        renderPop();
+        renderChips();
+      });
+      chips.appendChild(all);
+      chips.appendChild(el("span", { class: "grid-filter-count", role: "status", "aria-live": "polite", text: "Showing " + r.shown + " of " + r.total + " rows" }));
+    }
+    for (const [i, b] of btns) {
+      const on = isOn(active().get(colId(cols[i])));
+      b.className = "col-filter-btn" + (on ? " on" : "");
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    if (bar.style) bar.style.display = r.tests || gridFilterOpen.has(key) ? "" : "none";
+  }
+
+  function close(refocus) {
+    const open = gridFilterOpen.get(key);
+    gridFilterOpen.delete(key);
+    gridFilterTyping.delete(key);
+    gridValueTyping.delete(key);
+    gridValueSearch.delete(key);
+    renderPop();
+    renderChips();
+    const i = cols.findIndex((c) => colId(c) === open);
+    const b = btns.get(i);
+    if (refocus && b && typeof b.focus === "function") b.focus();
+  }
+
+  /* The distinct values of column i over every row the body holds now (before any filter), and whether the column is
+     offered as a list: a text column, not opted out by `valueList: false` or by the shared name rule (query and
+     statement text, plans, XML, scripts, messages, details, descriptions, errors), and no value longer than
+     VALUE_LIST_MAX_LEN. */
+  function universeOf(i) {
+    const c = cols[i];
+    return collectValues(
+      Array.from(tbody.children, (tr) => {
+        const td = tr.children[i];
+        return listCell(c, trRow.has(tr) ? columnValue(trRow.get(tr), c) : undefined, td ? td.textContent : "");
+      })
+    );
+  }
+  const listed = (i, uni) => listableColumn(cols[i]) && kindOf(i) === "text" && uni.maxLen <= VALUE_LIST_MAX_LEN;
+
+  /* The checklist under the text match: a search box, Select All, "(Blanks)" when any cell is blank and one checkbox
+     per value, at most VALUE_LIST_CAP of them (the search reaches the rest). Ticking works on the whole list, not on
+     what the search shows, except Select All, which ticks or unticks every value the search matches. Returns null for a
+     column that is not offered a list. */
+  function valuesSection(c, i) {
+    if (!listed(i, universeOf(i))) return null;
+    const id = colId(c);
+    const search = el("input", { type: "search", class: "gfv-search", "aria-label": "Search the values of " + c.label, placeholder: "Search values…" });
+    search.value = gridValueSearch.get(key) || "";
+    const allBox = el("input", { type: "checkbox", "aria-label": "Select All" });
+    const allRow = el("label", { class: "gfv-item gfv-all" }, [allBox, el("span", { text: "Select All" })]);
+    const list = el("div", { class: "gfv-list", role: "group", "aria-label": "Values of " + c.label });
+    const capNote = el("div", { class: "gfv-note gfv-cap-note", role: "status", "aria-live": "polite" });
+    const noneNote = el("div", { class: "gfv-note gfv-none-note", role: "status", "aria-live": "polite" });
+    const node = el("div", { class: "grid-filter-values" }, [search, allRow, list, capNote, noneNote]);
+    let uni = null;
+    let matches = [];
+    let items = []; // { box, key } for a value, { box, blank: true } for (Blanks)
+    const current = () => (active().get(id) || {}).values || NO_VALUES;
+    const query = () => valueKey(search.value.trim()); // folded like the values, as .NET OrdinalIgnoreCase does
+    const blankListed = () => uni.blank && query() === "";
+
+    /* Set the boxes from the filter in force; the boxes stay where they are, so keyboard focus is not lost. */
+    function sync() {
+      const v = compileValues(current());
+      let ticked = 0;
+      for (const it of items) {
+        const on = it.blank ? valuePasses(v, true, "") : valuePasses(v, false, it.value);
+        it.box.checked = on;
+        if (on) ticked++;
+      }
+      allBox.checked = items.length > 0 && ticked === items.length;
+      allBox.indeterminate = ticked > 0 && ticked < items.length;
+      const f = current();
+      noneNote.textContent = f.mode === "showOnly" && f.set.length === 0 && !f.blank ? "No values are ticked, so no rows show." : "";
+    }
+
+    /* Rebuild the rows from the grid and the search text. */
+    function rebuild() {
+      uni = universeOf(i);
+      const q = query();
+      matches = q ? uni.values.filter((v) => valueKey(v).includes(q)) : uni.values;
+      const shownValues = matches.slice(0, VALUE_LIST_CAP);
+      items = [];
+      const rows = [];
+      if (blankListed()) {
+        const box = el("input", { type: "checkbox", "aria-label": "(Blanks)" });
+        box.addEventListener("change", () => change((m) => (m.blank = box.checked)));
+        items.push({ box, blank: true });
+        rows.push(el("label", { class: "gfv-item gfv-blank" }, [box, el("span", { text: "(Blanks)" })]));
+      }
+      for (const v of shownValues) {
+        const box = el("input", { type: "checkbox", "aria-label": v });
+        box.addEventListener("change", () => change((m) => (box.checked ? m.ticked.add(valueKey(v)) : m.ticked.delete(valueKey(v)))));
+        items.push({ box, value: v });
+        rows.push(el("label", { class: "gfv-item" }, [box, el("span", { text: v })]));
+      }
+      list.textContent = "";
+      for (const r of rows) list.appendChild(r);
+      if (!rows.length) list.appendChild(el("div", { class: "gfv-empty", text: q ? "No value matches the search." : "No values." }));
+      capNote.textContent = matches.length > VALUE_LIST_CAP ? "Showing " + VALUE_LIST_CAP.toLocaleString("en-US") + " of " + matches.length.toLocaleString("en-US") + " values. Search to find the rest." : "";
+      sync();
+    }
+
+    function change(mutate) {
+      patchFilter(c, { values: nextValues(uni, current(), mutate) });
+      renderChips();
+      sync();
+    }
+
+    allBox.addEventListener("change", () => {
+      const on = allBox.checked;
+      change((m) => {
+        for (const v of matches) {
+          if (on) m.ticked.add(valueKey(v));
+          else m.ticked.delete(valueKey(v));
+        }
+        if (blankListed()) m.blank = on;
+      });
+    });
+    search.addEventListener("input", () => {
+      gridValueSearch.set(key, search.value);
+      rebuild();
+    });
+    search.addEventListener("focus", () => gridValueTyping.add(key));
+    rebuild();
+    return { node, search, refresh: rebuild, sync };
+  }
+
+  function renderPop() {
+    popHolder.textContent = "";
+    valuesRefresh = null;
+    const open = gridFilterOpen.get(key);
+    const i = open == null ? -1 : cols.findIndex((c) => colId(c) === open);
+    if (i < 0 || !btns.has(i)) {
+      gridFilterOpen.delete(key);
+      return null;
+    }
+    const c = cols[i];
+    const input = el("input", { type: "text", class: "grid-filter-input", "aria-label": "Filter " + c.label, placeholder: "contains…" });
+    const stored = active().get(colId(c));
+    const kind = kindOf(i);
+    const ops = FILTER_OPS_BY_KIND[kind];
+    let op = opFor(stored, kind);
+    input.value = stored ? stored.text ?? "" : "";
+    const opSel = el("select", { class: "grid-filter-op", "aria-label": "Match " + c.label }, ops.map((o) => el("option", { value: o, text: FILTER_OP_LABELS[o] })));
+    opSel.value = op;
+    const syncInput = () => {
+      if (input.style) input.style.display = filterNeedsNoText(op) ? "none" : "";
+    };
+    syncInput();
+    const clear = el("button", { type: "button", class: "btn grid-filter-clear", text: "Clear" });
+    const done = el("button", { type: "button", class: "btn grid-filter-close", text: "Close" });
+    const values = valuesSection(c, i);
+    /* A value part kept on a column that no longer gets a list: shown read-only, with a way to clear it. */
+    let kept = null;
+    if (!values && stored && valuesOn(stored.values)) {
+      const clearKept = el("button", { type: "button", class: "btn gfv-kept-clear", text: "Clear the value filter" });
+      clearKept.addEventListener("click", () => {
+        patchFilter(c, { values: NO_VALUES });
+        renderPop();
+        renderChips();
+      });
+      kept = el("div", { class: "gfv-kept" }, [el("span", { class: "gfv-note gfv-kept-note", text: "A kept value filter " + valuesPhrase(stored.values) + ". This column has no value list." }), clearKept]);
+    }
+    const panel = el("div", { class: "grid-filter-pop", role: "dialog", "aria-label": "Filter " + c.label }, [el("span", { class: "grid-filter-label", text: c.label }), ops.length > 1 ? opSel : null, input, clear, done, values ? values.node : kept].filter(Boolean));
+    if (values) valuesRefresh = values.refresh;
+    valueSearchBox = values ? values.search : null;
+    input.addEventListener("input", () => {
+      setFilter(c, op, input.value);
+      renderChips();
+    });
+    opSel.addEventListener("change", () => {
+      op = opSel.value;
+      setFilter(c, op, input.value);
+      syncInput();
+      renderChips();
+    });
+    input.addEventListener("focus", () => gridFilterTyping.add(key));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        close(true);
+      }
+    });
+    clear.addEventListener("click", () => {
+      clearColumn(c);
+      input.value = "";
+      if (values) values.sync();
+      renderChips();
+      if (typeof input.focus === "function") input.focus();
+    });
+    done.addEventListener("click", () => close(true));
+    panel.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close(true);
+      }
+    });
+    panel.addEventListener("focusout", (e) => {
+      const to = e && e.relatedTarget;
+      if (to && (to === btns.get(i) || (typeof panel.contains === "function" && panel.contains(to)))) return;
+      setTimeout(() => {
+        if (panel.isConnected === false || gridFilterOpen.get(key) !== colId(c)) return;
+        const at = typeof document !== "undefined" ? document.activeElement : null;
+        if (at && typeof panel.contains === "function" && panel.contains(at)) return;
+        gridFilterTyping.delete(key);
+        gridValueTyping.delete(key);
+        close(false);
+      }, 0);
+    });
+    popHolder.appendChild(panel);
+    return input;
+  }
+
+  for (const i of idx) {
+    const c = cols[i];
+    const b = el("button", { type: "button", class: "col-filter-btn", title: "Filter " + c.label, "aria-label": "Filter " + c.label, "aria-pressed": "false" });
+    /* The header's own click and key handlers sort; this button must not reach them. */
+    b.addEventListener("click", (e) => {
+      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+      if (gridFilterOpen.get(key) === colId(c)) return close(true);
+      gridFilterOpen.set(key, colId(c));
+      const input = renderPop();
+      renderChips();
+      if (input && typeof input.focus === "function") input.focus();
+    });
+    b.addEventListener("keydown", (e) => {
+      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    });
+    btns.set(i, b);
+    if (head.children[i]) head.children[i].appendChild(b);
+  }
+  const input = renderPop();
+  renderChips();
+  tbodyFilter.set(tbody, {
+    reapply: () => {
+      renderChips();
+      if (valuesRefresh) valuesRefresh();
+    },
+  });
+  /* The page was redrawn while a box had the focus: give it back once the new box is in the document. */
+  const refocus = gridValueTyping.has(key) && valueSearchBox ? valueSearchBox : input && gridFilterTyping.has(key) ? input : null;
+  if (refocus) {
+    setTimeout(() => {
+      if (refocus.isConnected !== false && typeof refocus.focus === "function") refocus.focus();
+    }, 0);
+  }
+  return bar;
+}
+
+/* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
+   header affordance (a filter, a menu) attaches. */
+function headerCell(c) {
+  return el("th", { text: c.label, class: isNumericCol(c) ? "num" : null });
+}
+
+/* The sort state of every grid, at MODULE scope so the 60 s poll's rebuild of a page re-applies the chosen sort.
+   Keyed by gridSortKey(): the route (the hash without its query, so a server or tab switch is a different table)
+   plus the descriptor's identity plus its column set. State: { col, dir } with dir "asc" | "desc"; absent means
+   the server's order. */
+const gridSortState = new Map(); // grows by one entry per table the session sorts (routes x tables), so it is bounded and never pruned
+/* tr -> its row object, so a grid whose rows are reconciled in place (Alert History) can re-sort what is in the DOM. */
+const trRow = new WeakMap();
+const tbodyGrid = new WeakMap();
+/* The cell each grid's Copy cell / Copy row act on (see gridTools), keyed like the sort state. */
+const gridPicked = new Map(); // one entry per table the session clicks in; bounded by routes x tables
+/* The column groups switched on for each grid (see columnPicker), keyed like the sort state; absent means defaultGroups. */
+const gridGroupsOn = new Map(); // one entry per grouped table the session toggles; bounded by routes x tables
+
+/* The table identity: `desc.sortId`, else `desc.id`, else `desc.title`, else `desc.rowsKey`. Panels built by
+   renderPanel carry a title; the FinOps tabs call VIZ.table with a rowsKey, and two grids of one tab can share one,
+   so the identity also carries the column keys. */
+function gridSortKey(desc, cols) {
+  const route = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash.split("?")[0] : "";
+  const id = desc.sortId ?? desc.id ?? desc.title ?? desc.rowsKey ?? "";
+  return route + "|" + id + "|" + cols.map(colId).join(",");
+}
+
+function colId(c) {
+  return String(c.key ?? "") + "\u0001" + String(c.label ?? "");
+}
+
+function isEmptyValue(v) {
+  return v == null || v === "" || (typeof v === "number" && Number.isNaN(v));
+}
+
+/* "time" | "number" | "text" for a column, from how it declares its format; a column with no format decides from
+   its values (every present one a number is a number). */
+function sortKindOf(c, values) {
+  if (c.format === "time" || c.format === "reltime") return "time";
+  if (c.format === "bool") return "number";
+  if (isNumericCol(c)) return "number";
+  const present = values.filter((v) => !isEmptyValue(v));
+  return present.length && present.every((v) => typeof v === "number") ? "number" : "text";
+}
+
+/* The raw value a column holds for a row: what the sort orders by and what the numeric filters compare. */
+function columnValue(row, c) {
+  return typeof c.sortValue === "function" ? c.sortValue(row) : getPath(row, c.key);
+}
+
+function sortKeyOf(kind, v) {
+  if (isEmptyValue(v)) return null;
+  if (kind === "time") {
+    const d = v instanceof Date ? v : parseUtc(typeof v === "string" ? v : null);
+    return d && !Number.isNaN(d.getTime()) ? d.getTime() : typeof v === "number" ? v : null;
+  }
+  if (kind === "number") {
+    const n = typeof v === "boolean" ? (v ? 1 : 0) : Number(v);
+    return Number.isNaN(n) ? null : n;
+  }
+  return String(v).toLowerCase();
+}
+
+/** Compare two sort keys (null last, regardless of dir). Exported for the behaviour test. */
+export function compareSortKeys(a, b, dir) {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  const r = a < b ? -1 : a > b ? 1 : 0;
+  return dir === "desc" ? -r : r;
+}
+
+function makeGridSort(desc, cols, rows) {
+  const stateKey = gridSortKey(desc, cols);
+  let kinds = [];
+  let sortable = [];
+  /* A column sorts when it is not opted out, some row has a value to sort on (a custom-render column over a key the
+     rows do not carry has nothing to order), and that value is not an array or object (a list cell has no order
+     unless the column supplies a sortValue). Recomputed from the rows whenever they change. */
+  function classify(rowList) {
+    kinds = cols.map((c) => sortKindOf(c, rowList.map((r) => valueOf(r, c))));
+    sortable = cols.map((c) => {
+      if (c.sortable === false) return false;
+      const present = rowList.map((r) => valueOf(r, c)).filter((v) => !isEmptyValue(v));
+      return present.length > 0 && (typeof c.sortValue === "function" || !present.some((v) => typeof v === "object" && !(v instanceof Date)));
+    });
+    grid.sortable = sortable;
+  }
+  const ths = [];
+  let tbody = null;
+  let moved = false;
+
+  const valueOf = columnValue;
+
+  function indicate() {
+    const st = gridSortState.get(stateKey);
+    cols.forEach((c, i) => {
+      const th = ths[i];
+      if (!th) return;
+      const live = sortable[i];
+      th.className = live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "";
+      th.setAttribute("tabindex", live ? "0" : "-1");
+      th.setAttribute("title", live ? "Sort by " + c.label : "");
+      const on = live && st && st.col === colId(c);
+      th.setAttribute("aria-sort", on ? (st.dir === "asc" ? "ascending" : "descending") : "none");
+      th.sortInd.textContent = on ? (st.dir === "asc" ? " ▲" : " ▼") : "";
+    });
+  }
+
+  /* Orders `trs` (taken as the server's order) by the current state and puts them in the tbody. */
+  function apply(trs) {
+    const st = gridSortState.get(stateKey);
+    let ordered = trs;
+    const ci = st ? cols.findIndex((c) => colId(c) === st.col) : -1;
+    if (ci >= 0 && sortable[ci]) {
+      const keyed = trs.map((tr, i) => ({ tr, i, k: sortKeyOf(kinds[ci], valueOf(trRow.get(tr), cols[ci])) }));
+      keyed.sort((x, y) => compareSortKeys(x.k, y.k, st.dir) || x.i - y.i);
+      ordered = keyed.map((x) => x.tr);
+    }
+    /* A grid still in the server's order (no sort chosen, none undone) is left as built: the DOM is only touched
+       once a sort has been in play. */
+    if (ordered !== trs || moved) {
+      for (const tr of ordered) tbody.appendChild(tr);
+      moved = ordered !== trs;
+    }
+    indicate();
+  }
+
+  const grid = {
+    sortable: [],
+    /* A header for every column that is not opted out: whether it carries the sort affordance is re-decided by
+       indicate() against the current rows. */
+    eligible: cols.map((c) => c.sortable !== false),
+    headerCell(c, i) {
+      const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
+      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : ""), tabindex: "0", "aria-sort": "none", title: "Sort by " + c.label }, [c.label, ind]);
+      th.sortInd = ind;
+      const cycle = () => {
+        if (!sortable[i]) return;
+        const st = gridSortState.get(stateKey);
+        const id = colId(c);
+        if (!st || st.col !== id) gridSortState.set(stateKey, { col: id, dir: "asc" });
+        else if (st.dir === "asc") gridSortState.set(stateKey, { col: id, dir: "desc" });
+        else gridSortState.delete(stateKey);
+        apply(grid.serverOrder);
+      };
+      th.addEventListener("click", cycle);
+      th.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          cycle();
+        }
+      });
+      ths[i] = th;
+      return th;
+    },
+    syncHeads: () => indicate(),
+    serverOrder: [],
+    attach(body, trs) {
+      tbody = body;
+      grid.serverOrder = trs.slice();
+      classify(trs.map((tr) => trRow.get(tr)));
+      tbodyGrid.set(body, grid);
+      apply(grid.serverOrder);
+    },
+    /* The tbody's rows were reconciled in place into the server's order: take that as the new server order. */
+    reapply() {
+      grid.serverOrder = [...tbody.children];
+      classify(grid.serverOrder.map((tr) => trRow.get(tr)));
+      apply(grid.serverOrder);
+    },
+  };
+  return grid;
+}
+
+/** The row object a rendered grid row was built from (a sorted grid's DOM order is not the row order). */
+export function gridRowOf(tr) {
+  return trRow.get(tr);
+}
+
+/** For a grid whose rows are reconciled in place (Alert History): after putting the rows back in the server's order,
+    call this with the tbody to re-apply the chosen sort. A tbody that is not a sortable grid is left alone. */
+export function reapplyGridSort(tbody) {
+  const g = tbody && tbodyGrid.get(tbody);
+  if (g) g.reapply();
+  const f = tbody && tbodyFilter.get(tbody);
+  if (f) f.reapply();
 }
 
 /* A table column may depend on the rows: `hideWhenEmpty: true` drops it when no row has a value at its key (null,
@@ -219,6 +1213,8 @@ function cell(row, c) {
     const rcls = [];
     if (c.wrap) rcls.push("wrap");
     if (c.mono) rcls.push("mono");
+    if (c.pre) rcls.push("pre");
+    if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) rcls.push(k); }
     return el("td", { class: rcls.join(" ") || null }, [c.render(row)]);
   }
   const raw = getPath(row, c.key);
@@ -226,8 +1222,10 @@ function cell(row, c) {
   if (isNumericCol(c)) cls.push("num");
   if (c.wrap) cls.push("wrap");
   if (c.mono) cls.push("mono");
+  if (c.pre) cls.push("pre");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
   if (c.statusSev) cls.push(sevClass(statusToSev(raw)));
+  if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) cls.push(k); }
   /* nullKey names another field of the SAME row that says why this one is empty (get_file_io_stats' size_note:
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
@@ -235,11 +1233,17 @@ function cell(row, c) {
   const text =
     why != null && why !== ""
       ? String(why)
-      : c.format
+      : typeof c.display === "function"
+        ? String(c.display(row) ?? "—")
+        : c.format
         ? applyFormat(c.format, raw)
         : raw == null || raw === ""
           ? "—"
-          : String(raw);
+          : c.plain === "named"
+            ? plainTextNamed(String(raw))
+            : c.plain
+              ? plainText(String(raw))
+              : String(raw);
   return el("td", { class: cls.join(" ") || null, text });
 }
 
@@ -273,10 +1277,13 @@ function vizStat(data, desc) {
      key with a value still renders the tiles, and a descriptor with no emptyText (every stored view, and
      every SQL Server tile on the server page) falls through unchanged. */
   if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
+  /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
+     of fifteen tiles, half of them dashes, said less than the seven that had a value. */
+  const shown = stats.filter((s) => !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
   return el(
     "div",
     { class: "stats" },
-    stats.map((s) => {
+    shown.map((s) => {
       const sev = s.sev || s.severity;
       const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
       const raw = getPath(data, s.key);
@@ -319,7 +1326,11 @@ function vizLine(data, desc) {
      params) or when loadPanelBody narrowed the read to the history it keeps, else desc.params.hours. Absent ⇒
      null ⇒ the chart keeps its data-extent domain, unchanged. */
   const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);
-  return renderLineChart({
+  /* Drag-to-zoom over the loaded points (zoomableLineChart, charts.js). The zoom is held under this chart's
+     identity (title, read and series) and the page's scope (server + tab + preset range), so the poll's rebuild
+     draws it again and a different server, tab or range does not. */
+  const zoomId = [desc.title || "", desc.read || desc.path || "", desc.xKey, seriesCfg.map((s) => s.key).join(",")].join("|");
+  return zoomableLineChart({
     points,
     xKey: desc.xKey,
     series,
@@ -329,9 +1340,12 @@ function vizLine(data, desc) {
        whole-number formatter as the same label several times over ("1 1 1 0 0 0" on a blocking-events axis). */
     integerTicks: desc.format === "int",
     unit: desc.unit ?? null,
+    title: desc.title || null,
+    atTime: desc.atTime || null,
+    source: desc.read || desc.path ? { read: desc.read || desc.path, params: desc.params || null } : null,
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
-  });
+  }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */
@@ -363,6 +1377,33 @@ function vizBandlist(data, desc) {
 /** Set the hash route to a server's detail page. */
 export function navigateServer(serverName) {
   location.hash = "#/server/" + encodeURIComponent(serverName);
+}
+
+/** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in
+    name order: the order a person reading the grid wants, instead of A to Z. A new array; the rows are not changed. */
+export function worstFirst(rows) {
+  const rank = (row) => {
+    if (String(row && row.status).toLowerCase() === "not_collected") return 4;
+    switch (statusToSev(row && row.status)) {
+      case "Critical": return 0;
+      case "Warning": return 1;
+      case "Unknown": return 2;
+      default: return 3;
+    }
+  };
+  return rows
+    .map((row, i) => ({ row, i }))
+    .sort((a, b) => rank(a.row) - rank(b.row) || String(a.row && a.row.collector).localeCompare(String(b.row && b.row.collector)) || a.i - b.i)
+    .map((x) => x.row);
+}
+
+/** Rows newest first by a text date key (an ISO day sorts as text): `newestFirst("summary_date")`. */
+export function newestFirst(key) {
+  return (rows) =>
+    rows
+      .map((row, i) => ({ row, i }))
+      .sort((a, b) => String(b.row && b.row[key]).localeCompare(String(a.row && a.row[key])) || a.i - b.i)
+      .map((x) => x.row);
 }
 
 /**

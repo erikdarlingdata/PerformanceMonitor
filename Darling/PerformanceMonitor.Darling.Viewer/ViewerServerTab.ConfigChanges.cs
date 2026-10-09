@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -29,13 +31,25 @@ public partial class ViewerServerTab : UserControl
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(3);
+        /* Six reads start together: the three change histories and the three data-start probes beside them (#4966). */
+        using var readFanOut = ViewerReadFanOut.Of(6);
+
+        /* #4966: each grid says where its snapshots start when the range reaches before it. Every history diffs the snapshots one
+           collector writes, so each has its own probe (server_config, database_config, trace_flags), started beside its read. */
+        var serverStartTask = _dataService.GetServerConfigChangesDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var databaseStartTask = _dataService.GetDatabaseConfigChangesDataStartAsync(_server.ServerId, startUtc, endUtc);
+        var traceFlagStartTask = _dataService.GetTraceFlagChangesDataStartAsync(_server.ServerId, startUtc, endUtc);
 
         var serverTask = _dataService.GetServerConfigChangesAsync(_server.ServerId, startUtc, endUtc);
         var databaseTask = _dataService.GetDatabaseConfigChangesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         var traceFlagTask = _dataService.GetTraceFlagChangesAsync(_server.ServerId, startUtc, endUtc);
 
-        await Task.WhenAll(serverTask, databaseTask, traceFlagTask);
+        /* One probe per grid: each wraps the read so a failing read watches all three. */
+        await AwaitReadWatchingProbeAsync(
+            AwaitReadWatchingProbeAsync(
+                AwaitReadWatchingProbeAsync(Task.WhenAll(serverTask, databaseTask, traceFlagTask), serverStartTask, "Server Config Changes"),
+                databaseStartTask, "Database Config Changes"),
+            traceFlagStartTask, "Trace Flag Changes");
 
         /* The three are done, and the not-collected notes below may read the store again. Release here so those reads are not
            priced against contention that has already finished. */
@@ -59,5 +73,12 @@ public partial class ViewerServerTab : UserControl
         ServerConfigChangesNoDataMessage.Visibility = serverChanges.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DatabaseConfigChangesNoDataMessage.Visibility = databaseChanges.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         TraceFlagChangesNoDataMessage.Visibility = traceFlagChanges.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        /* #4966: a change's time is a snapshot's capture time, so the rows can never come before the table's coverage, and the
+           notice names the earlier of the probe's answer and the earliest change shown. None of the three reads is capped (each
+           diffs every snapshot up to the window's end), so none passes a row cap. */
+        await ShowEventDataStartAsync(ServerConfigChangesTruncationBanner, serverStartTask, "Server Config Changes", startUtc, serverChanges.Select(r => (DateTime?)r.ChangeTime));
+        await ShowEventDataStartAsync(DatabaseConfigChangesTruncationBanner, databaseStartTask, "Database Config Changes", startUtc, databaseChanges.Select(r => (DateTime?)r.ChangeTime));
+        await ShowEventDataStartAsync(TraceFlagChangesTruncationBanner, traceFlagStartTask, "Trace Flag Changes", startUtc, traceFlagChanges.Select(r => (DateTime?)r.ChangeTime));
     }
 }

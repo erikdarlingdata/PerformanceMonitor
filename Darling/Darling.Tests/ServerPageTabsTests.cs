@@ -128,6 +128,18 @@ public sealed class ServerPageTabsTests
     /// the one thing here that is impossible to verify by eye.</para>
     /// </summary>
     [Fact]
+    public void TheQueryStoreTopGrid_DrawsTheApproximationNote_AsAFurtherNote()
+    {
+        var js = ServerTabsJs;
+        var at = js.IndexOf("\"get_query_store_top\",", StringComparison.Ordinal);
+        Assert.True(at >= 0);
+        var end = js.IndexOf("\n      ),", at, StringComparison.Ordinal);
+        var call = js[at..end];
+        Assert.Contains("\"truncation_note\",", call, StringComparison.Ordinal);
+        Assert.Contains("[\"approximation_note\"]", call, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EveryReadTheServerPageNames_ExistsInTheDispatch()
     {
         var dispatch = DarlingWebEndpoints.BuildReadDispatch().Keys.ToHashSet(StringComparer.Ordinal);
@@ -794,7 +806,7 @@ public sealed class ServerPageTabsTests
            the render. A repeat render paints from the remembered card synchronously; a card that does not
            arrive leaves a painted page alone, because a failed fleet read is not evidence the engine changed. */
         Assert.Contains("const remembered = lastCard.get(server);", ServerJs, StringComparison.Ordinal);
-        Assert.Contains("painted = paintTabs(tabsSlot, server, tabId, remembered.card);", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card);", ServerJs, StringComparison.Ordinal);
         Assert.Contains("if (card) lastCard.set(server, { card, reason });", ServerJs, StringComparison.Ordinal);
         Assert.Contains("if (!painted || (card && serverTabsFor(card) !== painted)) {", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.is_postgres", ServerJs, StringComparison.Ordinal);
@@ -885,8 +897,8 @@ public sealed class ServerPageTabsTests
         Assert.Contains("block-chain view", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
-        Assert.Contains("return tab.note ? noticeStrip(tab.note) : null;", js, StringComparison.Ordinal);
-        Assert.Contains("tabNote(tab)", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("return note ? noticeStrip(note) : null;", js, StringComparison.Ordinal);
+        Assert.Contains("tabNote(tab, tabReach())", ServerJs, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -922,11 +934,12 @@ public sealed class ServerPageTabsTests
         /* The WHOLE signature, so emptyText is asserted to be a declared parameter rather than something
            read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
            unrelated to this guard - and #4925 appended `moreNoteKeys = null` after it (further caveat fields
-           rendered the same way). The literal is spelled out here rather than truncated at emptyText
+           rendered the same way), and #4843 appended `columnGroups = null` (the opt-in column groups of a wide grid), and #5226 appended `control = null` (a node drawn under the title:
+           the ranking selector of the Top Queries / Top Procedures cards), and #5245 appended `dbScope = null` (the panel's own database-scope chip, for a panel whose scope differs from its read's class; unrelated to this guard)., and the release walk appended `extensionMissingLine = null` (the plain line a precondition panel shows when its optional extension is not installed; unrelated to this guard). The literal is spelled out here rather than truncated at emptyText
            because a prefix match would stop noticing a parameter inserted BEFORE it. */
         Assert.Contains(
             "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
-            + "noteKey = null, moreNoteKeys = null)",
+            + "noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null)",
             js,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -1209,7 +1222,7 @@ public sealed class ServerPageTabsTests
     /// </summary>
     private static IEnumerable<(string Read, string[] Arrays)> DescriptorArraysBoundIn(string js)
     {
-        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|table|fanout)\("))
+        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|momentStat|table|fanout)\("))
         {
             var depth = 1;
             var i = open.Index + open.Length;

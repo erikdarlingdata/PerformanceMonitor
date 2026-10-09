@@ -10,6 +10,7 @@ using System;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Database;
 
@@ -25,21 +26,34 @@ namespace PerformanceMonitorLite.Database;
 /// <c>deadlock_time</c>, or a NULL or empty graph, is never touched. <c>deadlock_id</c> is the primary key, so the
 /// delete addresses exactly the rows chosen.</para>
 ///
+/// <para><b>A graph the statement filter withheld whole</b> (#4348) is the marker text, the same for every such
+/// graph, so its identity adds the victim process id and the database the collector parsed before judging it. A
+/// marker row with no victim process id has nothing to tell it apart and is never touched. A row with real text keeps
+/// the identity above.</para>
+///
 /// <para><b>Only the hot table.</b> Rows already moved into archived Parquet behind the <c>v_deadlocks</c> view
 /// cannot be removed with a DELETE, so a copy that was archived stays until the archive ages out.</para>
 /// </summary>
 internal static class DeadlockDuplicateCleanup
 {
+    /* #4348: a graph the statement filter withheld WHOLE is the marker text, the same for every such graph, so the
+       text cannot tell two deadlocks at one time apart. A marker row's identity adds its victim process id and
+       database (the two PARTITION BY CASEs, NULL for a real graph, so a real graph's identity is unchanged), and a
+       marker row with no victim process id is never touched, like a NULL or empty graph. */
     private const string DeleteSql = @"
 DELETE FROM deadlocks
 WHERE deadlock_id IN (
     SELECT deadlock_id FROM (
         SELECT deadlock_id,
-               row_number() OVER (PARTITION BY server_id, deadlock_time, deadlock_graph_xml
+               row_number() OVER (PARTITION BY server_id, deadlock_time, deadlock_graph_xml,
+                                  CASE WHEN deadlock_graph_xml = '" + SensitiveStatements.PlaceholderText + @"' THEN victim_process_id END,
+                                  CASE WHEN deadlock_graph_xml = '" + SensitiveStatements.PlaceholderText + @"' THEN COALESCE(database_name, '') END
                                   ORDER BY collection_time, deadlock_id) AS rn
         FROM deadlocks
         WHERE deadlock_time IS NOT NULL
         AND   deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''
+        AND   (deadlock_graph_xml <> '" + SensitiveStatements.PlaceholderText + @"'
+               OR (victim_process_id IS NOT NULL AND victim_process_id <> ''))
     )
     WHERE rn > 1
 )";

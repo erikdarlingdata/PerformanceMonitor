@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using PerformanceMonitor.Darling.Service.Hosting;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -458,6 +459,30 @@ internal static class DarlingNetworkConfigEditor
         ChildIndent + "}";
 
     /// <summary>
+    /// #5288: the text the wizard writes as <c>mcp.network.allowFrom</c> / <c>web.network.allowFrom</c> (and
+    /// builds the firewall hint from) for what the operator typed. ONE entry comes back exactly as typed, so a
+    /// single-CIDR block is byte-for-byte what it was before the list existed. A LIST (two or more entries, or a
+    /// comma list that de-duplicates to one) comes back as <c>CidrAllowList.ToString()</c> — each entry masked,
+    /// duplicates dropped, joined by <c>,</c> with no spaces — so the file holds the text the hosts themselves
+    /// compute, and the firewall hint carries the exact scope the service enforces.
+    ///
+    /// <para><b>Always ONE JSON string, never a JSON array</b>, whatever the count. The settings converter
+    /// still READS an array (for hand edits), but a service older than #5288 cannot deserialize one: the whole
+    /// service then fails to start, collection included. The same service reads a comma string as an invalid
+    /// range and degrades only that listener to loopback-only. After a rollback the wizard's output must
+    /// therefore stay the safe shape.</para>
+    ///
+    /// <para>Text <see cref="CidrAllowList.TryParse"/> refuses comes back as typed: the wizard validates through
+    /// the bind resolvers before it builds a block and re-checks the final text, so that is only a direct
+    /// caller's input. No second split, trim or de-dupe lives here. Pure.</para>
+    /// </summary>
+    internal static string AllowFromText(string allowFrom)
+        => CidrAllowList.TryParse(allowFrom, out var list)
+           && (list.Count > 1 || allowFrom.Contains(',', StringComparison.Ordinal))
+            ? list.ToString()
+            : allowFrom;
+
+    /// <summary>
     /// The keys <see cref="BuildMcpNetworkBlock"/> writes (#4743). BOTH token keys are owned even though a
     /// block carries only one: switching a plaintext <c>token</c> to an <c>encryptedToken</c> must not
     /// leave both behind. A test pins that every key the builder writes is listed.
@@ -468,7 +493,9 @@ internal static class DarlingNetworkConfigEditor
     /// The active (uncommented) <c>mcp.network</c> block the wizard writes. Exactly one of
     /// <paramref name="encryptedToken"/> / <paramref name="plaintextToken"/> is non-null: the wizard
     /// prefers <c>encryptedToken</c> (a DPAPI blob) and only emits a plaintext <c>token</c> when
-    /// preserving an existing plaintext value the operator chose to keep. Pure.
+    /// preserving an existing plaintext value the operator chose to keep. #5288: <paramref name="allowFrom"/>
+    /// may be one CIDR or a comma list, and is written as ONE JSON string either way, never an array
+    /// (<see cref="AllowFromText"/>). Pure.
     /// </summary>
     internal static string BuildMcpNetworkBlock(
         string listen, string allowFrom, string? encryptedToken, string? plaintextToken)
@@ -480,7 +507,7 @@ internal static class DarlingNetworkConfigEditor
         return
             "\"network\": {\n" +
             FieldIndent + $"\"listen\": {JsonString(listen)},  // bind IP; 0.0.0.0 = all interfaces.\n" +
-            FieldIndent + $"\"allowFrom\": {JsonString(allowFrom)},  // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).\n" +
+            FieldIndent + $"\"allowFrom\": {JsonString(AllowFromText(allowFrom))},  // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).\n" +
             tokenLine +
             ChildIndent + "}";
     }
@@ -497,7 +524,9 @@ internal static class DarlingNetworkConfigEditor
     /// The active (uncommented) <c>web.network</c> block the wizard writes (#1617) — the web-dashboard twin
     /// of <see cref="BuildMcpNetworkBlock"/>, same exactly-one-of token contract: the wizard prefers
     /// <c>encryptedToken</c> (a DPAPI blob) and only emits a plaintext <c>token</c> when preserving an
-    /// existing plaintext value the operator chose to keep. Pure.
+    /// existing plaintext value the operator chose to keep. #5288: <paramref name="allowFrom"/> may be one CIDR
+    /// or a comma list, and is written as ONE JSON string either way, never an array
+    /// (<see cref="AllowFromText"/>). Pure.
     /// </summary>
     internal static string BuildWebNetworkBlock(
         string listen, string allowFrom, string? encryptedToken, string? plaintextToken)
@@ -509,7 +538,7 @@ internal static class DarlingNetworkConfigEditor
         return
             "\"network\": {\n" +
             FieldIndent + $"\"listen\": {JsonString(listen)},  // bind IP; 0.0.0.0 = all interfaces.\n" +
-            FieldIndent + $"\"allowFrom\": {JsonString(allowFrom)},  // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).\n" +
+            FieldIndent + $"\"allowFrom\": {JsonString(AllowFromText(allowFrom))},  // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).\n" +
             tokenLine +
             ChildIndent + "}";
     }

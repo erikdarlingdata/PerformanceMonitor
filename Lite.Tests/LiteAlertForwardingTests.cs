@@ -1247,8 +1247,8 @@ public partial class LiteAlertForwardingTests : IDisposable
         Directory.CreateDirectory(tempDir);
         try
         {
-            var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
-            await duckDb.InitializeAsync();
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
+            await duckDb.InitializeFromTemplateAsync();
             IAlertStateStore store = new LiteAlertStateStore(new DuckDbAlertHistoryStore(duckDb));
 
             /* Nothing persisted yet → null, so the engine starts at watermark 0 like the old loop. */

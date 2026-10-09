@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -202,7 +203,14 @@ public sealed class CollectorContext
     /// operator acts on it, which is the failure <c>CollectorRuntimePrecondition</c> (#2546) exists to
     /// prevent; a stored count stays true and lets the read derive the verdict fresh on every call.</para>
     /// </summary>
-    public IReadOnlyList<CollectorMeasurement> Measurements => _measurements;
+    public IReadOnlyList<CollectorMeasurement> Measurements
+    {
+        get
+        {
+            FoldStatementScrub();
+            return _measurements;
+        }
+    }
 
     private readonly List<CollectorMeasurement> _measurements = new();
 
@@ -259,6 +267,98 @@ public sealed class CollectorContext
         _measurements.Add(new CollectorMeasurement(label, value));
     }
 
+    /// <summary>Values the statement filter withheld this cycle because they were named or their match timed out
+    /// (#4348).</summary>
+    public const string StatementScrubNamedMeasurement = "statement_scrub_named";
+
+    /// <summary>Regex matches that timed out this cycle (#4348).</summary>
+    public const string StatementScrubTimeoutsMeasurement = "statement_scrub_timeouts";
+
+    /// <summary>Values withheld unjudged this cycle because the scrub budget was spent. Above 0 means the budget ran
+    /// out; in the field it should be 0 (#4348).</summary>
+    public const string StatementScrubUnjudgedMeasurement = "statement_scrub_unjudged";
+
+    /// <summary>Milliseconds the statement filter spent this cycle (#4348).</summary>
+    public const string StatementScrubMsMeasurement = "statement_scrub_ms";
+
+    private readonly List<ScrubTally> _scrubSessions = new();
+    private readonly object _scrubGate = new();
+
+    /// <summary>
+    /// Test seam (#5459): makes the session <see cref="BeginStatementScrub"/> hands out, so a test can pin a budget that
+    /// cannot run out on a slow runner, or one that is already spent, instead of the wall-clock 15 seconds. Production
+    /// never sets it, so every read gets the usual <c>new Session()</c>.
+    /// </summary>
+    internal Func<SensitiveStatements.Session>? ScrubSessionFactory { get; set; }
+
+    /// <summary>
+    /// Starts the statement filter's session for ONE read call (#4348). A collector wraps each statement or plan
+    /// string with the session at the line where the string first enters a row; the session judges under one
+    /// 15-second budget that every string of the call shares (the limit is per session, not per string). The context adds every session's counters into the four <c>statement_scrub_*</c>
+    /// measurements, written only when the cycle judged a value (a cycle that read no statement text carries none).
+    /// </summary>
+    public SensitiveStatements.Session BeginStatementScrub()
+    {
+        var session = ScrubSessionFactory?.Invoke() ?? new SensitiveStatements.Session();
+        lock (_scrubGate)
+        {
+            _scrubSessions.Add(new ScrubTally(session));
+        }
+
+        return session;
+    }
+
+    /// <summary>One session and what has already been added to the measurements for it, so a second read of
+    /// <see cref="Measurements"/> adds only what the session did since.</summary>
+    private sealed class ScrubTally(SensitiveStatements.Session session)
+    {
+        public SensitiveStatements.Session Session { get; } = session;
+        public long Named { get; set; }
+        public long TimedOut { get; set; }
+        public long Unjudged { get; set; }
+        public long Ms { get; set; }
+    }
+
+    private bool _scrubMeasured;
+
+    private void FoldStatementScrub()
+    {
+        lock (_scrubGate)
+        {
+            if (_scrubSessions.Count == 0)
+            {
+                return;
+            }
+
+            long named = 0, timedOut = 0, unjudged = 0, ms = 0;
+            var judged = false;
+            foreach (var tally in _scrubSessions)
+            {
+                var s = tally.Session;
+                judged |= s.Values > 0;
+                named += s.Named - tally.Named;
+                timedOut += s.TimedOut - tally.TimedOut;
+                unjudged += s.Unjudged - tally.Unjudged;
+                ms += s.ElapsedMs - tally.Ms;
+                tally.Named = s.Named;
+                tally.TimedOut = s.TimedOut;
+                tally.Unjudged = s.Unjudged;
+                tally.Ms = s.ElapsedMs;
+            }
+
+            if (!judged && !_scrubMeasured)
+            {
+                return;
+            }
+
+            _scrubMeasured = true;
+            this.Measure(StatementScrubNamedMeasurement, named);
+            this.Measure(StatementScrubTimeoutsMeasurement, timedOut);
+            this.Measure(StatementScrubUnjudgedMeasurement, unjudged);
+            this.Measure(StatementScrubMsMeasurement, ms);
+        }
+    }
+
     /// <summary>Wait types excluded from collection (Lite: ignored_wait_types.json — #1240).</summary>
     public IReadOnlySet<string> IgnoredWaitTypes { get; init; } = s_emptySet;
 
@@ -287,6 +387,31 @@ public sealed class CollectorContext
     /// install/09_collect_query_store.sql).
     /// </summary>
     public bool CapturePlanXml { get; init; }
+
+    /// <summary>
+    /// #5158: when true (and <see cref="CapturePlanXml"/> is on), <c>query_stats</c> leaves the plan out of
+    /// its main query, so the SELECT is the same no-plan form Lite ships and ordinals 44/45 do not exist.
+    /// <c>procedure_stats</c> does the same at module grain (offsets 0, -1; its plan ordinals are 27/28) and
+    /// adds three identity columns at 27-29 in their place; its fetch is <c>ProcedureStatsCollector.BuildPlanFetchQuery</c>.
+    /// The host then fetches plan XML in a second target query, <c>QueryStatsCollector.BuildPlanFetchQuery</c>,
+    /// for only the statement plans it has not already committed. Inline capture renders and ships about
+    /// 200 plans every run whether or not the store holds them (one large store: 54 GB/h rendered and
+    /// 29 GB/h shipped against 1.1 GB/h of distinct plans). Default false: every collector's SQL and
+    /// behavior are unchanged until a host sets it.
+    /// </summary>
+    public bool DeferPlanXmlFetch { get; init; }
+
+    /// <summary>
+    /// #5158: when true, <c>procedure_stats</c> appends the three plan-identity columns (<c>plan_statement_count</c>,
+    /// <c>plan_last_statement_compile</c>, <c>plan_generation_sum</c>) to its SELECT, so a host can recognize the
+    /// plans it holds. With <see cref="CapturePlanXml"/> on and <see cref="DeferPlanXmlFetch"/> off they follow the
+    /// inline plan columns (ordinals 29-31) and the plans render exactly as without the flag: this is how a host
+    /// measures whether its identity would have recognized plans it just rendered, without changing what is stored.
+    /// With <see cref="CapturePlanXml"/> off they stand alone at ordinals 27-29, which lets a host that defers its
+    /// plan fetch recognize plans on a cycle that renders none. Default false: no collector's SQL changes until a
+    /// host sets it.
+    /// </summary>
+    public bool PlanIdentityColumns { get; init; }
 
     /// <summary>
     /// Whether this target has granted <c>pg_read_binary_file</c> (#4046 part 1c), resolved by the host
@@ -418,6 +543,23 @@ public sealed class CollectorContext
     /// definition's curated default list applies.
     /// </summary>
     public IReadOnlyList<string>? PerfmonCounterOverride { get; init; }
+
+    /// <summary>
+    /// The name of this install's long-query completions session (#4961), made by the host from its product and its
+    /// install id (<see cref="LongQueryCompletionsCollector.XeSessionNameFor"/>). Only the long-query definition reads
+    /// it. Null when the host has no install id: the host then has no session to read, and says so as a fault before the
+    /// read, so the definition does not fall back to another install's name.
+    /// </summary>
+    public string? LongQuerySessionName { get; init; }
+
+    /// <summary>
+    /// The session the deadlock or blocked-process read names in the database being read (#4961): the shared name, or this
+    /// install's own when the host's ensure fell back to it there. Set by the host's per-database loop beside
+    /// <see cref="CurrentDatabaseName"/>, because the choice is per database. Null reads the shared name, which is every
+    /// server-scoped read and a database the ensure has not reached yet. Only the deadlock and blocked-process definitions
+    /// read it, and they refuse any name that is neither the shared name nor an own name of their capture.
+    /// </summary>
+    public string? AlwaysOnSessionName { get; set; }
 
     /// <summary>
     /// Host override for the per-item text byte budget (#2164), in BYTES. Null keeps the definition's
@@ -683,6 +825,16 @@ public sealed class CollectorContext
     /// where). Measured so drain stops absorbing it, exactly the #2164 argument one seam further down.
     /// </summary>
     public long PerItemPlanFetchMs { get; set; }
+
+    /// <summary>
+    /// #5158: how many statement plans the host actually rendered on the monitored server this pass, with
+    /// <see cref="DeferPlanXmlFetch"/> on. A row whose plan the host already held is not counted. Zero when
+    /// the fetch is not deferred, which is also when every row carries its inline plan.
+    /// </summary>
+    public int PerItemPlanRenderedRows { get; set; }
+
+    /// <summary>#5158: the measured plan size, in bytes, of the plans counted by <see cref="PerItemPlanRenderedRows"/>, over-cap plans included.</summary>
+    public long PerItemPlanRenderedBytes { get; set; }
 
     /// <summary>
     /// Milliseconds the item's separate statement-text fetch took (#2150's fetch, split out for the #2312

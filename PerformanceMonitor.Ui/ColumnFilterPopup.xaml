@@ -1,8 +1,9 @@
 <UserControl x:Class="PerformanceMonitor.Ui.ColumnFilterPopup"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             Width="220"
-             FontFamily="Segoe UI">
+             Width="260"
+             FontFamily="Segoe UI"
+             PreviewKeyDown="Popup_PreviewKeyDown">
     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" TextElement.FontFamily="Segoe UI">
         <StackPanel Margin="12">
             <!-- Header with column name -->
@@ -13,8 +14,91 @@
                        Foreground="{DynamicResource ForegroundBrush}"
                        Margin="0,0,0,12"/>
 
-            <!-- Operator dropdown -->
-            <TextBlock Text="Operator:"
+            <!-- Value list (#5565): the column's values to tick, like Excel. Collapsed for a column that gets no list. -->
+            <StackPanel x:Name="ValueListPanel" Visibility="Collapsed" Margin="0,0,0,12">
+                <TextBlock Text="Values:"
+                           Foreground="{DynamicResource ForegroundDimBrush}"
+                           FontSize="11"
+                           Margin="0,0,0,4"/>
+                <TextBox x:Name="SearchTextBox"
+                         Height="28"
+                         Margin="0,0,0,6"
+                         Padding="6,0"
+                         VerticalContentAlignment="Center"
+                         ToolTip="Search the values"
+                         AutomationProperties.Name="Search the values"
+                         TextChanged="SearchTextBox_TextChanged"/>
+                <CheckBox x:Name="SelectAllCheckBox"
+                          Content="Select All"
+                          IsThreeState="True"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          Margin="2,0,0,4"
+                          AutomationProperties.Name="Select all the listed values"
+                          Click="SelectAllCheckBox_Click"/>
+                <ListBox x:Name="ValuesListBox"
+                         Height="170"
+                         Background="Transparent"
+                         BorderBrush="{DynamicResource BorderBrush}"
+                         BorderThickness="1"
+                         AutomationProperties.Name="Values"
+                         KeyboardNavigation.TabNavigation="Once"
+                         KeyboardNavigation.DirectionalNavigation="Contained"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         VirtualizingPanel.VirtualizationMode="Recycling"
+                         ScrollViewer.CanContentScroll="True">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Focusable" Value="False"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <ContentPresenter/>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <CheckBox IsChecked="{Binding IsTicked, Mode=TwoWay}"
+                                      Foreground="{DynamicResource ForegroundBrush}"
+                                      Margin="4,2,4,2"
+                                      ToolTip="{Binding Label}"
+                                      AutomationProperties.Name="{Binding Label}">
+                                <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" MaxWidth="190"/>
+                            </CheckBox>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+                <TextBlock x:Name="NoteText"
+                           Visibility="Collapsed"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundDimBrush}"
+                           FontSize="11"
+                           Margin="0,4,0,0"/>
+            </StackPanel>
+
+            <!-- A value filter stored on a column that gets no list now (#5565): shown read-only, with a way to clear it. -->
+            <StackPanel x:Name="StoredValuesPanel" Visibility="Collapsed" Margin="0,0,0,12">
+                <TextBlock x:Name="StoredValuesText"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundDimBrush}"
+                           FontSize="11"
+                           Margin="0,0,0,4"/>
+                <Button x:Name="ClearStoredValuesButton"
+                        Content="Clear the value filter"
+                        Height="28"
+                        Padding="6,0"
+                        HorizontalAlignment="Left"
+                        ToolTip="Remove the value filter kept on this column"
+                        AutomationProperties.Name="Clear the value filter"
+                        Click="ClearStoredValuesButton_Click"/>
+            </StackPanel>
+
+            <!-- Text match, kept beside the list -->
+            <TextBlock x:Name="OperatorLabel"
+                       Text="Operator:"
                        Foreground="{DynamicResource ForegroundDimBrush}"
                        FontSize="11"
                        Margin="0,0,0,4"/>
@@ -33,22 +117,37 @@
                      Height="28"
                      Margin="0,0,0,16"
                      Padding="6,0"
-                     VerticalContentAlignment="Center"
-                     KeyDown="ValueTextBox_KeyDown"/>
+                     VerticalContentAlignment="Center"/>
 
             <!-- Buttons -->
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Content="Clear"
-                        Width="65"
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Button x:Name="ClearAllButton"
+                        Grid.Column="0"
+                        Content="Clear all filters"
                         Height="28"
                         Margin="0,0,8,0"
-                        Click="ClearButton_Click"/>
-                <Button Content="Apply"
-                        Width="65"
-                        Height="28"
-                        Click="ApplyButton_Click"
-                        IsDefault="True"/>
-            </StackPanel>
+                        Padding="6,0"
+                        HorizontalAlignment="Left"
+                        ToolTip="Remove every filter on this grid"
+                        Visibility="Collapsed"
+                        Click="ClearAllButton_Click"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="Clear"
+                            Width="65"
+                            Height="28"
+                            Margin="0,0,8,0"
+                            Click="ClearButton_Click"/>
+                    <Button Content="Apply"
+                            Width="65"
+                            Height="28"
+                            Click="ApplyButton_Click"
+                            IsDefault="True"/>
+                </StackPanel>
+            </Grid>
         </StackPanel>
     </Border>
 </UserControl>

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -17,6 +18,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -131,6 +133,7 @@ public partial class FinOpsTab
             return;
         }
 
+        ApplyServerGate();
         await RefreshActiveSubTabAsync();
     }
 
@@ -140,6 +143,13 @@ public partial class FinOpsTab
     /// </summary>
     private async Task LoadFinOpsAsync()
     {
+        /* A PostgreSQL target has no SQL Server data for any single-server panel: run none of their reads (ApplyServerGate
+           shows the one line). Server Inventory lists the fleet and always runs. */
+        if (FinOpsServerChoice.NotCollectedLine(ServerSelector.SelectedItem as DarlingServer, crossServer: SelectedSubTabIsCrossServer) is not null)
+        {
+            return;
+        }
+
         switch (FinOpsSubTabControl.SelectedIndex)
         {
             case FinOpsDatabaseResourcesSubTabIndex:
@@ -182,6 +192,9 @@ public partial class FinOpsTab
         }
     }
 
+    /// <summary>True while Server Inventory, the one sub-tab that reads the whole fleet rather than the picker's server, is the active sub-tab.</summary>
+    private bool SelectedSubTabIsCrossServer => FinOpsSubTabControl.SelectedIndex == FinOpsServerInventorySubTabIndex;
+
     // ── Utilization ──
 
     private async Task LoadFinOpsUtilizationAsync()
@@ -195,10 +208,12 @@ public partial class FinOpsTab
             data.MonthlyCost = _server.MonthlyCostUsd;
 
             /* Free space % for the storage health score, from the latest database sizes. */
+            /* #5312: deliberately NOT narrowed by the saved database filter. The free-space figure is the server's volume headroom, a
+               server-level health score, not a per-database size, so it reads every database's files whatever the filter says. */
             dbSizes = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
             var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
             var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
-            data.FreeSpacePct = totalStorageMb > 0 ? totalFreeMb / totalStorageMb * 100m : 100m;
+            data.FreeSpacePct = FinOpsUtilizationFigures.FreeSpacePct(totalStorageMb, totalFreeMb);
         }
 
         UpdateUtilizationSummary(data);
@@ -211,8 +226,11 @@ public partial class FinOpsTab
             var topConsumers = await _dataService.GetTopResourceConsumersAsync(_server.ServerId);
             FinOpsTopTotalGrid.ItemsSource = topConsumers.ByTotal;
             FinOpsTopAvgGrid.ItemsSource = topConsumers.ByAvg;
-            var dbSizeSummary = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId);
+            var dbSizeSummary = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
             FinOpsDbSizeChart.ItemsSource = dbSizeSummary;
+            /* A server with no CPU sample in the window is stale or not collecting: its latest sizes can be days old, so the chart is
+               hidden rather than shown as if they were current. */
+            FinOpsDbSizeChartGroup.Visibility = data.ShowsDatabaseSizeChart ? Visibility.Visible : Visibility.Collapsed;
             /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
             var chartCaption = DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
             FinOpsDbSizeChartCaption.Text = chartCaption ?? "";
@@ -224,6 +242,7 @@ public partial class FinOpsTab
             FinOpsTopTotalGrid.ItemsSource = null;
             FinOpsTopAvgGrid.ItemsSource = null;
             FinOpsDbSizeChart.ItemsSource = null;
+            FinOpsDbSizeChartGroup.Visibility = Visibility.Collapsed;
             FinOpsDbSizeChartCaption.Text = "";
             FinOpsDbSizeChartCaption.Visibility = Visibility.Collapsed;
             FinOpsProvisioningTrendGrid.ItemsSource = null;
@@ -279,9 +298,10 @@ public partial class FinOpsTab
         }
 
         /* CPU text + bars */
-        FinOpsAvgCpuText.Text = $"{data.AvgCpuPct:N2}%";
-        FinOpsP95CpuText.Text = $"{data.P95CpuPct:N2}%";
-        FinOpsMaxCpuText.Text = $"{data.MaxCpuPct}%";
+        /* A window with no CPU sample shows dashes and empty bars: the 0s the read returns came from nothing. */
+        FinOpsAvgCpuText.Text = data.AvgCpuText;
+        FinOpsP95CpuText.Text = data.P95CpuText;
+        FinOpsMaxCpuText.Text = data.MaxCpuText;
         FinOpsCpuSamplesText.Text = data.CpuSamples.ToString("N0");
         /* On an Azure SQL Database the count is its vCores, named as vCores, and n/a where its service objective names none: the
            scheduler count it can see is never shown as the CPU it is given. */
@@ -290,26 +310,21 @@ public partial class FinOpsTab
         /* The in-use count is n/a where it was not collected (NULL on an Azure SQL Database), never 0; the maximum shows as stored. */
         FinOpsWorkerThreadsText.Text = ServerHardwareScope.WorkerThreadsText(data.CurrentWorkersCount, data.MaxWorkersCount);
 
-        SetBar(FinOpsAvgCpuBar, FinOpsAvgCpuFilled, FinOpsAvgCpuEmpty, (double)data.AvgCpuPct);
-        SetBar(FinOpsP95CpuBar, FinOpsP95CpuFilled, FinOpsP95CpuEmpty, (double)data.P95CpuPct);
-        SetBar(FinOpsMaxCpuBar, FinOpsMaxCpuFilled, FinOpsMaxCpuEmpty, data.MaxCpuPct);
+        SetBar(FinOpsAvgCpuBar, FinOpsAvgCpuFilled, FinOpsAvgCpuEmpty, data.HasCpuSample ? (double)data.AvgCpuPct : 0);
+        SetBar(FinOpsP95CpuBar, FinOpsP95CpuFilled, FinOpsP95CpuEmpty, data.HasCpuSample ? (double)data.P95CpuPct : 0);
+        SetBar(FinOpsMaxCpuBar, FinOpsMaxCpuFilled, FinOpsMaxCpuEmpty, data.HasCpuSample ? data.MaxCpuPct : 0);
 
         /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
-        var stolenPct = data.TotalMemoryMb > 0
-            ? (double)(data.TotalMemoryMb - data.BufferPoolMb) / data.TotalMemoryMb * 100.0
-            : 0;
+        var stolenPct = FinOpsUtilizationFigures.StolenMemoryPct(data.TotalMemoryMb, data.BufferPoolMb);
         FinOpsMemoryUtilText.Text = $"{stolenPct:N0}%";
         SetBar(FinOpsMemoryUtilBar, FinOpsMemUtilFilled, FinOpsMemUtilEmpty, stolenPct);
 
         /* Buffer Pool % = Buffer Pool / Physical Memory */
-        var bpPct = data.PhysicalMemoryMb > 0
-            ? (double)data.BufferPoolMb / data.PhysicalMemoryMb * 100.0
-            : 0;
+        var bpPct = FinOpsUtilizationFigures.BufferPoolPct(data.BufferPoolMb, data.PhysicalMemoryMb);
 
         /* Physical memory and the buffer pool's share of it come from memory_stats, which on an Azure SQL Database is the
            database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
            edition, and only the caption and the verdict's wording change there. */
-        var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
         FinOpsMemoryRatioText.Text = $"{bpPct:N0}%";
         SetBar(FinOpsMemoryRatioBar, FinOpsMemRatioFilled, FinOpsMemRatioEmpty, bpPct);
 
@@ -319,20 +334,7 @@ public partial class FinOpsTab
         FinOpsTotalMemoryText.Text = $"{data.TotalMemoryMb:N0} MB";
         FinOpsBufferPoolText.Text = $"{data.BufferPoolMb:N0} MB";
 
-        FinOpsClassificationExplanation.Text = data.ProvisioningStatus switch
-        {
-            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(data.AvgCpuPct, data.P95CpuPct, bpPct, azureSqlDb),
-            "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(data.AvgCpuPct, data.MaxCpuPct, bpPct, azureSqlDb),
-            /* The reason comes from the same place as the verdict. This branch used to read
-               "P95CpuPct > 85 ? CPU : memory ratio is {x} (threshold: 0.95)", so a server flagged for grant
-               pressure or worker saturation would have been explained as a memory ratio that no longer
-               decides anything, citing a threshold the code does not check (#2246). */
-            "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
-                data.P95CpuPct, data.MaxGrantWaiters, data.GrantTimeouts, data.ForcedGrants,
-                data.MaxWorkersCount, data.CurrentWorkersCount),
-            ProvisioningVerdict.NotApplicable => ProvisioningVerdict.NotApplicableExplanation,
-            _ => ""
-        };
+        FinOpsClassificationExplanation.Text = FinOpsUtilizationFigures.Explanation(data.ToDto(), CultureInfo.CurrentCulture);
 
         /* Cost summary cards — shown only when a monthly budget is configured (0 = hidden, like Lite). */
         if (data.MonthlyCost > 0)
@@ -351,9 +353,10 @@ public partial class FinOpsTab
         /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
            Database is the database's own. */
         data.HealthScore = data.ComputeHealthScore();
-        /* A window with no CPU sample has no CPU term (ComputeHealthScore leaves it out), and the tooltip says so. */
-        FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;
-        FinOpsHealthScoreText.Text = $"Health: {data.HealthScore}";
+        /* A window with no CPU sample has no score: the memory and storage terms alone would read a full 100 next to "No Data".
+           It shows a dash on a gray badge, and the tooltip says why. */
+        FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;
+        FinOpsHealthScoreText.Text = data.HealthScoreText;
         FinOpsHealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         FinOpsHealthScoreBorder.Visibility = Visibility.Visible;
     }
@@ -374,13 +377,22 @@ public partial class FinOpsTab
         empty.Width = new GridLength(Math.Max(100 - clamped, 0.1), GridUnitType.Star);
     }
 
-    private static int HoursBackFromIndex(ComboBox combo) => combo.SelectedIndex switch { 0 => 1, 1 => 4, 2 => 12, 3 => 24, 4 => 168, _ => 24 };
+    /// <summary>The hours-back a FinOps list reads for its picker (#5562 R5). These reads take "hours back from now", so the
+    /// pickers are rolling-only in whole hours (<see cref="RollingUnitRule"/>): the span is the hours back, exactly. The
+    /// round-up in <see cref="ViewerTimeRangeWindow.HoursBack"/> is only a guard; the picker never offers a finished period
+    /// or a span under an hour.</summary>
+    private static int HoursBackFromPicker(TimeRangePicker picker)
+    {
+        var now = DateTime.UtcNow;
+        var (startUtc, _, _) = ViewerTimeRangeWindow.Window(picker.Value, now, ViewerTimeHelper.CurrentDisplayZone());
+        return ViewerTimeRangeWindow.HoursBack(startUtc, now);
+    }
 
     // ── Database Resources ──
 
     private async Task LoadFinOpsDatabaseResourcesAsync()
     {
-        var hoursBack = HoursBackFromIndex(FinOpsResourceUsageTimeRangeCombo);
+        var hoursBack = HoursBackFromPicker(FinOpsResourceUsageTimeRangeCombo);
         var data = await _dataService.GetDatabaseResourceUsageAsync(_server.ServerId, hoursBack);
         _finopsDbResourcesFilterMgr!.UpdateData(data);
         FinOpsNoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -391,7 +403,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsDatabaseSizesAsync()
     {
-        var data = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
+        var data = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId, SelectedDatabaseFilter);
 
         /* Proportional cost share by size (mirrors Lite's LoadDatabaseSizesAsync). */
         if (_server.MonthlyCostUsd > 0 && data.Count > 0)
@@ -401,7 +413,7 @@ public partial class FinOpsTab
             if (totalMb > 0)
             {
                 foreach (var d in data)
-                    d.MonthlyCostShare = ((d.TotalSizeMb ?? 0m) / totalMb) * _server.MonthlyCostUsd;
+                    d.MonthlyCostShare = FinOpsCost.StorageShare(d.TotalSizeMb ?? 0m, totalMb, _server.MonthlyCostUsd);
             }
         }
 
@@ -417,7 +429,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsPvsStatsAsync()
     {
-        var data = await _dataService.GetPvsStatsLatestAsync(_server.ServerId);
+        var data = await _dataService.GetPvsStatsLatestAsync(_server.ServerId, SelectedDatabaseFilter);
 
         _finopsPvsStatsFilterMgr!.UpdateData(data);
         FinOpsNoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -425,7 +437,7 @@ public partial class FinOpsTab
 
         /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same axis
            family as Storage Growth. Top-5 databases by current PVS size, 7 days of hourly points. */
-        var trend = await _dataService.GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7));
+        var trend = await _dataService.GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7), SelectedDatabaseFilter);
         RenderPvsTrendChart(trend);
     }
 
@@ -484,7 +496,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsHighImpactAsync()
     {
-        var hoursBack = HoursBackFromIndex(FinOpsHighImpactTimeRangeCombo);
+        var hoursBack = HoursBackFromPicker(FinOpsHighImpactTimeRangeCombo);
         var data = await _dataService.GetHighImpactQueriesAsync(_server.ServerId, hoursBack);
         _finopsHighImpactFilterMgr!.UpdateData(data);
         FinOpsHighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -507,8 +519,9 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsIdleDatabasesAsync()
     {
-        var data = await _dataService.GetIdleDatabasesAsync(_server.ServerId);
+        var (covered, data) = await _dataService.GetIdleDatabaseReadAsync(_server.ServerId);
         _finopsIdleDbsFilterMgr!.UpdateData(data);
+        FinOpsIdleDatabasesNoDataMessage.Text = DarlingFinOpsOptimizationReader.IdleDatabasesEmptyText(covered);
         FinOpsIdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsIdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
     }
@@ -522,18 +535,18 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsWaitCategorySummaryAsync()
     {
-        var hoursBack = HoursBackFromIndex(FinOpsWaitStatsTimeRangeCombo);
+        var hoursBack = HoursBackFromPicker(FinOpsWaitStatsTimeRangeCombo);
         var data = await _dataService.GetWaitCategorySummaryAsync(_server.ServerId, hoursBack);
 
-        /* Proportional cost share scaled to the window (mirrors Lite: budget * hoursBack/730). */
+        /* Proportional cost share scaled to the window (mirrors Lite: the monthly budget scaled by the window hours). */
         if (_server.MonthlyCostUsd > 0 && data.Count > 0)
         {
-            var windowBudget = _server.MonthlyCostUsd * (hoursBack / 730.0m);
+            var windowBudget = FinOpsCost.WindowBudget(_server.MonthlyCostUsd, hoursBack);
             var totalWait = data.Sum(w => w.TotalWaitTimeMs);
             if (totalWait > 0)
             {
                 foreach (var w in data)
-                    w.MonthlyCostShare = (w.TotalWaitTimeMs / (decimal)totalWait) * windowBudget;
+                    w.MonthlyCostShare = FinOpsCost.Share(w.TotalWaitTimeMs, (decimal)totalWait, windowBudget);
             }
         }
 
@@ -543,18 +556,18 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsExpensiveQueriesAsync()
     {
-        var hoursBack = HoursBackFromIndex(FinOpsExpensiveQueriesTimeRangeCombo);
+        var hoursBack = HoursBackFromPicker(FinOpsExpensiveQueriesTimeRangeCombo);
         var data = await _dataService.GetExpensiveQueriesAsync(_server.ServerId, hoursBack);
 
-        /* Proportional cost share scaled to the window (mirrors Lite: budget * hoursBack/730). */
+        /* Proportional cost share scaled to the window (mirrors Lite: the monthly budget scaled by the window hours). */
         if (_server.MonthlyCostUsd > 0 && data.Count > 0)
         {
-            var windowBudget = _server.MonthlyCostUsd * (hoursBack / 730.0m);
+            var windowBudget = FinOpsCost.WindowBudget(_server.MonthlyCostUsd, hoursBack);
             var totalCpu = data.Sum(q => q.TotalCpuMs);
             if (totalCpu > 0)
             {
                 foreach (var q in data)
-                    q.MonthlyCostShare = (q.TotalCpuMs / (decimal)totalCpu) * windowBudget;
+                    q.MonthlyCostShare = FinOpsCost.Share(q.TotalCpuMs, (decimal)totalCpu, windowBudget);
             }
         }
 
@@ -585,17 +598,21 @@ public partial class FinOpsTab
 
     // ── Server Inventory (cross-server) ──
 
+    /* Newest Server Inventory load wins: a read that finishes after a later one began is dropped (#5492 round 2). */
+    private readonly FinOpsLoadSequence _finopsInventoryLoads = new();
+
     private async Task LoadFinOpsServerInventoryAsync()
     {
-        var servers = await _dataService.GetServerInventoryAsync();
+        var token = _finopsInventoryLoads.Begin();
+        var includeRemoved = FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked);
+        var servers = await _dataService.GetServerInventoryAsync(includeRemoved);
 
-        /* Overlay each server's collected metrics + compute the health score (mirrors Lite's
-           LoadServerInventoryAsync minus the live query). memScore/storScore use Lite's inventory-path
-           defaults (buffer-pool ratio / file-level free space aren't in the inventory read).
+        /* Overlay each server's collected metrics + health score (mirrors Lite's LoadServerInventoryAsync minus the live query).
            #4227: ONE fleet round trip for every server's metrics, not one per server — the fan-out lanes
            this loop used to need (#3016) existed only to bound how many PER-SERVER reads ran concurrently,
            and there is now exactly one read total. */
         var metrics = await _dataService.GetServerMetricsAsync();
+        if (!_finopsInventoryLoads.IsCurrent(token)) return;
         foreach (var item in servers)
         {
             if (metrics.TryGetValue(item.ServerId, out var row))
@@ -604,19 +621,15 @@ public partial class FinOpsTab
                 if (row.StorageTotalGb.HasValue) item.StorageTotalGb = row.StorageTotalGb;
                 if (row.IdleDbCount.HasValue) item.IdleDbCount = row.IdleDbCount;
                 if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
-            }
 
-            /* A server with no CPU sample in the window has a null average: its CPU term is left out, because scoring it
-               as 0% CPU would hand it a full 100 made from nothing. */
-            int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;
-            var memScore = 80;
-            var storScore = FinOpsHealthCalculator.StorageScore(50);
-            item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
+                /* The Utilization view's own score for this server (same p95 CPU, buffer pool and free space); null (a dash) with no CPU sample. */
+                item.HealthScore = row.HealthScore;
+            }
         }
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);
         FinOpsNoServerInventoryMessage.Visibility = servers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsServerInventoryCountIndicator.Text = servers.Count > 0 ? $"{servers.Count} server(s)" : "";
+        FinOpsServerInventoryCountIndicator.Text = FinOpsServerChoice.InventoryCountText(servers.Count, includeRemoved);
     }
 
     // ── Refresh buttons + time-range combos (all route through the shell's overlap-guarded loop where they
@@ -630,27 +643,34 @@ public partial class FinOpsTab
     private async void FinOpsRefreshApplicationConnections_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsApplicationConnectionsAsync);
     private async void FinOpsRefreshHighImpact_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsHighImpactAsync);
     private async void FinOpsRefreshServerInventory_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsServerInventoryAsync);
+
+    /// <summary>Ticking or clearing "Show removed servers" reloads the list, and its "N server(s)" count follows the list it shows. Ignored until the tab is loaded, so the XAML's own initial state does not read.</summary>
+    private async void FinOpsShowRemoved_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        await RunFinOpsLoad(LoadFinOpsServerInventoryAsync);
+    }
     private async void FinOpsOptimizationRefresh_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsOptimizationAsync);
 
-    private async void FinOpsResourceUsageTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsResourceUsageTimeRange_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         await RunFinOpsLoad(LoadFinOpsDatabaseResourcesAsync);
     }
 
-    private async void FinOpsWaitStatsTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsWaitStatsTimeRange_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         await RunFinOpsLoad(LoadFinOpsWaitCategorySummaryAsync);
     }
 
-    private async void FinOpsExpensiveQueriesTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsExpensiveQueriesTimeRange_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         await RunFinOpsLoad(LoadFinOpsExpensiveQueriesAsync);
     }
 
-    private async void FinOpsHighImpactTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsHighImpactTimeRange_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         await RunFinOpsLoad(LoadFinOpsHighImpactAsync);

@@ -351,7 +351,8 @@ public sealed class FleetGateStatsTests
     {
         var source = ServerConnectBackoffTests.ReadWorkerSource();
 
-        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));", source, StringComparison.Ordinal);
+        /* #5597: the count also starts at the end of the server's seeding (SeedFinishedTicks), not only at the loop's floor. */
+        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));", source, StringComparison.Ordinal);
         Assert.Contains("_fleetGateStats?.RecordQueueWait(Stopwatch.GetElapsedTime(gateWaitStarted));", source, StringComparison.Ordinal);
 
         /* Every place that advances a COLLECTOR's due time on the grid is preceded by the count. The store
@@ -483,19 +484,48 @@ public sealed class FleetGateSelfAlertTests
         Assert.Single(h.Deliverer.Outcomes);
     }
 
+    /* #5493: Collection Falling Behind is a state alert. One alert per occurrence; with
+       connection_refire_minutes at 0 (the default) a standing condition never repeats. */
     [Fact]
-    public async Task AStandingCondition_RestatesOnlyAfterTheSharedCooldown()
+    public async Task AStandingCondition_SendsOneAlertPerOccurrence_WhenTheRefireIsZero()
     {
-        var h = new DarlingSelfAlertTests.Harness();
+        var h = new DarlingSelfAlertTests.Harness { ConnectionRefireMinutes = 0 };
         var e = h.Build();
         var start = h.Now;
 
         await e.ApplyFleetGateAsync(Report(run: 300, skipped: 100, h.Now), Ct);
-        h.Now = start.AddMinutes(1);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        foreach (var offset in new[] { TimeSpan.FromMinutes(1), TimeSpan.FromHours(3), TimeSpan.FromHours(12), TimeSpan.FromDays(3) })
+        {
+            h.Now = start.Add(offset);
+            await e.ApplyFleetGateAsync(Report(run: 300, skipped: 100, h.Now), Ct);
+            Assert.Single(h.Deliverer.Outcomes);
+        }
+    }
+
+    /* #5493: with connection_refire_minutes at N, the standing condition repeats once N minutes have
+       passed since the last send, and not before. */
+    [Fact]
+    public async Task AStandingCondition_RepeatsOnlyOnceTheRefireIntervalHasPassed()
+    {
+        var h = new DarlingSelfAlertTests.Harness { ConnectionRefireMinutes = 30 };
+        var e = h.Build();
+        var start = h.Now;
+
         await e.ApplyFleetGateAsync(Report(run: 300, skipped: 100, h.Now), Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        h.Now = start.AddHours(3);
+        h.Now = start.AddMinutes(29);
+        await e.ApplyFleetGateAsync(Report(run: 300, skipped: 100, h.Now), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = start.AddMinutes(30);
+        await e.ApplyFleetGateAsync(Report(run: 300, skipped: 100, h.Now), Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* The repeat restarts the interval: 29 minutes after it is still quiet. */
+        h.Now = start.AddMinutes(59);
         await e.ApplyFleetGateAsync(Report(run: 300, skipped: 100, h.Now), Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
@@ -695,7 +725,9 @@ public sealed class WorkerLoopTimerClockStepTests
     {
         var code = WorkerCode();
 
-        Assert.Contains(field + " = NextGridStamp(" + field + ", DateTime.UtcNow, " + interval + ");", code, StringComparison.Ordinal);
+        /* The store-metrics stamp advances inside TryStartStoreMetricsTick (#4970), which is handed the clock as nowUtc. */
+        var now = field == "_nextStoreMetricsUtc" ? "nowUtc" : "DateTime.UtcNow";
+        Assert.Contains(field + " = NextGridStamp(" + field + ", " + now + ", " + interval + ");", code, StringComparison.Ordinal);
         Assert.Contains("StampIsDue(" + field + ", " + interval + ", DateTime.UtcNow)", code, StringComparison.Ordinal);
     }
 

@@ -21,6 +21,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -48,6 +49,7 @@ namespace Darling.Tests;
 /// <c>Lite.Tests/McpLatestSnapshotStampTests</c> executes the Lite tools against a real DuckDB;
 /// <see cref="McpLatestSnapshotStampLivePostgresTests"/> executes the Darling ones against live Postgres.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpLatestSnapshotStampTests
 {
     /* ───────────────────────── the roster ───────────────────────── */
@@ -524,7 +526,7 @@ public sealed class McpLatestSnapshotStampTests
     /// for the server) — a "current" read IS a latest read, and the name had kept it out of the sweep.
     /// </summary>
     private static readonly Regex LatestReaderCall = new(
-        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetRunningJobsAsync)\(",
+        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetObjectIndexDetailAsync|GetIndexAnalysisWithSnapshotTimesAsync|GetRunningJobsAsync)\(",
         RegexOptions.Compiled);
 
     /* ───────────────────────── the readers ───────────────────────── */
@@ -552,6 +554,8 @@ public sealed class McpLatestSnapshotStampTests
        having here: the anchor column rides the row statement, so the instant published is the instant the
        returned rows came from, never a fresher capture a second MAX() read happened to see. */
     [InlineData(nameof(DarlingObjectStatsReader.IndexLockingSql), "collection_time")]
+    /* #5070: the Storage Growth index drill, stamped the same way. */
+    [InlineData(nameof(DarlingFinOpsStorageGrowthReader.ObjectIndexDetailSql), "collection_time")]
     public void EveryStampedRead_SelectsItsStampColumn_OnTheRowStatement(string sqlName, string column)
     {
         var sql = ReaderSql(sqlName);
@@ -671,6 +675,55 @@ public sealed class McpLatestSnapshotStampTests
            beside it in the same reader, which must stay outside. */
         Assert.Matches(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetCurrentConfigAsync(");
         Assert.DoesNotMatch(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(");
+        /* #5070: the Storage Growth index drill is a latest read too, and so is held to the stamped dialect. */
+        Assert.Matches(LatestReaderCall, "        var indexes = await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(");
+        /* #5082: so is the Index Analysis read, which answers each database's newest snapshot. */
+        Assert.Matches(LatestReaderCall, "        var read = await DarlingFinOpsIndexAnalysisReader.GetIndexAnalysisWithSnapshotTimesAsync(");
+    }
+
+    /// <summary>
+    /// The sweep above slices a file at its <c>[McpServerTool</c> marks, so it cannot see <c>get_finops</c>'s
+    /// <c>storage_growth</c> view, which lives in a partial file with no mark of its own (#5070). This pins the one
+    /// latest read in that file directly: the call that reads the index drill and the stamp built from the row
+    /// statement's own anchor sit in the same file, and the stamp goes through the shared UTC formatter.
+    /// </summary>
+    [Fact]
+    public void StorageGrowthIndexDrill_IsStamped_FromTheRowsOwnAnchor()
+    {
+        var source = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.StorageGrowth.cs"));
+        Assert.Matches(LatestReaderCall, source);
+        Assert.Contains("GetObjectIndexDetailAsync(", source, StringComparison.Ordinal);
+        Assert.Matches(CapturedAtKey, source);
+        Assert.Contains("captured_at = indexes.Count == 0 ? null : McpHelpers.FormatEffectiveStart(indexes[0].CollectionTime)", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Same reason as above for <c>index_analysis</c> (#5082): its partial file has no tool mark, so this pins the read and
+    /// the per-database stamp directly. The patterns run against the file's own source.
+    /// </summary>
+    [Fact]
+    public void IndexAnalysis_StampsEachDatabase_FromItsOwnSnapshot_AndNotTheOverallRow()
+    {
+        var source = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.IndexAnalysis.cs"));
+        Assert.Matches(LatestReaderCall, source);
+        Assert.Matches(CapturedAtKey, source);
+        Assert.Contains("captured_at = capturedAt is { } at ? McpHelpers.FormatEffectiveStart(at) : null,", source, StringComparison.Ordinal);
+        Assert.Contains("IndexAnalysisRollupRow(d, true, SnapshotTimeOf(snapshotTimes, d.DatabaseId))", source, StringComparison.Ordinal);
+        /* The overall row spans databases and is built without a time. */
+        Assert.Contains("IndexAnalysisRollupRow(result.OverallRollup, false)", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Same reason as above for <c>database_sizes</c>: its partial file has no tool mark, so this pins the latest read and
+    /// the stamp, built through the shared UTC formatter from the snapshot's own time.
+    /// </summary>
+    [Fact]
+    public void DatabaseSizes_IsStamped_FromTheSnapshotsOwnTime()
+    {
+        var source = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.DatabaseSizes.cs"));
+        Assert.Contains("DarlingFinOpsDatabaseSizesReader.GetLatestAsync(", source, StringComparison.Ordinal);
+        Assert.Matches(CapturedAtKey, source);
+        Assert.Contains("captured_at = McpHelpers.FormatEffectiveStart(files[0].CollectionTime)", source, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
@@ -696,6 +749,7 @@ public sealed class McpLatestSnapshotStampTests
     private static string ReaderSql(string sqlName) => sqlName switch
     {
         nameof(DarlingDataReader.LatestMemoryClerksSql) => DarlingDataReader.LatestMemoryClerksSql,
+        nameof(DarlingFinOpsStorageGrowthReader.ObjectIndexDetailSql) => DarlingFinOpsStorageGrowthReader.ObjectIndexDetailSql,
         nameof(DarlingDataReader.LatestFileIoStatsSql) => DarlingDataReader.LatestFileIoStatsSql,
         nameof(DarlingDataReader.LatestPerfmonStatsSql) => DarlingDataReader.LatestPerfmonStatsSql,
         nameof(DarlingCurrentConfigReader.ServerConfigSql) => DarlingCurrentConfigReader.ServerConfigSql,
@@ -833,6 +887,7 @@ public sealed class McpLatestSnapshotStampTests
 /// assertions are equalities, and an anchor of "now" would make every age a race.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class McpLatestSnapshotStampLivePostgresTests
 {
     private const string ServerName = "darling-mcp-latest-stamp-e2e";
@@ -868,6 +923,7 @@ public sealed class McpLatestSnapshotStampLivePostgresTests
             /* Every row sits in the past; the anchor is base + 5 min, so every age below is exact. */
             var @base = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-2);
             var anchor = @base.AddMinutes(5).ToString("o") + "Z";
+            var runningJobsLatest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
 
             /* ── memory grants: a storm 30 minutes before a calm latest snapshot ── */
             foreach (var (t, waiters, timeouts, granted) in new[] { (@base.AddMinutes(-30), 12, 3L, 6000m), (@base, 0, 0L, 500m) })
@@ -980,10 +1036,13 @@ VALUES ($1,$2,$3,$4,$5,120,'SUCCESS',7)", CollectionIdGenerator.Next(), ServerId
                     @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type_desc, total_size_mb, used_size_mb, volume_mount_point, volume_total_mb, volume_free_mb)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
                     CollectionIdGenerator.Next(), t, ServerId, ServerName, "Sales", "Sales", "ROWS", 10240m, 8192m, "D:\\", 512000m, 204800m);
+                /* get_running_jobs lists a snapshot only while it is recent (the alert read's #1812 bound), so its latest row is
+                   two minutes old instead of two hours; the stamp is still the latest row's own time. */
+                var jobsAt = t == @base ? runningJobsLatest : t.AddMinutes(-90);
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     @"INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-                    t, ServerId, ServerName, "Nightly ETL", "22222222-2222-2222-2222-222222222222", true, t.AddMinutes(-30), 1800L, 600L, 900L, 42L, true, 300.0m);
+                    jobsAt, ServerId, ServerName, "Nightly ETL", "22222222-2222-2222-2222-222222222222", true, jobsAt.AddMinutes(-30), 1800L, 600L, 900L, 42L, true, 300.0m);
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, cpu_count, physical_memory_mb)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
@@ -1004,7 +1063,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             {
                 var payload = Parse(json);
                 Assert.True(payload.TryGetProperty("captured_at", out var capturedAt), $"{name}: no captured_at on the payload");
-                Assert.Equal(Stamp(@base), capturedAt.GetString());
+                Assert.Equal(Stamp(name == "get_running_jobs" ? runningJobsLatest : @base), capturedAt.GetString());
                 Assert.False(payload.TryGetProperty("collection_time", out _), $"{name}: still publishes the retired top-level collection_time beside captured_at");
             }
 

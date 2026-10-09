@@ -33,7 +33,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_ShowsSinceEffectiveStart_WhenTheFloorIsPastTheSlack()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var banner = new TextBlock();
             var floor = RequestedStart.AddDays(3);
@@ -48,7 +48,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_StaysCollapsed_WhenTheFloorIsInsideTheSlack()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             /* 30 minutes after the requested start — inside DurationTrendRouting.TruncationSlack's 90-minute
                allowance, so a normal cadence-start lag, not a retention cut (the #2364 / #4231 ruling). Seeded
@@ -65,7 +65,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_StaysCollapsed_WhenTheProbeFoundNoFloorAtAll()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var banner = new TextBlock();
 
@@ -73,26 +73,6 @@ public sealed class RawWindowFloorViewerPortTests
 
             Assert.Equal(Visibility.Collapsed, banner.Visibility);
         });
-    }
-
-    /// <summary>WPF objects require STA; same shape as Lite.Tests' MainWindowAccessKeyTests / Dashboard.Tests'
-    /// DataGridExport tests.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
     }
 
     private static string ViewerFile(string file) => ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file);
@@ -114,7 +94,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_TableServed_NamesTheEffectiveStartAndTheBound_AndTheRawSlicerFloor()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var wideStart = RequestedStart.AddDays(1);
             var plan = new QueryStoreIntervalWide.WideReadPlan(
@@ -145,11 +125,75 @@ public sealed class RawWindowFloorViewerPortTests
         });
     }
 
+    /* #5329: an hourly-served grid starts at this server's first bucket, so "Showing since" names THAT start, and raw's floor (which
+       only the slicer and the comparison read) is the slicer's. The hourly tier suffix still follows. */
+    [Fact]
+    public void UpdateTruncationBanner_HourlyServed_NamesTheGridsStart_AndRawsFloorAsTheSlicers()
+    {
+        StaTestThread.Run(() =>
+        {
+            const string Suffix = " - aggregated hourly";
+            var banner = new TextBlock();
+
+            /* Hourly keeps more than raw: the grid starts a day in, raw's floor is four days in. */
+            ViewerServerTab.UpdateTruncationBanner(banner, RequestedStart.AddDays(4), RequestedStart, Suffix,
+                hourly: new ViewerServerTab.HourlyServed(RequestedStart.AddDays(1)));
+            Assert.StartsWith("Showing since ", banner.Text, StringComparison.Ordinal);
+            Assert.Contains(" · slicer since ", banner.Text, StringComparison.Ordinal);
+            Assert.EndsWith(Suffix, banner.Text, StringComparison.Ordinal);
+            var gridOnly = new TextBlock();
+            ViewerServerTab.UpdateTruncationBanner(gridOnly, null, RequestedStart, Suffix,
+                hourly: new ViewerServerTab.HourlyServed(RequestedStart.AddDays(1)));
+            Assert.StartsWith("Showing since ", gridOnly.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("slicer", gridOnly.Text, StringComparison.Ordinal);
+
+            /* A late hourly start after an aligned window start is named even when raw reaches the start. */
+            var late = new TextBlock();
+            ViewerServerTab.UpdateTruncationBanner(late, RequestedStart, RequestedStart, Suffix,
+                hourly: new ViewerServerTab.HourlyServed(RequestedStart.AddHours(5)));
+            Assert.StartsWith("Showing since ", late.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("slicer", late.Text, StringComparison.Ordinal);
+
+            /* A start inside the slack is the hour alignment alone: the banner names the window, not a "since". */
+            var aligned = new TextBlock();
+            ViewerServerTab.UpdateTruncationBanner(aligned, null, RequestedStart, Suffix,
+                hourly: new ViewerServerTab.HourlyServed(RequestedStart.AddHours(1)));
+            Assert.StartsWith("Showing 2", aligned.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("since", aligned.Text, StringComparison.Ordinal);
+
+            /* No bucket at all (an empty grid) with a cut raw floor: the slicer's shortfall only. */
+            var none = new TextBlock();
+            ViewerServerTab.UpdateTruncationBanner(none, RequestedStart.AddDays(4), RequestedStart, Suffix,
+                hourly: new ViewerServerTab.HourlyServed(null));
+            Assert.StartsWith("Slicer since ", none.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("full window", none.Text, StringComparison.Ordinal);
+
+            /* #5329: the usual hourly route (a cut raw floor, a first bucket inside the slack, and an edges note that says the
+               grid stops short) must not say "the grid shows the full window": that is the wide plan's claim. */
+            const string Edges = " - aggregated hourly. Window edges: the data from a to b is not included";
+            var usual = new TextBlock();
+            ViewerServerTab.UpdateTruncationBanner(usual, RequestedStart.AddDays(4), RequestedStart, Edges,
+                hourly: new ViewerServerTab.HourlyServed(RequestedStart.AddHours(1)));
+            Assert.DoesNotContain("full window", usual.Text, StringComparison.Ordinal);
+            Assert.StartsWith("Showing 2", usual.Text, StringComparison.Ordinal);
+            Assert.Contains(" · slicer since ", usual.Text, StringComparison.Ordinal);
+            Assert.EndsWith(Edges, usual.Text, StringComparison.Ordinal);
+
+            /* An empty grid (no bucket) names no start for it, and makes no full-window claim, with or without a cut raw floor. */
+            var emptyNoSlicer = new TextBlock();
+            ViewerServerTab.UpdateTruncationBanner(emptyNoSlicer, null, RequestedStart, Edges,
+                hourly: new ViewerServerTab.HourlyServed(null));
+            Assert.DoesNotContain("full window", emptyNoSlicer.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("Showing", emptyNoSlicer.Text, StringComparison.Ordinal);
+            Assert.StartsWith("No rollup bucket in the window", emptyNoSlicer.Text, StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public void UpdateTruncationBanner_WideBranch_NamesTheSlicerFloor_WhetherOrNotTheGridWasCut()
     {
         var tab = ViewerFile("ViewerServerTab.Queries.cs");
-        var start = tab.IndexOf("if (widePlan?.EffectiveStart is DateTime wideStart)", StringComparison.Ordinal);
+        var start = tab.IndexOf("if (servedStart is not null || hourlyServed)", StringComparison.Ordinal);
         Assert.True(start >= 0);
         var branch = tab[start..tab.IndexOf("return;", start, StringComparison.Ordinal)];
         Assert.Contains("var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);", branch, StringComparison.Ordinal);
@@ -171,8 +215,8 @@ public sealed class RawWindowFloorViewerPortTests
 
         var tab = ViewerFile("ViewerServerTab.Queries.cs");
         Assert.Contains("GetQueryStoreTopQueriesWithReachAsync(", tab, StringComparison.Ordinal);
-        Assert.Contains("UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan)", tab, StringComparison.Ordinal);
-        Assert.Contains("QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)", tab, StringComparison.Ordinal);
+        Assert.Contains("UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, \"Query Store\"), startUtc, widePlan: widePlan)", tab, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreIntervalWide.BannerReason(widePlan!.Value.StartBound)", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("interval table keeps 9 days", tab, StringComparison.Ordinal);
         Assert.Contains(" · slicer since ", tab, StringComparison.Ordinal);
     }

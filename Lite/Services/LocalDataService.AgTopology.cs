@@ -94,7 +94,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
             return new List<AgTopologyCard>();
         }
 
-        return AgTopology.BuildCards(replicas, await ReadAgTopologyDatabasesAsync());
+        return AgTopology.BuildCards(replicas, await ReadAgTopologyDatabasesAsync(), DateTime.UtcNow);
     }
 
     private async Task<List<AgTopologyReplicaRow>> ReadAgTopologyReplicasAsync()

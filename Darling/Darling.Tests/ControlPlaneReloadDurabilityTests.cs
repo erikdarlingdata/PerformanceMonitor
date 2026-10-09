@@ -47,6 +47,7 @@ namespace Darling.Tests;
 /// describing Darling's behaviour. <see cref="NeitherFixHasALiteTwinToDriftFrom"/> pins that, so a Lite
 /// twin appearing later fails asking for the same fix rather than drifting quietly.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class ControlPlaneReloadDurabilityTests
 {
     /// <summary>
@@ -169,9 +170,10 @@ public sealed class ControlPlaneReloadDurabilityTests
         Assert.Contains("ComposeStatementTimeoutUnknown", body, StringComparison.Ordinal);
 
         /* And the read it branches on has to be nullable — an int cannot express "I could not find out",
-           which is exactly why the original returned 15. */
+           which is exactly why the original returned 15. (#5560: the read is internal now, so the savepoint
+           test can drive it; the nullable return is the pinned part.) */
         Assert.Contains(
-            "private static async Task<int?> ReadComposeStatementTimeoutAsync(",
+            "internal static async Task<int?> ReadComposeStatementTimeoutAsync(",
             code,
             StringComparison.Ordinal);
 

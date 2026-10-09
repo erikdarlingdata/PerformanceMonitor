@@ -57,38 +57,80 @@ public partial class FinOpsTab : UserControl
     {
         InitializeComponent();
 
+        /* #5562: the shared time range pickers. The old combos opened on 24 hours (the heatmap on 30 days); the pickers
+           open on the same, drawn in the display zone in force. Every FinOps read takes "hours back from now" (the heatmap
+           days), so the pickers are rolling-only in whole hours (days): no calendar period, no custom end, no span under
+           one unit (R5). A picker must never offer a range its read cannot honor. */
+        foreach (var picker in new[] { FinOpsResourceUsageTimeRangeCombo, FinOpsWaitStatsTimeRangeCombo,
+                     FinOpsExpensiveQueriesTimeRangeCombo, FinOpsHighImpactTimeRangeCombo })
+        {
+            picker.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+            picker.RollingUnit = RollingUnitRule.Hour;
+            picker.Value = TimeRangePresets.Find("1d")!;
+        }
+
+        FinOpsObjectHeatmapWindowCombo.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        FinOpsObjectHeatmapWindowCombo.RollingUnit = RollingUnitRule.Day;
+        FinOpsObjectHeatmapWindowCombo.Value = TimeRangePresets.Find("1mo")!;
+
         /* Register the FinOps grids' column-filter managers into _filterManagers (defined below), after
            InitializeComponent so the named grids exist. Body lives in FinOpsTab.Loaders.cs. */
         InitializeFinOpsTab();
+
+        /* Headers show in full with their unit: each column is at least as wide as its own header (the fixed widths cut "Current Size M"). */
+        Loaded += (_, _) => DataGridHeaderFit.Apply(this);
     }
 
     /// <summary>The selector's currently-selected server. Entry points guard on a valid selection before any loader runs, so the loaders read this non-null.</summary>
     private DarlingServer _server => (DarlingServer)ServerSelector.SelectedItem!;
 
     /// <summary>Wires the data service. Call once, before the tab is first shown.</summary>
-    public void Initialize(ViewerDataService dataService) => _dataService = dataService;
+    public void Initialize(ViewerDataService dataService, ViewerServerStore? serverStore = null)
+    {
+        _dataService = dataService;
+        _serverStore = serverStore;
+    }
+
+    /// <summary>The shell's server store, which holds each server's saved database filter (#5312); null before <see cref="Initialize"/> or in a test.</summary>
+    private ViewerServerStore? _serverStore;
+
+    /// <summary>
+    /// #5312: the selected server's saved database filter, read from the same store the server tab's database picker writes, so the two cannot
+    /// disagree. Null when nothing is chosen: every read then keeps its unfiltered SQL and rows. Read per load, so a change made in the server
+    /// tab shows on the next refresh here.
+    /// </summary>
+    private IReadOnlyList<string>? SelectedDatabaseFilter
+    {
+        get
+        {
+            var saved = _serverStore?.GetViewFilterDatabases(_server.ServerName);
+            return saved is { Count: > 0 } ? saved.ToList() : null;
+        }
+    }
 
     /// <summary>
     /// Populates the server selector from the shell's server list (mirrors the Recommendations tab's own
-    /// selector). Suppresses SelectionChanged during population, preserving the current selection when the list
-    /// is re-supplied. The shell drives the first load once the tab becomes visible.
+    /// selector). Suppresses SelectionChanged during population. With <paramref name="keepSelection"/>, the
+    /// selector keeps its server while that server is in the list; otherwise, or once it is gone, it takes
+    /// <paramref name="sidebarServerId"/>, the shell's sidebar server, as the initial load does
+    /// (<see cref="FinOpsServerChoice.Selection"/>: the same keep-or-sidebar rule as the other pickers, but it never falls to a PostgreSQL target while a SQL Server target is listed). The shell drives the first load once the
+    /// tab becomes visible.
     /// </summary>
-    public void SetServers(IReadOnlyList<DarlingServer> servers)
+    public void SetServers(IReadOnlyList<DarlingServer> servers, int? sidebarServerId, bool keepSelection = true)
     {
         var previousId = (ServerSelector.SelectedItem as DarlingServer)?.ServerId;
 
         _populatingServers = true;
         ServerSelector.ItemsSource = servers;
-        if (servers.Count > 0)
-        {
-            var match = previousId is int pid ? servers.FirstOrDefault(s => s.ServerId == pid) : null;
-            ServerSelector.SelectedItem = match ?? servers[0];
-        }
+        ServerSelector.SelectedItem = FinOpsServerChoice.Selection(
+            servers, keepSelection ? previousId : null, sidebarServerId);
         _populatingServers = false;
+        ApplyServerGate();
 
-        /* The previously selected server is gone (removed elsewhere), so the selection fell back to another
-           one with SelectionChanged suppressed: reset the drills and column filters exactly as a deliberate
-           server switch does, so the old server's filters cannot zero the new server's grids (#2306). */
+        /* The selection changed with SelectionChanged suppressed: the previously selected server is gone
+           (removed elsewhere), or a load that does not keep the selection moved it. Reset the drills and column
+           filters exactly as a deliberate server switch does, so the old server's filters cannot zero the new
+           server's grids (#2306). */
         if (previousId is not null && servers.Count > 0 && ServerSelector.SelectedItem is DarlingServer now && now.ServerId != previousId)
         {
             ShowFinOpsStorageView(FinOpsStorageDrillLevel.Parent);
@@ -123,6 +165,28 @@ public partial class FinOpsTab : UserControl
         _populatingServers = true;
         ServerSelector.SelectedItem = match;
         _populatingServers = false;
+        ApplyServerGate();
+    }
+
+    /// <summary>
+    /// A PostgreSQL target answers none of the single-server FinOps panels (they read SQL Server data), so its sub-tabs
+    /// collapse and the tab says <see cref="FinOpsServerChoice.PostgresNotCollected"/> once, where the grids would have sat
+    /// empty or still holding the previous server's rows. Server Inventory lists the whole fleet and stays. Called wherever
+    /// the selected server or the active sub-tab changes; the loaders ask the same helper before they read.
+    /// </summary>
+    private void ApplyServerGate()
+    {
+        var line = FinOpsServerChoice.NotCollectedLine(ServerSelector.SelectedItem as DarlingServer, crossServer: false);
+        for (var i = 0; i < FinOpsSubTabControl.Items.Count; i++)
+        {
+            if (i != FinOpsServerInventorySubTabIndex && FinOpsSubTabControl.Items[i] is TabItem { Content: UIElement content })
+            {
+                content.Visibility = line is null ? Visibility.Visible : Visibility.Collapsed;
+            }
+        }
+
+        FinOpsNotCollectedText.Text = line ?? "";
+        FinOpsNotCollectedText.Visibility = line is not null && !SelectedSubTabIsCrossServer ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>The tab's own server selector drives it; single-clicking a sidebar server syncs it here (and
@@ -130,10 +194,16 @@ public partial class FinOpsTab : UserControl
     /// drill, then reloads the active sub-tab.</summary>
     private async void ServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        /* #5565: the tab's grids keep their column filters per server, so the scope follows the selector - also while
+           the list repopulates, when the early return below skips the rest. */
+        ColumnFilterScope.SetServer(this, (ServerSelector.SelectedItem as DarlingServer)?.ServerName);
+
         if (_populatingServers)
         {
             return;
         }
+
+        ApplyServerGate();
 
         /* A new server invalidates any open Storage Growth / Locking drill (their breadcrumbs + detail views
            belong to the previous server), so reset both to their parent view before reloading. */

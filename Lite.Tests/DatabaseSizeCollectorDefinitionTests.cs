@@ -122,15 +122,16 @@ public sealed class DatabaseSizeCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_Azure_IsDatabaseScoped_AndNeverEnumerates()
+    public void BuildQuery_Azure_IsDatabaseScoped_AndRunsPerDatabase()
     {
         var plan = DatabaseSizeStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true));
 
-        /* #1631: NOT per-database on Azure any more. RunsPerDatabase=true made the host enumerate
-           databases first, and that enumeration connects to master — the one database an Azure login
-           admitted by a DATABASE-level firewall rule cannot open (error 40615). The enumeration bought
-           nothing: the query is database-scoped and the connection already points at the right database. */
-        Assert.False(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
+        /* #5498: per-database on Azure again, and #1631's reason no longer applies. The enumeration connects to
+           master, which a login admitted by a DATABASE-level firewall rule cannot open (error 40615), but the host
+           now sweeps a registration that names a database on that database alone and never touches master (#2220).
+           A logical-server registration is connected to master anyway. One connection to master reported master's
+           files only, because the sibling arm read sys.resource_stats, which lags database creation by about an hour. */
+        Assert.True(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.False(DatabaseSizeStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo()));
 
         Assert.Contains("FROM sys.database_files AS df", plan.Text, StringComparison.Ordinal);

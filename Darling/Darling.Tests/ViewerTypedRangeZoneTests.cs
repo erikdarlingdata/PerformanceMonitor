@@ -202,70 +202,73 @@ public sealed class ViewerTypedRangeTests
         Assert.Null(range.Render(ServerZone));
     }
 
-    /* ---- source pins: the tab reaches the range only through the held instants ---- */
+    /* ---- source pins: the tab holds the range in the shared picker and draws it in its own zone (#5562) ---- */
 
     [Fact]
-    public void GetCustomRangeUtc_ReturnsTheHeldPair_AndDoesNotParseThePickers()
+    public void TheWindowIsReadFromThePickersHeldRange_NotFromControlsThatParseText()
     {
-        var body = StripComments(MemberText(TabSource(), "GetCustomRangeUtc"));
+        var body = StripComments(MemberText(TabSource(), "GetWindowUtc"));
 
+        Assert.Contains("ViewerTimeRangeWindow.Window(RangePicker.Value", body);
         Assert.DoesNotContain("DisplayToNaiveUtc", body);
         Assert.DoesNotContain("ConvertFromDisplay", body);
-        Assert.DoesNotContain("GetDateTimeFromPickers", body);
-        Assert.Contains("_customRange", body);
     }
 
     [Fact]
-    public void TheDisplayModeSwitch_ParsesNothing_AndDrawsTheHeldRangeInTheNewZone()
+    public void TheDisplayModeSwitch_ParsesNothing_AndRedrawsThePickerInTheNewZone()
     {
         var body = StripComments(MemberText(TabSource(), "TimeDisplayMode_SelectionChanged"));
 
         Assert.DoesNotContain("DisplayToNaiveUtc", body);
         Assert.DoesNotContain("ConvertFromDisplay", body);
-        Assert.DoesNotContain("GetDateTimeFromPickers", body);
         Assert.DoesNotContain("ForDisplay", body);
-        Assert.Contains("RenderCustomRange(", body);
-        Assert.Contains("DisplayZoneFor(mode,", body);
+        Assert.Contains("RefreshRangePicker()", body);
     }
 
     [Theory]
-    [InlineData("ApplyExternalTimeRange", "_customRange.Set(")]
-    [InlineData("ApplyExternalTimeRange", "_customRange.Clear()")]
-    [InlineData("SetToolbarWindowUtc", "_customRange.Set(")]
-    [InlineData("TimeRangeCombo_SelectionChanged", "_customRange.Clear()")]
-    [InlineData("TimeRangeCombo_SelectionChanged", "HoldPickersAsRange(")]
-    [InlineData("ApplyPickerEdit", "_customRange.ApplyEdit(")]
-    public void EveryPlaceThatSetsThePickers_HoldsTheRange(string member, string expected)
+    [InlineData("ApplyExternalTimeRange", "RangePicker.Value = range")]
+    [InlineData("SetToolbarWindowUtc", "TimeRangeSpec.FixedRange(fromUtc, toUtc)")]
+    [InlineData("InitializeRangePicker", "RangePicker.Value = ViewerTimeRangeWindow.DefaultFor(preferences)")]
+    [InlineData("InitializeRangePicker", "RangePicker.ZoneProvider = () => TabDisplayZone")]
+    public void EveryPlaceThatSetsThePicker_HoldsTheRangeAndTheTabsZone(string member, string expected)
     {
         Assert.Contains(expected, StripComments(MemberText(TabSource(), member)));
     }
 
     [Theory]
-    [InlineData("ApplyExternalTimeRange")]
-    [InlineData("SetToolbarWindowUtc")]
-    [InlineData("ApplyPickerEdit")]
     [InlineData("SetDisplayModeSelection")]
     [InlineData("RefreshServerClockAsync")]
-    public void EveryPlaceThatMovesTheZoneOrTheRange_DrawsThePickersFromTheHeldRange(string member)
+    public void EveryPlaceThatMovesTheZone_RedrawsThePicker(string member)
     {
-        Assert.Contains("RenderCustomRange(", StripComments(MemberText(TabSource(), member)));
+        Assert.Contains("RefreshRangePicker()", StripComments(MemberText(TabSource(), member)));
     }
 
     [Fact]
-    public void ThePickersAreWrittenOnlyByTheDrawing_AndTheDefaultSeed()
+    public void TheOverviewLanesAlwaysGetTheExplicitWindow_SoASubHourSpanIsNotRoundedToHours()
     {
-        var source = StripComments(TabSource());
-        var rendering = StripComments(MemberText(TabSource(), "RenderCustomRange"));
-        var comboSetup = StripComments(MemberText(TabSource(), "InitializeTimeComboBoxes"));
-        var seed = StripComments(MemberText(TabSource(), "TimeRangeCombo_SelectionChanged"));
+        var body = StripComments(MemberText(TabSource(), "GetOverviewCustomRange"));
 
-        var setters = new Regex(@"\b(?:From|To)(?:DatePicker\.SelectedDate|HourCombo\.SelectedIndex|MinuteCombo\.SelectedIndex)\s*=(?!=)");
-        var total = setters.Matches(source).Count;
-        var allowed = setters.Matches(rendering).Count + setters.Matches(comboSetup).Count + setters.Matches(seed).Count;
-
-        Assert.Equal(allowed, total);
-        Assert.Equal(6, setters.Matches(rendering).Count);
+        Assert.Contains("GetWindowUtc()", body);
+        Assert.DoesNotContain("(null, null)", body);
     }
+
+    [Fact]
+    public void TheDataStartNote_IsFedByTheFloorEveryBannerSiteAlreadyAwaits()
+    {
+        /* #5562 R7: the six primary surfaces once awaited their probe through a feeding helper; now every banner site reaches the
+           picker through UpdateTruncationBanner (ViewerTimeRangeGapFixTests pins the site counts and the feed). */
+        Assert.Contains("RangePicker.DataStartUtc = floor", StripComments(MemberText(TabSource(), "RecordDataStart")));
+        Assert.DoesNotContain("PrimaryDataStartAsync", TabSource());
+        foreach (var file in new[] { "ViewerServerTab.Queries.cs", "ViewerServerTab.ActiveQueries.cs", "ViewerServerTab.Blocking.cs" })
+        {
+            var code = ViewerSource(file, ThisFile());
+            Assert.Contains("DataStartOrNullAsync(", code);
+            Assert.DoesNotContain("PrimaryDataStartAsync(", code);
+        }
+    }
+
+    private static string ThisFile([CallerFilePath] string thisFile = "") => thisFile;
+
 
     /* ---- helpers ---- */
 
@@ -465,7 +468,7 @@ public sealed class ViewerMultiServerListClockTests
     {
         var source = ViewerTypedRangeTests.ViewerSource("ViewerDataService.AlertHistory.cs", ThisFile());
         var display = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(source, "TimeLocal"));
-        var load = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(source, "GetAlertHistoryAsync"));
+        var load = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(source, "GetAlertHistoryWindowAsync"));
 
         /* The active-clock ForDisplay by its exact name: FormatForDisplay is the renderer that takes the row's zone (#4766). */
         Assert.DoesNotMatch(@"\bForDisplay\b", display);

@@ -39,7 +39,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
             return;
         }
 
-        const string role = "pm_test_pgreadbinaryfile_role";
+        var role = "pm_test_pgreadbinaryfile_" + Guid.NewGuid().ToString("N")[..8]; // #4981: unique to the run, roles are cluster-wide
 
         await using var adminConnection = new NpgsqlConnection(connectionStringRoot);
         await adminConnection.OpenAsync();
@@ -120,10 +120,11 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         const string database = "pm_test_pgreadbinaryfile_sqlascii";
         const string targetKey = "dev-postgres-sqlascii-probe";
 
-        await using var adminConnection = new NpgsqlConnection(connectionStringRoot);
+        /* #5549: unpooled, because this connection runs the drop (and the create beside it). */
+        await using var adminConnection = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(connectionStringRoot));
         await adminConnection.OpenAsync();
 
-        await DropScratchDatabaseAsync(adminConnection, database);
+        await DropScratchDatabaseAsync(connectionStringRoot, adminConnection, database);
 
         await using (var create = adminConnection.CreateCommand())
         {
@@ -162,16 +163,18 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(connectionStringRoot, bodySucceeded, async (cleanup, _) =>
+            await LiveStoreCleanup.RunAsync(ScratchPostgres.UnpooledAdminConnectionString(connectionStringRoot), bodySucceeded, async (cleanup, _) =>
             {
-                await DropScratchDatabaseAsync(cleanup, database);
+                await DropScratchDatabaseAsync(connectionStringRoot, cleanup, database);
             });
         }
     }
 
     /* WITH (FORCE), because the probe's own connection may not have finished closing on the server. */
-    private static async Task DropScratchDatabaseAsync(NpgsqlConnection adminConnection, string database)
+    private static async Task DropScratchDatabaseAsync(string connectionStringRoot, NpgsqlConnection adminConnection, string database)
     {
+        /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+        await ScratchPostgres.QuiesceTimescaleJobsAsync(connectionStringRoot, database);
         await using var drop = adminConnection.CreateCommand();
         drop.CommandTimeout = 60;
         drop.CommandText = $"DROP DATABASE IF EXISTS {database} WITH (FORCE)";
@@ -203,7 +206,9 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         var ct = TestContext.Current.CancellationToken;
         const string database = "pm_test_enc1252";
 
-        await using var admin = new NpgsqlConnection(connectionStringRoot);
+        /* #5549: unpooled, because this connection runs the drop. The database is a bare WIN1252 one made from template0,
+           so it never holds a TimescaleDB job and needs no quiesce. */
+        await using var admin = new NpgsqlConnection(ScratchPostgres.UnpooledAdminConnectionString(connectionStringRoot));
         await admin.OpenAsync(ct);
         await using (var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS {database}", admin)) { await drop.ExecuteNonQueryAsync(ct); }
         await using (var create = new NpgsqlCommand($"CREATE DATABASE {database} ENCODING 'WIN1252' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0", admin))
@@ -232,9 +237,9 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(connectionStringRoot!, bodySucceeded, async (cleanup, _) =>
+            await LiveStoreCleanup.RunAsync(ScratchPostgres.UnpooledAdminConnectionString(connectionStringRoot!), bodySucceeded, async (cleanup, _) =>
             {
-                await DropScratchDatabaseAsync(cleanup, database);
+                await DropScratchDatabaseAsync(connectionStringRoot!, cleanup, database);
             });
         }
     }

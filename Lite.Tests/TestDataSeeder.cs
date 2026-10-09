@@ -2161,7 +2161,7 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
     /// leave it null for a DTU-model objective or an elastic pool, whose objective names no vCore count (its cpu_count is still its
     /// own scheduler count). Every other edition has 256 GB in both tables.</para>
     /// </summary>
-    public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples, int? vcoreCount = null, string? serviceObjective = null, string? edition = null)
+    public async Task SeedRightSizingScenarioAsync(int engineEdition, bool withCpuSamples, int? vcoreCount = null, string? serviceObjective = null, string? edition = null, int cpuCount = 32)
     {
         await ClearTestDataAsync();
         await SeedTestServerAsync();
@@ -2174,7 +2174,7 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
         var azureSqlDatabase = engineEdition == 5;
         await SeedMemoryStatsAsync(
             totalPhysicalMb: azureSqlDatabase ? 167_117 : 262_144, bufferPoolMb: 40_960, targetMb: azureSqlDatabase ? 163_840 : 245_760);
-        await SeedServerPropertiesAsync(cpuCount: 32, htRatio: 2, physicalMemMb: azureSqlDatabase ? 933_836 : 262_144,
+        await SeedServerPropertiesAsync(cpuCount: cpuCount, htRatio: 2, physicalMemMb: azureSqlDatabase ? 933_836 : 262_144,
             edition: edition ?? (azureSqlDatabase ? "SQL Azure" : "Enterprise Edition"), engineEdition: engineEdition,
             serviceObjective: serviceObjective ?? (vcoreCount.HasValue ? $"GP_Gen5_{vcoreCount}" : null), vcoreCount: vcoreCount);
         await SeedFileSizeAsync(totalDataSizeMb: 51_200);
@@ -2194,16 +2194,66 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
 
         // Seed database sizes for 3 databases + query activity for only 1
         await SeedDatabaseSizesForIdleTestAsync();
-        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 7.1);
+        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 7.1, coverEveryDay: true);
     }
 
-    /// <summary>The idle-database scenario on a server watched for 6.5 days: the advice text claims 7, so nothing is called idle.</summary>
+    /// <summary>The idle-database scenario on a server watched for 6.5 days, a sample at least every half day, so EVERY UTC day holds a sample: the advice text claims 7, and the oldest sample is not yet 7 days old, so at no time of day is anything called idle.</summary>
     public async Task SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync()
     {
         await ClearTestDataAsync();
         await SeedTestServerAsync();
         await SeedDatabaseSizesForIdleTestAsync();
-        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 6.5);
+        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 6.5, coverEveryDay: true);
+    }
+
+    /// <summary>
+    /// The idle-database scenario with query-stats samples at exactly the given days back, each at noon UTC (<c>daysBack</c> of 0 is
+    /// today at noon). Day granularity keeps the scenario the same at every time of day the test runs.
+    /// </summary>
+    public async Task SeedIdleDatabasesWithSampleDaysAsync(params int[] daysBack)
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+        await SeedDatabaseSizesForIdleTestAsync();
+
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        foreach (var day in daysBack)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name,
+     database_name, query_hash, delta_execution_count,
+     delta_worker_time, delta_elapsed_time, delta_logical_reads)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _utcNow().Date.AddDays(-day).AddHours(12) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = "ActiveDB" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = $"0xDAY{day:D4}" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 300L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 6_000_000L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 12_000_000L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 150_000L });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    /// <summary>
+    /// The idle-database scenario after a collection gap: the first sample is 9 days old, so the server's oldest sample is older
+    /// than 7 days, but the days between hold none and only today holds samples. Nothing watched those days, so nothing is idle.
+    /// </summary>
+    public async Task SeedIdleDatabasesAfterANineDayCollectionGapAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+        await SeedDatabaseSizesForIdleTestAsync();
+        await SeedQueryStatsForDatabaseAsync("ActiveDB", executions: 5000, cpuMs: 100_000, oldestSampleDaysAgo: 9);
     }
 
     /// <summary>The idle-database scenario on a server watched for only four hours: too little history to call anything idle.</summary>
@@ -2367,6 +2417,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
     }
 
     /// <summary>
+    /// Seeds <paramref name="samples"/> CPU samples an hour apart ending two days ago, outside the 24-hour utilization read, so the server's CPU
+    /// samples span more than a day (the CPU right-sizing rules need a full day) without moving the 24-hour figures.
+    /// </summary>
+    internal Task SeedOlderCpuHistoryAsync(int avgSqlCpu, int avgOtherCpu, int samples = 4) =>
+        SeedFinOpsCpuUtilizationAsync(avgSqlCpu, avgOtherCpu, samples, spacingMinutes: 60, daysBack: 2);
+
+    /// <summary>
     /// Seeds database_size_stats with 3 databases for idle-database testing.
     /// "ActiveDB" will have query_stats activity (seeded separately).
     /// "OldReportsDB" (50GB) and "ArchiveDB" (100GB) have no activity — should be detected as idle.
@@ -2413,7 +2470,9 @@ VALUES ($1, $2, $3, $4, $5, $6, 1, 'ROWS', $7, $8, $9, $10)";
     /// Seeds query_stats with activity for a specific database.
     /// Used to mark a database as "active" so it's excluded from idle detection.
     /// </summary>
-    internal async Task SeedQueryStatsForDatabaseAsync(string databaseName, long executions, long cpuMs, double oldestSampleDaysAgo = 0)
+    /// <param name="coverEveryDay">With <paramref name="oldestSampleDaysAgo"/> above 0, spreads the 16 samples evenly from that far back to now,
+    /// so every UTC day in between holds one. Without it the first sample is that old and the rest are recent: a collection gap.</param>
+    internal async Task SeedQueryStatsForDatabaseAsync(string databaseName, long executions, long cpuMs, double oldestSampleDaysAgo = 0, bool coverEveryDay = false)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -2434,7 +2493,8 @@ INSERT INTO query_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
 
             // oldestSampleDaysAgo > 0 puts the first sample that far back, so the server has that much history.
-            var t = i == 0 && oldestSampleDaysAgo > 0 ? _utcNow().AddDays(-oldestSampleDaysAgo) : TestPeriodStart.AddMinutes(i * 15);
+            var t = coverEveryDay && oldestSampleDaysAgo > 0 ? _utcNow().AddDays(-oldestSampleDaysAgo * (15 - i) / 15.0)
+                : i == 0 && oldestSampleDaysAgo > 0 ? _utcNow().AddDays(-oldestSampleDaysAgo) : TestPeriodStart.AddMinutes(i * 15);
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
             cmd.Parameters.Add(new DuckDBParameter { Value = t });
             cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });

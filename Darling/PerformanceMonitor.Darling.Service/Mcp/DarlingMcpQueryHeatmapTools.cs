@@ -13,9 +13,11 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -57,7 +59,7 @@ public sealed class DarlingMcpQueryHeatmapTools
     public const int FullTextPreviewLength = 32_000;
 
     [McpServerTool(Name = "get_query_heatmap"), Description("Draws the desktop viewer's Query Heatmap as a table: how many distinct queries fell into each (time bin x log-magnitude bucket) cell over a window, plus the most-executed query in each cell. It answers when a server was slow and how slow at the same time - get_top_queries_by_cpu ranks queries over a whole window and cannot show that the window had two very different halves. Bins are 5 minutes wide by default because that is exactly what the desktop viewer uses, so a browser, an agent and a desktop pointed at the same server draw the same picture; raise bucket_minutes for a longer window, which is also the lever that fits more of the window inside the cell cap. Magnitude buckets are the viewer's seven, in the metric's own unit: under 1, 1-10, 10-100, 100-1K, 1K-10K, 10K-100K and over 100K.")]
-    public static async Task<string> GetQueryHeatmap(
+    public static Task<string> GetQueryHeatmap(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("How far back to look, in hours. Default 24.")] int hours_back = 24,
@@ -67,11 +69,37 @@ public sealed class DarlingMcpQueryHeatmapTools
         [Description("Maximum CELLS to return, most recent bins first. Default 100. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultCellLimit,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Return each cell's top query at full length instead of an 80-character preview. Default false.")] bool full_text = false,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
+        => GetQueryHeatmap(
+            postgres, server_name, hours_back, metric, DatabaseFilter.One(database_name), bucket_minutes, limit, as_of, full_text,
+            logger, cancellationToken);
+
+    /// <summary>
+    /// #5245: the get_query_heatmap read over a LIST of databases. The MCP tool passes <see cref="DatabaseFilter.One"/> of its one <c>database_name</c>; a
+    /// later lane wires the parameter to a list. Every one-name consumer on this read is list-aware: the echoed
+    /// <c>database_name</c> field (<see cref="DatabaseFilter.Describe"/>: the name for one database, "the chosen
+    /// databases" for two or more, null for all) and the empty-grid text (<see cref="EmptyAsync"/>). For one name
+    /// both read exactly as they did.
+    /// </summary>
+    internal static async Task<string> GetQueryHeatmap(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        string? metric,
+        DatabaseFilter databaseFilter,
+        int bucket_minutes,
+        int limit,
+        string? as_of,
+        bool full_text,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
+        /* #5562: stays at 168 h. This reads raw query_stats, which a TimescaleDB store drops at four days (TimescaleSupport.RawRetentionInterval), so a
+           longer reach would be a window the table cannot fill, so this keeps the 168-hour overload (its WebReadReach row says the same). */
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
             ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
@@ -107,10 +135,18 @@ public sealed class DarlingMcpQueryHeatmapTools
             */
             var previewLength = full_text ? FullTextPreviewLength : DefaultPreviewLength;
             var rows = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
-                postgres, resolved.ServerId, parsedMetric, start, end, database_name, bucket_minutes, limit + 1, previewLength, cancellationToken);
+                postgres, resolved.ServerId, parsedMetric, start, end, databaseFilter, bucket_minutes, limit + 1, previewLength, cancellationToken);
+
+            /* #4966: where this server's query_stats start, read ahead of the empty answers, which carry it too: an empty grid
+               over a window the table does not reach back to is not a report that nothing ran. A window of 90 minutes or
+               less that answered cells is covered without a probe. Unfiltered by database_name (the floor is a property of
+               the table). */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "query_stats", resolved.ServerName, start, end, cancellationToken),
+                start, end, "query_stats", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, notice, databaseFilter, cancellationToken: cancellationToken);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -141,13 +177,18 @@ public sealed class DarlingMcpQueryHeatmapTools
 
             var labels = DarlingQueryHeatmapReader.BucketLabels[parsedMetric];
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* The window floor, always present (false and null when the table covered the window). No effective_hours_back:
+                   this payload carries a page `truncated`, and the census holds that key apart for the window floor. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 metric = DarlingQueryHeatmapReader.MetricName(parsedMetric),
                 metric_unit = DarlingQueryHeatmapReader.MetricUnit(parsedMetric),
-                database_name,
+                database_name = databaseFilter.Describe(),
                 /* The window that was QUERIED, anchored or not — the caller reads the bins against it. */
                 window_start = start.ToString("o"),
                 window_end = end.ToString("o"),
@@ -185,6 +226,9 @@ public sealed class DarlingMcpQueryHeatmapTools
                     top_query_text_truncated = c.TopQueryTextTruncated,
                 }),
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the cells (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -205,7 +249,7 @@ public sealed class DarlingMcpQueryHeatmapTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, int hours_back,
-        CancellationToken cancellationToken)
+        McpWindowNotice notice, DatabaseFilter databaseFilter, CancellationToken cancellationToken)
     {
         var (hasAny, hasInWindow) = await DarlingQueryHeatmapReader.GetCoverageAsync(postgres, serverId, start, end, cancellationToken);
 
@@ -221,11 +265,21 @@ public sealed class DarlingMcpQueryHeatmapTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.");
+                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                notice.AsHints());
         }
 
         return McpHelpers.Status(
             "empty",
-            $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.");
+            McpHelpers.QuietUnlessCut(
+                /* A database_name filter is exempt: the coverage probe is unfiltered, so a filtered empty grid may be the filter and
+                   not the window, and the covered sentence is the one that says so. */
+                notice.WindowTruncated && databaseFilter.IsAll, notice.EffectiveStart,
+                factual: $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+                coveredClaim: databaseFilter.Names.Count > 1
+                    ? ". A server that is up and idle looks exactly like this, and so does a filter on the chosen databases matching nothing collected."
+                    : ". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
+                tail: " Delta-based collection also needs a SECOND cycle before the first non-zero row exists."),
+            notice.AsHints());
     }
 }

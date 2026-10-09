@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -61,6 +62,18 @@ internal static class DarlingJobReader
     /// latest does not depend on the clock, and the ordering stays on the collector-computed duration rather
     /// than on either clock. $1 server_id.
     ///
+    /// <para>The snapshot counts only while it is the collector's CURRENT answer: the collector writes no row when no
+    /// job is running, so the newest row can be weeks old. The latest SUCCESSFUL <c>running_jobs</c> run in
+    /// <c>collection_log</c> (a SUCCESS with zero rows for a run that found nothing) decides: rows stored means the
+    /// newest snapshot is that run's; none stored means nothing is running, unless a snapshot newer than that log row
+    /// exists (the log row is stamped when the run ends, after its rows are stored). A server with no such log row keeps
+    /// the newest snapshot. The same text as the viewer's <c>ViewerDataService.RunningJobsSql</c>.</para>
+    ///
+    /// <para>The snapshot must also be recent: <c>collection_time &gt;= $2</c> is the alert read's #1812 bound
+    /// (<see cref="PerformanceMonitor.Alerting.RunningJobsCurrency.Cutoff"/>, three missed cycles at the effective running_jobs cadence).
+    /// A server that went offline while a job ran (only failed runs after it), a lost msdb login or a collector switched off
+    /// otherwise left the job reading as running for days. $2 is the oldest collection time still current (naive UTC).</para>
+    ///
     /// <para>The conversion follows the server's time zone, so a job that started before a daylight saving
     /// change lands at its real UTC time rather than an hour off (#4793). Before that it subtracted the ONE
     /// newest collected offset, which was right only for a job that started after the last change.</para>
@@ -85,24 +98,102 @@ internal static class DarlingJobReader
             FROM v_running_jobs
             WHERE server_id = $1
         )
+        AND   collection_time >= $2
+        AND   (
+            NOT EXISTS
+            (
+                SELECT 1
+                FROM collection_log
+                WHERE server_id = $1
+                AND   collector_name = 'running_jobs'
+                AND   status = 'SUCCESS'
+            )
+            OR EXISTS
+            (
+                SELECT 1
+                FROM
+                (
+                    SELECT collection_time, rows_collected
+                    FROM collection_log
+                    WHERE server_id = $1
+                    AND   collector_name = 'running_jobs'
+                    AND   status = 'SUCCESS'
+                    ORDER BY collection_time DESC
+                    LIMIT 1
+                ) AS last_run
+                WHERE last_run.rows_collected IS NULL
+                OR    last_run.rows_collected > 0
+                OR    v_running_jobs.collection_time > last_run.collection_time
+            )
+        )
         ORDER BY current_duration_seconds DESC
         """;
 
+    /// <summary>The newest collection time for the running_jobs collector: its latest SUCCESS run (a run that found nothing logs
+    /// SUCCESS with zero rows) or its newest snapshot, whichever is later. The same text as the viewer's
+    /// <c>ViewerDataService.RunningJobsLastGoodCollectionSql</c>. $1 server_id.</summary>
+    public const string RunningJobsLastGoodCollectionSql = """
+        SELECT MAX(t)
+        FROM
+        (
+            SELECT MAX(collection_time) AS t
+            FROM collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'running_jobs'
+            AND   status = 'SUCCESS'
+            UNION ALL
+            SELECT MAX(collection_time)
+            FROM v_running_jobs
+            WHERE server_id = $1
+        ) AS x
+        """;
+
+    /// <summary>The running jobs, and the last good collection's time when no job is listed because it is older than the freshness bound.</summary>
+    public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection);
+
     public static async Task<List<RunningJobRow>> GetRunningJobsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        => (await ReadRunningJobsAsync(postgres, serverId, cancellationToken)).Jobs;
+
+    /// <summary>
+    /// The running jobs while the snapshot is current: the alert read's #1812 bound at this server's effective running_jobs cadence
+    /// (the per-server override, else the fleet one, else the shipped default). When nothing is listed and the collector's last good
+    /// collection is older than that bound, <see cref="RunningJobsRead.LastGoodCollection"/> carries its time.
+    /// </summary>
+    public static async Task<RunningJobsRead> ReadRunningJobsAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
-        var rows = new List<RunningJobRow>();
+        var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
+        var cadence = PerformanceMonitor.Collectors.CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes("running_jobs", serverId, overrides) ?? 5;
+        var cutoff = PerformanceMonitor.Alerting.RunningJobsCurrency.Cutoff(DateTime.UtcNow, cadence);
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
-        await using var command = postgres.CreateCommand(RunningJobsSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+
+        var rows = new List<RunningJobRow>();
+        await using (var command = postgres.CreateCommand(RunningJobsSql))
         {
-            rows.Add(MapRunningJobRow(reader, clock));
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddTimestamp(command, cutoff);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(MapRunningJobRow(reader, clock));
+            }
         }
 
-        return rows;
+        if (rows.Count > 0)
+        {
+            return new RunningJobsRead(rows, null);
+        }
+
+        /* Nothing listed: it reads as "not current" only when the last good collection is older than the bound (a healthy collector
+           that found no job logs a recent SUCCESS). The rows read above released its connection first. */
+        await using var lastGood = postgres.CreateCommand(RunningJobsLastGoodCollectionSql);
+        lastGood.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(lastGood, serverId);
+        var last = await lastGood.ExecuteScalarAsync(cancellationToken);
+        DateTime? lastGoodTime = last is DateTime t ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null;
+        return new RunningJobsRead(rows, PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff));
     }
 
     /// <summary>Maps one row of <see cref="RunningJobsSql"/> (11 columns, in the SELECT's order).</summary>
@@ -119,6 +210,139 @@ internal static class DarlingJobReader
             reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
             !reader.IsDBNull(9) && reader.GetBoolean(9),
             reader.IsDBNull(10) ? null : reader.GetDecimal(10));
+
+    /// <summary>
+    /// The newest <c>agent_status</c> row AT OR BEFORE the anchor ($2, naive UTC) of every enabled server that has one, or
+    /// of the one server asked for ($1; NULL for every server). A per-server <c>LATERAL</c> reads one row off the
+    /// (server_id, collection_time) index, so the cost is one index probe per server rather than a walk of the table's
+    /// retained history. A server with no row at or before the anchor (a PostgreSQL target, or an Agent collector that had
+    /// not run by then) is simply absent. <c>next_scheduled_run</c> is the server's own wall clock;
+    /// <see cref="ReadLatestAgentStatesAsync"/> converts it to UTC.
+    /// </summary>
+    public const string LatestAgentStatusSql = """
+        SELECT
+            s.server_id,
+            COALESCE(s.display_name, s.server_name),
+            a.agent_running,
+            a.agent_status_desc,
+            a.next_scheduled_run,
+            a.collection_time
+        FROM servers AS s
+        CROSS JOIN LATERAL
+        (
+            SELECT x.agent_running, x.agent_status_desc, x.next_scheduled_run, x.collection_time
+            FROM agent_status AS x
+            WHERE x.server_id = s.server_id
+            AND   x.collection_time <= $2
+            ORDER BY x.collection_time DESC
+            LIMIT 1
+        ) AS a
+        WHERE s.is_enabled
+        AND   ($1::int IS NULL OR s.server_id = $1)
+        ORDER BY COALESCE(s.display_name, s.server_name), s.server_id
+        """;
+
+    /// <summary>The description served for an Agent whose newest snapshot is older than the staleness window.</summary>
+    public const string AgentUnknownDescription = "unknown (no recent status)";
+
+    /// <summary>The description served for a server whose newest snapshot found no SQL Agent service at all (the
+    /// collector stores <c>agent_running = false</c> with NULL descriptions then: Express, an Agent-off container). That
+    /// is not a stopped Agent, and the page draws it as a neutral line, so the page quotes this text.</summary>
+    public const string NoAgentServiceDescription = "no SQL Agent service found";
+
+    /// <summary>The live staleness window of the Agent Not Running self-alert: the <c>collection_stale_minutes</c> setting
+    /// the alert engine reads (<c>update_alert_settings</c> / <c>get_alert_settings</c> report the same column), so the
+    /// page and the alert judge a snapshot's age by one number.</summary>
+    public const string CollectionStaleMinutesSql = "SELECT collection_stale_minutes FROM config_alert_settings WHERE id = 1";
+
+    /// <summary>The setting's bounds, as <c>DarlingAlertSettings.CollectionStaleMinutes</c> clamps it.</summary>
+    internal const int StaleMinutesMin = 5;
+    internal const int StaleMinutesMax = 1440;
+
+    /// <summary>The window for a stored setting: the clamp the engine applies, or the shipped default when the store holds none.</summary>
+    internal static TimeSpan StaleWindowFor(int? storedMinutes)
+    {
+        if (storedMinutes is null) return DarlingSelfAlertEvaluator.StaleWindow;
+        return TimeSpan.FromMinutes(Math.Clamp(storedMinutes.Value, StaleMinutesMin, StaleMinutesMax));
+    }
+
+    /// <summary>The window the Agent Not Running alert judges a snapshot against right now. A store that has not seeded the
+    /// settings row (or predates the column) answers with the shipped default, which is what the engine runs on then too.</summary>
+    public static async Task<TimeSpan> ReadStaleWindowAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(CollectionStaleMinutesSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            return StaleWindowFor(value is null or DBNull ? null : Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedColumn or PostgresErrorCodes.UndefinedTable)
+        {
+            return DarlingSelfAlertEvaluator.StaleWindow;
+        }
+    }
+
+    /// <summary>One server's SQL Agent state as <c>get_job_history</c> reports it. <paramref name="AgentRunning"/> is null
+    /// when the state is not known: no recent snapshot, no Agent service, or a snapshot that did not say.</summary>
+    public sealed record AgentState(
+        string Server, bool? AgentRunning, string? AgentStatusDesc, DateTime? NextRunUtc, DateTime CapturedAtUtc);
+
+    /// <summary>
+    /// Turns a stored snapshot into the state served. A snapshot is judged only while it is fresh, against the alert's live
+    /// window (<paramref name="staleWindow"/>, from <see cref="ReadStaleWindowAsync"/>) and with the comparison the "Agent
+    /// Not Running" self-alert uses: an older one says nothing about the Agent at the anchor (<paramref name="anchorUtc"/>,
+    /// the window's end: now, or the <c>as_of</c> asked for), so it reads as unknown with no next run, never as the last
+    /// value seen. A fresh row of <c>agent_running = false</c> with no description is the collector's
+    /// "no Agent service row" answer, which reads as <see cref="NoAgentServiceDescription"/> with no running flag: that
+    /// server has no Agent to stop, and the alert stays silent for it on purpose.
+    /// </summary>
+    internal static AgentState ResolveAgentState(
+        string server, bool? running, string? statusDesc, DateTime? nextRunUtc, DateTime capturedAtUtc, DateTime anchorUtc, TimeSpan staleWindow)
+    {
+        if (anchorUtc - capturedAtUtc >= staleWindow)
+            return new AgentState(server, null, AgentUnknownDescription, null, capturedAtUtc);
+        if (running == false && statusDesc is null)
+            return new AgentState(server, null, NoAgentServiceDescription, null, capturedAtUtc);
+        return new AgentState(server, running, statusDesc, nextRunUtc, capturedAtUtc);
+    }
+
+    /// <summary>A fault a test arms for the current async flow, thrown ahead of the Agent read to prove the runs survive it.</summary>
+    internal static readonly System.Threading.AsyncLocal<Exception?> AgentReadFaultForTests = new();
+
+    /// <summary>The Agent state of one server (<paramref name="serverId"/>) or of every enabled server that has a snapshot,
+    /// ordered by name, as of <paramref name="anchorUtc"/> (UTC): each server's newest snapshot at or before that instant,
+    /// judged against it, so a snapshot collected after the anchor is never read. A server with no snapshot at or before the
+    /// anchor is absent.</summary>
+    public static async Task<List<AgentState>> ReadLatestAgentStatesAsync(
+        NpgsqlDataSource postgres, int? serverId, DateTime anchorUtc, CancellationToken cancellationToken = default)
+    {
+        if (AgentReadFaultForTests.Value is { } fault) throw fault;
+        var staleWindow = await ReadStaleWindowAsync(postgres, cancellationToken);
+        var clocks = await DarlingServerClocksReader.GetAsync(postgres, serverId, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        var states = new List<AgentState>();
+        await using var command = postgres.CreateCommand(LatestAgentStatusSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = (object?)serverId ?? DBNull.Value });
+        /* collection_time is naive UTC (timestamp, no zone), so the anchor is bound as a naive instant: a Kind=Utc DateTime bound
+           to a timestamp parameter would be shifted by the server's zone, silently. */
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(anchorUtc, DateTimeKind.Unspecified) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var id = reader.GetInt32(0);
+            states.Add(ResolveAgentState(
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetBoolean(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : DarlingServerClocksReader.ClockFor(clocks, id).ToUtc(reader.GetDateTime(4)),
+                DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc),
+                anchorUtc,
+                staleWindow));
+        }
+
+        return states;
+    }
 
     /// <summary>Lite/Dashboard's job-duration display formatting (Xs / Xm Ys / Xh Ym).</summary>
     public static string FormatDuration(long seconds)

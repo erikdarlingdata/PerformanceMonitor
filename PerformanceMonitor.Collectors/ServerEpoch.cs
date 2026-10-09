@@ -8,8 +8,10 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -241,6 +243,49 @@ public static class ServerEpoch
 
         stamp = new Stamp(startTime, name);
         return true;
+    }
+
+    /// <summary>
+    /// The collectors that persist the instance identity (<see cref="IdentityStateKey"/>), in the order a reader tries
+    /// them: <c>wait_stats</c> carries it, and <c>cpu_utilization</c> keeps carrying it when an operator turns
+    /// <c>wait_stats</c> off.
+    /// </summary>
+    public static readonly IReadOnlyList<string> IdentityCarrierCollectors = new[] { "wait_stats", "cpu_utilization" };
+
+    /// <summary>
+    /// The <c>@@SERVERNAME</c> in one carrier's persisted state (<see cref="IdentityStateKey"/>), or null when the state
+    /// has no identity row or the row holds no name. This is the last name the instance reported, not a live one.
+    /// </summary>
+    public static string? LastKnownName(IReadOnlyDictionary<string, string> state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+
+        return state.TryGetValue(IdentityStateKey, out var text) && TryParse(text, out var stamp) && !string.IsNullOrWhiteSpace(stamp.Name)
+            ? stamp.Name
+            : null;
+    }
+
+    /// <summary>
+    /// The last-known <c>@@SERVERNAME</c> of one registration, read from its carriers' persisted state in the order
+    /// <see cref="IdentityCarrierCollectors"/> gives: the first carrier whose state holds a name decides, and a carrier
+    /// with no state or no name hands over to the next. Null when none of them holds a name.
+    /// </summary>
+    /// <param name="readCarrierState">Reads one carrier's persisted state, given the carrier's collector name. An app's
+    /// read that fails returns no state, which reads as no name.</param>
+    public static async Task<string?> LastKnownNameAsync(Func<string, Task<Dictionary<string, string>>> readCarrierState)
+    {
+        ArgumentNullException.ThrowIfNull(readCarrierState);
+
+        foreach (var carrier in IdentityCarrierCollectors)
+        {
+            var name = LastKnownName(await readCarrierState(carrier));
+            if (name is not null)
+            {
+                return name;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

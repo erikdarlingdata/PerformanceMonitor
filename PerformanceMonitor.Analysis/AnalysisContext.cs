@@ -25,6 +25,16 @@ public class AnalysisContext
     /// findings come from the databases' own targets. Null or empty changes nothing.
     /// </summary>
     public IReadOnlyList<string>? SeparatelyMonitoredDatabases { get; set; }
+
+    /// <summary>
+    /// The databases this node holds only as a SECONDARY copy in an Availability Group (#5558), resolved once per
+    /// pass at the same door as <see cref="SeparatelyMonitoredDatabases"/> from the store's own AG snapshots at or
+    /// before <see cref="TimeRangeEnd"/>. The facts whose data replicates from the primary
+    /// (<see cref="FactReplicaScope"/>) skip these databases, so the primary reports each finding once. Null or
+    /// empty changes nothing: every unknown (collector off, stale rows, standalone, Azure SQL Database) leaves it
+    /// null or empty, so the filter fails open.
+    /// </summary>
+    public IReadOnlySet<string>? SecondaryReplicaDatabases { get; set; }
     public string ServerName { get; set; } = string.Empty;
     public DateTime TimeRangeStart { get; set; }
     public DateTime TimeRangeEnd { get; set; }
@@ -241,6 +251,14 @@ public class AnalysisContext
     public bool? PlanRegressionReadsIntervalTable { get; set; }
 
     /// <summary>
+    /// The window start the PLAN_REGRESSION fact actually read from (#5448), when it read per-day totals: the start of the
+    /// day the exact 14-day edge falls in, because the daily read moves the edge in whole days. Null when the fact read the
+    /// exact edge (raw, the interval table without day totals, or no fact), which is also what a drill-down without a fact
+    /// pass uses. The regressed-queries drill-down starts its window here when set, so its best plan is one the fact saw.
+    /// </summary>
+    public DateTime? PlanRegressionWindowStart { get; set; }
+
+    /// <summary>
     /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
     /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
     /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose
@@ -368,18 +386,21 @@ public sealed record CollectionFailure(string Family, string Read, CollectionFai
 
 /// <summary>
 /// What a facts read hands its caller about collection (#3691): the failures and the family total off the
-/// context the read ran on, as ONE value so the read's tuple grows by one element rather than two. Returned
+/// context the read ran on, as ONE value so the read's tuple grows by one element rather than two (#5558 adds the
+/// secondary-replica set the read filtered with, riding the same value for the same reason; the callers build the
+/// <c>secondary_replica_note</c> from it with <c>AgReplicaScope.SkippedNote</c>, which this project cannot reference). Returned
 /// rather than parked on a service property for the reason <c>CollectAndScoreFactsAsync</c>'s coverage is:
 /// that path has no <c>IsAnalyzing</c> guard, two on-demand callers can overlap, and a shared property would
 /// let one read the other's failures.
 /// </summary>
-public sealed record CollectionCaveatState(IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal)
+public sealed record CollectionCaveatState(
+    IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal, IReadOnlySet<string>? SecondaryReplicaDatabases = null)
 {
     /// <summary>The state the context carries after its collector ran (or threw before recording anything).</summary>
     public static CollectionCaveatState From(AnalysisContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return new(context.CollectionFailures, context.CollectionFamilyCount);
+        return new(context.CollectionFailures, context.CollectionFamilyCount, context.SecondaryReplicaDatabases);
     }
 
     /// <summary>True when at least one family failed — the only case in which anything is emitted.</summary>

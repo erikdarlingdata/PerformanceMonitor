@@ -26,7 +26,9 @@
  */
 
 import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, fmtNum } from "../util.js";
+import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
+import { orderServers } from "../server-order.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
@@ -92,16 +94,6 @@ function viewRefreshControl(view, def, isNotebook, canEdit) {
   });
   return control.root;
 }
-
-/** The time-range choices the rendered view's chrome offers (mirrors the composer's RANGE_OPTIONS). */
-const VIEW_RANGE_OPTIONS = [
-  { hours: 1, label: "Last hour" },
-  { hours: 6, label: "Last 6 hours" },
-  { hours: 24, label: "Last 24 hours" },
-  { hours: 24 * 7, label: "Last 7 days" },
-  { hours: 24 * 30, label: "Last 30 days" },
-  { hours: 24 * 90, label: "Last 90 days" },
-];
 
 /* ─────────────────────────── list page ─────────────────────────── */
 
@@ -306,10 +298,9 @@ async function createFromTemplate(template, server, status) {
 async function loadServerNames() {
   const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
-  return [...(res.data.cards || [])]
+  return orderServers(res.data.cards || [])
     .map((c) => ({ value: c.server_name || c.display_name, label: c.display_name || c.server_name }))
-    .filter((o) => o.value)
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .filter((o) => o.value);
 }
 
 function viewCard(v) {
@@ -440,12 +431,98 @@ function importPanel() {
    view's declared default. */
 const viewScopeMemory = new Map();
 
-function seedState(id, defaultHours, variables) {
+/* The server scope a view is saved with (the morning walk, W4): its server-dimension variable's default, the same
+   variable the editor greys measures by. The control opened on "All servers (fleet)" whatever the view saved, and the
+   run body's explicit server "All" beat the variable on the service side, so a view saved for one server read the
+   whole fleet. Only a concrete name that is in the fleet counts; "All", blank, a "$other" reference, several
+   variables, or a name the fleet does not list keep the whole fleet. A comma or semicolon list is several servers. */
+function savedServerScope(variables, fleet) {
+  const serverVars = (variables || []).filter((v) => v && v.dimension === "server" && String(v.default || "").trim());
+  if (serverVars.length !== 1) return "All";
+  const raw = String(serverVars[0].default).trim();
+  if (raw.charAt(0) === "$" || raw.toLowerCase() === "all") return "All";
+  const names = [];
+  for (const part of raw.split(/[,;]/)) {
+    const want = part.trim();
+    const o = want ? (fleet || []).find((x) => x.value === want || x.label === want) : null;
+    if (o && !names.includes(o.value)) names.push(o.value);
+  }
+  return names.length ? names : "All";
+}
+
+/* The server a view's PANELS are set to (W4b of the release walk). A view can carry no server variable and instead filter
+   every composed panel to one server ({dimension:"server", op:"eq", value:"SQL2025"} on each). The service ANDs a panel's
+   filters with the scope, so such a view already read only that server while the picker said "All servers (fleet)", and
+   picking another server meant every panel filtered to the first one and drew nothing. A view counts only when EVERY composed
+   panel has exactly one server "eq" filter, all naming the same server (case ignored) and that server is in the fleet; a
+   mixed view, a panel with any server filter other than that one "eq" (an "in", a "neq", a second "eq"), or a name the fleet
+   does not list keeps the old behaviour. */
+function serverFilters(p) {
+  return (Array.isArray(p.filters) ? p.filters : []).filter((f) => f && f.dimension === "server");
+}
+
+function serverEqFilters(p) {
+  return (Array.isArray(p.filters) ? p.filters : []).filter(
+    (f) => f && f.dimension === "server" && f.op === "eq" && typeof f.value === "string" && f.value.trim()
+  );
+}
+
+function panelFilterServer(panels, fleet) {
+  const composed = (panels || []).filter((p) => p && typeof p === "object" && p.source != null);
+  if (!composed.length) return null;
+  let name = null;
+  for (const p of composed) {
+    const eq = serverEqFilters(p);
+    /* The one "eq" must be the panel's ONLY server filter: panelUnderScope drops just the eq, so a leftover "in" or "neq" would
+       still be ANDed with the picked server into an empty panel. */
+    if (eq.length !== 1 || serverFilters(p).length !== 1) return null;
+    const v = eq[0].value.trim().toLowerCase();
+    if (name !== null && name !== v) return null;
+    name = v;
+  }
+  const o = (fleet || []).find((x) => String(x.value).toLowerCase() === name || String(x.label).toLowerCase() === name);
+  return o ? { value: o.value, label: o.label } : null;
+}
+
+/* True while the scope is exactly the server the panels are set to, the one case their own filter and the scope agree. */
+function onPanelServer(state, panelServer) {
+  return !!panelServer && Array.isArray(state.server) && state.server.length === 1 && state.server[0] === panelServer.value;
+}
+
+/* A panel as it runs under the picked scope. Choosing a server other than the one the panels are set to (or "All servers")
+   REPLACES that setting for every panel: the panel's server filter is dropped so the scope decides, rather than the two
+   being ANDed into an empty panel. Any other panel, and any scope that still matches, runs as saved. */
+function panelUnderScope(p, state, panelServer) {
+  if (!panelServer || onPanelServer(state, panelServer) || !p || typeof p !== "object" || p.source == null) return p;
+  const kept = (Array.isArray(p.filters) ? p.filters : []).filter((f) => !serverEqFilters({ filters: [f] }).length);
+  return { ...p, filters: kept };
+}
+
+/* "Your pick" is said only when the reader picked the server: state.picked is set by the server picker and remembered with the
+   scope. A scope the view's own server variable chose is the view's setting, and the note says so. */
+function panelServerNote(state, panelServer) {
+  if (!panelServer) return "";
+  if (onPanelServer(state, panelServer)) {
+    return "This view sets its server: every panel is set to " + panelServer.label + ". Pick another server, or All servers, to replace that for every panel.";
+  }
+  if (state.picked) return "Showing your pick instead of " + panelServer.label + ", the server this view's panels are set to.";
+  /* The view's own server variable can be "All" (or blank): then the scope is every server, not a server it names. */
+  const allServers = state.server === "All" || state.server === "" || state.server == null || (Array.isArray(state.server) && state.server.length === 0);
+  return allServers
+    ? "Showing all servers, as this view's own setting says, instead of " + panelServer.label + ", the server this view's panels are set to."
+    : "Showing the server this view's own setting names instead of " + panelServer.label + ", the server this view's panels are set to.";
+}
+
+function seedState(id, defaultHours, variables, fleet, panelServer) {
   const cached = viewScopeMemory.get(String(id));
   if (cached) {
-    return { server: cached.server, hours: cached.hours, values: { ...cached.values } };
+    return { server: cached.server, hours: cached.hours, values: { ...cached.values }, picked: cached.picked === true };
   }
-  const state = { server: "All", hours: defaultHours, values: {} };
+  const state = { server: savedServerScope(variables, fleet), hours: defaultHours, values: {}, picked: false };
+  /* An explicit server variable decides first, "All" included: the panels' server seeds the scope only when the view has no
+     server variable at all. */
+  const hasServerVariable = (variables || []).some((v) => v && v.dimension === "server");
+  if (state.server === "All" && panelServer && !hasServerVariable) state.server = [panelServer.value];
   for (const v of variables) {
     if (v.dimension !== "server" && v.default) state.values[v.name] = v.default;
   }
@@ -453,7 +530,7 @@ function seedState(id, defaultHours, variables) {
 }
 
 function rememberScope(id, state) {
-  viewScopeMemory.set(String(id), { server: state.server, hours: state.hours, values: { ...state.values } });
+  viewScopeMemory.set(String(id), { server: state.server, hours: state.hours, values: { ...state.values }, picked: !!state.picked });
 }
 
 export async function renderView(main, id) {
@@ -515,7 +592,9 @@ export async function renderView(main, id) {
   const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
   const hasComposed = panels.some((p) => p && p.source != null);
 
-  const state = seedState(id, defaultHours, variables);
+  const panelServer = panelFilterServer(panels.filter((p) => p && p.source != null), fleet);
+  const state = seedState(id, defaultHours, variables, fleet, panelServer);
+  const scopeNote = panelServer && hasComposed ? el("div", { class: "meta view-scope-note", text: panelServerNote(state, panelServer) }) : null;
 
   function currentScope() {
     return {
@@ -528,14 +607,15 @@ export async function renderView(main, id) {
 
   const gridBox = el("div", { class: "panel-grid" });
   function renderGrid() {
-    mount(gridBox, panels.map((p) => panelOrError(p, readSet, sourceSet, currentScope())));
+    if (scopeNote) scopeNote.textContent = panelServerNote(state, panelServer);
+    mount(gridBox, panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i)));
   }
 
   /* The chrome is only meaningful when a composed panel can re-scope; a pure v1 read view skips it. */
   const onChange = () => { rememberScope(id, state); renderGrid(); };
   const controls = hasComposed ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
 
-  mount(main, [head, status, controls, gridBox]);
+  mount(main, [head, status, controls, scopeNote, gridBox]);
   renderGrid();
   /* Clear any stale AbortSignal left by the previous page (e.g. server.js's per-render panelAbort) so it
      cannot bleed into SUBSEQUENT view renders — the onChange scope re-render and any poll-triggered
@@ -632,6 +712,9 @@ export async function renderNotebookDoc(main, opts) {
      (compose.js buildRunBody). With no scope_server the scope names none, and each panel cell says so. Saved mode
      keeps its scope bar exactly as before. */
   let controls = null;
+  let scopeNote = null;
+  let refreshScopeNote = () => {};
+  let cellUnderScope = (cell) => cell;
   let currentScope = () => ({ server: "All", hours: 24, variables: [], values: {} });
   if (isAlert) {
     const scopeServer = opts.scopeServer || "";
@@ -642,7 +725,13 @@ export async function renderNotebookDoc(main, opts) {
     const variables = Array.isArray(def.variables) ? def.variables.filter((v) => v && v.name) : [];
     const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
     const hasPanels = cells.some((c) => c && c.type === "panel" && c.source != null);
-    const state = seedState(opts.view.id, defaultHours, variables);
+    const panelServer = panelFilterServer(cells.filter((c) => c && c.type === "panel"), fleet);
+    const state = seedState(opts.view.id, defaultHours, variables, fleet, panelServer);
+    cellUnderScope = (cell) => (cell && cell.type === "panel" ? panelUnderScope(cell, state, panelServer) : cell);
+    if (panelServer && hasPanels) {
+      scopeNote = el("div", { class: "meta view-scope-note", text: panelServerNote(state, panelServer) });
+      refreshScopeNote = () => { scopeNote.textContent = panelServerNote(state, panelServer); };
+    }
     currentScope = () => ({
       server: state.server,
       hours: state.hours,
@@ -663,11 +752,12 @@ export async function renderNotebookDoc(main, opts) {
       const scope = currentScope();
       mount(docBox, cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter)));
     } else {
-      mount(docBox, cells.map((cell) => renderCell(cell, readSet, sourceSet, currentScope())));
+      refreshScopeNote();
+      mount(docBox, cells.map((cell) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope())));
     }
   }
 
-  mount(main, [head, status, controls, docBox]);
+  mount(main, [head, status, controls, scopeNote, docBox]);
   renderDoc();
 }
 
@@ -872,10 +962,9 @@ function backToViews() {
 /* Fleet server options for the scope picker (value = stored server_name, label = display name). */
 function fleetOptions(fleetRes) {
   if (fleetRes.kind !== "data" || !fleetRes.data) return [];
-  return [...(fleetRes.data.cards || [])]
+  return orderServers(fleetRes.data.cards || [])
     .map((c) => ({ value: c.server_name || c.display_name, label: c.display_name }))
-    .filter((o) => o.value)
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .filter((o) => o.value);
 }
 
 /* The view-scope control bar: a server scope picker (single / multi / All), a time-range select, and a value input
@@ -907,88 +996,24 @@ function varControl(v, state, onChange) {
   return inp;
 }
 
-/* Mirror of the compose backend's window ceiling (ComposeLimits.MaxWindow = 90 days) — a custom range can't exceed it. */
+/* Mirror of the compose backend's window ceiling (ComposeLimits.MaxWindowHours = 90 days). The shared time range picker (#5562) greys
+   out a longer length with the reason; the old Custom number input clamped it silently. */
 const MAX_RANGE_HOURS = 24 * 90;
 
-/* A human label for an arbitrary hour count (whole days render as days), matching the preset labels' style. */
-function rangeLabel(hours) {
-  if (hours % 24 === 0 && hours >= 24) {
-    const d = hours / 24;
-    return "Last " + d + (d === 1 ? " day" : " days");
-  }
-  return "Last " + hours + (hours === 1 ? " hour" : " hours");
-}
-
-/* A time-range picker bound to state.hours: the presets, plus the view's stored default and the current value when
-   either is a non-preset custom window (kept selectable so the 60s refresh shows exactly what's applied), plus a
-   "Custom…" entry that reveals a number + unit input. The compose backend accepts any window up to MAX_RANGE_HOURS,
-   so an arbitrary span is purely this UI. */
+/* The view scope's time range: the shared picker in its rolling-only form, because the scope is "this many hours back from now" (the
+   compose runner and the read cells take hours, not an end). It is bound to state.hours; the view's stored default and the current
+   value show as the picker's label, so the 60s refresh shows exactly what is applied. */
 function buildRangeSelect(defaultHours, state, onChange) {
-  const wrap = el("span", { class: "range-select" });
-  const sel = el("select", { class: "filter-box", "aria-label": "Time range" });
-  const added = new Set(VIEW_RANGE_OPTIONS.map((r) => String(r.hours)));
-  for (const r of VIEW_RANGE_OPTIONS) sel.appendChild(el("option", { value: String(r.hours), text: r.label }));
-  for (const h of [state.hours, defaultHours]) {
-    const key = String(h);
-    if (h && !added.has(key)) {
-      sel.appendChild(el("option", { value: key, text: rangeLabel(h) }));
-      added.add(key);
-    }
-  }
-  sel.appendChild(el("option", { value: "custom", text: "Custom…" }));
-  sel.value = String(state.hours);
-
-  const custom = buildCustomHoursInput(state, onChange);
-  custom.style.display = "none";
-
-  sel.addEventListener("change", () => {
-    if (sel.value === "custom") {
-      custom.style.display = "";
-      return;
-    }
-    custom.style.display = "none";
-    state.hours = parseInt(sel.value, 10) || defaultHours;
-    onChange();
+  const picker = rollingHoursPicker({
+    hours: state.hours || defaultHours,
+    reachHours: MAX_RANGE_HOURS,
+    label: "Time range",
+    onChange: (hours) => {
+      state.hours = hours;
+      onChange();
+    },
   });
-
-  wrap.appendChild(sel);
-  wrap.appendChild(custom);
-  return wrap;
-}
-
-/* The inline custom-window input revealed by the "Custom…" range option: a number + unit (hours/days); Apply (or
-   Enter) commits it to state.hours, clamped to MAX_RANGE_HOURS, and re-runs the panels. */
-function buildCustomHoursInput(state, onChange) {
-  const box = el("span", { class: "range-custom" });
-  const num = el("input", { class: "filter-box range-custom-n", type: "number", min: "1", step: "1", "aria-label": "Custom range amount" });
-  const unit = el("select", { class: "filter-box range-custom-u", "aria-label": "Custom range unit" });
-  unit.appendChild(el("option", { value: "1", text: "hours" }));
-  unit.appendChild(el("option", { value: "24", text: "days" }));
-  if (state.hours % 24 === 0 && state.hours >= 24) {
-    num.value = String(state.hours / 24);
-    unit.value = "24";
-  } else {
-    num.value = String(state.hours);
-    unit.value = "1";
-  }
-  const apply = el("button", { class: "btn small", type: "button", text: "Apply" });
-  const commit = () => {
-    const n = parseInt(num.value, 10);
-    if (!n || n < 1) return;
-    state.hours = Math.min(n * parseInt(unit.value, 10), MAX_RANGE_HOURS);
-    onChange();
-  };
-  apply.addEventListener("click", commit);
-  num.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      commit();
-    }
-  });
-  box.appendChild(num);
-  box.appendChild(unit);
-  box.appendChild(apply);
-  return box;
+  return el("span", { class: "range-select" }, [picker.node]);
 }
 
 /* The server scope picker: a <details> dropdown of checkboxes — "All servers (fleet)" plus each fleet server.
@@ -1024,6 +1049,7 @@ function buildServerScopePicker(fleet, state, onChange) {
     const rows = [
       checkRow("All servers (fleet)", isAll(), () => {
         state.server = "All";
+        state.picked = true;
         redraw();
         onChange();
       }),
@@ -1033,6 +1059,7 @@ function buildServerScopePicker(fleet, state, onChange) {
       rows.push(
         checkRow(o.label, on, () => {
           toggle(o.value, !on);
+          state.picked = true;
           redraw();
           onChange();
         })
@@ -1059,7 +1086,7 @@ function checkRow(label, checked, onToggle) {
    `onSettled` (optional; the alert notebook's in-flight limiter release, #4222) is called exactly once per call: by
    the renderer when its load ends, or right here when the panel cannot start a load and becomes an error card —
    so a bad cell cannot hold a limiter slot. Every other caller omits it. */
-function panelOrError(p, readSet, sourceSet, scope, onSettled) {
+function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null) {
   const fail = (title, message) => {
     if (onSettled) onSettled();
     return panelErrorCard(title, message);
@@ -1077,7 +1104,7 @@ function panelOrError(p, readSet, sourceSet, scope, onSettled) {
     if (!p.viz) {
       return fail(p.title, "This composed panel has no chart type.");
     }
-    return renderComposedPanelCard(p, scope, onSettled);
+    return renderComposedPanelCard(p, scope, onSettled, slot);
   }
   if (!p.read || !readSet.has(p.read)) {
     return fail(p.title, "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed.");

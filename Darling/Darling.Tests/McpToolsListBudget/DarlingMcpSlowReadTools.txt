@@ -1,0 +1,8 @@
+# DarlingMcpSlowReadTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_slow_reads 356
+param get_slow_reads.full_detail 50
+param get_slow_reads.hours 38
+param get_slow_reads.limit 36
+param get_slow_reads.route 40
+param get_slow_reads.server_name 40
+param get_slow_reads.surface 30

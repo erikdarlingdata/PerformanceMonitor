@@ -48,7 +48,7 @@ public sealed class MaterializationHoleScanShapeSqlTests
             Assert.Equal(3, sql.Split("OFFSET 0").Length - 1);
 
             var materializationProbeAt = sql.IndexOf(
-                "WHERE NOT EXISTS (SELECT 1 FROM \"_timescaledb_internal\".\"_materialized_hypertable_42\" AS m WHERE m.bucket = b.bucket OFFSET 0)",
+                "WHERE NOT EXISTS (SELECT 1 FROM \"_timescaledb_internal\".\"_materialized_hypertable_42\" AS m WHERE m.bucket >= b.bucket AND m.bucket <= b.bucket OFFSET 0)",
                 StringComparison.Ordinal);
             var fenceAt = sql.IndexOf("    OFFSET 0\n) AS c\nWHERE EXISTS (", StringComparison.Ordinal);
             var sourceProbeAt = sql.IndexOf($"SELECT 1 FROM collect.{target.Source} AS s", StringComparison.Ordinal);
@@ -216,8 +216,8 @@ ORDER BY b.bucket";
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-            var h0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-6), DateTimeKind.Unspecified);
-            Assert.True(DateTime.UtcNow - h0.AddHours(48) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
+            var h0 = LiveClock.Now().Date.AddDays(-6);
+            Assert.True(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) - h0.AddHours(48) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
 
             var collected = Enumerable.Range(0, 48).Where(h => h is not (>= 5 and <= 8) and not 20).ToArray();
             await PlantHoursAsync(connection, h0, collected, ct);

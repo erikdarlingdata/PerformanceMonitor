@@ -58,7 +58,10 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
         var sql = QueryStoreIntervalWideBrinIndex.CreateSql;
         Assert.Contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS", sql);
         Assert.Contains("USING brin (collection_time)", sql);
-        Assert.Contains("autosummarize = on", sql);
+        /* #5594: off. An autosummarize work item waits for the table's lock and cancels a running autovacuum. */
+        Assert.Contains("autosummarize = off", sql);
+        Assert.DoesNotContain("autosummarize = on", sql);
+        Assert.Contains("autosummarize = off", QueryStoreIntervalWideBrinIndex.Spec.IndexDefinition);
         Assert.Contains("ix_query_store_interval_wide_collection_time_brin", sql);
         Assert.Contains("DROP INDEX CONCURRENTLY IF EXISTS", QueryStoreIntervalWideBrinIndex.DropSql);
     }
@@ -66,7 +69,8 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
     [Fact]
     public void TheEnsure_ReadsValidityFirst_AndGuardsHypertablesThroughAViewCheck()
     {
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalWideBrinIndex.cs");
+        /* The machinery moved to QueryStoreBackgroundIndexes (#4952) so the two new btrees share it; the pins moved with it. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreBackgroundIndexes.cs");
 
         /* The validity read is what tells an INVALID leftover from a good index; IF NOT EXISTS alone keeps both. */
         Assert.Contains("i.indisvalid", source);
@@ -75,7 +79,7 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
         /* The hypertable catalog view is queried only after to_regclass says it exists (no TimescaleDB, no view). */
         Assert.Contains("to_regclass('timescaledb_information.hypertables')", source);
         Assert.Contains("if (hasHypertableView)", source);
-        Assert.Contains("BrinAction.SkipHypertable", source);
+        Assert.Contains("IndexAction.SkipHypertable", source);
         Assert.Contains("LogWarning", source);
     }
 
@@ -85,14 +89,16 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
 
         var migrate = source.IndexOf("PgMigrations.MigrateAsync(migrateConnection", System.StringComparison.Ordinal);
-        var launch = source.IndexOf("var intervalWideBrin = QueryStoreIntervalWideBrinIndex.RunDelayedAsync(", System.StringComparison.Ordinal);
-        var drain = source.IndexOf("await intervalWideBrin;", System.StringComparison.Ordinal);
+        /* #5571: the launch is the day-partition task, which runs Phase A and then the index ensures on one task (the
+           VALIDATE and a CREATE INDEX CONCURRENTLY on the legacy table conflict), so the pin names that entry point. */
+        var launch = source.IndexOf("var queryStoreIndexes = QueryStoreIntervalPartitions.RunDelayedAsync(", System.StringComparison.Ordinal);
+        var drain = source.IndexOf("await queryStoreIndexes;", System.StringComparison.Ordinal);
         var loopStop = source.IndexOf("PerformanceMonitor Darling collection loop stopped", System.StringComparison.Ordinal);
 
         Assert.True(migrate > 0 && launch > migrate, "the ensure must launch after migrations");
         Assert.True(drain > launch && drain < loopStop, "the ensure is drained only at shutdown, after the collection loop");
-        Assert.Single(Regex.Matches(source, @"await intervalWideBrin;"));
-        Assert.Contains("QueryStoreIntervalWideBrinIndex.StartDelay", source);
+        Assert.Single(Regex.Matches(source, @"await queryStoreIndexes;"));
+        Assert.Contains("QueryStoreBackgroundIndexes.StartDelay", source);
     }
 
     [Fact]
@@ -103,7 +109,7 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
         using var cts = new CancellationTokenSource();
         cts.CancelAfter(TimeSpan.FromMilliseconds(200));
 
-        await QueryStoreIntervalWideBrinIndex.RunDelayedAsync(dataSource, logger, TimeSpan.FromMinutes(20), cts.Token);
+        await QueryStoreBackgroundIndexes.RunDelayedAsync(dataSource, logger, TimeSpan.FromMinutes(20), QueryStoreBackgroundIndexes.All, cts.Token);
 
         var entry = Assert.Single(logger.Entries);
         Assert.Equal(LogLevel.Debug, entry.Level);
@@ -116,7 +122,7 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
         /* A cancel that lands after the delay needs a connection held open mid-handshake; Npgsql then may report
            the stop as its own exception, so that branch is pinned on the source: the flag is set right after the
            delay, the Debug branch is filtered on it, and the Information branch is the unfiltered catch. */
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalWideBrinIndex.cs")
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreBackgroundIndexes.cs")
             .Replace("\r\n", "\n");
 
         var delay = source.IndexOf("await Task.Delay(delay, cancellationToken)", System.StringComparison.Ordinal);

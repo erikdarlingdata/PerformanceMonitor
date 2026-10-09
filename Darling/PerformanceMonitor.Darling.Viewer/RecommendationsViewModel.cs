@@ -246,12 +246,7 @@ public sealed class RecommendationCardViewModel
     /// are deliberately NOT structured config fixes — their target lists are empty here — so they remain
     /// incidents, matching the Dashboard (where MISSING_INDEX keeps the incident affordances).
     /// </summary>
-    private bool HasStructuredFixAction =>
-        Item.Remediation is { } r &&
-        ((r.DbConfigTargets is { Count: > 0 }) ||
-         (r.RcsiTargets is { Count: > 0 }) ||
-         (r.FileGrowthTargets is { Count: > 0 }) ||
-         (r.ServerConfigTargets is { Count: > 0 }));
+    private bool HasStructuredFixAction => FactRemediation.IsConfigFix(Item.Remediation);
 
     /// <summary>
     /// Whether this is a standing CONFIG-FIX finding (a structured config action) rather than a time-bound
@@ -408,6 +403,20 @@ public sealed class RecommendationsViewModel
     /// suffixed with the Collection Health pointer. Empty in every other state.
     /// </summary>
     public string WindowEmptyMessage { get; }
+
+    /// <summary>
+    /// #5558: the one-sentence note shown above a Loaded or Empty list when the monitored node holds a secondary copy
+    /// of some databases in an availability group (their per-database findings are the primary's), or null for none.
+    /// </summary>
+    public string? ReplicaNote { get; private set; }
+
+    /// <summary>Sets <see cref="ReplicaNote"/> and returns this view-model, so a caller can chain it onto a factory.
+    /// Only the Loaded and Empty states show it; the others replace the whole list area with their own message.</summary>
+    public RecommendationsViewModel WithReplicaNote(string? note)
+    {
+        ReplicaNote = string.IsNullOrWhiteSpace(note) ? null : note;
+        return this;
+    }
 
     /// <summary>Total card count across all sections.</summary>
     public int TotalCount => Sections.Sum(s => s.Count);

@@ -85,8 +85,8 @@ internal static class DarlingFleetReader
     /// <para>The <c>is_silenced</c> column (#2031) is the SQL mirror of the Viewer's
     /// <c>ViewerDataService.IsWholeServerSilence</c> predicate — an enabled, unexpired mute rule scoped to the
     /// server (matched on the store server id when the rule carries one, else — a legacy rule — case-insensitively on the
-    /// same COALESCE(display, storage) name the card shows) with NO narrowing pattern on any other field. Display-only: the
-    /// web seat has no silence action; this exists so a dataless-quiet server and a silenced one stop looking
+    /// same COALESCE(display, storage) name the card shows) with NO narrowing pattern on any other field. The
+    /// column is read-only; the fleet page's Silence / Unsilence button writes the rule it reads back. It exists so a dataless-quiet server and a silenced one stop looking
     /// identical on the fleet cards and to <c>get_fleet_overview</c>.</para> $ none.</summary>
     public const string FleetServersSql = @"
 SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.server_name, s.sql_engine_edition, s.engine_kind,
@@ -437,25 +437,77 @@ GROUP BY server_id";
     /// keeps the read to the window's chunk(s): on the one-minute cadence the default hour is ~60 rows per
     /// database per server, and the fleet's whole hour is tens of thousands of rows behind the
     /// <c>(server_id, collection_time)</c> index — the same order as <see cref="FleetBlockingSql"/>'s
-    /// two scans.</para></summary>
+    /// two scans.</para>
+    ///
+    /// <para><b>Only the pairs that moved are ordered (#5526).</b> The read used to be one <c>LAG</c> window,
+    /// <c>PARTITION BY server_id, database_name</c>, over every server's rows, so one sort and one window pass
+    /// covered the whole fleet's window. On a store with 50 PostgreSQL targets that took 6.8 s for 7 days (168
+    /// hours, the most <c>get_fleet_overview</c> and <c>/api/fleet</c> accept), most of it the sort and the window
+    /// rather than I/O; this form took 0.68 to 0.77 s there, with 433 of 443 pairs flat. A
+    /// <c>(server_id, database_name)</c> pair that never changes its counter inside a window needs no ordering:
+    /// with every sample equal, every difference is 0. So <c>pairs</c> first takes ONE
+    /// unordered aggregate over the window (rows, rows with a counter, min, max) and marks a pair <c>flat</c>
+    /// when it has a counter in every row (<c>count(deadlocks) = count(*)</c>) and the counter never moves
+    /// (<c>min = max</c>). A flat pair of <c>n</c> samples has <c>n - 1</c> differences, all 0, so it adds 0 to
+    /// <c>cnt</c>, nothing to <c>last_seen</c> and <c>n - 1</c> to <c>intervals</c>, exactly what the ordered
+    /// form gave it; that is arithmetic, not an estimate. Every other pair (any change, any NULL counter, a
+    /// column that is NULL throughout, a reset) goes through the old ordered <c>LAG</c> unchanged. The
+    /// <c>LATERAL</c> reads one server at a time (<c>server_id = s.server_id</c>, the hypertable's segmentby, so a
+    /// compressed chunk is read through its segment index and no sort or window covers more than one server's
+    /// rows) and keeps only that server's ordered pairs by name, the NULL-named shared-relation series by
+    /// <c>IS NULL</c> because <c>= ANY</c> never matches NULL. A server with no ordered pair skips the read
+    /// (the pair test is a one-time filter on the lateral), and still gets its row: <c>cnt</c> 0,
+    /// <c>last_seen</c> NULL, <c>intervals</c> the flat pairs' sum. A server whose only row in the window is
+    /// one sample still gets its row with <c>intervals</c> 0, and a server with no row in the window still does
+    /// not appear. <c>FleetTotalsSql</c> in the viewer is the same shape, keeping only the total.</para></summary>
     public const string FleetPgDeadlockSql = @"
-WITH sampled AS
+WITH pairs AS
 (
     SELECT
         server_id,
-        collection_time,
-        deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time) AS raw_delta
+        database_name,
+        count(*) AS n,
+        (count(deadlocks) = count(*) AND min(deadlocks) = max(deadlocks)) AS flat
     FROM pg_database_stats
     WHERE collection_time >= $1
     AND   collection_time <= $2
+    GROUP BY server_id, database_name
+),
+window_servers AS
+(
+    SELECT
+        server_id,
+        CAST(coalesce(SUM(n - 1) FILTER (WHERE flat), 0) AS bigint) AS flat_intervals,
+        array_agg(database_name) FILTER (WHERE NOT flat AND database_name IS NOT NULL) AS ordered_names,
+        coalesce(bool_or(database_name IS NULL) FILTER (WHERE NOT flat), false) AS ordered_null_name
+    FROM pairs
+    GROUP BY server_id
 )
 SELECT
-    server_id,
-    CAST(coalesce(SUM(GREATEST(raw_delta, 0)), 0) AS bigint) AS cnt,
-    MAX(collection_time) FILTER (WHERE raw_delta > 0) AS last_seen,
-    CAST(count(raw_delta) AS bigint) AS intervals
-FROM sampled
-GROUP BY server_id";
+    s.server_id,
+    d.cnt,
+    d.last_seen,
+    s.flat_intervals + d.intervals AS intervals
+FROM window_servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT
+        CAST(coalesce(SUM(GREATEST(sampled.raw_delta, 0)), 0) AS bigint) AS cnt,
+        MAX(sampled.collection_time) FILTER (WHERE sampled.raw_delta > 0) AS last_seen,
+        CAST(count(sampled.raw_delta) AS bigint) AS intervals
+    FROM
+    (
+        SELECT
+            collection_time,
+            deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time) AS raw_delta
+        FROM pg_database_stats
+        WHERE (cardinality(s.ordered_names) > 0 OR s.ordered_null_name)
+        AND   server_id = s.server_id
+        AND   collection_time >= $1
+        AND   collection_time <= $2
+        AND   (database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL))
+    ) AS sampled
+) AS d";
 
     /// <summary>The deadlock health band's two tiers from the singleton settings row (#3368, V120).
     ///
@@ -524,6 +576,28 @@ LEFT JOIN LATERAL
     LIMIT 1
 ) AS latest ON TRUE
 WHERE s.is_enabled
+AND   s.server_id <> 0";
+
+    /// <summary>W1b: the real last collection of the servers <see cref="FleetLastCollectionSql"/> found nothing for, so an
+    /// offline card shows how long it has been dark instead of "more than 2 days". $1 the server ids (those the window held
+    /// none for), $2 the window start. The shape of the Viewer's <c>ServerFreshnessSql</c> (a per-server LATERAL ...
+    /// ORDER BY collection_time DESC LIMIT 1, an index descent on (server_id, collection_time)), bounded ABOVE by the window
+    /// start because everything newer is already known to be empty, which also lets TimescaleDB leave the newest chunks out.</summary>
+    public const string FleetOlderCollectionSql = @"
+SELECT
+    s.server_id,
+    latest.collection_time
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT collection_time
+    FROM v_collection_log
+    WHERE server_id = s.server_id
+    AND   collection_time < $2
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS latest
+WHERE s.server_id = ANY($1)
 AND   s.server_id <> 0";
 
     /// <summary>How far back <see cref="FleetLastCollectionSql"/> looks for a server's newest collection: two
@@ -798,7 +872,7 @@ GROUP BY server_id, collector_name";
             await ScopeAzureMasterRowsAsync(
                 postgres, servers, blocking, deadlocks, windowStartUtc, windowEndUtc, separatelyMonitored, logger, cancellationToken);
         }
-        var lastCollection = await ReadLastCollectionAsync(postgres, now, cancellationToken);
+        var lastCollection = await ReadLastCollectionAsync(postgres, now, logger, cancellationToken);
         /* #3735: the ONE read in this fan-out that does not depend on the caller's window — the 7-day
            collection-health aggregate is the same statement whatever hours_back was — and therefore the one
            that is single-flighted and memoized. Every other read above and below stays a per-call read: each
@@ -848,7 +922,7 @@ GROUP BY server_id, collector_name";
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds);
@@ -893,7 +967,8 @@ GROUP BY server_id, collector_name";
         DateTime now,
         TimeSpan deadlockWindow,
         DeadlockRateThresholds deadlockTiers,
-        DateTime? registeredAt = null)
+        DateTime? registeredAt = null,
+        DateTime? olderCollection = null)
     {
 
         /* Lite's XE-preferred / DMV-fallback, per server: XE when it has any row this window, else the DMV
@@ -1030,7 +1105,8 @@ GROUP BY server_id, collector_name";
             IsOnline = isOnline,
             AwaitingFirstCollection = awaitingFirstCollection,
             CollectionStale = collectionStale,
-            LastCollectionTime = lastCollection,
+            /* W1b: the windowed read's newest collection, else (offline past the window) the real last one, display only. */
+            LastCollectionTime = lastCollection ?? olderCollection,
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherCpu,
             TotalCpuPercent = totalCpu,
@@ -1701,22 +1777,97 @@ GROUP BY server_id, collector_name";
     /// <summary>One <see cref="LastCollectionRow"/> per enabled registry server, INCLUDING the ones whose
     /// window holds nothing (#3935): their row is the read's positive report that it looked and found none,
     /// which is what <see cref="ClassifyWindowedFreshness"/> needs before it may call a server Offline.</summary>
-    private static async Task<Dictionary<int, LastCollectionRow>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
+    internal static async Task<Dictionary<int, LastCollectionRow>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, ILogger? logger, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, LastCollectionRow>();
-        await using var command = postgres.CreateCommand(FleetLastCollectionSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddTimestamp(command, LastCollectionWindowStart(now));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        /* The first read is closed (reader, command, and with them its pooled connection) before the older-collection read opens
+           its own, so one fleet call never holds two pooled connections while it waits for the second: concurrent polls that each
+           held one and waited for another could exhaust the pool and answer 503. */
         {
-            map[reader.GetInt32(0)] = new LastCollectionRow(
-                reader.IsDBNull(1) ? null : reader.GetDateTime(1),
-                reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+            await using var command = postgres.CreateCommand(FleetLastCollectionSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddTimestamp(command, LastCollectionWindowStart(now));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                map[reader.GetInt32(0)] = new LastCollectionRow(
+                    reader.IsDBNull(1) ? null : reader.GetDateTime(1),
+                    reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+            }
+        }
+
+        /* W1b: a server the window held nothing for gets its real last collection from one more, index-backed read, run
+           only when there is such a server. A failed read leaves the card as it was: the bound text, never a wrong age.
+           The answer is cached per server for OlderCollectionCacheMinutes: while a server stays dark its older collection
+           cannot change (the 48 h read takes over the moment rows return), so the read never runs on every poll. */
+        var cache = OlderCollectionCache.GetOrCreateValue(postgres);
+        foreach (var id in map.Where(kv => kv.Value.LastCollection is not null).Select(kv => kv.Key))
+        {
+            /* A server with rows is not dark: forget its entry, so a later dark spell reads fresh. */
+            cache.TryRemove(id, out _);
+        }
+
+        var dark = map.Where(kv => kv.Value.LastCollection is null).Select(kv => kv.Key).ToList();
+        var toRead = new List<int>();
+        foreach (var id in dark)
+        {
+            if (cache.TryGetValue(id, out var cached) && now - cached.ReadAt < OlderCollectionCacheTtl)
+            {
+                if (cached.Older is { } older) map[id] = map[id] with { OlderCollection = older };
+            }
+            else
+            {
+                toRead.Add(id);
+            }
+        }
+
+        if (toRead.Count > 0)
+        {
+            try
+            {
+                var found = new Dictionary<int, DateTime>();
+                await using (var older = postgres.CreateCommand(FleetOlderCollectionSql))
+                {
+                    older.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    older.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = toRead.ToArray() });
+                    AddTimestamp(older, LastCollectionWindowStart(now));
+                    await using var olderReader = await older.ExecuteReaderAsync(cancellationToken);
+                    while (await olderReader.ReadAsync(cancellationToken))
+                    {
+                        var id = olderReader.GetInt32(0);
+                        if (olderReader.IsDBNull(1) || !map.ContainsKey(id)) continue;
+                        found[id] = olderReader.GetDateTime(1);
+                    }
+                }
+
+                foreach (var id in toRead)
+                {
+                    DateTime? olderCollection = found.TryGetValue(id, out var value) ? value : null;
+                    cache[id] = new OlderCollectionEntry(now, olderCollection);
+                    if (olderCollection is { } at) map[id] = map[id] with { OlderCollection = at };
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* Display only: the card falls back to the bound sentence, and nothing is cached, so the next poll tries again. */
+                logger?.LogWarning(ex, "Fleet overview: the last collection of {Count} offline server(s) could not be read; their cards keep the two-day bound", toRead.Count);
+            }
         }
 
         return map;
     }
+
+    /// <summary>How long a dark server's older-collection answer is reused (W1b). The value cannot change while the server stays
+    /// dark; it is dropped as soon as the server shows rows again.</summary>
+    internal const int OlderCollectionCacheMinutes = 15;
+
+    private static readonly TimeSpan OlderCollectionCacheTtl = TimeSpan.FromMinutes(OlderCollectionCacheMinutes);
+
+    private sealed record OlderCollectionEntry(DateTime ReadAt, DateTime? Older);
+
+    /// <summary>Per store (the data source), then per server id: the cached older-collection answer. A table keyed on the data source
+    /// object keeps two stores that reuse a server id (tests, a rebind) from sharing an answer.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<NpgsqlDataSource, System.Collections.Concurrent.ConcurrentDictionary<int, OlderCollectionEntry>> OlderCollectionCache = new();
 
     /// <summary>Reads the cross-server 7-day collector health and counts each server's HEALTHY / FAILING
     /// collectors through the shared <see cref="CollectorHealth.HealthStatus"/> banding, plus (#3819) the
@@ -1726,6 +1877,14 @@ GROUP BY server_id, collector_name";
         NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
     {
         var counts = new Dictionary<int, CollectorCounts>();
+        /* #4999: every collector is banded against the interval it is scheduled at on ITS server, the one the
+           per-server get_collection_health read judges it by, so the roll-up and that read cannot disagree about a
+           collector an operator moved off its shipped cadence. The schedule table is sparse and read once here, before
+           the health statement's reader opens, so one call never holds two connections; a server's rows are
+           picked out of it once, the first time that server appears. A read that fails leaves every row on its
+           shipped cadence, as the per-server read does. */
+        var scheduleOverrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, cancellationToken);
+        var overridesByServer = new Dictionary<int, IReadOnlyList<ScheduleOverride>>();
         /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
            alongside it) when the guard passes, else the raw scan. Same fourteen ordinals either way, so
            everything below is shared. */
@@ -1748,7 +1907,13 @@ GROUP BY server_id, collector_name";
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetInt32(0);
-            var health = MapFleetHealthRow(reader);
+            if (!overridesByServer.TryGetValue(serverId, out var serverOverrides))
+            {
+                serverOverrides = scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList();
+                overridesByServer[serverId] = serverOverrides;
+            }
+
+            var health = MapFleetHealthRow(reader, serverId, serverOverrides);
 
             counts.TryGetValue(serverId, out var existing);
             var status = health.HealthStatus;
@@ -1790,7 +1955,19 @@ GROUP BY server_id, collector_name";
     /// ordinals 0-13; <c>server_id</c> is read by the caller) to the <see cref="CollectorHealth"/> the shared
     /// banding reads. Its own method so a test can drive the banding through the same mapping the fleet read
     /// uses (#4812).</summary>
-    internal static CollectorHealth MapFleetHealthRow(System.Data.Common.DbDataReader reader)
+    internal static CollectorHealth MapFleetHealthRow(System.Data.Common.DbDataReader reader) =>
+        MapFleetHealthRow(reader, serverId: null, overrides: null);
+
+    /// <summary>
+    /// #4999: <see cref="MapFleetHealthRow(System.Data.Common.DbDataReader)"/> for a row whose server's schedule
+    /// overrides are known. The row is stamped with the interval its collector is scheduled at on that server
+    /// (<see cref="DarlingDataReader.ApplyScheduledFrequency"/>, the per-server read's own step) BEFORE the
+    /// trailing-run estimate is taken, because the estimate reads the cadence too. The band then judges an
+    /// overridden collector against the interval it runs at, as get_collection_health does for the same server.
+    /// With no <paramref name="serverId"/> or no <paramref name="overrides"/> the row keeps the shipped cadence.
+    /// </summary>
+    internal static CollectorHealth MapFleetHealthRow(
+        System.Data.Common.DbDataReader reader, int? serverId, IReadOnlyList<ScheduleOverride>? overrides)
     {
         var health = new CollectorHealth
         {
@@ -1817,6 +1994,12 @@ GROUP BY server_id, collector_name";
                the ladder. Unset, a collector that lost half its databases bands HEALTHY here. */
             LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
         };
+
+        /* #4999: the cadence is stamped before anything below reads it. */
+        if (serverId is int scheduledServerId && overrides is not null)
+        {
+            DarlingDataReader.ApplyScheduledFrequency(health, scheduledServerId, overrides);
+        }
 
         /* #3885: the produced-then-stopped arm's input, set AFTER construction because it is derived
            from two of this row's own members plus the cadence rather than read from a column. The
@@ -1866,7 +2049,9 @@ GROUP BY server_id, collector_name";
     /// <param name="LastCollection">The newest collection at or after <see cref="LastCollectionWindowStart"/>,
     /// or null when the window holds none.</param>
     /// <param name="RegisteredAt">The server's first successful connect, as the registry recorded it.</param>
-    internal readonly record struct LastCollectionRow(DateTime? LastCollection, DateTime? RegisteredAt);
+    /// <param name="OlderCollection">W1b: the newest collection BEFORE the window, read only for a server the window held
+    /// none for, so an offline card can show its real age. Never an input to the freshness rule.</param>
+    internal readonly record struct LastCollectionRow(DateTime? LastCollection, DateTime? RegisteredAt, DateTime? OlderCollection = null);
     /// <summary>The PostgreSQL deadlock reading (#3539): the summed counter differences, the sample that
     /// showed the newest step, and <paramref name="Intervals"/> — how many differences the sum was taken
     /// over. Its <c>default</c> is zero intervals, which <see cref="BuildCard"/> reads as unmeasured: a
@@ -2156,8 +2341,8 @@ public sealed class FleetServerCard
     [JsonPropertyName("is_azure_mi")] public bool IsAzureManagedInstance { get; init; }
 
     /// <summary>True when a whole-server alert silence (an enabled, unexpired mute rule scoped to this server
-    /// with no narrowing pattern) is active (#2031) — display-only, so a silenced server stops looking like a
-    /// healthy-quiet one. The web seat has no silence action; silencing stays with the Viewer/MCP.</summary>
+    /// with no narrowing pattern) is active (#2031) — so a silenced server stops looking like a
+    /// healthy-quiet one. The fleet page's Silence / Unsilence button writes the rule.</summary>
     [JsonPropertyName("is_silenced")] public bool IsSilenced { get; init; }
 
     /// <summary>The server's tags for the read-only fleet pills (#2020) — id, name, and stored <c>#RRGGBB</c>

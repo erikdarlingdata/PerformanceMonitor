@@ -100,6 +100,54 @@ public static class PgDeadlockRemask
     public readonly record struct ReportCursor(DateTime CollectionTime, int ServerId);
 
     /// <summary>
+    /// Where an alert-log walk resumes (#5625): a position in <c>idx_config_alert_log_time (server_id, metric_name,
+    /// alert_time)</c> order, which is the order both alert stages walk in. <see cref="AlertTime"/> is the last
+    /// instant finished under <see cref="ServerId"/> and <see cref="MetricName"/> (rows tied at it are finished
+    /// too); null means that server and metric are still to be read from their first row. The log is not walked in
+    /// <c>alert_time</c> order across servers because no index serves that: the walk would read every row of every
+    /// server on each page. Nothing depends on the global order: no UPDATE changes <c>server_id</c>,
+    /// <c>metric_name</c> or <c>alert_time</c>, so a rewritten or dismissed row keeps its place in this index order, and
+    /// an alert written after this build is already in its final form, wherever it lands.
+    /// </summary>
+    public readonly record struct AlertLogCursor(int ServerId, string MetricName, DateTime? AlertTime);
+
+    /// <summary>The next server that has any row in <c>config_alert_log</c> at or after <c>$1</c> (a bigint, so
+    /// <c>server_id + 1</c> cannot overflow): one descent of <c>idx_config_alert_log_time</c> on its leading column,
+    /// not the servers registry, because the rows of a server that was removed stay in the log until their retention
+    /// ends (#5625).</summary>
+    public const string AlertServerProbeSql = @"
+SELECT a.server_id
+FROM config_alert_log AS a
+WHERE a.server_id >= $1
+ORDER BY a.server_id
+LIMIT 1";
+
+    /// <summary>The first server and metric of the log, in index order (#5625).</summary>
+    public const string AlertPairFirstSql = @"
+SELECT a.server_id, a.metric_name, a.metric_name LIKE 'Analysis: %' AS is_analysis
+FROM config_alert_log AS a
+ORDER BY a.server_id, a.metric_name
+LIMIT 1";
+
+    /// <summary>The next server and metric after <c>($1, $2)</c> in index order, with whether its name is an
+    /// <c>Analysis: </c> one (#5625). A row comparison on the index's first two columns, so the descent lands past every
+    /// row of the pair just finished: a loose scan that needs no range on <c>metric_name</c> (which could not be told
+    /// from the <c>LIKE</c> under every collation a bring-your-own store can have) and no skip scan.</summary>
+    public const string AlertPairNextSql = @"
+SELECT a.server_id, a.metric_name, a.metric_name LIKE 'Analysis: %' AS is_analysis
+FROM config_alert_log AS a
+WHERE (a.server_id, a.metric_name) > ($1, $2)
+ORDER BY a.server_id, a.metric_name
+LIMIT 1";
+
+    /// <summary>How many probe statements one alert page may run besides the row reads that fill it (#5625): every
+    /// step to the next server (deadlock stage) or to the next server and metric (finding-alert stage) is one,
+    /// whatever the metric's name and whether or not rows follow it. A page that meets no row to examine still ends,
+    /// with a cursor on the place it reached, so a log whose remaining metrics hold nothing to look at costs a few
+    /// pages rather than one that runs a statement per metric.</summary>
+    public const int MaxAlertStepsPerPage = 100;
+
+    /// <summary>
     /// One page of stored reports, in <c>(collection_time, server_id)</c> order after the cursor (<c>$1</c>/<c>$2</c>,
     /// null for the start): <c>$3</c> rows and every row tied with the last, so a page never splits a batch and the
     /// next resumes strictly after it. Keyed on the partitioning column so the page walks the hypertable's chunks in
@@ -196,19 +244,24 @@ AND   d.victim_pid IS NOT DISTINCT FROM $4
 AND   d.deadlock_hash = {ReportAnchorSql}
 AND   {PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text")}";
 
-    /// <summary>One page of deadlock alert rows in <c>alert_time</c> order after <c>$1</c> (null for the start):
-    /// <c>$2</c> rows and every row tied with the last, so a page never splits one instant's rows and the next
-    /// resumes strictly after it. By <c>alert_time</c>, not physical order (#4036's round-2 review, finding 4): an
-    /// UPDATE writes a new copy of a row, and a Viewer dismiss-all writes one of every row, so a copy could land behind
-    /// a <c>ctid</c> cursor during an otherwise clean walk, never be read, and the stage be marked done over it. No
-    /// UPDATE changes a row's <c>alert_time</c>. <c>ctid</c> and <c>xmin</c> are only what the write checks the row by
+    /// <summary>One slice of deadlock alert rows of ONE server (<c>$1</c>) in <c>alert_time</c> order after <c>$2</c>
+    /// (null for the server's first row): <c>$3</c> rows and every row tied with the last, so a slice never splits one
+    /// instant's rows and the next resumes strictly after it. The server and the metric are both equalities, so the
+    /// read is one range of <c>idx_config_alert_log_time (server_id, metric_name, alert_time)</c> that starts at the
+    /// cursor and stops at the page size, on PostgreSQL 16, 17 and 18 alike (no skip scan, #5625). A page spans servers
+    /// by asking <see cref="AlertServerProbeSql"/> for the next one, never by one read over all of them: the metric
+    /// is not the index's first column, so a read over every server would walk each server's other alerts too.
+    /// By <c>alert_time</c>, not physical order (#4036): an UPDATE writes a new copy of a row, and a Viewer
+    /// dismiss-all writes one of every row, so a copy could land behind a <c>ctid</c> cursor during an otherwise clean
+    /// walk, never be read, and the stage be marked done over it. No UPDATE changes a row's <c>alert_time</c>,
+    /// <c>server_id</c> or <c>metric_name</c>. <c>ctid</c> and <c>xmin</c> are only what the write checks the row by
     /// (the history table is a plain table, never compressed, so both are there).
-    /// <para>The same statement resolves every report-shaped key the page's incidents carry to its stored report
-    /// (the rows after the page's, <c>is_report</c> true): whether its hash is raw, and a raw one's text, the
+    /// <para>The same statement resolves every report-shaped key the slice's incidents carry to its stored report
+    /// (the rows after the slice's, <c>is_report</c> true): whether its hash is raw, and a raw one's text, the
     /// earliest report where one hash covers two, as <see cref="DarlingPgDeadlockReader.DeadlocksSql"/> grouped them
-    /// when the alert fired. In SQL, from the page's own <c>context_json</c>, so no raw hash leaves the store as a
-    /// parameter (#4035), and in one statement, so the keys looked up are the page's own. The keys are matched as
-    /// text rather than parsed, so a context that is not JSON cannot fail the page (<see cref="RemaskAlert"/> leaves
+    /// when the alert fired. In SQL, from the slice's own <c>context_json</c>, so no raw hash leaves the store as a
+    /// parameter (#4035), and in one statement, so the keys looked up are the slice's own. The keys are matched as
+    /// text rather than parsed, so a context that is not JSON cannot fail the slice (<see cref="RemaskAlert"/> leaves
     /// such a row as it is).</para></summary>
     public static readonly string AlertPageSql = $@"
 WITH page AS MATERIALIZED
@@ -221,11 +274,12 @@ WITH page AS MATERIALIZED
         a.context_json,
         a.xmin
     FROM config_alert_log AS a
-    WHERE ($1::timestamp IS NULL OR a.alert_time > $1::timestamp)
+    WHERE a.server_id = $1
     AND   a.metric_name = '{AlertEngine.DeadlockWatermarkMetric}'
+    AND   ($2::timestamp IS NULL OR a.alert_time > $2::timestamp)
     AND   a.context_json IS NOT NULL
     ORDER BY a.alert_time
-    FETCH FIRST $2 ROWS WITH TIES
+    FETCH FIRST $3 ROWS WITH TIES
 ),
 keys AS
 (
@@ -726,49 +780,86 @@ AND   xmin = $4::xid";
     /// Examines one slice of deadlock alert rows and rewrites the ones still carrying a pre-#4005 incident (#4012).
     /// Returns the cursor to resume from, null once the log's end is reached, and how many rows changed between the
     /// read and the write (a dismissal moves a row), which were left as they were and need the log read again.
+    /// A slice reads one server at a time through <see cref="AlertPageSql"/> (a range of the alert-log index, bounded
+    /// by the slice's size) and steps to the next server with <see cref="AlertServerProbeSql"/> until it holds
+    /// <see cref="MaxAlertRowsPerPass"/> rows or the log ends (#5625).
     /// <paramref name="rowDone"/> hears each row's outcome, with the cursor to resume from once the row closes its
     /// <c>alert_time</c> (null while rows of that instant are left in the page), so a cancel mid-page resumes after
     /// the last instant finished and never skips a row tied with it.
     /// </summary>
-    public static async Task<(DateTime? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredAlertsAsync(
-        NpgsqlConnection connection, DateTime? afterCursor, PgLogHashKey? keyUnresolvedWith, bool reportsMayBeRaw,
-        Action<DateTime?, RowOutcome>? rowDone, CancellationToken cancellationToken = default)
+    public static async Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredAlertsAsync(
+        NpgsqlConnection connection, AlertLogCursor? afterCursor, PgLogHashKey? keyUnresolvedWith, bool reportsMayBeRaw,
+        Action<AlertLogCursor?, RowOutcome>? rowDone, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         var page = new List<(string Ctid, DateTime AlertTime, int ServerId, string? Detail, string Context, uint Xmin)>();
         var reports = new Dictionary<(int, string), ResolvedReport>();
+        AlertLogCursor? next = null;
         await using (var transaction = await BeginBoundedAsync(connection, cancellationToken))
         {
-            await using (var select = new NpgsqlCommand(AlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+            int? server;
+            DateTime? after;
+            if (afterCursor is { } resume)
             {
-                select.Parameters.Add(new NpgsqlParameter { Value = (object?)afterCursor ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
-                select.Parameters.Add(new NpgsqlParameter { Value = (long)MaxAlertRowsPerPass, NpgsqlDbType = NpgsqlDbType.Bigint });
-                await using var reader = await select.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    if (!reader.GetBoolean(0))
-                    {
-                        page.Add((
-                            reader.GetString(2),
-                            reader.GetDateTime(1),
-                            reader.GetInt32(3),
-                            reader.IsDBNull(4) ? null : reader.GetString(4),
-                            reader.GetString(5),
-                            reader.GetFieldValue<uint>(6)));
-                        continue;
-                    }
+                server = resume.ServerId;
+                after = resume.AlertTime;
+            }
+            else
+            {
+                server = await NextServerAsync(connection, transaction, long.MinValue, cancellationToken);
+                after = null;
+            }
 
-                    /* A stored report one of the page's incidents names. */
-                    var raw = reader.GetBoolean(13);
-                    reports[(reader.GetInt32(3), reader.GetString(7))] = raw && !reader.IsDBNull(12)
-                        ? new ResolvedReport(ReportState.Raw, RemaskedIncident(
-                            reader.IsDBNull(8) ? null : reader.GetDateTime(8),
-                            reader.IsDBNull(9) ? null : reader.GetInt32(9),
-                            reader.IsDBNull(10) ? null : reader.GetInt32(10),
-                            reader.IsDBNull(11) ? null : reader.GetString(11),
-                            reader.GetString(12)))
-                        : new ResolvedReport(ReportState.Current, null);
+            var steps = 0;
+            while (server is { } current)
+            {
+                await using (var select = new NpgsqlCommand(AlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+                {
+                    select.Parameters.Add(new NpgsqlParameter { Value = current, NpgsqlDbType = NpgsqlDbType.Integer });
+                    select.Parameters.Add(new NpgsqlParameter { Value = (object?)after ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                    select.Parameters.Add(new NpgsqlParameter { Value = (long)Math.Max(1, MaxAlertRowsPerPass - page.Count), NpgsqlDbType = NpgsqlDbType.Bigint });
+                    await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        if (!reader.GetBoolean(0))
+                        {
+                            page.Add((
+                                reader.GetString(2),
+                                reader.GetDateTime(1),
+                                reader.GetInt32(3),
+                                reader.IsDBNull(4) ? null : reader.GetString(4),
+                                reader.GetString(5),
+                                reader.GetFieldValue<uint>(6)));
+                            continue;
+                        }
+
+                        /* A stored report one of the page's incidents names. */
+                        var raw = reader.GetBoolean(13);
+                        reports[(reader.GetInt32(3), reader.GetString(7))] = raw && !reader.IsDBNull(12)
+                            ? new ResolvedReport(ReportState.Raw, RemaskedIncident(
+                                reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+                                reader.IsDBNull(9) ? null : reader.GetInt32(9),
+                                reader.IsDBNull(10) ? null : reader.GetInt32(10),
+                                reader.IsDBNull(11) ? null : reader.GetString(11),
+                                reader.GetString(12)))
+                            : new ResolvedReport(ReportState.Current, null);
+                    }
+                }
+
+                if (page.Count >= MaxAlertRowsPerPass)
+                {
+                    next = new AlertLogCursor(page[^1].ServerId, AlertEngine.DeadlockWatermarkMetric, page[^1].AlertTime);
+                    break;
+                }
+
+                server = await NextServerAsync(connection, transaction, (long)current + 1, cancellationToken);
+                after = null;
+                if (server is { } following && ++steps >= MaxAlertStepsPerPage)
+                {
+                    /* A log of many servers with little to look at: end the page on the server it reached. */
+                    next = new AlertLogCursor(following, AlertEngine.DeadlockWatermarkMetric, null);
+                    break;
                 }
             }
 
@@ -801,18 +892,69 @@ AND   xmin = $4::xid";
                 await transaction.CommitAsync(cancellationToken);
             }
 
-            rowDone?.Invoke(i == page.Count - 1 || page[i + 1].AlertTime != row.AlertTime ? row.AlertTime : null, outcome);
+            rowDone?.Invoke(
+                i == page.Count - 1 || page[i + 1].AlertTime != row.AlertTime || page[i + 1].ServerId != row.ServerId
+                    ? new AlertLogCursor(row.ServerId, AlertEngine.DeadlockWatermarkMetric, row.AlertTime)
+                    : null,
+                outcome);
         }
 
-        var next = page.Count < MaxAlertRowsPerPass ? (DateTime?)null : page[^1].AlertTime;
         return (next, page.Count, rewritten, raced);
     }
 
-    /// <summary>How many stored analysis findings one slice examines.</summary>
-    public const int MaxFindingRowsPerPass = 500;
+    /// <summary>The first server at or after <paramref name="from"/> that has a row in the alert log, or null: one
+    /// descent of the index's leading column (<see cref="AlertServerProbeSql"/>).</summary>
+    private static async Task<int?> NextServerAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, long from, CancellationToken cancellationToken)
+    {
+        await using var probe = new NpgsqlCommand(AlertServerProbeSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds };
+        probe.Parameters.Add(new NpgsqlParameter { Value = from, NpgsqlDbType = NpgsqlDbType.Bigint });
+        await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? reader.GetInt32(0) : null;
+    }
 
-    /// <summary>One page of stored analysis findings that carry a deadlock exemplar section, in physical order after
-    /// <c>$1</c> (null for the start). Only a finding whose chain holds a key the section is attached for (the deadlock
+    /// <summary>How many heap blocks of <c>analysis_findings</c> one slice reads (#5625): 2048 blocks of 8 KiB, 16 MiB.
+    /// The slice is bounded by the table's physical size, not by how many findings match, so a store with none to
+    /// rewrite still costs one slice a fixed read. On a 600,000-finding store (1,514 MB, none matching) the old page
+    /// read all 132,357 buffers (about 1 GB) and failed twice under the 15 s <see cref="StatementTimeoutSeconds"/>
+    /// on a cold or busy disk; 16 MiB is 1/64 of that, so a disk has to fall below about 1 MiB/s to time a slice
+    /// out, and a walk is about 65 slices on that store.</summary>
+    public const int FindingBlocksPerPass = 2048;
+
+    /// <summary>The block count of <c>analysis_findings</c> now (#5625): where a block-range walk ends. Read for each
+    /// slice, so a table that grew during the walk is walked to its new end (rows this build writes are already
+    /// stamped; the ones the walk rewrites are found again by the next walk).</summary>
+    public const string FindingBlockCountSql = @"
+SELECT pg_catalog.pg_relation_size('analysis_findings'::regclass) / pg_catalog.current_setting('block_size')::bigint,
+       pg_catalog.pg_relation_filenode('analysis_findings'::regclass)::bigint";
+
+    /// <summary>The file the block walk is reading (#5625). A <c>VACUUM FULL</c>, <c>CLUSTER</c> or <c>pg_repack</c>
+    /// of <c>analysis_findings</c> writes the live rows to a new file, packed toward block 0, so rows that sat at or
+    /// after the walk's cursor can land before it. <see cref="Filenode"/> is the file the walk's cursor belongs to
+    /// (null before its first page); <see cref="RemaskStoredFindingsAsync"/> reads the table's current one with the
+    /// block count and, when the two differ, sends the walk back to block 0 and sets <see cref="Restarted"/>.</summary>
+    public sealed class FindingWalk
+    {
+        /// <summary>The <c>pg_relation_filenode</c> of the table when the walk's cursor was last set.</summary>
+        public long? Filenode { get; set; }
+
+        /// <summary>True when the last page found a different file than the walk began in and returned to block 0.</summary>
+        public bool Restarted { get; private set; }
+
+        internal void Update(long? filenode, bool restarted)
+        {
+            Filenode = filenode;
+            Restarted = restarted;
+        }
+    }
+
+    /// <summary>One page of stored analysis findings that carry a deadlock exemplar section, from one physical block
+    /// range of the table (#5625): <c>$1</c> is the first block's <c>(block,0)</c> and <c>$2</c> the end of the range,
+    /// exclusive, so the read is a TID Range Scan of <see cref="FindingBlocksPerPass"/> blocks whatever matches. It was
+    /// <c>finding_id &gt; $1 ORDER BY finding_id</c>, and the table has no index on <c>finding_id</c> (the bulk ingest
+    /// goes without it), so every page was a Seq Scan and Sort of the whole table, 1 GB on a 600,000-finding store,
+    /// and a page with nothing to find still read all of it. Only a finding whose chain holds a key the section is
+    /// attached for (the deadlock
     /// rate fact or its anomaly, anywhere on the path, as <see cref="PgTargetDrillDownCollector"/> attaches it: #4012's
     /// review, finding 4) is looked into, by its <c>story_path</c>, a plain column holding the chain's keys joined
     /// with <c>" → "</c> (<c>InferenceEngine.BuildStory</c>), so every other finding's drill-down is never detoasted
@@ -825,18 +967,17 @@ SELECT
     f.ctid::text,
     f.drill_down_json,
     f.story_text,
-    f.xmin,
-    f.finding_id
+    f.xmin
 FROM analysis_findings AS f
-WHERE ($1::bigint IS NULL OR f.finding_id > $1::bigint)
+WHERE f.ctid >= $1::tid
+AND   f.ctid <  $2::tid
 AND   CASE
           WHEN string_to_array(f.story_path, ' → ') && ARRAY['" + PgTargetFactKeys.DeadlockRate + "', '" + PgTargetFactKeys.AnomalyDeadlockRate + @"']
           THEN strpos(f.drill_down_json, '""" + PgTargetDrillDownCollector.DeadlockExemplarsSection + @"""') > 0
                AND strpos(f.drill_down_json, '""sql_normalized"":true') = 0
           ELSE false
       END
-ORDER BY f.finding_id
-FETCH FIRST $2 ROWS WITH TIES";
+ORDER BY f.ctid";
 
     /// <summary>Writes one finding's normalized drill-down and prose back, only while the row is still the version
     /// the page read (<c>ctid</c> and <c>xmin</c>), never by sending its raw text back (#4012's review).</summary>
@@ -865,27 +1006,62 @@ AND   xmin = $4::xid";
     }
 
     /// <summary>
-    /// Examines one slice of stored analysis findings and rewrites the ones whose deadlock exemplars predate #4005
-    /// (#4012). Returns the cursor to resume from, null once the table's end is reached, and how many rows changed
-    /// between the read and the write, which were left as they were and need the table read again.
+    /// Examines one block range of stored analysis findings and rewrites the ones whose deadlock exemplars predate
+    /// #4005 (#4012, #5625). <paramref name="afterCursor"/> is the first block to read (null for the start) and the
+    /// returned cursor the next one, or null once the table's last block is behind it; it moves by
+    /// <see cref="FindingBlocksPerPass"/> blocks whether or not anything matched. Returns how many matching findings
+    /// were read, how many were rewritten, and how many changed between the read and the write, which were left as
+    /// they were and need the table read again. A cancel inside a slice leaves the cursor at the slice's start: the
+    /// rows it rewrote are stamped, so the next tick reads them no more. <paramref name="rowDone"/> is called with a
+    /// null cursor, for the same reason.
+    /// <paramref name="walk"/> carries the table's file across the walk's slices (#5625): when the file under a
+    /// cursor has been replaced (a table rewrite), the slice reads nothing and returns block 0, so the walk starts
+    /// again, and <see cref="FindingWalk.Restarted"/> tells the caller that walk is not a clean one.
     /// </summary>
+    public static Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsAsync(
+        NpgsqlConnection connection, long? afterCursor, Action<long?, RowOutcome>? rowDone,
+        CancellationToken cancellationToken = default) =>
+        RemaskStoredFindingsAsync(connection, afterCursor, rowDone, null, cancellationToken);
+
+    /// <inheritdoc cref="RemaskStoredFindingsAsync(NpgsqlConnection, long?, Action{long?, RowOutcome}?, CancellationToken)"/>
     public static async Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsAsync(
         NpgsqlConnection connection, long? afterCursor, Action<long?, RowOutcome>? rowDone,
-        CancellationToken cancellationToken = default)
+        FindingWalk? walk, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        var page = new List<(string Ctid, string DrillDown, string Story, uint Xmin, long FindingId)>();
+        var from = afterCursor ?? 0L;
+        long blocks;
+        long filenode;
+        var page = new List<(string Ctid, string DrillDown, string Story, uint Xmin)>();
         await using (var transaction = await BeginBoundedAsync(connection, cancellationToken))
         {
-            await using (var select = new NpgsqlCommand(FindingPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+            await using (var size = new NpgsqlCommand(FindingBlockCountSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
             {
-                select.Parameters.Add(new NpgsqlParameter { Value = (object?)afterCursor ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Bigint });
-                select.Parameters.Add(new NpgsqlParameter { Value = (long)MaxFindingRowsPerPass, NpgsqlDbType = NpgsqlDbType.Bigint });
+                await using var sizeReader = await size.ExecuteReaderAsync(cancellationToken);
+                await sizeReader.ReadAsync(cancellationToken);
+                blocks = sizeReader.GetInt64(0);
+                filenode = sizeReader.GetInt64(1);
+            }
+
+            if (walk is { Filenode: { } walkFilenode } && afterCursor is not null && walkFilenode != filenode)
+            {
+                /* The table was rewritten under the cursor: rows may now sit before it. Nothing is read; the walk
+                   begins again at block 0 and is not counted clean. */
+                await transaction.CommitAsync(cancellationToken);
+                walk.Update(filenode, restarted: true);
+                return (0L, 0, 0, 0);
+            }
+
+            if (from < blocks)
+            {
+                await using var select = new NpgsqlCommand(FindingPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds };
+                select.Parameters.Add(new NpgsqlParameter { Value = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({from},0)"), NpgsqlDbType = NpgsqlDbType.Text });
+                select.Parameters.Add(new NpgsqlParameter { Value = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({from + FindingBlocksPerPass},0)"), NpgsqlDbType = NpgsqlDbType.Text });
                 await using var reader = await select.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    page.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetFieldValue<uint>(3), reader.GetInt64(4)));
+                    page.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetFieldValue<uint>(3)));
                 }
             }
 
@@ -893,9 +1069,8 @@ AND   xmin = $4::xid";
         }
 
         int rewritten = 0, raced = 0;
-        for (var i = 0; i < page.Count; i++)
+        foreach (var row in page)
         {
-            var row = page[i];
             var outcome = RowOutcome.Unchanged;
             if (RemaskFinding(row.DrillDown, row.Story) is { } finding)
             {
@@ -915,10 +1090,11 @@ AND   xmin = $4::xid";
                 await transaction.CommitAsync(cancellationToken);
             }
 
-            rowDone?.Invoke(i == page.Count - 1 || page[i + 1].FindingId != row.FindingId ? row.FindingId : null, outcome);
+            rowDone?.Invoke(null, outcome);
         }
 
-        var next = page.Count < MaxFindingRowsPerPass ? (long?)null : page[^1].FindingId;
+        var next = from + FindingBlocksPerPass >= blocks ? (long?)null : from + FindingBlocksPerPass;
+        walk?.Update(next is null ? null : filenode, restarted: false);
         return (next, page.Count, rewritten, raced);
     }
 
@@ -942,32 +1118,69 @@ AND   xmin = $4::xid";
     public static string FindingAlertExemplarsHeading => FindingMessageFormatter.DrillDownHeading(PgTargetDrillDownCollector.DeadlockExemplarsSection);
 
     /// <summary>
-    /// One page of analysis finding alerts that carry a deadlock exemplar section flattened before #4005 (#4012's
-    /// review, finding 3), in <c>alert_time</c> order after <c>$1</c> (null for the start), <c>$2</c> rows and every
-    /// row tied with the last (#4036's round-2 review, finding 4: not physical order, which a dismissal's new copy of
-    /// a row can land behind), with the finding each was sent for when it is still stored. Only rows recorded since
-    /// <see cref="FindingAlertSectionSince"/> are looked into, and that test guards the text tests, so an older row's
-    /// context is never detoasted (finding 6). A finding alert flattens its drill-down into <c>context_json</c>
-    /// (<c>FindingMessageFormatter.BuildContext</c>): the section's <c>exemplars</c> as a 300-character JSON prefix that
-    /// holds the raw <c>deadlock_hash</c>, its <c>note</c> naming the raw victim fingerprint, and the advice the prose
-    /// was frozen with. The alert names its finding by server, category and the first eight characters of its story
-    /// hash (<c>FindingMessageFormatter.MetricName</c>); the finding is the newest such one analysed before the alert
-    /// was recorded, within a day. Only rows whose metric says <c>Analysis:</c> are looked into, and a section this
-    /// build flattened (its <c>Sql Normalized</c> field) or one the pass already rewrote or withheld is not read.
+    /// One slice of analysis finding alerts of ONE server (<c>$1</c>) and ONE metric (<c>$2</c>), in <c>alert_time</c>
+    /// order after <c>$3</c> (null for the pair's first row): the first <c>$4</c> rows recorded since
+    /// <see cref="FindingAlertSectionSince"/> and every row tied with the last (#4036: not physical order, which a
+    /// dismissal's new copy of a row can land behind). Server and metric are equalities and the time is a range, so the
+    /// read is one range of <c>idx_config_alert_log_time (server_id, metric_name, alert_time)</c> that starts at the
+    /// cursor and stops at the slice's size (#5625); an older row is never read, so its context is never detoasted
+    /// (#4036). Every row read comes back, with <c>needs</c> telling whether its context holds a deadlock exemplar
+    /// section flattened before #4005, so the walk's cursor moves over rows that need nothing; only the rows that need
+    /// work carry their <c>ctid</c>, context and finding. A finding alert flattens its drill-down into
+    /// <c>context_json</c> (<c>FindingMessageFormatter.BuildContext</c>): the section's <c>exemplars</c> as a
+    /// 300-character JSON prefix that holds the raw <c>deadlock_hash</c>, its <c>note</c> naming the raw victim
+    /// fingerprint, and the advice the prose was frozen with. The alert names its finding by server, category and the
+    /// first eight characters of its story hash (<c>FindingMessageFormatter.MetricName</c>), which is the metric the
+    /// slice reads; the finding is the newest such one analysed before the alert was recorded, within a day. A section
+    /// this build flattened (its <c>Sql Normalized</c> field) or one the pass already rewrote or withheld needs
+    /// nothing. Which metrics are <c>Analysis: </c> ones is the walk's loose scan (<see cref="AlertPairNextSql"/>), not
+    /// a range on <c>metric_name</c>, which a store with another collation could not be shown to match.
     /// </summary>
     public static readonly string FindingAlertPageSql = $@"
+WITH cand AS MATERIALIZED
+(
+    SELECT
+        a.ctid,
+        a.alert_time,
+        a.xmin,
+        a.context_json
+    FROM config_alert_log AS a
+    WHERE a.server_id = $1
+    AND   a.metric_name = $2
+    AND   a.alert_time >= '__SINCE__'::timestamp
+    AND   ($3::timestamp IS NULL OR a.alert_time > $3::timestamp)
+    ORDER BY a.alert_time
+    FETCH FIRST $4 ROWS WITH TIES
+),
+tested AS
+(
+    SELECT
+        c.ctid,
+        c.alert_time,
+        c.xmin,
+        c.context_json,
+        CASE
+            WHEN c.context_json IS NOT NULL
+            THEN strpos(c.context_json, '""Heading"":""{FindingAlertExemplarsHeading}""') > 0
+                 AND strpos(c.context_json, '{{""Label"":""Sql Normalized"",""Value"":""true""}}') = 0
+                 AND strpos(c.context_json, '{WithheldBefore4005}') = 0
+            ELSE false
+        END AS needs
+    FROM cand AS c
+)
 SELECT
-    a.ctid::text,
-    a.context_json,
-    a.xmin,
+    CASE WHEN t.needs THEN t.ctid::text END,
+    CASE WHEN t.needs THEN t.context_json END,
+    t.xmin,
     f.drill_down_json,
     f.story_text,
     f.severity,
     f.confidence,
     f.time_range_start,
     f.time_range_end,
-    a.alert_time
-FROM config_alert_log AS a
+    t.alert_time,
+    t.needs
+FROM tested AS t
 LEFT JOIN LATERAL
 (
     SELECT
@@ -978,26 +1191,15 @@ LEFT JOIN LATERAL
         f.time_range_start,
         f.time_range_end
     FROM analysis_findings AS f
-    WHERE f.server_id = a.server_id
-    AND   f.analysis_time <= a.alert_time
-    AND   f.analysis_time >= a.alert_time - INTERVAL '1 day'
-    AND   a.metric_name = 'Analysis: ' || CASE WHEN f.category = '' THEN 'finding' ELSE f.category END || ' [' || left(f.story_path_hash, 8) || ']'
+    WHERE t.needs
+    AND   f.server_id = $1
+    AND   f.analysis_time <= t.alert_time
+    AND   f.analysis_time >= t.alert_time - INTERVAL '1 day'
+    AND   $2::text = 'Analysis: ' || CASE WHEN f.category = '' THEN 'finding' ELSE f.category END || ' [' || left(f.story_path_hash, 8) || ']'
     ORDER BY f.analysis_time DESC
     LIMIT 1
 ) AS f ON true
-WHERE a.alert_time >= '{FindingAlertSectionSince.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)}'::timestamp
-AND   ($1::timestamp IS NULL OR a.alert_time > $1::timestamp)
-AND   a.metric_name LIKE 'Analysis: %'
-AND   CASE
-          WHEN a.context_json IS NOT NULL
-           AND a.alert_time >= '{FindingAlertSectionSince.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)}'::timestamp
-          THEN strpos(a.context_json, '""Heading"":""{FindingAlertExemplarsHeading}""') > 0
-               AND strpos(a.context_json, '{{""Label"":""Sql Normalized"",""Value"":""true""}}') = 0
-               AND strpos(a.context_json, '{WithheldBefore4005}') = 0
-          ELSE false
-      END
-ORDER BY a.alert_time
-FETCH FIRST $2 ROWS WITH TIES";
+ORDER BY t.alert_time".Replace("__SINCE__", FindingAlertSectionSince.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
 
     /// <summary>Writes one finding alert's context back, only while the row is still the version the page read
     /// (<c>ctid</c> and <c>xmin</c>). Its <c>detail_text</c> carries no drill-down and is not touched.</summary>
@@ -1171,37 +1373,91 @@ AND   xmin = $3::xid";
 
     /// <summary>
     /// Examines one slice of stored finding alerts and rewrites the ones whose deadlock exemplar section was
-    /// flattened before #4005 (#4012's review, finding 3). Returns the cursor to resume from, null once the log's
-    /// end is reached, and how many rows changed between the read and the write.
+    /// flattened before #4005 (#4012). Returns the cursor to resume from, null once the log's end is reached, how
+    /// many alerts were examined, and how many rows changed between the read and the write.
+    /// A slice walks the alert log in index order: for each server and <c>Analysis: </c> metric (found by a loose scan,
+    /// <see cref="AlertPairNextSql"/>) one range read of <see cref="FindingAlertPageSql"/>, until
+    /// <see cref="MaxFindingAlertRowsPerPass"/> alerts are examined or the log ends (#5625). Alerts are examined
+    /// whether or not they need work, so the cursor moves on a slice that rewrites nothing.
     /// </summary>
-    public static async Task<(DateTime? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingAlertsAsync(
-        NpgsqlConnection connection, DateTime? afterCursor, Action<DateTime?, RowOutcome>? rowDone,
+    public static async Task<(AlertLogCursor? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingAlertsAsync(
+        NpgsqlConnection connection, AlertLogCursor? afterCursor, Action<AlertLogCursor?, RowOutcome>? rowDone,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        var page = new List<(string Ctid, string Context, uint Xmin, string? DrillDown, string? Story, FindingDiagnosis? Diagnosis, DateTime AlertTime)>();
+        var page = new List<(string Ctid, string Context, uint Xmin, string? DrillDown, string? Story, FindingDiagnosis? Diagnosis, AlertLogCursor Key)>();
+        var examined = 0;
+        AlertLogCursor? next = null;
         await using (var transaction = await BeginBoundedAsync(connection, cancellationToken))
         {
-            await using (var select = new NpgsqlCommand(FindingAlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+            (int Server, string Metric, bool IsAnalysis)? pair;
+            DateTime? after;
+            if (afterCursor is { } resume)
             {
-                select.Parameters.Add(new NpgsqlParameter { Value = (object?)afterCursor ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
-                select.Parameters.Add(new NpgsqlParameter { Value = (long)MaxFindingAlertRowsPerPass, NpgsqlDbType = NpgsqlDbType.Bigint });
-                await using var reader = await select.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
+                /* A step cap can end a page on a pair of any name (#5625), so the cursor's own name says whether it is
+                   an Analysis one, the same test the probe's LIKE makes. */
+                pair = (resume.ServerId, resume.MetricName, resume.MetricName.StartsWith("Analysis: ", StringComparison.Ordinal));
+                after = resume.AlertTime;
+            }
+            else
+            {
+                pair = await NextAlertPairAsync(connection, transaction, null, cancellationToken);
+                after = null;
+            }
+
+            var steps = 0;
+            while (pair is { } current)
+            {
+                if (current.IsAnalysis)
                 {
-                    page.Add((
-                        reader.GetString(0),
-                        reader.GetString(1),
-                        reader.GetFieldValue<uint>(2),
-                        reader.IsDBNull(3) ? null : reader.GetString(3),
-                        reader.IsDBNull(4) ? null : reader.GetString(4),
-                        reader.IsDBNull(5) ? null : new FindingDiagnosis(
-                            reader.GetDouble(5),
-                            reader.GetDouble(6),
-                            reader.IsDBNull(7) ? null : reader.GetDateTime(7),
-                            reader.IsDBNull(8) ? null : reader.GetDateTime(8)),
-                        reader.GetDateTime(9)));
+                    DateTime? last = null;
+                    await using (var select = new NpgsqlCommand(FindingAlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+                    {
+                        select.Parameters.Add(new NpgsqlParameter { Value = current.Server, NpgsqlDbType = NpgsqlDbType.Integer });
+                        select.Parameters.Add(new NpgsqlParameter { Value = current.Metric, NpgsqlDbType = NpgsqlDbType.Text });
+                        select.Parameters.Add(new NpgsqlParameter { Value = (object?)after ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
+                        select.Parameters.Add(new NpgsqlParameter { Value = (long)Math.Max(1, MaxFindingAlertRowsPerPass - examined), NpgsqlDbType = NpgsqlDbType.Bigint });
+                        await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+                        while (await reader.ReadAsync(cancellationToken))
+                        {
+                            examined++;
+                            last = reader.GetDateTime(9);
+                            if (!reader.GetBoolean(10))
+                            {
+                                continue;
+                            }
+
+                            page.Add((
+                                reader.GetString(0),
+                                reader.GetString(1),
+                                reader.GetFieldValue<uint>(2),
+                                reader.IsDBNull(3) ? null : reader.GetString(3),
+                                reader.IsDBNull(4) ? null : reader.GetString(4),
+                                reader.IsDBNull(5) ? null : new FindingDiagnosis(
+                                    reader.GetDouble(5),
+                                    reader.GetDouble(6),
+                                    reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                                    reader.IsDBNull(8) ? null : reader.GetDateTime(8)),
+                                new AlertLogCursor(current.Server, current.Metric, last)));
+                        }
+                    }
+
+                    if (examined >= MaxFindingAlertRowsPerPass)
+                    {
+                        next = new AlertLogCursor(current.Server, current.Metric, last);
+                        break;
+                    }
+                }
+
+                pair = await NextAlertPairAsync(connection, transaction, (current.Server, current.Metric), cancellationToken);
+                after = null;
+                if (pair is { } following && ++steps >= MaxAlertStepsPerPage)
+                {
+                    /* Many servers and metrics with little to look at: end the page on the pair it reached, whatever its
+                       name, so every probe counts. */
+                    next = new AlertLogCursor(following.Server, following.Metric, null);
+                    break;
                 }
             }
 
@@ -1230,11 +1486,30 @@ AND   xmin = $3::xid";
                 await transaction.CommitAsync(cancellationToken);
             }
 
-            rowDone?.Invoke(i == page.Count - 1 || page[i + 1].AlertTime != row.AlertTime ? row.AlertTime : null, outcome);
+            rowDone?.Invoke(i == page.Count - 1 || page[i + 1].Key != row.Key ? row.Key : null, outcome);
         }
 
-        var next = page.Count < MaxFindingAlertRowsPerPass ? (DateTime?)null : page[^1].AlertTime;
-        return (next, page.Count, rewritten, raced);
+        return (next, examined, rewritten, raced);
+    }
+
+    /// <summary>The first (<paramref name="after"/> null) or next server and metric of the alert log in index order, with
+    /// whether the metric is an <c>Analysis: </c> one, or null at the log's end (<see cref="AlertPairFirstSql"/>,
+    /// <see cref="AlertPairNextSql"/>).</summary>
+    private static async Task<(int Server, string Metric, bool IsAnalysis)?> NextAlertPairAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, (int Server, string Metric)? after, CancellationToken cancellationToken)
+    {
+        await using var probe = new NpgsqlCommand(after is null ? AlertPairFirstSql : AlertPairNextSql, connection, transaction)
+        { CommandTimeout = CommandBackstopSeconds };
+        if (after is { } position)
+        {
+            probe.Parameters.Add(new NpgsqlParameter { Value = position.Server, NpgsqlDbType = NpgsqlDbType.Integer });
+            probe.Parameters.Add(new NpgsqlParameter { Value = position.Metric, NpgsqlDbType = NpgsqlDbType.Text });
+        }
+
+        await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? (reader.GetInt32(0), reader.GetString(1), reader.GetBoolean(2))
+            : null;
     }
 
     /// <summary>How many consecutive failures of one stage end it for this process (#4012's review). Each failure is
@@ -1340,19 +1615,23 @@ AND   xmin = $3::xid";
         public StageProgress FindingAlerts { get; } = new("finding alert");
 
         /// <summary>The alert walk's cursor: the last row it finished.</summary>
-        public DateTime? AlertCursor { get; set; }
+        public AlertLogCursor? AlertCursor { get; set; }
 
         /// <summary>The alert-key walk's cursor: the last row it finished.</summary>
-        public DateTime? AlertKeyCursor { get; set; }
+        public AlertLogCursor? AlertKeyCursor { get; set; }
 
         /// <summary>The report walk's cursor: the last batch it finished.</summary>
         public ReportCursor? ReportCursor { get; set; }
 
-        /// <summary>The finding walk's cursor: the last row it finished.</summary>
+        /// <summary>The finding walk's cursor (#5625): the next heap block to read.</summary>
         public long? FindingCursor { get; set; }
 
+        /// <summary>The file of <c>analysis_findings</c> the finding walk's cursor belongs to (#5625); a different
+        /// one at the next page means the table was rewritten and the walk starts again.</summary>
+        public long? FindingFilenode { get; set; }
+
         /// <summary>The finding-alert walk's cursor: the last row it finished.</summary>
-        public DateTime? FindingAlertCursor { get; set; }
+        public AlertLogCursor? FindingAlertCursor { get; set; }
 
         /// <summary>True once the alert-key stage has said it waits for a log-hash key; said once per process.</summary>
         public bool NoKeyWarned { get; set; }
@@ -1430,7 +1709,7 @@ AND   xmin = $3::xid";
                 if (ReferenceEquals(stage, progress.Alerts)) progress.AlertCursor = null;
                 else if (ReferenceEquals(stage, progress.Reports)) progress.ReportCursor = null;
                 else if (ReferenceEquals(stage, progress.AlertKeys)) progress.AlertKeyCursor = null;
-                else if (ReferenceEquals(stage, progress.Findings)) progress.FindingCursor = null;
+                else if (ReferenceEquals(stage, progress.Findings)) { progress.FindingCursor = null; progress.FindingFilenode = null; }
                 else progress.FindingAlertCursor = null;
             }
         }
@@ -1521,9 +1800,12 @@ AND   xmin = $3::xid";
                     }
                     else if (ReferenceEquals(stage, progress.Findings))
                     {
+                        var walk = new FindingWalk { Filenode = progress.FindingFilenode };
                         var (next, e, _, _) = await RemaskStoredFindingsAsync(
-                            connection, progress.FindingCursor, (row, outcome) => { progress.FindingCursor = row ?? progress.FindingCursor; Counted(outcome); }, cancellationToken);
+                            connection, progress.FindingCursor, (row, outcome) => { progress.FindingCursor = row ?? progress.FindingCursor; Counted(outcome); }, walk, cancellationToken);
                         progress.FindingCursor = next;
+                        progress.FindingFilenode = walk.Filenode;
+                        stage.WalkInterrupted |= walk.Restarted;
                         page = (next is null, e);
                     }
                     else

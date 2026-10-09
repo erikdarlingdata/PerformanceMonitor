@@ -37,6 +37,7 @@ public sealed class ArchiveResetRestoreByNameTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         CollectionResetGate.ResetForTests();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort */ }
@@ -46,7 +47,7 @@ public sealed class ArchiveResetRestoreByNameTests : IDisposable
 
     private async Task SeedAsync(params string[] statements)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
         foreach (var sql in statements)

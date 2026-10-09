@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// not. Move both, or split them deliberately and delete this pin with a reason — do not "fix" it by
 /// copying whichever value happens to be under the cursor.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FindingsRetentionCrossSkuPinTests
 {
     [Fact]

@@ -196,6 +196,36 @@ public sealed class ReadLatencyWebRecordingTests
         Assert.Equal(1, sample.Count);
     }
 
+    [Fact]
+    public async Task ADispatchEntryThatNotesAFallback_RecordsOneWebSample_WithOutcomeFallbackRaw()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the read-latency web-recording pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        const string routeName = "__test_fallback_raw";
+        using var seam = new ExtraDispatchEntryScope(
+            (routeName, (_, _, _) =>
+            {
+                ReadScope.NoteFallback(ReadFallback.FallbackRaw, "test dispatch entry", null);
+                return Task.FromResult("{\"ok\":true}");
+            }));
+
+        var readLatency = new ReadLatencyAccumulator();
+        var server = await BuildServer(postgres, readLatency);
+
+        var response = await Send(server, "/api/read/" + routeName);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var sample = Assert.Single(readLatency.Drain(), d => d.Surface == ReadSurface.Web && d.Route == routeName);
+        Assert.Equal(ReadOutcome.FallbackRaw, sample.Outcome);
+    }
+
     /// <summary>
     /// Sets <see cref="DarlingWebEndpoints.TestOnlyExtraDispatchEntry"/> for the scope's lifetime and
     /// clears it on <see cref="Dispose"/>. The entry is held per async flow (#4782): only this fact, and the

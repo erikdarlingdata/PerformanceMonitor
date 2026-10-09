@@ -156,10 +156,8 @@ public sealed class ViewerNotificationSqlTests
     }
 
     [Fact]
-    public void SmtpPassword_IsSealedAsAServiceReadableBlob_NeverPlaintext()
+    public void TheProjection_CarriesTheSmtpSettings_ButNoPassword_ItIsSealedAfterwardForTheRowItIsWrittenWith()
     {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
-
         var settings = new ViewerAppSettings
         {
             SmtpEnabled = true,
@@ -168,12 +166,10 @@ public sealed class ViewerNotificationSqlTests
             SmtpRecipients = "dba@contoso.com",
         };
 
-        var row = ViewerControlPlaneMigration.BuildNotificationRow(settings, "hunter2", "", "");
+        var row = ViewerControlPlaneMigration.BuildNotificationRow(settings, "", "");
 
-        Assert.NotNull(row.SmtpEncryptedPassword);
-        Assert.NotEqual("hunter2", row.SmtpEncryptedPassword); /* not plaintext */
-        /* The SERVICE must be able to read what the viewer sealed (identical DPAPI entropy + scope). */
-        Assert.Equal("hunter2", DarlingSecrets.Unprotect(row.SmtpEncryptedPassword!));
+        Assert.Equal("smtp.contoso.com", row.SmtpHost);
+        Assert.Null(row.SmtpEncryptedPassword);
     }
 
     [Fact]
@@ -187,7 +183,7 @@ public sealed class ViewerNotificationSqlTests
             SlackWebhookEnabled = false,
         };
 
-        var row = ViewerControlPlaneMigration.BuildNotificationRow(settings, "pw", "https://teams", "https://slack");
+        var row = ViewerControlPlaneMigration.BuildNotificationRow(settings, "https://teams", "https://slack");
 
         Assert.Equal("", row.SmtpHost);
         Assert.Null(row.SmtpEncryptedPassword);

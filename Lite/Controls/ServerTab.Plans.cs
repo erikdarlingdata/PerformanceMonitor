@@ -55,7 +55,7 @@ public partial class ServerTab : UserControl
             if (string.IsNullOrEmpty(plan))
             {
                 var connStr = _credentialResolver.GetConnectionString(_server);
-                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash);
+                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, row.QueryHash));
                 source = "live server";
             }
 
@@ -71,7 +71,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -110,7 +110,7 @@ public partial class ServerTab : UserControl
             if (string.IsNullOrEmpty(plan))
             {
                 var connStr = _credentialResolver.GetConnectionString(_server);
-                plan = await LocalDataService.FetchProcedurePlanOnDemandAsync(connStr, row.DatabaseName, row.SchemaName, row.ObjectName);
+                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(connStr, row.DatabaseName, row.SchemaName, row.ObjectName));
                 source = "live server";
             }
 
@@ -126,7 +126,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -259,7 +259,8 @@ public partial class ServerTab : UserControl
         {
             /* #4530: the server's edition/MAXDOP for rule 38, best-effort (null on a missing row or a
                read failure, same as GetServerMetadataForPlanAnalysisAsync's own contract). */
-            viewer.ServerMetadata = await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId);
+            /* #5457: off the UI thread, so a held store lock cannot freeze the window (see ServerTab.BlockChain). */
+            viewer.ServerMetadata = await Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId));
             /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed
                plan XML, replacing the redundant up-front XDocument.Parse validation. */
             await viewer.LoadPlan(planXml, label, queryText);
@@ -373,8 +374,8 @@ public partial class ServerTab : UserControl
                 try
                 {
                     var connStr = _credentialResolver.GetConnectionString(_server);
-                    planXml = await LocalDataService.FetchProcedurePlanOnDemandAsync(
-                        connStr, proc.DatabaseName, proc.SchemaName, proc.ObjectName);
+                    planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(
+                        connStr, proc.DatabaseName, proc.SchemaName, proc.ObjectName));
                 }
                 catch { }
                 break;
@@ -386,7 +387,7 @@ public partial class ServerTab : UserControl
                     try
                     {
                         var connStr = _credentialResolver.GetConnectionString(_server);
-                        planXml = await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId);
+                        planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId));
                     }
                     catch { }
                 }
@@ -403,7 +404,7 @@ public partial class ServerTab : UserControl
                 try
                 {
                     var procConnStr = _credentialResolver.GetConnectionString(_server);
-                    planXml = await LocalDataService.FetchProcedurePlanOnDemandAsync(procConnStr, procComp.DatabaseName, procComp.SchemaName, procComp.ObjectName);
+                    planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchProcedurePlanOnDemandAsync(procConnStr, procComp.DatabaseName, procComp.SchemaName, procComp.ObjectName));
                 }
                 catch { }
                 break;
@@ -468,7 +469,7 @@ public partial class ServerTab : UserControl
                     try
                     {
                         var connStr = _credentialResolver.GetConnectionString(_server);
-                        planXml = await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId);
+                        planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, qs.DatabaseName, qs.PlanId));
                     }
                     catch { }
                 }
@@ -529,7 +530,8 @@ public partial class ServerTab : UserControl
         {
             var connectionString = _credentialResolver.GetConnectionString(_server);
 
-            var actualPlanXml = await ActualPlanExecutor.ExecuteForActualPlanAsync(
+            /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            var actualPlanXml = await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 connectionString,
                 databaseName ?? "",
                 queryText,
@@ -538,7 +540,7 @@ public partial class ServerTab : UserControl
                 isAzureSqlDb: false,
                 timeoutSeconds: 0,
                 _actualPlanCts.Token,
-                productName: "SQL Server Performance Monitor Lite");
+                productName: "SQL Server Performance Monitor Lite"));
 
             if (!string.IsNullOrEmpty(actualPlanXml))
             {
@@ -583,7 +585,7 @@ public partial class ServerTab : UserControl
         try
         {
             var connStr = _credentialResolver.GetConnectionString(_server);
-            return await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash);
+            return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash));
         }
         catch { return null; }
     }
@@ -629,8 +631,8 @@ public partial class ServerTab : UserControl
             var connStr = _credentialResolver.GetConnectionString(_server);
             foreach (var f in frames)
             {
-                planXml = await LocalDataService.FetchPlanBySqlHandleAsync(
-                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd);
+                planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchPlanBySqlHandleAsync(
+                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd));
                 if (!string.IsNullOrEmpty(planXml)) break;
             }
         }
@@ -721,8 +723,8 @@ public partial class ServerTab : UserControl
             var connStr = _credentialResolver.GetConnectionString(_server);
             foreach (var f in frames)
             {
-                planXml = await LocalDataService.FetchPlanBySqlHandleAsync(
-                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd);
+                planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchPlanBySqlHandleAsync(
+                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd));
                 if (!string.IsNullOrEmpty(planXml)) break;
             }
         }
@@ -795,12 +797,12 @@ public partial class ServerTab : UserControl
     private void DownloadDeadlockXml_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not DeadlockProcessDetail row || string.IsNullOrEmpty(row.DeadlockGraphXml)) return;
-        SaveXmlToFile(row.DeadlockGraphXml, $"deadlock_{row.DeadlockTime:yyyyMMdd_HHmmss}.xml", "deadlock XML");
+        SaveXmlToFile(row.DeadlockGraphXml, $"deadlock_{row.DeadlockTime:yyyyMMdd_HHmmss}.xml", "deadlock XML", "deadlock graph");
     }
 
     private void DownloadBlockedProcessXml_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not BlockedProcessReportRow row || string.IsNullOrEmpty(row.BlockedProcessReportXml)) return;
-        SaveXmlToFile(row.BlockedProcessReportXml, $"blocked_process_{row.EventTime:yyyyMMdd_HHmmss}.xml", "blocked process XML");
+        SaveXmlToFile(row.BlockedProcessReportXml, $"blocked_process_{row.EventTime:yyyyMMdd_HHmmss}.xml", "blocked process XML", "blocked process report");
     }
 }

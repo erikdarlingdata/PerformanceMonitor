@@ -110,6 +110,13 @@ internal sealed class RetentionWalPacer
     /// </summary>
     internal long BatchWalTargetBytes => (long)(RateBytesPerSecond * BatchTargetSeconds);
 
+    /// <summary>
+    /// The rule that makes the drain give way to collection (#5592), or null for a pass that does not (tests, and
+    /// every caller that does not pass a signal). It rides on the pacer because the pacer is the one object every
+    /// paced batch already carries, so the drain loop applies both and no call site passes anything new.
+    /// </summary>
+    internal RetentionCollectionYield? Yield { get; set; }
+
     /// <summary>The WAL reported by every batch so far.</summary>
     internal long TotalWalBytes { get; private set; }
 

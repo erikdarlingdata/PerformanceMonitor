@@ -36,68 +36,153 @@ namespace PerformanceMonitorLite.Controls;
 
 public partial class ServerTab : UserControl
 {
-    private void InitializeTimeComboBoxes()
+    /// <summary>
+    /// The range the toolbar picker holds, resolved against the clock now (#5562). A live range (the last 5 minutes,
+    /// 'Today', 'since ...') slides with every call. A calendar period is exempt from the 5-minute floor ('Today' at
+    /// 00:02 reads 00:00 to now; the sample note explains a sparse chart). When the held range cannot be used at this moment
+    /// (a 'since' start that has not happened yet) the last window that did resolve keeps being read, so a refresh never
+    /// reads nothing; with none yet, the default of four hours.
+    /// </summary>
+    private ResolvedTimeRange CurrentRange()
     {
-        // Populate hour ComboBoxes (12-hour format with AM/PM)
-        var hours = new List<string>();
-        for (int h = 0; h < 24; h++)
+        if (RangePicker.Resolve() is { } resolved)
         {
-            var dt = DateTime.Today.AddHours(h);
-            hours.Add(dt.ToString("HH:00")); // "00:00", "01:00", ..., "23:00"
+            _lastResolvedRange = resolved;
+            return resolved;
         }
 
-        FromHourCombo.ItemsSource = hours;
-        ToHourCombo.ItemsSource = hours;
-        FromHourCombo.SelectedIndex = 0;  // Default to 12 AM
-        ToHourCombo.SelectedIndex = 23;   // Default to 11 PM
-
-        // Populate minute ComboBoxes (15-minute intervals)
-        var minutes = new List<string> { ":00", ":15", ":30", ":45" };
-        FromMinuteCombo.ItemsSource = minutes;
-        ToMinuteCombo.ItemsSource = minutes;
-        FromMinuteCombo.SelectedIndex = 0; // Default to :00
-        ToMinuteCombo.SelectedIndex = 3;   // Default to :45 (so 11:45 PM is end)
-    }
-
-    private DateTime? GetDateTimeFromPickers(DatePicker datePicker, ComboBox hourCombo, ComboBox minuteCombo)
-    {
-        if (!datePicker.SelectedDate.HasValue) return null;
-
-        var date = datePicker.SelectedDate.Value.Date;
-        int hour = hourCombo.SelectedIndex >= 0 ? hourCombo.SelectedIndex : 0;
-        int minute = minuteCombo.SelectedIndex >= 0 ? minuteCombo.SelectedIndex * 15 : 0;
-
-        return date.AddHours(hour).AddMinutes(minute);
-    }
-
-    /// <summary>
-    /// Gets the selected time range in hours.
-    /// </summary>
-    private int GetHoursBack()
-    {
-        return TimeRangeCombo.SelectedIndex switch
+        if (_lastResolvedRange != null)
         {
-            0 => 1,
-            1 => 4,
-            2 => 12,
-            3 => 24,
-            4 => 168,
-            _ => 4
-        };
+            return _lastResolvedRange;
+        }
+
+        LiteTimeRange.Default.TryResolve(DateTime.UtcNow, GetPickerZone(), out var fallback, out _);
+        return fallback!;
+    }
+
+    private ResolvedTimeRange? _lastResolvedRange;
+
+    /// <summary>
+    /// How often the main collector of the page on screen samples, read from the schedule when asked (#5562, ruling R3): the
+    /// picker shows 'Data here is collected every N minutes.' when a span holds fewer than 3 samples. The argument is the
+    /// collector's name (<see cref="CurrentMainCollector"/>) and the answer its ACTUAL interval on this server. Set by
+    /// MainWindow, which owns the schedule; a tab opened without one (a test) shows no note.
+    /// </summary>
+    private Func<string, TimeSpan?>? _sampleIntervalProvider;
+    private bool _sampleNoteWired;
+
+    /// <summary>Hands the tab the way to read a collector's actual interval on this server.</summary>
+    public void SetSampleIntervalSource(Func<string, TimeSpan?> provider)
+    {
+        _sampleIntervalProvider = provider;
+        if (!_sampleNoteWired)
+        {
+            _sampleNoteWired = true;
+
+            /* A tab or sub-tab change moves the page on screen, so the note names that page's collector. */
+            AddHandler(System.Windows.Controls.Primitives.Selector.SelectionChangedEvent, new SelectionChangedEventHandler((_, e) =>
+            {
+                if (e.OriginalSource is TabControl)
+                {
+                    RefreshRangeNotes();
+                }
+            }));
+        }
+
+        RefreshRangeNotes();
     }
 
     /// <summary>
-    /// The custom range this tab holds (#4766): two naive-UTC instants, or nothing until one is chosen. The pickers on
-    /// the toolbar are a rendering of it in the display zone (<see cref="RenderCustomRange"/>), not the state: every
-    /// read, slicer, drill and chart window takes its instants from here (<see cref="GetCurrentWindowUtc"/>), and only
-    /// a change the user makes to a picker parses text back into an instant (<see cref="CaptureCustomRangeEdit"/>).
-    /// A display-mode switch therefore changes the text on the pickers and nothing else, and a range in the hour that
-    /// repeats after a fall-back keeps the occurrence it was made for.
+    /// The main collector of the sub-tab on screen (<see cref="LiteTimeRange.MainCollectorFor"/>): the top tab's header and,
+    /// when that tab holds a sub-tab control, the selected sub-tab's. Never widens the range; <c>null</c> shows no note.
     /// </summary>
-    private readonly CustomRangeState _customRange = new();
+    internal string? CurrentMainCollector()
+    {
+        if (MainTabControl.SelectedItem is not TabItem top)
+        {
+            return null;
+        }
 
-    /// <summary>True while the pickers are written from <see cref="_customRange"/>, so those writes are not read as the user typing.</summary>
-    private bool _renderingCustomRange;
+        string? sub = null;
+        if (top.Content is DependencyObject content && FindFirstTabControl(content) is { SelectedItem: TabItem selected })
+        {
+            sub = selected.Header as string;
+        }
+
+        return LiteTimeRange.MainCollectorFor(top.Header as string, sub);
+    }
+
+    private static TabControl? FindFirstTabControl(DependencyObject parent)
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(parent))
+        {
+            if (child is TabControl tabs)
+            {
+                return tabs;
+            }
+
+            if (child is DependencyObject next && FindFirstTabControl(next) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The floors the tab's banner probes found (#5562 R7), by the page that asked: a collector name, or "overview" for the
+    /// lanes on the Overview page. The picker names the floor of the page on screen; a page that has not probed yet, or a page
+    /// with no probe, gets the archive's static retention edge. No query of its own: every value is one a banner site
+    /// already awaited.
+    /// </summary>
+    private readonly Dictionary<string, DateTime?> _probedFloors = new();
+
+    /// <summary>
+    /// Hands the picker the data start a banner site found (every <c>ApplyWindowFloorToBanner</c> site calls this with its
+    /// surface's main collector, so a source-scan test can pin the sites). It shows only while that page is on screen.
+    /// </summary>
+    internal void FeedDataStart(string? collector, DateTime? floor)
+    {
+        if (collector is not null)
+        {
+            _probedFloors[collector] = floor;
+        }
+
+        ApplyDataStart();
+    }
+
+    /// <summary>Points the picker's data start at the page on screen: its probed floor, else the static retention edge.</summary>
+    private void ApplyDataStart()
+    {
+        var key = MainTabControl.SelectedItem is TabItem { Header: "Overview" } ? "overview" : CurrentMainCollector();
+        RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(
+            key is not null && _probedFloors.TryGetValue(key, out var floor) ? floor : null, DateTime.UtcNow);
+    }
+
+    /// <summary>Redraws the picker's resolved text and its sample-interval note (a live range slides; the schedule can be edited).</summary>
+    private void RefreshRangeNotes()
+    {
+        ApplyDataStart();
+        RangePicker.SampleInterval = CurrentMainCollector() is { } collector ? _sampleIntervalProvider?.Invoke(collector) : null;
+        RangePicker.Refresh();
+    }
+
+    /// <summary>
+    /// Hours back from now that cover the range (#5562): the preset's own hours for a whole-hour rolling range, else the
+    /// whole hours from the range's start to now rounded up (at least 1), so a reader that only takes hours back (a
+    /// history window opened from a row) still covers a 15-minute span or a calendar period. Readers that carry
+    /// instants take them from <see cref="GetCurrentWindowUtc"/>.
+    /// </summary>
+    private int GetHoursBack() => LiteTimeRange.WindowFor(CurrentRange()).hoursBack;
+
+    /// <summary>
+    /// True during a synchronous, programmatic write to the range controls (a display-mode switch re-rendering the pickers,
+    /// a drill setting Custom), so those writes are not read as the user choosing a range and do not start a refresh (#5371).
+    /// It used to share <c>_isRefreshing</c> with "a refresh is in flight", which made every range handler bail on an
+    /// in-flight refresh and drop the user's change; the in-flight half is now the refresh coordinator's, which remembers it.
+    /// </summary>
+    private bool _suppressRangeRefresh;
 
     /// <summary>
     /// The zone the pickers show and are read in for <paramref name="mode"/>: UTC, this machine's zone, or the tab's OWN
@@ -107,74 +192,7 @@ public partial class ServerTab : UserControl
     internal static TimeZoneInfo PickerZone(TimeDisplayMode mode, ServerClock tabClock) =>
         ServerTimeHelper.DisplayZoneFor(mode, tabClock);
 
-    /// <summary>
-    /// The window a refresh reads, as (hoursBack, fromUtc, toUtc): the held custom range when a custom range is
-    /// selected and one is held, else the preset with no bounds. Pure, so a test drives it without the control.
-    /// </summary>
-    internal static (int hoursBack, DateTime? fromUtc, DateTime? toUtc) CurrentWindowUtc(
-        int hoursBack, bool customSelected, CustomRangeState held) =>
-        customSelected && held.IsCustom ? (hoursBack, held.FromUtc, held.ToUtc) : (hoursBack, null, null);
-
     private TimeZoneInfo GetPickerZone() => PickerZone(ServerTimeHelper.CurrentDisplayMode, _serverClock);
-
-    private bool IsFromPicker(object? sender) =>
-        ReferenceEquals(sender, FromDatePicker) || ReferenceEquals(sender, FromHourCombo) || ReferenceEquals(sender, FromMinuteCombo);
-
-    /// <summary>
-    /// A typed edit (#4766): the picker the user changed is read as a wall clock in the display zone and becomes that
-    /// side of the held range; the other side keeps its exact instant. With nothing held yet (the pickers were filled
-    /// before any edit) both pickers are read once and the pair is held. Reads the pickers, so it is the only place
-    /// their text is parsed.
-    /// </summary>
-    private void CaptureCustomRangeEdit(object? sender)
-    {
-        var fromWall = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-        var toWall = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-        var zone = GetPickerZone();
-        if (_customRange.IsCustom)
-        {
-            var fromSide = IsFromPicker(sender);
-            var wall = fromSide ? fromWall : toWall;
-            if (wall.HasValue)
-            {
-                _customRange.ApplyEdit(wall.Value, fromSide ? BoundSide.From : BoundSide.To, zone);
-            }
-        }
-        else if (fromWall.HasValue && toWall.HasValue)
-        {
-            _customRange.Set(
-                DisplayZone.ToUtcBound(fromWall.Value, zone, BoundSide.From),
-                DisplayZone.ToUtcBound(toWall.Value, zone, BoundSide.To));
-        }
-    }
-
-    /// <summary>
-    /// Shows the held range on the pickers in the display zone (#4766). Each bound is rendered as its own instant, so a
-    /// switch of zone changes only the text; nothing is parsed back. The picker minutes step in quarter hours, so an
-    /// instant between two steps shows the step below it while the held instant stays exact.
-    /// </summary>
-    private void RenderCustomRange()
-    {
-        if (_customRange.Render(GetPickerZone()) is not { } shown)
-        {
-            return;
-        }
-
-        _renderingCustomRange = true;
-        try
-        {
-            FromDatePicker.SelectedDate = shown.From.Date;
-            FromHourCombo.SelectedIndex = shown.From.Hour;
-            FromMinuteCombo.SelectedIndex = shown.From.Minute / 15;
-            ToDatePicker.SelectedDate = shown.To.Date;
-            ToHourCombo.SelectedIndex = shown.To.Hour;
-            ToMinuteCombo.SelectedIndex = shown.To.Minute / 15;
-        }
-        finally
-        {
-            _renderingCustomRange = false;
-        }
-    }
 
     /// <summary>
     /// The chart axis window as UTC instants (#4766), the frame every chart on this tab plots in: the custom range
@@ -194,19 +212,21 @@ public partial class ServerTab : UserControl
         GetChartWindow(hoursBack, fromDate, toDate, DateTime.UtcNow);
 
     /// <summary>
-    /// Sets the time range dropdown from outside (used by Apply to All).
+    /// Holds <paramref name="spec"/> on this tab as if the user picked it (used by Apply to All): the picker redraws, and its
+    /// RangeChanged handler persists the choice and refreshes. A range this tab cannot use right now is left as it was.
     /// </summary>
-    public void SetTimeRangeIndex(int index)
+    public void SetTimeRange(TimeRangeSpec spec)
     {
-        if (index >= 0 && index < TimeRangeCombo.Items.Count)
-        {
-            TimeRangeCombo.SelectedIndex = index;
-        }
+        _probedFloors.Clear();
+        RangePicker.Select(spec);
     }
 
     private void ApplyTimeRangeToAll_Click(object sender, RoutedEventArgs e)
     {
-        ApplyTimeRangeRequested?.Invoke(TimeRangeCombo.SelectedIndex);
+        /* #5562 M2: a calendar period goes as the instants it names in THIS tab's zone, a fixed range as its held instants. Every
+           other tab resolves in its own server's clock in Server mode, so "Today" sent unresolved would be a different day on each
+           (#4766 settled that they window on the same period; the Viewer does the same through the same helper). */
+        ApplyTimeRangeRequested?.Invoke(TimeRangePresets.ForBroadcast(RangePicker.Value, DateTime.UtcNow, GetPickerZone()));
     }
 
     /* The _refreshTimer null guard in both handlers below is doing two jobs. It always absorbed the
@@ -335,15 +355,15 @@ public partial class ServerTab : UserControl
         /* The held range is two instants (#4766), so a switch of display zone re-renders the same pair in the new
            zone and parses nothing back: a range in the repeated hour, or one the pickers cannot spell exactly,
            returns to exactly the instants it held. Suppress refreshes while updating pickers to avoid cascading queries. */
-        _isRefreshing = true;
+        _suppressRangeRefresh = true;
         try
         {
             ServerTimeHelper.CurrentDisplayMode = mode;
-            RenderCustomRange();
+            RangePicker.Refresh();
         }
         finally
         {
-            _isRefreshing = false;
+            _suppressRangeRefresh = false;
         }
 
         // Refresh every grid so each row's time text (ServerTimeHelper.FormatServerTime / FormatServerClock) is read again in the new mode
@@ -373,198 +393,47 @@ public partial class ServerTab : UserControl
         await RefreshAllDataAsync();
     }
 
-    private async void TimeRangeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    /// <summary>
+    /// The picker's choice (a preset, a calendar period, a typed range or a picked day). Remembers it
+    /// (<see cref="PersistSelectedTimeRange"/>) and re-reads every grid and chart. A programmatic write that must not
+    /// refresh sets <c>_suppressRangeRefresh</c>; an in-flight refresh is the coordinator's to replay (#5371), so this
+    /// does not look at <c>_isRefreshing</c>.
+    ///
+    /// <para>#2640: before the choice was remembered the control was write-only: the setting existed and was read at
+    /// startup, but only the Settings window wrote it, so choosing a longer range here and restarting came back at four
+    /// hours. A typed range is deliberately NOT persisted: restoring a window that ended two days ago would show an
+    /// empty chart of a range the operator has moved on from.</para>
+    /// </summary>
+    private async void RangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
-        if (!IsLoaded || _isRefreshing) return;
+        if (!IsLoaded || _suppressRangeRefresh) return;
 
-        /* Show/hide custom date pickers and time ComboBoxes */
-        var isCustom = TimeRangeCombo.SelectedIndex == 5;
-        var visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+        /* L2: a probed floor is the first row inside the window it was probed for, so a held one names an older, shorter window
+           (or an older, longer one) once the range moves. Each page probes again on its own pass. */
+        _probedFloors.Clear();
+        PersistSelectedTimeRange(e.Spec);
 
-        if (FromDatePicker != null)
-        {
-            FromDatePicker.Visibility = visibility;
-            FromHourCombo.Visibility = visibility;
-            FromMinuteCombo.Visibility = visibility;
-            ToLabel.Visibility = visibility;
-            ToDatePicker.Visibility = visibility;
-            ToHourCombo.Visibility = visibility;
-            ToMinuteCombo.Visibility = visibility;
-
-            if (isCustom && FromDatePicker.SelectedDate == null)
-            {
-                FromDatePicker.SelectedDate = DateTime.Today.AddDays(-1);
-                ToDatePicker.SelectedDate = DateTime.Today;
-            }
-
-            if (!isCustom)
-            {
-                /* #2154: a DatePicker's calendar dropdown is a POPUP, which lives outside the visual
-                   tree's visibility — collapsing the picker does not close an already-open dropdown,
-                   so backing out of Custom Range without picking a date left an orphaned floating
-                   calendar on screen. Close them explicitly alongside the collapse. */
-                FromDatePicker.IsDropDownOpen = false;
-                ToDatePicker.IsDropDownOpen = false;
-            }
-        }
-
-        if (!isCustom)
-        {
-            /* #2640: remember the choice. Before this the picker was write-only — the settings key
-               default_time_range_hours existed and was read at startup, but the only thing that wrote it
-               was the Settings window, so choosing "Last 7 days" here and restarting came back at four
-               hours with nothing to explain why. A control that offers a choice and discards it reads as
-               broken, and the reporter read it that way.
-
-               Custom Range is deliberately NOT persisted: it has no hours value to store, and restoring a
-               window that ended two days ago would be worse than restoring nothing — the app would open
-               showing an empty chart of a range the operator has moved on from. */
-            PersistSelectedTimeRange();
-
-            await RefreshAllDataAsync();
-        }
+        await RefreshAllDataAsync();
     }
 
     /// <summary>
-    /// Writes the picked range to <c>default_time_range_hours</c>, the same key the Settings window writes
-    /// and startup reads, so the two cannot disagree about what the range means. Failure is logged by
-    /// <see cref="App.WriteSetting"/> and never interrupts the refresh — a settings file that cannot be
-    /// written must not stop the user looking at data.
+    /// Writes the picked range to settings.json, the same keys the Settings window writes and startup reads
+    /// (<see cref="LiteTimeRange.SettingsFor"/>): a whole-hour rolling range to the legacy <c>default_time_range_hours</c>
+    /// (older builds read it), any other preset or calendar period to <c>default_time_range</c>. A typed range writes
+    /// nothing. Failure is logged by <see cref="App.WriteSetting"/> and never interrupts the refresh.
     /// </summary>
-    private void PersistSelectedTimeRange()
+    private void PersistSelectedTimeRange(TimeRangeSpec spec)
     {
-        var hours = TimeRangeCombo.SelectedIndex switch
-        {
-            0 => 1,
-            1 => 4,
-            2 => 12,
-            3 => 24,
-            4 => 168,
-            _ => 0,
-        };
-
-        if (hours == 0)
+        var (rangeId, hours) = LiteTimeRange.SettingsFor(spec);
+        if (rangeId == null && hours == null)
         {
             return;
         }
 
-        /* The in-memory value too, not only the file: a second server tab opened in this same session
-           reads App.DefaultTimeRangeHours in its constructor, and a tab that opens on a different range
-           from the one just chosen is the same complaint in a smaller window. */
-        App.DefaultTimeRangeHours = hours;
+        /* The in-memory values too, not only the file: a second server tab opened in this same session reads them in its
+           constructor, and a tab that opens on a different range from the one just chosen is the same complaint. */
+        App.ApplyDefaultTimeRange(rangeId, hours);
 
-        App.WriteSetting("time range", root => root["default_time_range_hours"] = hours);
-    }
-
-    private async void CustomDateRange_Changed(object sender, SelectionChangedEventArgs e)
-    {
-        if (!IsLoaded || _renderingCustomRange) return;
-        CaptureCustomRangeEdit(sender);
-        if (_isRefreshing) return;
-        if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
-        {
-            await RefreshAllDataAsync();
-        }
-    }
-
-    private async void CustomTimeCombo_Changed(object sender, SelectionChangedEventArgs e)
-    {
-        if (!IsLoaded || _renderingCustomRange) return;
-        CaptureCustomRangeEdit(sender);
-        if (_isRefreshing) return;
-        /* Only refresh if we have valid dates selected */
-        if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
-        {
-            await RefreshAllDataAsync();
-        }
-    }
-
-    private void DatePicker_CalendarOpened(object sender, RoutedEventArgs e)
-    {
-        if (sender is DatePicker datePicker)
-        {
-            /* Use Dispatcher to ensure visual tree is ready */
-            Dispatcher.BeginInvoke(new Action(() =>
-            {
-                var popup = datePicker.Template.FindName("PART_Popup", datePicker) as System.Windows.Controls.Primitives.Popup;
-                if (popup?.Child is System.Windows.Controls.Calendar calendar)
-                {
-                    ApplyThemeToCalendar(calendar);
-                }
-            }));
-        }
-    }
-
-    private void ApplyThemeToCalendar(System.Windows.Controls.Calendar calendar)
-    {
-        SolidColorBrush primaryBg, fg, borderBrush;
-
-        if (ThemeManager.CurrentTheme == "CoolBreeze")
-        {
-            primaryBg   = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#EEF4FA")!);
-            fg          = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#1A2A3A")!);
-            borderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#A8BDD0")!);
-        }
-        else if (ThemeManager.HasLightBackground)
-        {
-            primaryBg   = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF));
-            fg          = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x1A, 0x1D, 0x23));
-            borderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xDE, 0xE2, 0xE6));
-        }
-        else
-        {
-            primaryBg   = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#111217")!);
-            fg          = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#E4E6EB")!);
-            borderBrush = new SolidColorBrush((System.Windows.Media.Color)ColorConverter.ConvertFromString("#2a2d35")!);
-        }
-
-        calendar.Background = primaryBg;
-        calendar.Foreground = fg;
-        calendar.BorderBrush = borderBrush;
-
-        ApplyThemeRecursively(calendar, primaryBg, fg);
-    }
-
-    private void ApplyThemeRecursively(DependencyObject parent, Brush primaryBg, Brush fg)
-    {
-        bool HasLightBackground = ThemeManager.HasLightBackground;
-        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-        {
-            var child = VisualTreeHelper.GetChild(parent, i);
-
-            if (child is System.Windows.Controls.Primitives.CalendarItem calendarItem)
-            {
-                calendarItem.Background = primaryBg;
-                calendarItem.Foreground = fg;
-            }
-            else if (child is System.Windows.Controls.Primitives.CalendarDayButton dayButton)
-            {
-                dayButton.Background = Brushes.Transparent;
-                dayButton.Foreground = fg;
-            }
-            else if (child is System.Windows.Controls.Primitives.CalendarButton calButton)
-            {
-                calButton.Background = Brushes.Transparent;
-                calButton.Foreground = fg;
-            }
-            else if (child is Button button)
-            {
-                button.Background = Brushes.Transparent;
-                button.Foreground = fg;
-            }
-            else if (child is TextBlock textBlock)
-            {
-                textBlock.Foreground = fg;
-            }
-            else if (!HasLightBackground)
-            {
-                if (child is Border border && border.Background is SolidColorBrush bg && bg.Color.R > 200 && bg.Color.G > 200 && bg.Color.B > 200)
-                    border.Background = primaryBg;
-                else if (child is Grid grid && grid.Background is SolidColorBrush gridBg && gridBg.Color.R > 200 && gridBg.Color.G > 200 && gridBg.Color.B > 200)
-                    grid.Background = primaryBg;
-            }
-
-            ApplyThemeRecursively(child, primaryBg, fg);
-        }
+        App.WriteSetting("time range", root => App.WriteDefaultTimeRange(root, rangeId, hours));
     }
 }

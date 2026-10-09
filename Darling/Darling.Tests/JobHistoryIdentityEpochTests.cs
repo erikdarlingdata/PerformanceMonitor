@@ -217,6 +217,11 @@ public sealed class JobHistoryIdentityEpochTests
         Assert.Equal(archival.Text.Replace(DevArchivalFilter, string.Empty, StringComparison.Ordinal), firstRun.Text);
     }
 
+    /// <summary>The run's measurements without the statement filter's counts (#4348), which every read that judged a
+    /// message adds beside whatever the definition measured itself.</summary>
+    private static IEnumerable<CollectorMeasurement> IdentityMeasurements(CollectorContext context) =>
+        context.Measurements.Where(m => !m.Label.StartsWith("statement_scrub_", StringComparison.Ordinal));
+
     [Fact]
     public async Task Regression_IsDetectedFromTheRows_AndCountedOnce_WithBothNumbers()
     {
@@ -240,7 +245,9 @@ public sealed class JobHistoryIdentityEpochTests
            run record as MEASUREMENTS - a count of one plus the two numbers an operator needs - never as prose. */
         Assert.Empty(deltas.Discontinuities);
         Assert.Empty(deltas.ClearedGroups);
-        var byLabel = context.Measurements.ToDictionary(m => m.Label, m => m.Value, StringComparer.Ordinal);
+        /* #4348: the statement filter's own statement_scrub_* counts ride the same note (a message was judged); this
+           test is about the identity measurements, so those are set aside. */
+        var byLabel = IdentityMeasurements(context).ToDictionary(m => m.Label, m => m.Value, StringComparer.Ordinal);
         Assert.Equal(3, byLabel.Count);
         Assert.Equal(1L, byLabel[JobHistoryCollector.IdentityRegressionsMeasurement]);
         Assert.Equal(11_500_000L, byLabel[JobHistoryCollector.IdentityWatermarkMeasurement]);
@@ -258,7 +265,7 @@ public sealed class JobHistoryIdentityEpochTests
         using var reader = new FakeJobHistoryReader(JobHistoryRow(11_500_001L), JobHistoryRow(11_500_002L));
         Assert.Equal(2, (await JobHistoryCollector.Instance.ReadAsync(reader, context, CancellationToken.None)).Count);
         Assert.Empty(deltas.Discontinuities);
-        Assert.Empty(context.Measurements);
+        Assert.Empty(IdentityMeasurements(context));
 
         /* No watermark at all (true first run, or an archival-emptied Lite store): every id is "below"
            nothing, so there is no regression to report. A null watermark is not evidence of anything. */
@@ -267,7 +274,7 @@ public sealed class JobHistoryIdentityEpochTests
         using var firstRunReader = new FakeJobHistoryReader(JobHistoryRow(17L));
         Assert.Single(await JobHistoryCollector.Instance.ReadAsync(firstRunReader, firstRun, CancellationToken.None));
         Assert.Empty(firstRunDeltas.Discontinuities);
-        Assert.Empty(firstRun.Measurements);
+        Assert.Empty(IdentityMeasurements(firstRun));
     }
 
     [Fact]

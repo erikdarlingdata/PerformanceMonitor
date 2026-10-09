@@ -355,7 +355,7 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
     [Fact]
     public void ClearingTheHover_DropsThePredicate()
     {
-        var afterClear = OnStaThread(() =>
+        var afterClear = StaTestThread.Run(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             var hover = new ChartHoverHelper(chart, "%", displayZone: () => TimeZoneInfo.Utc);
@@ -423,24 +423,4 @@ public sealed class CpuHoverStoredWallClockTests : IClassFixture<SharedDuckDbFix
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 }

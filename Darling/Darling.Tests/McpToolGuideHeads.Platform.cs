@@ -118,6 +118,7 @@ public sealed class McpToolGuideHeadsPlatformTests
     [
         "get_fleet_overview",
         "add_servers",
+        "edit_server",
         "remove_server",
     ];
 
@@ -135,6 +136,9 @@ public sealed class McpToolGuideHeadsPlatformTests
         ("add_servers", "one failed connection or a duplicate does not stop the rest"),
         ("add_servers", "only added servers are monitored"),
         ("add_servers", "A password or client secret is encrypted at rest and never returned"),
+        ("edit_server", "no confirm step"),
+        ("edit_server", "keeps its id, tags and history"),
+        ("edit_server", "probed first and saved only if the server answers"),
         ("remove_server", "immediately, no confirm step"),
         ("remove_server", "Already-collected historical data is NOT deleted"),
         ("remove_server", "a partial match is honored only if exactly one definition contains it"),

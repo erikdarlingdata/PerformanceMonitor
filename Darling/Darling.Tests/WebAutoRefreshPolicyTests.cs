@@ -158,7 +158,8 @@ public sealed class WebAutoRefreshPolicyTests
         }
         catch (System.ComponentModel.Win32Exception)
         {
-            // Node is not installed on this machine; RefreshPolicyJs_CarriesTheBackOffConstants still pins the rule.
+            // RefreshPolicyJs_CarriesTheBackOffConstants still pins the rule.
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
         }
     }
 

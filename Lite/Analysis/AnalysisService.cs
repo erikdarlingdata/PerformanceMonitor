@@ -114,6 +114,15 @@ public class AnalysisService
     /// <summary>See <see cref="LastFactCount"/>: of those facts, how many scored above zero.</summary>
     public int? LastFactsScored { get; private set; }
 
+    /// <summary>
+    /// #5558: the one-sentence note naming how many databases the last pass left to the primary replica because this
+    /// node holds only a secondary copy of them in an availability group, or null when none were skipped (and when
+    /// the pass never reached the set). Carried out like <see cref="LastWindowCoverage"/>, because a short or empty
+    /// findings list cannot say it: without the note, "nothing found" reads as a clean bill of health for databases
+    /// the pass never looked at.
+    /// </summary>
+    public string? LastSecondaryReplicaNote { get; private set; }
+
     /// <param name="retentionDaysForCollector">#1757: resolves a collector's configured retention so the
     /// baseline provider can warn when a source table is retained for less than the baseline window. Optional
     /// — null simply disables that warning, which is why every existing caller keeps working unchanged.</param>
@@ -229,6 +238,7 @@ public class AnalysisService
         LastCollectionFamilyCount = 0;
         LastFactCount = null;
         LastFactsScored = null;
+        LastSecondaryReplicaNote = null;
 
         try
         {
@@ -242,6 +252,13 @@ public class AnalysisService
                build + insert) carries no check on purpose — by then the expensive work is paid
                for and finishing is what preserves it. */
             context.CancellationToken.ThrowIfCancellationRequested();
+
+            /* #5558: the databases this node holds only as a secondary copy, at the window's end (so an AsOf pass
+               uses the role at that time). Fails open: any unknown leaves it empty. Inside the try and after
+               IsAnalyzing, so an abandonment (a budget that runs out while the read waits on the store lock) takes
+               the #2412/#2443 path below instead of escaping the pass, and the guard window does not widen. */
+            await SecondaryReplicaScope.EnsureAsync(_duckDb, context);
+            LastSecondaryReplicaNote = AgReplicaScope.SkippedNote(context.SecondaryReplicaDatabases);
 
             // 0. Check minimum data span — total history, not the analysis window.
             // A server with 100h of total history can be analyzed over a 4h window.
@@ -575,6 +592,7 @@ public class AnalysisService
             CancellationToken = cancellationToken
         };
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
+        await SecondaryReplicaScope.EnsureAsync(_duckDb, context); /* #5558 */
 
         try
         {
@@ -617,7 +635,9 @@ public class AnalysisService
             TimeRangeStart = timeRangeEnd.AddHours(-1),
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
-            CancellationToken = cancellationToken
+            CancellationToken = cancellationToken,
+            /* #5558: audit_config reads only server-level facts, so no AG read is paid for (Darling parity). */
+            SecondaryReplicaDatabases = SecondaryReplicaScope.NoneSkipped
         };
 
         try
@@ -650,8 +670,13 @@ public class AnalysisService
     /// that fails must not cost the caller the comparison it was only meant to refine, so it degrades
     /// to an empty map and every key takes the absolute rule — the never-blind fallback the anomaly
     /// gate follows.</para>
+    ///
+    /// <para>#5558: the last two elements are the secondary-replica sets the two windows' contexts filtered with (null
+    /// when collection threw), each as of its own window end. <c>compare_analysis</c> builds its per-window
+    /// <c>secondary_replica_note</c> from them rather than reading the role a second time, so a note cannot name a skip
+    /// the facts did not make.</para>
     /// </summary>
-    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(
+    public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion, IReadOnlySet<string>? BaselineSecondaries, IReadOnlySet<string>? ComparisonSecondaries)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
         DateTime comparisonStart, DateTime comparisonEnd,
@@ -676,6 +701,10 @@ public class AnalysisService
         };
         baselineContext.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         comparisonContext.SeparatelyMonitoredDatabases = baselineContext.SeparatelyMonitoredDatabases;
+        /* #5558: NOT copied across like the list above: the two windows can straddle a failover, and each window
+           uses the role at its own end. */
+        await SecondaryReplicaScope.EnsureAsync(_duckDb, baselineContext);
+        await SecondaryReplicaScope.EnsureAsync(_duckDb, comparisonContext);
 
         try
         {
@@ -687,14 +716,15 @@ public class AnalysisService
 
             var dispersion = await LookUpDispersionAsync(serverId, serverName, baselineFacts, comparisonFacts, comparisonStart, cancellationToken);
 
-            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
+            return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion,
+                baselineContext.SecondaryReplicaDatabases, comparisonContext.SecondaryReplicaDatabases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
                not be swallowed into an empty result and logged as a fault. */
             AppLogger.Error("AnalysisService", $"Period comparison failed for {serverName}: {ex.Message}");
-            return ([], [], null, null, new Dictionary<string, BaselineBucket>());
+            return ([], [], null, null, new Dictionary<string, BaselineBucket>(), null, null);
         }
     }
 
@@ -986,7 +1016,7 @@ ORDER BY event_time";
             var windows = ConfigChangeAttribution.WindowsFor(anchorTime, context.TimeRangeEnd);
 
             context.CancellationToken.ThrowIfCancellationRequested();
-            var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
+            var (before, after, beforeCoverage, afterCoverage, dispersion, _, _) = await ComparePeriodsAsync(
                 context.ServerId, context.ServerName,
                 windows.BeforeStart, windows.BeforeEnd,
                 windows.AfterStart, windows.AfterEnd,
@@ -1160,6 +1190,14 @@ ORDER BY event_time";
             return null;
         }
     }
+
+    /// <summary>#5558: the shared one-sentence note when this node holds a secondary copy of any database in an
+    /// availability group as of <paramref name="asOfUtc"/> (now when null), else null. Read-back surfaces that list stored
+    /// findings (get_analysis_findings) carry it so a short list is not mistaken for a clean bill of health. A failed
+    /// read is "no note", never an error.</summary>
+    internal Task<string?> GetSecondaryReplicaNoteAsync(
+        int serverId, DateTime? asOfUtc = null, CancellationToken cancellationToken = default) =>
+        SecondaryReplicaScope.NoteAsync(_duckDb, serverId, asOfUtc, cancellationToken);
 
     /// <summary>
     /// The insufficient-history message for <paramref name="serverId"/>, or null when it has enough history

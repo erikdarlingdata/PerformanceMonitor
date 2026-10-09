@@ -126,6 +126,20 @@ public sealed class PgServerLogTailRotationLiveTests
         rows.Count(r => IsTheWait(r, wait));
 
     /// <summary>
+    /// The wait's lines are present and none was read twice. PostgreSQL 18 logs a lock wait's "still waiting" line
+    /// again when the waiting backend wakes on a latch before the lock is granted, so one wait can leave two lines (an
+    /// exact count of 1 failed with Expected 1, Actual 2, the failure #4919 already removed from
+    /// PgLogBurstAndRotationLiveTests). A re-read repeats a line's timestamp and text, while the repeated line carries a
+    /// later timestamp and a longer wait, so lines distinct by (timestamp, text) were each read once.
+    /// </summary>
+    private static void AssertReadOnce(IEnumerable<PgLogEvent> rows, LoggedWait wait)
+    {
+        var lines = rows.Where(r => IsTheWait(r, wait)).ToList();
+        Assert.NotEmpty(lines);
+        Assert.Equal(lines.Count, lines.Select(r => (r.OccurredAtUtc, r.Message)).Distinct().Count());
+    }
+
+    /// <summary>
     /// #4719: where the log directory stood when a wait gave up, so a failed run says where the entry went: the four
     /// newest files (name, size, mtime, whether the last 4 MB holds this pid's "still waiting" line) and the end of
     /// the newest. The listing sorts by mtime then name, so two files sharing an mtime second show as such.
@@ -215,7 +229,7 @@ public sealed class PgServerLogTailRotationLiveTests
         await RotateAsync(connection, ct);
 
         var withState = await CycleAsync(connection, Carry(first.Context), binary, ct);
-        Assert.Equal(1, Count(withState.Rows, wait));
+        AssertReadOnce(withState.Rows, wait);
 
         /* No state is today's read: the newest file only, which does not hold the line. */
         var noState = await CycleAsync(connection, null, binary, ct);
@@ -224,9 +238,14 @@ public sealed class PgServerLogTailRotationLiveTests
         /* Within the cycle no raw_line_hash repeats. */
         Assert.Equal(withState.Rows.Count, withState.Rows.Select(r => r.RawLineHash).Distinct().Count());
 
-        /* Across the two cycles the line is one identity. */
-        var all = first.Rows.Concat(withState.Rows).Where(r => IsTheWait(r, wait)).Select(r => r.RawLineHash).Distinct();
-        Assert.Single(all);
+        /* Across the two cycles each line is one identity. A wait can leave two lines on PostgreSQL 18 (the repeated
+           "still waiting" line), each its own identity, so the lines are told apart by timestamp and text. */
+        var all = first.Rows.Concat(withState.Rows).Where(r => IsTheWait(r, wait)).ToList();
+        Assert.NotEmpty(all);
+        foreach (var line in all.GroupBy(r => (r.OccurredAtUtc, r.Message)))
+        {
+            Assert.Single(line.Select(r => r.RawLineHash).Distinct());
+        }
     }
 
     [Theory]
@@ -288,7 +307,7 @@ public sealed class PgServerLogTailRotationLiveTests
         var cycle = await CycleUntilLoggedAsync(connection, Carry(first.Context), false, wait, ct);
 
         Assert.Contains(cycle.Context.Measurements, m => m.Label == PgServerLogTail.BytesSkippedMeasurement && m.Value > 0);
-        Assert.Equal(1, Count(cycle.Rows, wait));
+        AssertReadOnce(cycle.Rows, wait);
     }
 
     [Fact]

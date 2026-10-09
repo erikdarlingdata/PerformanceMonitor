@@ -307,18 +307,19 @@ public sealed class AlertNotebookRenderClientTests
     [Fact]
     public void Views_PanelOrError_SettlesExactlyOnce_SoABadPanelCellCannotHoldALimiterSlot()
     {
-        var body = CodeOf(ReadRepoFileLf(ViewsPath), "function panelOrError(p, readSet, sourceSet, scope, onSettled) {");
+        var body = CodeOf(ReadRepoFileLf(ViewsPath), "function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null) {");
 
         Assert.Contains("if (onSettled) onSettled();", body, StringComparison.Ordinal);
-        Assert.Contains("renderComposedPanelCard(p, scope, onSettled)", body, StringComparison.Ordinal);
+        Assert.Contains("renderComposedPanelCard(p, scope, onSettled, slot)", body, StringComparison.Ordinal);
         Assert.Contains("renderPanel(p, onSettled)", body, StringComparison.Ordinal);
 
         // Every error card is built by the settling `fail` function: the one panelErrorCard call left is inside it.
         Assert.Single(Regex.Matches(body, @"panelErrorCard\("));
 
-        // The dashboard grid passes no callback, so its behaviour is the one it had.
+        // The dashboard grid passes no callback (its panel is only re-scoped by panelUnderScope first, which cannot
+        // take a limiter slot), so its behaviour is the one it had.
         Assert.Contains(
-            "panels.map((p) => panelOrError(p, readSet, sourceSet, currentScope()))",
+            "panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i))",
             ReadRepoFile(ViewsPath), StringComparison.Ordinal);
     }
 

@@ -151,8 +151,26 @@ public sealed class PlanRegressionIntervalTableEquivalenceTests
         /* A held store: raw keeps 30 days, the table's floor is 16 days back, and an anchored pass reaches 20. */
         Assert.False(QueryStoreIntervalLatest.UseTable(now.AddDays(-25), false, now.AddDays(-30), rawBound, now.AddDays(-16)));
 
-        /* The same window where raw holds nothing older than the table: the table. */
-        Assert.True(QueryStoreIntervalLatest.UseTable(now.AddDays(-25), false, now.AddDays(-15), rawBound, now.AddDays(-16)));
+        /* The same window where raw holds nothing older than the table, a full margin clear of its floor: the table. */
+        Assert.True(QueryStoreIntervalLatest.UseTable(now.AddDays(-25), false, now.AddDays(-14), rawBound, now.AddDays(-16)));
+    }
+
+    [Fact]
+    public void UseTable_RawFloorWithinTheMarginOfTheTableFloor_ReadsRaw()
+    {
+        /* #5541: raw drops a snapshot by collection_time, the table drops an interval by first_execution_time. A raw
+           floor at or just above the table floor can still hold a snapshot of an interval the table dropped, so the
+           table is only safe once raw's floor clears the table's by the purge-edge margin. */
+        var now = new DateTime(2026, 9, 23, 0, 0, 0, DateTimeKind.Unspecified);
+        var rawBound = now.AddDays(-20);
+        var h = now.AddDays(-16);
+        var margin = QueryStoreIntervalWide.PurgeEdgeMargin;
+        var minute = TimeSpan.FromMinutes(1);
+
+        Assert.False(QueryStoreIntervalLatest.UseTable(now.AddDays(-25), false, h, rawBound, h));
+        Assert.False(QueryStoreIntervalLatest.UseTable(now.AddDays(-25), false, h + margin - minute, rawBound, h));
+        Assert.True(QueryStoreIntervalLatest.UseTable(now.AddDays(-25), false, h + margin, rawBound, h));
+        Assert.True(QueryStoreIntervalLatest.UseTable(now.AddDays(-25), false, h + margin + minute, rawBound, h));
     }
 
     /* ---- the seed ---------------------------------------------------------------------------------------- */

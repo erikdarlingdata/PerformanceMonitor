@@ -880,6 +880,45 @@ public class IndexCleanupAnalyzerTests
         Assert.Contains(r.Notes, n => n.Contains("Same Keys Different Order"));
     }
 
+    /// <summary>
+    /// The notes are the Index Analysis banner every user reads, so they say what is left out of the scripts and what to do about
+    /// it. They used to quote the proc's internals: "Stage 1 did not capture ...", "adversarial tests 9a/10a assert ...", "Rule
+    /// 7/7.5/7.5b reproduces the proc's LITERAL behavior ...". This input raises every conditional note too.
+    /// </summary>
+    [Fact]
+    public void Notes_AreInPlainWords_WithNoDeveloperJargon()
+    {
+        var keeper = Idx("IX_Keep", "[a]", indexId: 2, includes: "[b]", seeks: 10, scans: 5, partitionCount: 2);
+        var loser = Idx("IX_Drop", "[a]", indexId: 3, includes: "[c]", seeks: 10, partitionCount: 2);
+        var nc = Idx("nc_xy", "[x], [y]", indexId: 4, seeks: 10);
+        var uc = Idx("UC_xy", "[x], [y]", indexId: 5, uniqueConstraint: true);
+        var big = Idx("CX_Big", "[k]", indexId: 1, type: "CLUSTERED", compression: "NONE", reservedMb: 10240m, seeks: 10, objectId: 2, table: "Big");
+
+        var r = IndexCleanupAnalyzer.Analyze(new[] { keeper, loser, nc, uc, big }, Opts());
+
+        Assert.Contains(r.Recommendations, x => x.ScriptOmitsPartitionPlacement);
+        Assert.Contains(r.Recommendations, x => x.ResultKind == IndexCleanupResultKind.Compress);
+        Assert.Contains(r.Recommendations, x => x.ConsolidationRule == IndexCleanupRules.UniqueConstraintReplacement);
+
+        Assert.Contains(r.Notes, n => n.Contains("ON filegroup or partition scheme", StringComparison.Ordinal));
+        Assert.Contains(r.Notes, n => n.Contains("sparse", StringComparison.Ordinal));
+        Assert.Contains(r.Notes, n => n.Contains("20% to 60%", StringComparison.Ordinal));
+        Assert.Contains(r.Notes, n => n.Contains("PARTITION = ALL", StringComparison.Ordinal));
+        Assert.Contains(r.Notes, n => n.Contains("Reverse Duplicate", StringComparison.Ordinal));
+        Assert.Contains(r.Notes, n => n.Contains("rebuilt as UNIQUE", StringComparison.Ordinal));
+        Assert.Contains(r.Notes, n => n.Contains("Same Keys Different Order", StringComparison.Ordinal));
+
+        string[] jargon = ["Stage 1", "adversarial", "Rule ", "LITERAL", "@debug", "the proc", "proc's", "key_columns", "is_unique", "partition_count", "port of", "out of scope"];
+
+        foreach (var note in r.Notes)
+        {
+            foreach (var word in jargon)
+            {
+                Assert.False(note.Contains(word, StringComparison.OrdinalIgnoreCase), $"developer wording '{word}' in a user-facing note: {note}");
+            }
+        }
+    }
+
     // ── Review-parity guards (sp_IndexCleanup fix waves ae32a4c / 0abb3ef) ────────────────────────
     // A constraint-backed index cannot be rebuilt with CREATE INDEX ... DROP_EXISTING (Msg 1907), so it
     // must never be the surviving side of a merge; a filtered or partitioned index must never be promoted

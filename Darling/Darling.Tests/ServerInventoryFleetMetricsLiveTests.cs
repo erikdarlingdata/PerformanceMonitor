@@ -168,6 +168,15 @@ LEFT JOIN grants g ON true";
         await InsertQueryStatsAsync(connection, ServerId, ServerName, "TailDb", watermarkTarget.AddMinutes(10), 2, ct);
         // NeverExecutedDb: no query_stats rows at all.
 
+        /* The idle coverage rule: 7 days of history and a sample on each complete UTC day before "now" (idleCutoff + 7 days, so
+           2020-06-01 through 2020-06-07). One zero-execution sample before the cutoff hour (read raw, as the rollup may not hold
+           it) and one at noon on each day; the days after the watermark are read raw, the first day from the rollup. */
+        await FinOpsIdleCoverageSeed.InsertAsync(connection, ct, ServerId, ServerName, idleCutoff.AddHours(-1), "oldest");
+        for (var day = 0; day < 7; day++)
+        {
+            await FinOpsIdleCoverageSeed.InsertAsync(connection, ct, ServerId, ServerName, anchorHour.Date.AddDays(day).AddHours(12), "day" + day);
+        }
+
         /* The "known databases" universe: one size snapshot per candidate, all at the SAME collection_time so
            the latest-snapshot join (exact timestamp equality) picks up every one of them together. */
         var snapshotTime = watermarkTarget.AddMinutes(20);
@@ -256,6 +265,7 @@ LEFT JOIN grants g ON true";
         await InsertDatabaseSizeAsync(connection, ServerA, "old-new-A", "StaleDb", now.AddDays(-2), 9999, ct); // not latest — must be ignored
         await InsertQueryStatsAsync(connection, ServerA, "old-new-A", "AppDb1", now.AddDays(-2), 5, ct);
         // AppDb2: no executions -> idle.
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerA, "old-new-A", now);
 
         // Server B: both databases active, no memory-grant evidence at all (grants CTE empty, must COALESCE to 0).
         await InsertCpuAsync(connection, ServerB, now.AddHours(-1), 20, ct);
@@ -265,14 +275,17 @@ LEFT JOIN grants g ON true";
         await InsertDatabaseSizeAsync(connection, ServerB, "old-new-B", "Db2", now.AddMinutes(-15), 150, ct);
         await InsertQueryStatsAsync(connection, ServerB, "old-new-B", "Db1", now.AddDays(-1), 2, ct);
         await InsertQueryStatsAsync(connection, ServerB, "old-new-B", "Db2", now.AddDays(-6), 7, ct); // inside the 7d window
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerB, "old-new-B", now);
 
         // Server C: both databases idle, no CPU/memory evidence at all (every left-joined CTE empty).
         await InsertDatabaseSizeAsync(connection, ServerC, "old-new-C", "Db1", now.AddMinutes(-45), 50, ct);
         await InsertDatabaseSizeAsync(connection, ServerC, "old-new-C", "Db2", now.AddMinutes(-45), 75, ct);
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerC, "old-new-C", now);
 
         // Server D: low CPU and nothing else — the verdict every server with CPU samples kept: OVER_PROVISIONED.
         await InsertCpuAsync(connection, ServerD, now.AddHours(-1), 5, ct);
         await InsertCpuAsync(connection, ServerD, now.AddHours(-2), 7, ct);
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerD, "old-new-D", now);
 
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         var metrics = await viewer.GetServerMetricsAsync(ct);
@@ -359,6 +372,10 @@ LEFT JOIN grants g ON true";
         await using var command = dataSource.CreateCommand(sql);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = idleCutoff }); // $1 cpu cutoff — unused by this test
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = idleCutoff }); // $2 idle cutoff
+        var now = idleCutoff.AddDays(7);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now) }); // $3 first complete day
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageDays }); // $4 days
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now) }); // $5 today
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

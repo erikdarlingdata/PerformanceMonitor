@@ -18,8 +18,11 @@
 --              config.custom_alert_rules (the user-authored alert rules, #3285), on
 --              config.database_state_expected (the per-database override editor, #1986), and on
 --              config.config_mute_rules (the web dashboard's dedicated mute-rule endpoints, #3450 -- plus the
---              two config_service beacon columns their bump trigger writes as the caller). All non-secret
---              tables; over the web every write is gated server-side by the host's auth + seat model -- these
+--              two config_service beacon columns their bump trigger writes as the caller), and the single
+--              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843), and INSERT
+--              on config.config_monitored_servers and no UPDATE on it: the web add-server route (#4843) inserts, and
+--              the web edit-server route (#5240) edits through config.edit_monitored_server, a function it may
+--              execute (its credential column stays SELECT-carved). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'
@@ -51,7 +54,7 @@
 -- re-running blindly are the single-table grants in steps 3b-3f: each names a table (or, for the
 -- beacon columns, a trigger dependency) a specific migration creates -- custom_views is V31,
 -- database_state_expected is V49, custom_alert_rules is V116, the mute-rule reload-beacon trigger is
--- V117 and config_notification_routes is V131 -- so re-run this script after upgrading past each.
+-- V117, config_notification_routes is V131 and config_collector_run_times is V160 and the password key tables (step 3g) are V165 -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
@@ -220,7 +223,10 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               plan_force_bot_enabled,
               -- V113 (#2138 phase 1): the remediation credential's login name. Non-secret, exactly like
               -- username; remediation_encrypted_password is deliberately NOT granted.
-              remediation_username)
+              remediation_username,
+              -- V169 (#5452): the AWS role a target uses, and whether an external ID is stored with it.
+              -- Non-secret; the external ID itself (aws_external_id) is deliberately NOT granted.
+              aws_role_arn, aws_external_id_set)
     ON config.config_monitored_servers TO viewer;
 REVOKE SELECT ON config.config_command FROM viewer;
 GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,
@@ -229,7 +235,10 @@ GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_
 REVOKE SELECT ON config.config_notification FROM viewer;
 GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients,
               email_cooldown_minutes, teams_proxy, slack_proxy, modified_at,
-              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy)
+              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy,
+              -- V166: pagerduty_auto_resolve. Non-secret (a behaviour toggle, like the EU-region flag
+              -- beside it), so it stays granted.
+              pagerduty_auto_resolve)
     ON config.config_notification TO viewer;
 -- V131 (#3598): the sparse notification-routes table mirrors the parent row's destination columns under the
 -- same names, so the same carve applies: the webhook URLs and the PagerDuty routing key are bearer secrets and
@@ -248,7 +257,8 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               is_enabled, created_at, modified_at, alert_delivery_mode_override,
               engine, port,
               plan_force_bot_enabled,
-              remediation_username)
+              remediation_username,
+              aws_role_arn, aws_external_id_set)
     ON config.config_monitored_servers TO mcp;
 REVOKE SELECT ON config.config_command FROM mcp;
 GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,
@@ -257,11 +267,18 @@ GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_
 REVOKE SELECT ON config.config_notification FROM mcp;
 GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients,
               email_cooldown_minutes, teams_proxy, slack_proxy, modified_at,
-              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy)
+              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy,
+              -- V166: pagerduty_auto_resolve. Non-secret (a behaviour toggle, like the EU-region flag
+              -- beside it), so it stays granted.
+              pagerduty_auto_resolve)
     ON config.config_notification TO mcp;
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
 GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at)
     ON config.config_notification_routes TO mcp;
+-- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
+-- already covers the table when it exists at that point; naming it makes the grant explicit and idempotent, mirroring
+-- how the schedule tables are read, so a store that reaches V160 after an earlier provisioning is covered by the re-run.
+GRANT SELECT ON config.config_collector_run_times TO mcp;
 
 -- 3. config writes -- admin gets the whole schema.
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;
@@ -299,6 +316,380 @@ GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
+-- #5085: the fleet server-tag write tools run as mcp; these two single-table grants are the admin gate. Both
+--     tables are non-secret with no beacon trigger, and server_tags.id is an identity column (no sequence grant).
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
+
+-- 3d-2. Alert History dismiss (#4843): the web dashboard's POST /api/alert-history/dismiss runs as viewer and
+--     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so viewer
+--     can flip the dismissed flag and cannot rewrite what an alert said or reach INSERT/DELETE. config_alert_log
+--     carries no trigger. The WPF read-only probe (has_table_privilege ... 'UPDATE') answers for the table-level
+--     privilege only, so it stays false for viewer. mcp gets none: no MCP tool dismisses an alert.
+GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;
+
+-- #5085: the web dashboard's /api/server-tags endpoints run as viewer, so viewer gets the same two single-table
+--     writes (the seat model decides who may call them; these grants are only the floor). The WPF Viewer's read-only
+--     probe still discriminates on config_alert_log UPDATE, so a connectAs = "viewer" Viewer stays read-only.
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;
+
+-- #4843: the web dashboard's add-server route runs the add_servers core as viewer, so viewer gets INSERT on
+--     config_monitored_servers (never DELETE: no web route removes a server). The
+--     credential column stays SELECT-carved from viewer, so it can write a password blob and never read one back;
+--     the write's bump trigger is served by the two config_service beacon columns granted above.
+GRANT INSERT ON config.config_monitored_servers TO viewer;
+
+-- #5240: the web dashboard's edit route (PATCH /api/servers/{id}) and the MCP edit_server tool change a monitored
+--     server through config.edit_monitored_server, created right below. Viewer holds NO UPDATE on the table: the
+--     function checks the optimistic token, works out for itself whether host or port moves, and refuses a move that
+--     keeps the stored secret on a SQL or service-principal row. RE-RUN THIS SCRIPT AFTER UPGRADING to the release that
+--     adds the edit route (the precedent is the V117 note above): a store whose roles predate the function answers
+--     every web edit with an error that says to re-run it. The function is owned by whoever runs the script, so run it
+--     as the store owner, the role that owns config.config_monitored_servers.
+--     REVOKE first, like the SELECT carve above: it takes away any UPDATE an earlier release granted viewer here, and
+--     revoking the table privilege also revokes every column privilege on it. A plain REVOKE removes only the privileges
+--     recorded as granted by the role that issues it (a superuser or the owner counts as the owner), so run this script
+--     as the same owner every time, as above.
+REVOKE UPDATE ON config.config_monitored_servers FROM viewer;
+
+CREATE OR REPLACE FUNCTION config.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric,
+   p_aws_role_arn text,
+   p_aws_external_id text)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_old_modified_at timestamp;
+   v_old_host text;
+   v_old_port integer;
+   v_old_auth text;
+   v_old_database text;
+   v_old_read_only_intent boolean;
+   v_old_username text;
+   v_old_encrypt_mode text;
+   v_old_trust_server_certificate boolean;
+   v_old_multi_subnet_failover boolean;
+   v_host text;
+   v_port integer;
+   v_auth text;
+   v_database text;
+   v_read_only_intent boolean;
+   v_username text;
+   v_encrypt_mode text;
+   v_trust_server_certificate boolean;
+   v_multi_subnet_failover boolean;
+   v_secret_auth boolean;
+   v_new_secret boolean;
+   v_secret_set boolean;
+   v_secret text;
+   v_remediation_held boolean;
+   v_connection_changed boolean;
+   v_old_role text;
+   v_old_ext text;
+   v_role text;
+   v_ext text;
+BEGIN
+   p_columns := COALESCE(p_columns, ARRAY[]::text[]);
+
+   SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
+          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> '',
+          s.aws_role_arn, s.aws_external_id
+   INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
+        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
+        v_remediation_held, v_old_role, v_old_ext
+   FROM config.config_monitored_servers AS s
+   WHERE s.server_id = p_server_id
+   FOR UPDATE OF s;
+
+   IF NOT FOUND THEN
+      RETURN QUERY SELECT 'not_found'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- The token is compared as it was read, to the microsecond.
+   IF v_old_modified_at IS DISTINCT FROM p_expected_modified_at THEN
+      RETURN QUERY SELECT 'conflict'::text, v_old_modified_at;
+      RETURN;
+   END IF;
+
+   v_host := CASE WHEN 'host' = ANY (p_columns) THEN btrim(p_host) ELSE v_old_host END;
+   v_port := CASE WHEN 'port' = ANY (p_columns) THEN p_port ELSE v_old_port END;
+   v_auth := CASE WHEN 'auth' = ANY (p_columns) THEN p_auth ELSE v_old_auth END;
+   v_database := CASE WHEN 'database' = ANY (p_columns) THEN p_database ELSE v_old_database END;
+   v_read_only_intent := CASE WHEN 'read_only_intent' = ANY (p_columns) THEN p_read_only_intent ELSE v_old_read_only_intent END;
+   v_username := CASE WHEN 'username' = ANY (p_columns) THEN p_username ELSE v_old_username END;
+   v_encrypt_mode := CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE v_old_encrypt_mode END;
+   v_trust_server_certificate := CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE v_old_trust_server_certificate END;
+   v_multi_subnet_failover := CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE v_old_multi_subnet_failover END;
+   -- The AWS role (#5452). Left out of p_columns, the stored role and external ID are kept. A role named in p_columns
+   -- with a NULL value clears it, and a cleared role takes its external ID with it.
+   v_role := CASE WHEN 'aws_role_arn' = ANY (p_columns) THEN p_aws_role_arn ELSE v_old_role END;
+   v_ext := CASE WHEN v_role IS NULL THEN NULL
+                 WHEN 'aws_external_id' = ANY (p_columns) THEN p_aws_external_id
+                 ELSE v_old_ext END;
+   v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
+   v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
+
+   -- A NULL for a column the table requires is refused with a plain outcome: the edit sends nothing the table would
+   -- have to turn away.
+   IF ('name' = ANY (p_columns) AND p_name IS NULL)
+      OR v_host IS NULL OR v_port IS NULL OR v_auth IS NULL OR v_encrypt_mode IS NULL
+      OR v_read_only_intent IS NULL OR v_trust_server_certificate IS NULL OR v_multi_subnet_failover IS NULL
+      OR ('monthly_cost_usd' = ANY (p_columns) AND p_monthly_cost_usd IS NULL) THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- The store takes the password itself from these roles: a secret that starts with env: or file: (a reference,
+   -- compared as the service reads one, case-sensitive and at the start of the text) is refused. References are set
+   -- in the configuration file.
+   IF v_new_secret AND (left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:') THEN
+      RETURN QUERY SELECT 'reference_refused'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- A new role would take the stored external ID with it unseen; the caller sends the ID again or clears it.
+   IF v_role IS NOT NULL AND v_role IS DISTINCT FROM v_old_role AND v_old_ext IS NOT NULL
+      AND NOT ('aws_external_id' = ANY (p_columns)) THEN
+      RETURN QUERY SELECT 'external_id_needed'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- An external ID with no role is refused (the table's check would refuse it too).
+   IF v_role IS NULL AND 'aws_external_id' = ANY (p_columns) AND p_aws_external_id IS NOT NULL THEN
+      RETURN QUERY SELECT 'external_id_needs_role'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
+   -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
+   -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
+   v_connection_changed := v_host IS DISTINCT FROM v_old_host
+      OR v_port IS DISTINCT FROM v_old_port
+      OR v_database IS DISTINCT FROM v_old_database
+      OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
+      OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
+      OR v_username IS DISTINCT FROM v_old_username
+      OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
+      OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
+      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
+
+   -- A row that holds a remediation secret is not moved from here, whatever else the call sends: that secret is
+   -- set and changed on the service host, and a new main password does not replace it.
+   IF v_connection_changed AND v_remediation_held THEN
+      RETURN QUERY SELECT 'remediation_kept'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   IF v_secret_auth AND NOT v_new_secret AND v_connection_changed THEN
+      RETURN QUERY SELECT 'password_needed'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- A row whose authentication stores no secret never keeps one.
+   IF NOT v_secret_auth THEN
+      v_secret_set := true;
+      v_secret := NULL;
+   ELSIF 'encrypted_password' = ANY (p_columns) THEN
+      v_secret_set := true;
+      v_secret := p_secret;
+   ELSE
+      v_secret_set := false;
+      v_secret := NULL;
+   END IF;
+
+   -- A value the table's own checks refuse (a required column, a format, a duplicate) answers invalid_value too:
+   -- the table's error text is not passed on.
+   BEGIN
+      UPDATE config.config_monitored_servers AS s
+      SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+          host = v_host,
+          port = v_port,
+          database = v_database,
+          read_only_intent = v_read_only_intent,
+          auth = v_auth,
+          username = v_username,
+          encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+          encrypt_mode = v_encrypt_mode,
+          trust_server_certificate = v_trust_server_certificate,
+          multi_subnet_failover = v_multi_subnet_failover,
+          monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+          aws_role_arn = v_role,
+          aws_external_id = v_ext,
+          modified_at = (now() AT TIME ZONE 'UTC')
+      WHERE s.server_id = p_server_id
+      RETURNING s.modified_at INTO new_modified_at;
+   EXCEPTION WHEN integrity_constraint_violation THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END;
+
+   outcome := 'saved';
+   RETURN NEXT;
+END;
+$fn$;
+REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) TO viewer, mcp;
+
+-- #5452: the 15-argument edit function stays as a permanent wrapper over the 17-argument one, for a caller that
+--     was built before the AWS role columns. It passes NULL for both and strips the two AWS column names from
+--     p_columns, so a caller of the old signature can neither change nor clear a role. Same grants, same owner.
+CREATE OR REPLACE FUNCTION config.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT e.outcome, e.new_modified_at
+   FROM config.edit_monitored_server(
+      p_server_id, p_expected_modified_at,
+      array_remove(array_remove(COALESCE(p_columns, ARRAY[]::text[]), 'aws_role_arn'), 'aws_external_id'),
+      p_name, p_host, p_port, p_database, p_read_only_intent, p_auth, p_username, p_secret, p_encrypt_mode,
+      p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, NULL::text, NULL::text) AS e;
+$fn$;
+REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) TO viewer, mcp;
+
+-- The store's own password rules for every role but the owner: a BEFORE INSERT OR UPDATE trigger on
+--     config_monitored_servers. A new or changed password that starts with env: or file: (a reference) is refused:
+--     references are set in the configuration file, or by --add-server on the service host, as the owner. An update
+--     that changes how a server is reached (host, port, engine, database, read-only intent, authentication mode,
+--     username, encryption, certificate trust, multi-subnet failover) while keeping the stored password is refused:
+--     the password is typed again with the change, and a row that holds a remediation login is not moved by these roles
+--     at all (PW003). The owner (the role that owns the table, or a superuser) is not
+--     held to either rule, and neither is a row already in the table: only INSERT and UPDATE are checked. The
+--     trigger and its function are created here, not in a migration, so re-running this script after an upgrade
+--     keeps them current.
+CREATE OR REPLACE FUNCTION config.monitored_server_password_rules()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $rules$
+DECLARE
+   v_reference_main boolean;
+   v_reference_remediation boolean;
+   v_held boolean;
+   v_moved boolean;
+BEGIN
+   -- The store owner (the role that owns the table, and a superuser) writes what it writes: the service, the
+   -- --add-server verb, the configuration-file seed, and the body of edit_monitored_server, which runs as the
+   -- function's owner. Every other role is held to the two rules below.
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+      RETURN NEW;
+   END IF;
+
+   v_reference_main := COALESCE(left(NEW.encrypted_password, 4) = 'env:' OR left(NEW.encrypted_password, 5) = 'file:', false);
+   v_reference_remediation := COALESCE(left(NEW.remediation_encrypted_password, 4) = 'env:' OR left(NEW.remediation_encrypted_password, 5) = 'file:', false);
+
+   IF TG_OP = 'INSERT' THEN
+      -- A new row never holds a reference. The one pass: an upsert's proposed row for a server whose stored value is
+      -- already that exact reference (the row is locked, so it cannot go away before the write), which then meets the
+      -- UPDATE rules below. A role that cannot read or lock the row (viewer, mcp) gets the refusal.
+      IF v_reference_main OR v_reference_remediation THEN
+         v_held := false;
+         BEGIN
+            PERFORM 1
+            FROM config.config_monitored_servers AS s
+            WHERE s.server_id = NEW.server_id
+              AND (NOT v_reference_main OR s.encrypted_password = NEW.encrypted_password)
+              AND (NOT v_reference_remediation OR s.remediation_encrypted_password = NEW.remediation_encrypted_password)
+            FOR UPDATE OF s;
+            v_held := FOUND;
+         EXCEPTION WHEN insufficient_privilege THEN
+            v_held := false;
+         END;
+
+         IF NOT v_held THEN
+            RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+         END IF;
+      END IF;
+
+      RETURN NEW;
+   END IF;
+
+   -- An update never sets a reference.
+   IF (v_reference_main AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password)
+      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password) THEN
+      RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+   END IF;
+
+   -- An update that changes how the row connects (the set edit_monitored_server counts, plus the engine) never keeps
+   -- a stored secret that is still there: the main password is typed again with the change, and a remediation
+   -- password is changed on the service host.
+   v_moved := NEW.host IS DISTINCT FROM OLD.host
+      OR NEW.port IS DISTINCT FROM OLD.port
+      OR NEW.engine IS DISTINCT FROM OLD.engine
+      OR NEW.database IS DISTINCT FROM OLD.database
+      OR NEW.read_only_intent IS DISTINCT FROM OLD.read_only_intent
+      OR lower(NEW.auth) IS DISTINCT FROM lower(OLD.auth)
+      OR NEW.username IS DISTINCT FROM OLD.username
+      OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
+      OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
+      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
+
+   -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
+   -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
+   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
+      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
+      RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
+   END IF;
+
+   IF v_moved
+      AND COALESCE(OLD.encrypted_password, '') <> ''
+      AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
+      RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+   END IF;
+
+   -- A new AWS role (#5452) never inherits an external ID stored for the old one, unseen: the update names the ID
+   -- again, or clears it. The owner is not held to this; edit_monitored_server answers it first.
+   IF NEW.aws_role_arn IS NOT NULL
+      AND NEW.aws_role_arn IS DISTINCT FROM OLD.aws_role_arn
+      AND OLD.aws_external_id IS NOT NULL
+      AND NEW.aws_external_id IS NOT DISTINCT FROM OLD.aws_external_id THEN
+      RAISE EXCEPTION '%', 'Changing the AWS role needs the external ID with it: send the external ID again, or clear it.' USING ERRCODE = 'PW004';
+   END IF;
+
+   RETURN NEW;
+END;
+$rules$;
+REVOKE ALL ON FUNCTION config.monitored_server_password_rules() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
+   BEFORE INSERT OR UPDATE ON config.config_monitored_servers
+   FOR EACH ROW EXECUTE FUNCTION config.monitored_server_password_rules();
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same
@@ -319,7 +710,78 @@ GRANT INSERT ON config.analysis_muted TO mcp;
 GRANT UPDATE ON config.config_alert_settings TO mcp;
 GRANT UPDATE (email_cooldown_minutes) ON config.config_notification TO mcp;
 GRANT UPDATE (enabled, modified_at), DELETE ON config.config_notification_routes TO mcp;
-GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers TO mcp;
+GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;
+REVOKE UPDATE ON config.config_monitored_servers FROM mcp;
+-- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE
+-- names every other column of the table and leaves out aws_role_arn, aws_external_id and the generated
+-- aws_external_id_set. A column added to the table later is added to this list.
+GRANT UPDATE (server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password)
+   ON config.config_monitored_servers TO mcp;
+
+-- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
+--     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
+--     and it comes after EVERY grant above, so none of them can put a privilege back. REVOKE ALL ... CASCADE takes every
+--     privilege on the four tables from PUBLIC and the three roles, TRIGGER and REFERENCES included, so no role can add
+--     a new trigger or foreign key. A trigger or foreign key already there (made while a role held the privilege) is
+--     dropped by the loops below, with a WARNING, because it would outlast the REVOKE. Then SELECT on the key and
+--     service-state tables is granted back to admin only (the desktop Viewer reads them as admin), and the DO block
+--     checks that nothing else is left; the pin tables are read by the owner only. The four tables are created by V165 and the
+--     legacy pin candidate table by V167: on a store below V165 the block warns and skips, so the rest of the script
+--     (the PUBLIC revoke below included) still runs; re-run the script once the service has migrated the store to V167.
+--     A store at V165 or V166 gets the four-table revoke now, and the candidate table's own revoke once V167 has made it.
+DO $do$
+DECLARE
+    stray record;
+BEGIN
+    IF pg_catalog.to_regclass('config.password_key') IS NOT NULL
+       AND pg_catalog.to_regclass('config.password_key_service') IS NOT NULL
+       AND pg_catalog.to_regclass('config.legacy_secret_pin') IS NOT NULL
+       AND pg_catalog.to_regclass('config.legacy_secret_pin_marker') IS NOT NULL THEN
+        REVOKE ALL ON config.password_key, config.password_key_service,
+           config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp CASCADE;
+        GRANT SELECT ON config.password_key, config.password_key_service TO admin;
+        IF pg_catalog.to_regclass('config.legacy_secret_pin_candidate') IS NOT NULL THEN
+            REVOKE ALL ON config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE;
+        END IF;
+
+        FOR stray IN
+           SELECT t.tgname, t.tgrelid::pg_catalog.regclass::pg_catalog.text AS tablename
+           FROM pg_catalog.pg_trigger AS t
+           WHERE NOT t.tgisinternal
+             AND t.tgrelid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service'), pg_catalog.to_regclass('config.legacy_secret_pin'), pg_catalog.to_regclass('config.legacy_secret_pin_marker'), pg_catalog.to_regclass('config.legacy_secret_pin_candidate'))
+             AND t.tgname NOT IN ('trg_password_key_owner_only_row', 'trg_password_key_owner_only_truncate', 'trg_password_key_service_owner_only_row', 'trg_password_key_service_owner_only_truncate', 'trg_legacy_secret_pin_owner_only_row', 'trg_legacy_secret_pin_owner_only_truncate', 'trg_legacy_secret_pin_marker_owner_only_row', 'trg_legacy_secret_pin_marker_owner_only_truncate', 'trg_legacy_secret_pin_candidate_owner_only_row', 'trg_legacy_secret_pin_candidate_owner_only_truncate')
+        LOOP
+           RAISE WARNING 'Dropped trigger % from % because only the store owner may write the password key tables.', stray.tgname, stray.tablename;
+           EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', stray.tgname, stray.tablename);
+        END LOOP;
+
+        FOR stray IN
+           SELECT k.conname, k.conrelid::pg_catalog.regclass::pg_catalog.text AS tablename
+           FROM pg_catalog.pg_constraint AS k
+           WHERE k.contype = 'f'
+             AND k.confrelid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service'), pg_catalog.to_regclass('config.legacy_secret_pin'), pg_catalog.to_regclass('config.legacy_secret_pin_marker'), pg_catalog.to_regclass('config.legacy_secret_pin_candidate'))
+        LOOP
+           RAISE WARNING 'Dropped foreign key % on % because it references a password key table.', stray.conname, stray.tablename;
+           EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', stray.tablename, stray.conname);
+        END LOOP;
+
+        IF EXISTS (
+           SELECT 1
+           FROM pg_catalog.pg_class AS c
+           CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
+           LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
+           WHERE c.oid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service'), pg_catalog.to_regclass('config.legacy_secret_pin'), pg_catalog.to_regclass('config.legacy_secret_pin_marker'), pg_catalog.to_regclass('config.legacy_secret_pin_candidate'))
+             AND (a.grantee = 0 OR r.rolname IN ('admin', 'viewer', 'mcp'))
+             AND NOT (COALESCE(r.rolname = 'admin', false) AND a.privilege_type = 'SELECT'
+                      AND c.oid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service')))
+        ) THEN
+           RAISE EXCEPTION 'A role other than the store owner still holds a privilege it should not on a password key table.';
+        END IF;
+    ELSE
+        RAISE WARNING 'The password key tables were not found, so their grants were skipped. Run this script again after the service has upgraded the store.';
+    END IF;
+END
+$do$;
 
 -- 4. Default privileges so NEW tables/views (future collectors, created bare into collect via
 --    search_path) auto-inherit SELECT. FOR ROLE <owner> must name the role that creates them.

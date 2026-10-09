@@ -807,6 +807,9 @@ ORDER BY accumulated_wait_ms DESC";
 
     /* ---------------- long-running queries ---------------- */
 
+    /// <summary>The characters of a statement the long-running-query alert prints (#5320: judged whole, then cut to this).</summary>
+    internal const int AlertStatementPreviewLength = 300;
+
     /// <summary>
     /// Lite's long-running-query read with the two PG dialect adjustments: DuckDB's bare
     /// <c>NOW() - INTERVAL '10 MINUTES'</c> becomes the parameterized naive-UTC $4 (a bare
@@ -845,7 +848,7 @@ WITH candidates AS (
     SELECT
         r.session_id,
         r.database_name,
-        SUBSTRING(r.query_text, 1, 300) AS query_text,
+        r.query_text,
         r.total_elapsed_time_ms / 1000 AS elapsed_seconds,
         r.cpu_time_ms,
         r.reads,
@@ -987,7 +990,9 @@ LIMIT $3";
                 {
                     SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
                     DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    /* #5320: the whole statement is judged, then cut to the alert's 300 characters here. The read used to cut
+                       in SQL (SUBSTRING), so a value early in a batch whose naming text sat past the 300th character read clean. */
+                    QueryText = reader.IsDBNull(2) ? "" : McpHelpers.StatementPreview(reader.GetString(2), AlertStatementPreviewLength) ?? "",
                     ElapsedSeconds = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                     CpuTimeMs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                     Reads = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),

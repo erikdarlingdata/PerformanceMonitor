@@ -25,13 +25,13 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingBlockingReaderServerClockTests
 {
-    /* The XE select is 35 columns wide: event_time first, the six server-local stamps at 25..30. */
+    /* The XE select is 37 columns wide: event_time first, the six server-local stamps at 25..30, and the row's store key last (collection_time, blocked_report_id at 35, 36; #5236). */
     private static readonly int[] XeStamps = [25, 26, 27, 28, 29, 30];
 
     /* The DMV select is 20 columns wide: event_time first, the two server-local stamps last. */
     private static readonly int[] DmvStamps = [18, 19];
 
-    private static DataTable XeTable() => Table(35, [0, .. XeStamps]);
+    private static DataTable XeTable() => Table(37, [0, .. XeStamps]);
 
     private static DataTable DmvTable() => Table(20, [0, .. DmvStamps]);
 
@@ -98,6 +98,104 @@ public sealed class DarlingBlockingReaderServerClockTests
 
         Assert.Equal(Naive(year, month, day, expectedUtcHour, 1), row.BlockedLastTranStartedUtc);
         Assert.Equal(Naive(year, month, day, expectedUtcHour, 11), row.BlockingLastTranStartedUtc);
+    }
+
+    /// <summary>
+    /// #5236: the XE select's LAST two columns (ordinals 35 and 36) are the row's store key, <c>collection_time</c> then
+    /// <c>blocked_report_id</c>, and map to <c>CollectionTime</c> / <c>BlockedReportId</c>. The plan flags are NOT in the list
+    /// read, so they stay false; a NULL key reads null, and a DMV-snapshot row (its select has no key) leaves both null.
+    /// </summary>
+    [Fact]
+    public void MapXeRow_ReadsTheStoreKey_AtOrdinals35And36_AndLeavesThePlanFlagsFalse()
+    {
+        static DataTable Keyed(params (int Ordinal, object Value)[] values)
+        {
+            var table = Table(35, [0, .. XeStamps]);
+            table.Columns.Add("c35", typeof(DateTime));
+            table.Columns.Add("c36", typeof(long));
+            AddRow(table, [(0, Naive(2026, 11, 2, 15)), .. values]);
+            return table;
+        }
+
+        var keyed = ReadXe(Keyed((35, Naive(2026, 11, 2, 15, 1)), (36, 4242L)), Eastern());
+        Assert.Equal(Naive(2026, 11, 2, 15, 1), keyed.CollectionTime);
+        Assert.Equal(4242L, keyed.BlockedReportId);
+        Assert.False(keyed.HasBlockedPlan);
+        Assert.False(keyed.HasBlockingPlan);
+
+        var nulls = ReadXe(Keyed(), Eastern());
+        Assert.Null(nulls.CollectionTime);
+        Assert.Null(nulls.BlockedReportId);
+
+        var dmvTable = DmvTable();
+        AddRow(dmvTable, (0, Naive(2026, 3, 9, 15)));
+        var dmv = ReadDmv(dmvTable, Eastern());
+        Assert.Null(dmv.CollectionTime);
+        Assert.Null(dmv.BlockedReportId);
+        Assert.False(dmv.HasBlockedPlan);
+        Assert.False(dmv.HasBlockingPlan);
+    }
+
+    /// <summary>
+    /// #5236: the flag read answers per (collection_time, blocked_report_id) pair and the rows take their own pair's answer. A
+    /// row with no entry (purged between the two statements) and a row with no key (a DMV snapshot) keep both flags false.
+    /// </summary>
+    [Fact]
+    public void ApplyBlockedPlanFlags_GivesEachRowItsOwnPairsAnswer()
+    {
+        static DarlingBlockingReader.BlockedProcessReadRow Row(DateTime? time, long? id) => new() { CollectionTime = time, BlockedReportId = id };
+
+        var t1 = Naive(2026, 11, 2, 15, 1);
+        var t2 = Naive(2026, 11, 2, 15, 2);
+        var both = Row(t1, 1);
+        var blockedOnly = Row(t1, 2);
+        var blockingOnly = Row(t2, 1);
+        var neither = Row(t2, 2);
+        var purged = Row(t2, 3);
+        var dmv = Row(null, null);
+
+        DarlingBlockingReader.ApplyBlockedPlanFlags(
+            [both, blockedOnly, blockingOnly, neither, purged, dmv],
+            new System.Collections.Generic.Dictionary<(DateTime Time, long Id), (bool Blocked, bool Blocking)>
+            {
+                [(t1, 1)] = (true, true),
+                [(t1, 2)] = (true, false),
+                [(t2, 1)] = (false, true),
+                [(t2, 2)] = (false, false),
+            });
+
+        Assert.True(both.HasBlockedPlan);
+        Assert.True(both.HasBlockingPlan);
+        Assert.True(blockedOnly.HasBlockedPlan);
+        Assert.False(blockedOnly.HasBlockingPlan);
+        Assert.False(blockingOnly.HasBlockedPlan);
+        Assert.True(blockingOnly.HasBlockingPlan);
+        Assert.False(neither.HasBlockedPlan);
+        Assert.False(neither.HasBlockingPlan);
+        Assert.False(purged.HasBlockedPlan);
+        Assert.False(purged.HasBlockingPlan);
+        Assert.False(dmv.HasBlockedPlan);
+        Assert.False(dmv.HasBlockingPlan);
+    }
+
+    /// <summary>#5236: the deadlock page's victim-plan flag, keyed the same way.</summary>
+    [Fact]
+    public void ApplyVictimPlanFlags_GivesEachRowItsOwnPairsAnswer()
+    {
+        var t1 = Naive(2026, 11, 2, 15, 1);
+        var withPlan = new DarlingBlockingReader.DeadlockReadRow { CollectionTime = t1, DeadlockId = 7 };
+        var withoutPlan = new DarlingBlockingReader.DeadlockReadRow { CollectionTime = t1, DeadlockId = 8 };
+        var purged = new DarlingBlockingReader.DeadlockReadRow { CollectionTime = t1, DeadlockId = 9 };
+        var unkeyed = new DarlingBlockingReader.DeadlockReadRow { CollectionTime = t1 };
+
+        DarlingBlockingReader.ApplyVictimPlanFlags(
+            [withPlan, withoutPlan, purged, unkeyed],
+            new System.Collections.Generic.Dictionary<(DateTime Time, long Id), bool> { [(t1, 7)] = true, [(t1, 8)] = false });
+
+        Assert.True(withPlan.HasVictimPlan);
+        Assert.False(withoutPlan.HasVictimPlan);
+        Assert.False(purged.HasVictimPlan);
+        Assert.False(unkeyed.HasVictimPlan);
     }
 
     [Fact]

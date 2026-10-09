@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -98,6 +99,23 @@ public sealed partial class ViewerDataService
         ORDER BY event_time DESC
         LIMIT 200
         """;
+
+    /// <summary>The grid's row cap: the newest 200 completions by event time. <see cref="LongQueryCompletionsSql"/>'s LIMIT is the same number.</summary>
+    public const int LongQueriesRowCap = 200;
+
+    /// <summary>
+    /// Where this server's long_query_completions coverage starts for the window (#4966), through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first row in
+    /// the window if that is earlier. The grid WINDOWS on <c>collection_time</c>, the probe's own column, but SHOWS
+    /// <c>event_time</c>: the first collection of the XE session stores the events its ring buffer still held, so a row
+    /// collected inside the window can carry an event time from before the coverage. The caller names the earlier of this
+    /// and the earliest event the grid shows (<see cref="ViewerEventDataStart.Of"/>), and the oldest row when the read hit
+    /// <see cref="LongQueriesRowCap"/>. Null when the window holds no row and no logged run, and when it lies wholly before
+    /// the coverage.
+    /// </summary>
+    public Task<DateTime?> GetLongQueriesDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("long_query_completions"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     public async Task<List<ViewerLongQueryRow>> GetRecentLongQueryCompletionsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)

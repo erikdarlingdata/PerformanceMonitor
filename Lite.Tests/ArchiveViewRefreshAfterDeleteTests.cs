@@ -85,8 +85,8 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     [Fact]
     public async Task RetentionDeletingTheLastPartFile_LeavesTheViewReadable()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
         var thisMonth = DateTime.UtcNow.ToString("yyyyMM");
 
         await ArchiveRowsAsync("200001_collection_log_pt001.parquet", 0, 40);
@@ -103,8 +103,8 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     [Fact]
     public async Task RetentionDeletingTheLastPlainFile_WhilePartFilesRemain_LeavesTheViewReadable()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
         var thisMonth = DateTime.UtcNow.ToString("yyyyMM");
 
         await ArchiveRowsAsync("200001_collection_log.parquet", 0, 40);
@@ -128,8 +128,8 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     [Fact]
     public async Task TheBackgroundServicesRetentionStep_RebuildsTheViewsAfterItDeletesAFile()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
         var thisMonth = DateTime.UtcNow.ToString("yyyyMM");
 
         await ArchiveRowsAsync("200001_collection_log_pt001.parquet", 0, 40);
@@ -157,8 +157,8 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     [Fact]
     public async Task RemovingFilesLeftByAKilledReset_LeavesTheViewReadable_EvenWhenTheNextResetIsAbandoned()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
 
         await ArchiveRowsAsync("20260901_0000_collection_log.parquet", 0, 40);
         await ExecAsync(@"

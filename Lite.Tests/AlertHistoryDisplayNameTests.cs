@@ -46,8 +46,8 @@ public sealed class AlertHistoryDisplayNameTests : IDisposable
 
     private async Task<List<AlertHistoryRow>> ReadAsync(bool withNames)
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
 
         var server = Server();
         var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));

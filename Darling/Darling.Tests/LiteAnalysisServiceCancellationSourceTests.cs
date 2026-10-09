@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// The wiring itself — that DuckDB actually observes the token — is proven by Lite.Tests' Windows-only pins;
 /// this pin only proves the shape is present.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class LiteAnalysisServiceCancellationSourceTests
 {
     private const string AnalysisServicePath = "Lite/Analysis/AnalysisService.cs";
@@ -38,7 +39,7 @@ public sealed class LiteAnalysisServiceCancellationSourceTests
     private const string CollectConfigAuditFactsAsyncSignature =
         "public async Task<List<Fact>> CollectConfigAuditFactsAsync(";
     private const string ComparePeriodsAsyncSignature =
-        "public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(";
+        "public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion, IReadOnlySet<string>? BaselineSecondaries, IReadOnlySet<string>? ComparisonSecondaries)> ComparePeriodsAsync(";
     private const string LookUpDispersionAsyncSignature =
         "private async Task<IReadOnlyDictionary<string, BaselineBucket>> LookUpDispersionAsync(";
     // The next declaration after LookUpDispersionAsync in file order (#4203's four end here); anchors the

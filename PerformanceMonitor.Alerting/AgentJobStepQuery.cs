@@ -177,7 +177,7 @@ public static class AgentJobStepQuery
         return @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     job_id = CONVERT(varchar(36), j.job_id),
     step_id = k.step_id,
     job_name = j.name,

@@ -22,7 +22,8 @@ namespace Darling.Tests;
 /// normalized away:
 /// <list type="bullet">
 /// <item>the bin width: a literal 5-minute interval in the viewer vs. the reader's bound $5 parameter;</item>
-/// <item>the preview width: a literal 120 in the viewer vs. the reader's bound $7 parameter (#4198).</item>
+/// <item>the preview: the viewer's chart cuts it in SQL at a literal 120, while the reader returns the whole text (#5320) so the
+/// statement filter judges the whole statement before the preview is cut in C#.</item>
 /// </list>
 /// The <c>ORDER BY</c>/<c>LIMIT</c> tail AFTER <c>WHERE rn = 1</c> is a third, deliberate difference (the
 /// reader caps and orders newest-first; the viewer has no cap and orders ascending) and is pinned on its
@@ -59,8 +60,9 @@ public sealed class QueryHeatmapSqlTwinParityTests
            Assert.Equal below alone could miss if an unrelated one-sided edit happened to cancel it out. */
         const string ReaderBinWidth = "date_bin(($5::integer * INTERVAL '1 minute'), collection_time, TIMESTAMP '1970-01-01 00:00:00')";
         const string ViewerBinWidth = "date_bin(INTERVAL '5 minutes', collection_time, TIMESTAMP '1970-01-01 00:00:00')";
-        const string ReaderPreviewWidth = "query_text_digest)), $7) AS top_query_text";
-        const string ViewerPreviewWidth = "query_text_digest)), 120) AS top_query_text";
+        const string Resolved = "COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest))";
+        const string ReaderPreviewWidth = Resolved + " AS top_query_text";
+        const string ViewerPreviewWidth = "LEFT(" + Resolved + ", 120) AS top_query_text";
 
         Assert.Contains(ReaderBinWidth, readerSql, StringComparison.Ordinal);
         Assert.Contains(ViewerBinWidth, viewerSql, StringComparison.Ordinal);

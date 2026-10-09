@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// collector query against the SAME state (the fix), rather than asserting against a canned fixture — the
 /// point of #4251 is that the two disagree.</para>
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class PgServerConfigPendingRestartLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -329,7 +329,7 @@ public sealed class PgServerConfigPendingRestartLiveTests
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4251 permission round trip.");
         var ct = TestContext.Current.CancellationToken;
-        const string roleName = "pm_4251_monitor_role";
+        var roleName = "pm_4251_monitor_" + Guid.NewGuid().ToString("N")[..8]; // #4981: unique to the run, roles are cluster-wide
         var targetKey = "pg-4251-permissions-" + Guid.NewGuid().ToString("N");
 
         await using var setup = new NpgsqlConnection(cs);

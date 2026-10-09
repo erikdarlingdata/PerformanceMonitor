@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -47,9 +48,13 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
     /// <summary>
     /// The procedure duration trend, both copies (the viewer's read and the MCP's SQL, whose per-collection CTE the
     /// pin in DarlingMcpTrendToolsTests proves is one string; the MCP statement buckets it, #3897): t1/t2 pre-V128 (NULL) — t1 no prior, no rate (the
-    /// viewer drops it, the MCP keeps it unrated); t2 the LAG's 300 s. t3 a restart — every row 0 — no rate
-    /// either. t4 a steady pass with a readmitted plan (its row 0)
-    /// beside a measured 120 s row: MAX 120 wins over the LAG's 300, and the readmitted plan adds 0.
+    /// viewer drops it, the MCP keeps it unrated); t2 the gap to t1, 300 s. t3 a restart — every row 0 — no rate
+    /// either. t4 a steady pass with a readmitted plan (its row 0) beside a row that stored 120 s. A point's seconds
+    /// are the gap to the previous point on the run axis (#5449), and the stored 120 s means the run before t4 began
+    /// 120 s earlier and stored no rows. That run is in the collection log as an idle SUCCESS run (rows 0), so the
+    /// axis holds it: t3 (with its own run logged just after it, which is why the idle run reads idle), the idle run
+    /// 180 s later (a 0-work point over its 180 s gap), then t4 over the 120 s gap to the idle run (1200 ms / 120 s
+    /// = 10.0). The readmitted plan adds 0.
     /// </summary>
     [Fact]
     public async Task ProcedureDurationTrend_DropsTheUnknowableCollection_PrefersTheStoredInterval_AgainstDevPostgres()
@@ -80,20 +85,28 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
             await ProcedureAsync(connection, t4, "usp_A", 24, 1_200_000, 120, ct);
             await ProcedureAsync(connection, t4, "usp_New", 0, 0, 0, ct);
 
+            /* The collection log, as the collector writes it: t3's run is logged just after the rows it stored (rows are
+               stamped at the run's start); the run 120 s before t4 stored nothing (rows_collected 0, duration 0). */
+            var idleRun = t4.AddSeconds(-120);
+            await RunAsync(connection, t3.AddSeconds(2), rowsCollected: 1, ct);
+            await RunAsync(connection, idleRun, rowsCollected: 0, ct);
+
             var points = (await viewer.GetProcedureDurationTrendAsync(ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), cancellationToken: ct)).Points;
-            Assert.Equal(new[] { t2, t4 }, points.Select(p => p.CollectionTime).ToArray());
-            Assert.Equal(2.0, points[0].Value, precision: 6);      /* 600 ms / LAG 300 s */
+            Assert.Equal(new[] { t2, idleRun, t4 }, points.Select(p => p.CollectionTime).ToArray());
+            Assert.Equal(2.0, points[0].Value, precision: 6);      /* 600 ms / the 300 s gap to t1 */
             Assert.Equal(0, points[0].ExecutionCount);             /* 30 / 300 = 0.1 executions/sec, truncated to long as always */
-            Assert.Equal(10.0, points[1].Value, precision: 6);     /* 1200 ms / STORED 120 s, not the LAG's 4.0 */
+            Assert.Equal(0.0, points[1].Value, precision: 6);      /* the idle run: no work over its 180 s gap to t3 */
+            Assert.Equal(10.0, points[2].Value, precision: 6);     /* 1200 ms / the 120 s gap to the idle run, not 4.0 over 300 s */
 
             /* The MCP copy, run as the tool would run it on the raw tier — since #3897 bucketed, here at one
                minute so each bucket holds one collection and its figures are that collection's own; the bucket's
                first collection (ordinal 4) is the collection itself. */
-            await using (var command = postgres.CreateCommand(DarlingTrendReader.ProcedureDurationTrendSql))
+            await using (var command = postgres.CreateCommand(DarlingTrendReader.ProcedureDurationTrendFilteredSql))
             {
                 command.Parameters.AddWithValue(ServerId);
                 command.Parameters.AddWithValue(t1.AddMinutes(-1));
                 command.Parameters.AddWithValue(t4.AddMinutes(1));
+                command.Parameters.Add(DatabaseFilter.All.Parameter());   /* $4: every database (#5244) */
                 command.Parameters.AddWithValue(1);
                 var mcp = new List<(DateTime At, double? Rate, double? Executions)>();
                 await using var reader = await command.ExecuteReaderAsync(ct);
@@ -104,15 +117,17 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
                         reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2))));
                 }
 
-                /* The SQL returns all four collections; t1 and t3 carry NULL rates — the viewer's chart reader drops
-                   those (above), the MCP reader keeps them as unrated points (#3541 A12). */
-                Assert.Equal(new[] { t1, t2, t3, t4 }, mcp.Select(m => m.At).ToArray());
+                /* The SQL returns all four collections and the idle run; t1 and t3 carry NULL rates — the viewer's chart
+                   reader drops those (above), the MCP reader keeps them as unrated points (#3541 A12). */
+                Assert.Equal(new[] { t1, t2, t3, idleRun, t4 }, mcp.Select(m => m.At).ToArray());
                 Assert.Null(mcp[0].Rate);
                 Assert.Equal(2.0, mcp[1].Rate!.Value, precision: 6);
                 Assert.Null(mcp[2].Rate);
                 Assert.Null(mcp[2].Executions);
-                Assert.Equal(10.0, mcp[3].Rate!.Value, precision: 6);
-                Assert.Equal(0.2, mcp[3].Executions!.Value, precision: 6);
+                Assert.Equal(0.0, mcp[3].Rate!.Value, precision: 6);
+                Assert.Equal(0.0, mcp[3].Executions!.Value, precision: 6);
+                Assert.Equal(10.0, mcp[4].Rate!.Value, precision: 6);
+                Assert.Equal(0.2, mcp[4].Executions!.Value, precision: 6);
             }
 
             /* The history grid: the stored interval as stored, the marker's 0 included; LAG only for NULL. */
@@ -133,8 +148,56 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
     }
 
     /// <summary>
-    /// #3653 (A11): the query-stats duration and execution-count trends, both viewer copies and the Storage
-    /// builder the viewer's duration copy IS (<see cref="DurationTrendRouting.QueryDurationTrendRawSql"/>) — the
+    /// #5449: the same four collections with NO collection log (an imported or old store): the axis is the stored
+    /// collections alone, so t4 divides by its 300 s gap to t3 (1200 ms / 300 s = 4.0) and not by the 120 s it stored,
+    /// which only a logged idle run can place. t1 and t3 stay unrated (no previous point and no stored interval; a
+    /// restart), t2 is 2.0.
+    /// </summary>
+    [Fact]
+    public async Task ProcedureDurationTrend_WithNoCollectionLog_RatesOverTheStoredCollectionsAlone_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live procedure-trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var viewer = new ViewerDataService(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = Naive(TruncateToSeconds(DateTime.UtcNow.AddHours(-2)));
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+            var t4 = t3.AddMinutes(5);
+
+            await ProcedureAsync(connection, t1, "usp_A", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: null, ct);
+            await ProcedureAsync(connection, t2, "usp_A", 30, 600_000, null, ct);
+            await ProcedureAsync(connection, t3, "usp_A", 0, 0, 0, ct);
+            await ProcedureAsync(connection, t4, "usp_A", 24, 1_200_000, 120, ct);
+            await ProcedureAsync(connection, t4, "usp_New", 0, 0, 0, ct);
+
+            var points = (await viewer.GetProcedureDurationTrendAsync(ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), cancellationToken: ct)).Points;
+            Assert.Equal(new[] { t2, t4 }, points.Select(p => p.CollectionTime).ToArray());
+            Assert.Equal(2.0, points[0].Value, precision: 6);
+            Assert.Equal(4.0, points[1].Value, precision: 6);      /* no log = the stored collections are the axis: 1200 ms / the 300 s gap to t3 */
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #3653 (A11): the query-stats duration and execution-count trends, both viewer copies and the MCP reader's
+    /// bucketed read (the same Storage builder, <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>) — the
     /// same four collections as the procedure test above, now on <c>query_stats</c>, which has carried
     /// <c>sample_interval_seconds</c> from its first rung and whose trend reads LAG-recomputed the interval
     /// anyway. t1/t2 pre-V128 (NULL) — t1 no prior, no rate; t2 the LAG's 300 s. t3 a restart — every row 0
@@ -186,31 +249,22 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
             Assert.Equal(0.1, executions.Points[0].Value, precision: 6);
             Assert.Equal(0.2, executions.Points[1].Value, precision: 6);
 
-            /* The builder's text without the viewer's filter — the statement the MCP reader's raw const is the
-               alias-in-waiting of — run as the tool would run it: all four collections come back, t1 and t3 with
-               NULL rates (the MCP reader keeps them as unrated points, #3541 A12). */
-            await using (var command = postgres.CreateCommand(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)))
-            {
-                command.Parameters.AddWithValue(ServerId);
-                command.Parameters.AddWithValue(t1.AddMinutes(-1));
-                command.Parameters.AddWithValue(t4.AddMinutes(1));
-                var rows = new List<(DateTime At, double? Rate, double? Executions)>();
-                await using var reader = await command.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
-                {
-                    rows.Add((reader.GetDateTime(0),
-                        reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
-                        reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2))));
-                }
+            /* The MCP reader's bucketed read of the same rows (one-minute buckets, so each collection is its own
+               bucket), all databases: all four collections come back, t1 and t3 with NULL rates (the MCP reader keeps
+               them as unrated points, #3541 A12). */
+            var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(t1.AddMinutes(-1), rollups.Item1, rollups.Item2, windowEndUtc: t4.AddMinutes(1));
+            Assert.Equal(RetentionTier.Raw, route.Tier);
+            var rows = (await DarlingTrendReader.GetQueryDurationTrendAsync(
+                postgres, ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), route, 1, DatabaseFilter.All, ct)).Points;
 
-                Assert.Equal(new[] { t1, t2, t3, t4 }, rows.Select(r => r.At).ToArray());
-                Assert.Null(rows[0].Rate);
-                Assert.Equal(2.0, rows[1].Rate!.Value, precision: 6);
-                Assert.Null(rows[2].Rate);
-                Assert.Null(rows[2].Executions);
-                Assert.Equal(10.0, rows[3].Rate!.Value, precision: 6);
-                Assert.Equal(0.2, rows[3].Executions!.Value, precision: 6);
-            }
+            Assert.Equal(4, rows.Count);
+            Assert.Null(rows[0].Value);
+            Assert.Equal(2.0, rows[1].Value!.Value, precision: 6);
+            Assert.Null(rows[2].Value);
+            Assert.Null(rows[2].ExecutionsPerSecond);
+            Assert.Equal(10.0, rows[3].Value!.Value, precision: 6);
+            Assert.Equal(0.2, rows[3].ExecutionsPerSecond!.Value, precision: 6);
 
             bodySucceeded = true;
         }
@@ -334,10 +388,23 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>One SUCCESS run of the procedure collector in the collection log (#5449: the run axis the procedure trend reads).</summary>
+    private static async Task RunAsync(NpgsqlConnection connection, DateTime loggedAt, int rowsCollected, CancellationToken ct)
+    {
+        using var cmd = new NpgsqlCommand(
+            "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) " +
+            "VALUES ((SELECT COALESCE(MAX(log_id), 0) + 1 FROM collect.collection_log), $1, $2, 'procedure_stats', $3, 0, 'SUCCESS', $4)", connection);
+        cmd.Parameters.AddWithValue(ServerId);
+        cmd.Parameters.AddWithValue(ServerName);
+        cmd.Parameters.AddWithValue(loggedAt);
+        cmd.Parameters.AddWithValue(rowsCollected);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM procedure_stats WHERE server_id = {ServerId}; DELETE FROM query_stats WHERE server_id = {ServerId}; DELETE FROM pg_statement_stats WHERE server_id = {ServerId};", connection);
+            $"DELETE FROM procedure_stats WHERE server_id = {ServerId}; DELETE FROM query_stats WHERE server_id = {ServerId}; DELETE FROM pg_statement_stats WHERE server_id = {ServerId}; DELETE FROM collect.collection_log WHERE server_id = {ServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
