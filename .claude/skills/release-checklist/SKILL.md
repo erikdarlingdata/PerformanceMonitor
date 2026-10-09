@@ -148,7 +148,13 @@ Quick click-through of any new features or significant changes listed in the cha
 
 ### 8. Desktop App Upgrade — Velopack Setup.exe + single-instance handoff
 
-Covers the **desktop apps' own** upgrade via Velopack (`*-Setup.exe`) for **Lite** and the **Darling Viewer**. Test the upgrade over a **running** prior version:
+Covers the **desktop apps' own** upgrade via Velopack (`*-Setup.exe`) for **Lite** and the **Darling Viewer**.
+
+This step is a gate. Run it before step 10 on every release, even when the upgrade code did not change. Publishing notifies everyone who watches the repo, and the apps offer the new version in Help → About. A check after publishing finds a broken upgrade only after users can install it.
+
+Before the cut, build each new Setup.exe from the release PR's head commit as `build.yml` does. Run `dotnet publish` for the self-contained build, then `vpk download` and `vpk pack` with the same arguments. These Setup.exe files are unsigned. Run each one on a clean Windows machine over the prior release's signed Setup.exe. After publishing, repeat item 2 with the signed Setup.exe to confirm that signing changed nothing. That repeat is not the gate.
+
+Test the upgrade over a **running** prior version:
 
 1. Install the prior release's Setup.exe, launch the app, and **minimize it to the tray** (leave it running).
 2. Run the new release's Setup.exe (and separately test Help → About → download → restart). Confirm the **new** version actually runs afterward — not the stale in-memory one.
@@ -156,7 +162,7 @@ Covers the **desktop apps' own** upgrade via Velopack (`*-Setup.exe`) for **Lite
 4. **Elevated case:** run the old version **as administrator**, launch the new one non-elevated → expect the *"Restart as administrator"* prompt; elevating completes the takeover. A *same-version* elevated instance should just surface (no UAC).
 5. Confirm Lite never closes the Darling Viewer and vice-versa (scoped by exe name).
 
-Local proxy without a release: bump `<Version>`, rebuild, run over the old build → expect the close-and-takeover prompt. The decision logic is unit-tested (`Lite.Tests/SingleInstanceDecisionTests`); this step validates the live Win32/Velopack seam (`SingleInstanceCoordinator` / `ProcessInspector` in `PerformanceMonitor.Ui`). When the seam saw no changes since the prior release, a quick post-publish regression pass is acceptable instead of a pre-cut gate. Design: `plans/single-instance-upgrade-handoff.md`.
+Local proxy without a release: bump `<Version>`, rebuild, run over the old build → expect the close-and-takeover prompt. The decision logic is unit-tested (`Lite.Tests/SingleInstanceDecisionTests`); this step validates the live Win32/Velopack seam (`SingleInstanceCoordinator` / `ProcessInspector` in `PerformanceMonitor.Ui`). Design: `plans/single-instance-upgrade-handoff.md`.
 
 ### 8a. Darling service install and upgrade (every release)
 
@@ -236,6 +242,8 @@ Before cutting the release, verify the nightly build has been clean:
 - At release-PR merge time, dev must equal the sha the field validation ran against (or the delta must be explicitly accepted)
 
 ### 11. Tag and Release
+
+Do not tag or publish until step 8 passes on the unsigned Setup.exe files from the release PR's head. Publishing notifies watchers, so every check that can block the release runs before it.
 
 After PR is merged to main:
 ```
