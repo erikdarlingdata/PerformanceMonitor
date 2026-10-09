@@ -333,12 +333,6 @@ FROM generate_series(1, 450) AS i", connection))
         Assert.Equal(0, raced);
     }
 
-    /* ───────────────────────── seeding ───────────────────────── */
-
-    /// <summary>About 500,000 alert rows over 50 servers in one INSERT ... SELECT each: mostly other metrics; 40,000
-    /// <c>Analysis: </c> alerts that need nothing (97 metric names on every server, a tenth of the rows older than the
-    /// finding-alert section); current deadlock alerts; and raw deadlock alerts on four servers, twelve at a time tied
-    /// on one instant per server.</summary>
     /// <summary>The step caps, server ids below one, the cancel cursors and a server with thousands of alerts, one
     /// scenario after another in one database (each empties the log first): they are small, and a database for each
     /// would cost the class more than the checks do.</summary>
@@ -592,6 +586,12 @@ CROSS JOIN (VALUES ($2), ('Analysis: big [00000001]')) AS m(name)", connection))
         Incidents = [new AlertIncident(PgDeadlockLogParser.HashOf("a report retention dropped"), ["UPDATE creds SET pw = 'Leak5625' WHERE id = 7"])],
     });
 
+    /* ───────────────────────── seeding ───────────────────────── */
+
+    /// <summary>About 500,000 alert rows over 50 servers in one INSERT ... SELECT each: mostly other metrics; 40,000
+    /// <c>Analysis: </c> alerts that need nothing (97 metric names on every server, a tenth of the rows older than the
+    /// finding-alert section); current deadlock alerts; and raw deadlock alerts on four servers, twelve at a time tied
+    /// on one instant per server.</summary>
     private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using (var filler = new NpgsqlCommand(@"
