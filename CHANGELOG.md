@@ -21,7 +21,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
-## [3.10.0] - 2026-10-08
+## [3.10.0] - 2026-10-09
 
 Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 
