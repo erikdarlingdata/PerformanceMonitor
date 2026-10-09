@@ -3119,15 +3119,16 @@ public class CrossAppGuardCiGateTests
                 .Where(line => !line.TrimStart().StartsWith('#'))
                 .ToArray();
 
-            // build.yml has one: (#5459, shadow mode) the nightly's test map. It reads a NIGHTLY run, never a build.yml
-            // run, so a cancelled push run cannot starve it, and its selection is not used to skip anything. The Lite
+            // build.yml has one: (#5459) the nightly's test map. It reads a NIGHTLY run, never a build.yml
+            // run, so a cancelled push run cannot starve it; the selection it yields reaches the shards as THIS run's
+            // own artifact (counted below), and a missing map only makes that selection FULL. The Lite
             // shard packer's timings download (#5208) moved with the shard cut into run-lite-shard.ps1 (#5616), checked
             // below; no workflow step has it any more.
             var downloadLines = code.Where(line => line.Contains("gh run download", StringComparison.Ordinal)).ToArray();
             var downloads = downloadLines.Length;
             Assert.True(
                 downloads == (name == "build.yml" ? 1 : 0),
-                $"{name} has {downloads} 'gh run download' line(s); only build.yml may have one, for the shadow-mode test map.");
+                $"{name} has {downloads} 'gh run download' line(s); only build.yml may have one, for the test map.");
             if (name == "build.yml")
             {
                 Assert.Single(downloadLines, line => line.Contains("-n test-map ", StringComparison.Ordinal));
@@ -3146,10 +3147,18 @@ public class CrossAppGuardCiGateTests
            build the same test projects, each naming the Guard job's output and no run-id (the loop above pins that). A
            fourth use, or one that names anything else, is a second reader the cancel-in-progress argument does not cover. */
         var buildCode = string.Join('\n', build.Split('\n').Where(l => !l.TrimStart().StartsWith('#')));
-        /* Two more (#5459, shadow mode): the shadow-check job fetches THIS run's selection and THIS run's shard reports.
+        /* Five more (#5459): the shadow-check job fetches THIS run's selection and THIS run's shard reports, and the
+           build, darling-pg and lite-tests jobs each fetch THIS run's selection before they narrow their classes.
            Same run, no run-id (the loop above pins that), so a cancelled run's output is never read by another run. */
-        Assert.Equal(5, Regex.Matches(buildCode, "download-artifact").Count);
+        Assert.Equal(8, Regex.Matches(buildCode, "download-artifact").Count);
         Assert.Equal(2, Regex.Matches(JobBlock(build, "shadow-check"), "uses: actions/download-artifact@v6").Count);
+        foreach (var jobKey in new[] { "build", "darling-pg", "lite-tests" })
+        {
+            var selection = StepBlock(JobBlock(build, jobKey), "Download the test map selection");
+            Assert.Contains("uses: actions/download-artifact@v6", selection, StringComparison.Ordinal);
+            Assert.Contains("name: test-map-selection", selection, StringComparison.Ordinal);
+        }
+
         foreach (var jobKey in new[] { "darling-pg", "darling-tree-guards", "lite-tests" })
         {
             var fetch = StepBlock(JobBlock(build, jobKey), "Fetch the Guard job's build of the test project");

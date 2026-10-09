@@ -7,8 +7,10 @@ These readers use the same code:
 
 * build.yml's jobs call `lite-scope`, `darling-scope` and `tree-scope` with the area answers
   dorny/paths-filter already computed, and get the decision back as `key=value` lines for $GITHUB_OUTPUT.
-* `map-select` (slice 1 of change 4; nothing in the workflow calls it yet) answers, from a class-to-file map, which
-  test classes a pull request needs. See map_select() for the map's schema. `--replay --map FILE` also replays the
+* `map-select` answers, from a class-to-file map, which test classes a pull request needs (build.yml's
+  test-map-select job writes it as an artifact), and `map-keep` reads that artifact for one suite: the Darling PG,
+  Lite and no-store Darling passes of a pull request keep only those classes, and run everything when the answer
+  is FULL, missing or unreadable. See map_select() for the map's schema. `--replay --map FILE` also replays the
   corpus against such a map and reports what it would miss (it does not fail on that yet).
 * `--replay` reads .github/ci-history/failures.jsonl (a trimmed record of every run with a real test failure)
   and checks that each failing class would have been selected for that run's changed files. A cut to the rules
@@ -285,6 +287,38 @@ _CLASS_DECL = re.compile(
     r"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*class\s+(\w+)")
 _TRAIT = re.compile(r'Trait\(\s*"(\w+)"\s*,\s*"(\w+)"\s*\)')
 
+# The test map is built on shards that set only DARLING_TEST_PG and DARLING_TEST_PGRUNTIME (nightly.yml's "Run this
+# shard's classes" step; a test pins that env block to MAP_SHARD_ENV). A class that gates its tests on any OTHER
+# DARLING_TEST_PG_* or DARLING_TEST_PGRUNTIME_* variable (the log-format targets, the log-rotation targets, the
+# store-upgrade fixtures) skips at map build, so the map has no coverage edges for what its tests would run and a
+# change to the code under them would never select it (#5459; measured on the 2026-10-09 map: 16 files, 19
+# mapped classes, 12 to 44 coverage files each against 100 and more for a fully covered class). The map cannot tell
+# us, so the SOURCE does: every class in a file that names such a variable in a quoted literal carries the Gate=Env
+# trait and map_select always selects it. It is found from the source at selection time, so a new gated class needs
+# no list edit.
+#
+# What the scan cannot see (a miss here is silent, so a new gate must be written to be seen): it reads each test file
+# on its own, for a quoted "DARLING_TEST_PG_..." or "DARLING_TEST_PGRUNTIME_..." literal. A gate variable that a class
+# reads through a constant or a helper declared in ANOTHER file, or one that is not named DARLING_TEST_PG_* /
+# DARLING_TEST_PGRUNTIME_*, is invisible to it, and the class stays unmarked and unmapped. A new gate of either kind
+# must also name its variable as a quoted literal in the class's own file (or take the Gate=Env trait by hand).
+#
+# What it costs: the mark is per CLASS, not per test, so a class where only some tests are gated runs whole on every
+# narrowed Darling pull request, and the darling-pg job sets these variables, so the gated tests really run. Measured
+# on a full run of this change (workflow run 37911378693, the 19 test classes that carry the mark, summed test time
+# per class, the shard each lands on in brackets): DarlingStoreUpgradeTests 274 s [shard 5],
+# ManagedConfUpgradePathTests 85 s [4], DarlingManagedPostgresTests 73 s [3], PgServerLogTailCsvJsonRotationLiveTests
+# 44 s [1], PgLogBurstAndRotationLiveTests 38 s [2], PgRaiseShapedRecordsLiveTests 31 s [1],
+# PgServerLogTailRotationLiveTests 15 s [1], and 12 more classes of 11 s or less (29 s together): about 590 s of test
+# time in all. Per shard that is 274 s on shard 5, 100 s on shard 4, 90 s on shard 1, 73 s on shard 3, 43 s on shard 2
+# and 9 s on shard 0. A class runs on one thread, so shard 5 cannot get below the 274 s of DarlingStoreUpgradeTests: on
+# a narrowed pull request whose other shards finish in a minute or two, shard 5 becomes the slowest by about 3
+# minutes (it is 174 s ahead of shard 4, the next). It never passes the full run's slowest shard (shard 0, 589 s of
+# test time, against 509 s for shard 5 in that run). The shard cut is unchanged.
+MAP_SHARD_ENV = frozenset({"DARLING_TEST_PG", "DARLING_TEST_PGRUNTIME"})
+GATE_TRAIT = "Gate=Env"
+GATE_ENV_LITERAL = re.compile(r'"DARLING_TEST_PG(?:RUNTIME)?_[A-Z0-9_]+"')
+
 SUITE_DIRS = {
     "darling": os.path.join("Darling", "Darling.Tests"),
     "lite": "Lite.Tests",
@@ -299,6 +333,16 @@ SUITE_BY_PREFIX = {
     "Dashboard.Tests": "dashboard",
     "Installer.Tests": "installer",
 }
+
+
+def split_failed_class(cls: str) -> tuple[str, str]:
+    """(namespace prefix, simple class name) of a failing test class's full name. A nested class is reported as
+    `Ns.Outer+Inner` (some runners use `Ns.Outer/Inner`): the prefix is the namespace of the OUTER class, the text
+    before the first '+', and the simple name is the innermost class, which is the name _walk_classes yields for a
+    nested declaration. Splitting on the last '.' alone left `Outer+Inner` as the "simple name", found no such class
+    in the tree, and so never counted a nested failure as a miss (#5459)."""
+    head = re.split(r"[+/]", cls, maxsplit=1)[0]
+    return head.rpartition(".")[0], re.split(r"[.+/]", cls)[-1]
 
 
 def _walk_classes(root: str):
@@ -317,11 +361,12 @@ def _walk_classes(root: str):
                 except OSError:
                     continue
                 relfile = os.path.relpath(path, root).replace(os.sep, "/")
+                gated = any(GATE_ENV_LITERAL.search(line) for line in lines)
                 for n, line in enumerate(lines):
                     m = _CLASS_DECL.match(line)
                     if not m:
                         continue
-                    traits: set[str] = set()
+                    traits: set[str] = {GATE_TRAIT} if gated else set()
                     j = n - 1
                     while j >= 0:
                         s = lines[j].strip()
@@ -441,11 +486,11 @@ class SlowIndex:
             self._words[key] = set(re.findall(r"[\w-]+", self.text(suite, name)))
         return self._words[key]
 
-    def skip(self, files: list[str], event: str) -> dict[str, list[str]]:
+    def skip(self, files: list[str], event: str, base_ref: str = "") -> dict[str, list[str]]:
         """{suite: [simple class names a leg leaves out]} for one change. Empty for every event but pull_request,
-        and when the changed file list is unknown."""
+        for a pull request into main (narrows), and when the changed file list is unknown."""
         out: dict[str, list[str]] = {suite: [] for suite in SUITE_DIRS}
-        if event != "pull_request" or not files:
+        if not narrows(event, base_ref) or not files:
             return out
         changed = set(files)
         # Everything about the change is computed once; a class is then a few set lookups.
@@ -533,7 +578,7 @@ def replay(corpus: str = CORPUS, root: str = ROOT, quiet: bool = False) -> int:
             d = decide(row["changed_files"], row["event"], rules)
             skipped = slow.skip(row["changed_files"], row["event"])
             for cls in row["failed_classes"]:
-                prefix, _, simple = cls.rpartition(".")
+                prefix, simple = split_failed_class(cls)
                 suite = SUITE_BY_PREFIX.get(prefix)
                 if suite is None:
                     continue
@@ -601,6 +646,21 @@ DOC_PATTERNS = (
 _TEST_PROJECT_FILE = re.compile(r"(^|/)[^/]*Tests/")
 
 
+MAIN_BRANCH = "main"
+
+
+def narrows(event: str, base_ref: str = "") -> bool:
+    """Whether a run may run less than everything: only a pull_request whose base branch is not `main` (#5459).
+    A pull request into main is the release gate (dev to main), so it runs every class, Cost=Slow ones included.
+    An empty or absent base ref keeps the old behaviour: the replay corpus rows carry none."""
+    if event != "pull_request":
+        return False
+    ref = (base_ref or "").strip()
+    if ref.startswith("refs/heads/"):
+        ref = ref[len("refs/heads/"):]
+    return ref != MAIN_BRANCH
+
+
 def _full(reason: str) -> dict:
     return {"full": True, "reason": reason, "selected": {}, "why": {}, "seconds": {}, "total": {}}
 
@@ -642,7 +702,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                *, event: str = "pull_request", keep_full: "tuple[str, ...] | list[str]" = KEEP_FULL,
                doc_patterns: "tuple[str, ...] | list[str]" = DOC_PATTERNS,
                now: "datetime.datetime | None" = None, max_age_days: "float | None" = MAP_MAX_AGE_DAYS,
-               max_drift: int = MAP_MAX_DRIFT) -> dict:
+               max_drift: int = MAP_MAX_DRIFT, base_ref: str = "") -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -674,6 +734,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     map has never seen; that class runs as a "new class"."""
     if event != "pull_request":
         return _full(f"event {event or '(none)'} always runs everything")
+    if not narrows(event, base_ref):
+        return _full("a pull request into main always runs everything")
     if test_map is None:
         return _full("no test map")
     if not isinstance(test_map, dict):
@@ -778,6 +840,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                 reasons[cls] = "new class"
             elif "Stage=Guard" in traits:
                 reasons.setdefault(cls, "guard stage")
+            if GATE_TRAIT in traits:
+                reasons.setdefault(cls, "gated on an environment the map shards lack")
         selected[suite] = sorted(reasons)
         why[suite] = {c: reasons[c] for c in sorted(reasons)}
         seconds[suite] = round(sum(_seconds(classes[suite][c]) for c in reasons if c in mapped), 3)
@@ -834,7 +898,7 @@ def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, 
             sel = map_select(test_map, row["changed_files"], [], tree, event=row["event"], max_age_days=None, **extra)
             full_rows += bool(sel["full"])
             for cls in row["failed_classes"]:
-                prefix, _, simple = cls.rpartition(".")
+                prefix, simple = split_failed_class(cls)
                 suite = SUITE_BY_PREFIX.get(prefix)
                 if suite is None or simple not in tree.get(suite, {}):
                     continue
@@ -863,11 +927,29 @@ def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, 
     return misses
 
 
+def map_keep(selection: object, suite: str) -> "tuple[set[str] | None, str]":
+    """The class names a shard of `suite` keeps, from the selection `map-select --out` wrote (#5459, live selection).
+
+    Returns (names, reason). `names` is None, meaning the shard runs everything it was cut, whenever the selection
+    cannot be trusted: it is missing, not a JSON object, FULL, has no list of names for the suite, a name that is not
+    text, or an empty list. Empty is distrusted on purpose: the Guard classes are always selected, so a selection with
+    no class in it for a suite means the selection broke, not that nothing needs to run."""
+    if not isinstance(selection, dict):
+        return None, "the selection is missing or unreadable"
+    if selection.get("full") is not False:
+        return None, f"the selection is FULL ({selection.get('reason') or 'no reason given'})"
+    chosen = selection.get("selected")
+    names = chosen.get(suite) if isinstance(chosen, dict) else None
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) and n for n in names):
+        return None, f"the selection holds no usable class list for the {suite} suite"
+    return set(names), ""
+
+
 def shadow_summary(result: dict) -> str:
-    """The step-summary text of a shadow run: how many classes the map would have run, and the estimated seconds."""
-    lines = ["### Test map shadow (#5459): nothing was skipped, every shard ran everything", ""]
+    """The step-summary text of the selection job: how many classes the map picked, and the estimated seconds."""
+    lines = ["### Test map selection (#5459): the Darling PG, Lite and no-store Darling passes run only the classes below", ""]
     if result.get("full"):
-        lines.append(f"Selection: FULL ({result.get('reason') or 'no reason given'}).")
+        lines.append(f"Selection: FULL ({result.get('reason') or 'no reason given'}), so every shard ran everything.")
         return "\n".join(lines) + "\n"
     lines += ["Estimated seconds are the nightly's instrumented times, so they read high.", "",
               "| suite | selected classes | of | estimated seconds |", "|---|---|---|---|"]
@@ -1024,6 +1106,7 @@ def main(argv: list[str]) -> int:
     sk = sub.add_parser("slow-skip", help="the Cost=Slow classes a pull request run leaves out (workflow step)")
     sk.add_argument("--suite", required=True, choices=sorted(SUITE_DIRS))
     sk.add_argument("--event", required=True)
+    sk.add_argument("--base-ref", default="", help="the pull request's base branch (github.base_ref); main skips nothing")
     sk.add_argument("--repo", default="")
     sk.add_argument("--pr", default="")
     sk.add_argument("--list", action="store_true", help="print every Cost=Slow class of the suite instead")
@@ -1033,9 +1116,10 @@ def main(argv: list[str]) -> int:
     dc.add_argument("--event", default="pull_request")
     dc.add_argument("files", nargs="*")
 
-    ms = sub.add_parser("map-select", help="which classes a pull request runs, from a class-to-file map (not wired in yet)")
+    ms = sub.add_parser("map-select", help="which classes a pull request runs, from a class-to-file map (workflow step)")
     ms.add_argument("--map", required=True, help="the test map (JSON, or .gz)")
     ms.add_argument("--event", default="pull_request")
+    ms.add_argument("--base-ref", default="", help="the pull request's base branch (github.base_ref); main runs everything")
     ms.add_argument("--base", help="the merge base; the drift is `git diff --no-renames <map sha>..<base>`")
     ms.add_argument("--drift-file", help="the drift as one path per line, instead of --base (`-` for none)")
     ms.add_argument("--root", default=ROOT, help="the tree whose test classes are listed (default: this repository)")
@@ -1043,6 +1127,10 @@ def main(argv: list[str]) -> int:
     ms.add_argument("--out", help="also write the selection JSON to this file (stdout keeps the notice and the JSON)")
     ms.add_argument("--summary", help="also write the shadow step-summary markdown to this file")
     ms.add_argument("files", nargs="*")
+
+    mk = sub.add_parser("map-keep", help="the classes a shard keeps from a selection; FULL when it cannot be trusted (workflow step)")
+    mk.add_argument("--selection", required=True, help="the JSON map-select --out wrote; missing or unreadable counts as FULL")
+    mk.add_argument("--suite", required=True, choices=("darling", "lite"))
 
     sc = sub.add_parser("shadow-check", help="classes that failed but a map selection would not have run (workflow step)")
     sc.add_argument("--selection", help="the JSON map-select --out wrote; missing or unreadable counts as FULL")
@@ -1080,7 +1168,8 @@ def main(argv: list[str]) -> int:
             # The map holds the suites the nightly instruments (darling, lite). The deprecated suites in the tree
             # are not in it and no shard runs them as a test-map class, so they are not "new classes".
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
-        result = map_select(test_map, files, drift, discovered, event=args.event, **selection_args(Rules()))
+        result = map_select(test_map, files, drift, discovered, event=args.event, base_ref=args.base_ref,
+                            **selection_args(Rules()))
         if result["full"]:
             print(f"::notice::test map: running everything ({result['reason']})")
         print(json.dumps(result, indent=1))
@@ -1090,6 +1179,21 @@ def main(argv: list[str]) -> int:
         if args.summary:
             with open(args.summary, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(shadow_summary(result))
+        return 0
+    if args.cmd == "map-keep":
+        # Line 1 is `SELECTED <n>` (then one class name per line) or `FULL <reason>`; the exit code is always 0, so a
+        # caller that cannot read the answer runs everything.
+        try:
+            with open(args.selection, encoding="utf-8") as fh:
+                chosen = json.load(fh)
+        except (OSError, ValueError):
+            chosen = None
+        names, why = map_keep(chosen, args.suite)
+        if names is None:
+            print(f"FULL {why}")
+        else:
+            print(f"SELECTED {len(names)}")
+            print("\n".join(sorted(names)))
         return 0
     if args.cmd == "shadow-check":
         selection = None
@@ -1138,7 +1242,7 @@ def main(argv: list[str]) -> int:
         files = args.files
         if not files and args.repo and args.pr.isdigit() and args.event == "pull_request":
             files = changed_files_of_pr(args.repo, args.pr)
-        print("\n".join(index.skip(files, args.event)[args.suite]))
+        print("\n".join(index.skip(files, args.event, args.base_ref)[args.suite]))
         return 0
     if args.cmd == "decide":
         print(json.dumps(decide(args.files, args.event, Rules()), indent=1))

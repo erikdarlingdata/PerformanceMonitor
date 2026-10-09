@@ -251,6 +251,26 @@ public sealed class SlowClassCensusTests
     }
 
     [Fact]
+    public void APullRequestIntoMain_SkipsNothing_AndOneIntoDevSkipsTheSameAsBefore()
+    {
+        foreach (var suite in new[] { Darling, Lite })
+        {
+            var expected = s_slow.Where(kv => kv.Value.Suite == suite).Select(kv => kv.Key).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+
+            // #5459: the release gate (a pull request into main) runs every class, Cost=Slow ones too.
+            Assert.Empty(Lines(RunScript("slow-skip", "--suite", suite, "--event", "pull_request", "--base-ref", "main", "SECURITY.md").Output));
+
+            // The same change into dev, and one with no base branch at all (the replay corpus has none), skip as before.
+            foreach (var baseRef in new[] { "dev", "" })
+            {
+                var (code, output) = RunScript("slow-skip", "--suite", suite, "--event", "pull_request", "--base-ref", baseRef, "SECURITY.md");
+                Assert.Equal(0, code);
+                Assert.Equal(expected, Lines(output).OrderBy(x => x, StringComparer.Ordinal).ToArray());
+            }
+        }
+    }
+
+    [Fact]
     public void AChange_ThatReachesATaggedClass_PutsItBack()
     {
         // Its own test file.
@@ -288,23 +308,41 @@ public sealed class SlowClassCensusTests
         // backstop exemptions rest on it.
         var darlingShard = File.ReadAllText(Path.Combine(Root(), ".github", "scripts", "run-darling-pg-shard.ps1"));
         var liteShard = File.ReadAllText(Path.Combine(Root(), ".github", "scripts", "run-lite-shard.ps1"));
-        Assert.Single(Regex.Matches(yml, @"slow-skip --suite darling --event \$env:SLOW_EVENT --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
-        Assert.Single(Regex.Matches(darlingShard, @"slow-skip --suite darling --event \$EventName --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
-        Assert.Single(Regex.Matches(liteShard, @"slow-skip --suite lite --event \$EventName --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
+        Assert.Single(Regex.Matches(yml, @"slow-skip --suite darling --event \$env:SLOW_EVENT ""--base-ref=\$env:SLOW_BASE_REF"" --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
+        Assert.Single(Regex.Matches(darlingShard, @"slow-skip --suite darling --event \$EventName ""--base-ref=\$env:SLOW_BASE_REF"" --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
+        Assert.Single(Regex.Matches(liteShard, @"slow-skip --suite lite --event \$EventName ""--base-ref=\$env:SLOW_BASE_REF"" --repo \$env:SLOW_REPO --pr \$env:SLOW_PR"));
         Assert.DoesNotContain("slow-skip", File.ReadAllText(Path.Combine(Root(), ".github", "workflows", "nightly.yml")), StringComparison.Ordinal);
 
         // Each use sits inside a `pull_request` condition, so a push, a merge-queue run, the nightly (whose legs pass no
         // event) and a release run every class.
-        Assert.Single(Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request'"));
-        Assert.Single(Regex.Matches(darlingShard, @"\$EventName -eq 'pull_request'"));
-        Assert.Single(Regex.Matches(liteShard, @"\$EventName -eq 'pull_request'"));
+        // The test map selection (#5459) has its own pull_request condition beside it, in the build job's step and in each
+        // shard script. A usable selection replaces the skip, so in the scripts the skip sits in the `elseif` of the
+        // selection's `if`: the skip never runs on a pull request that was narrowed, and never on anything but a pull request.
+        Assert.Single(Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request' -and \$scopeArgs\.Count -eq 0"));
+        Assert.Single(Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request' -and \$env:TEST_MAP_SELECTION"));
+        Assert.Equal(2, Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request'").Count);
+        foreach (var shard in new[] { darlingShard, liteShard })
+        {
+            Assert.Single(Regex.Matches(shard, @"\$EventName -eq 'pull_request' -and \$SelectionFile"));
+            Assert.Single(Regex.Matches(shard, @"elseif \(\$EventName -eq 'pull_request'\) \{"));
+            Assert.Equal(2, Regex.Matches(shard, @"\$EventName -eq 'pull_request'").Count);
+            Assert.True(shard.IndexOf("elseif ($EventName -eq 'pull_request')", StringComparison.Ordinal)
+                < shard.IndexOf("slow-skip --suite", StringComparison.Ordinal), "the skip must sit inside the elseif");
+        }
 
-        // The two shard steps hand the event on from the environment they set, and the nightly passes none.
-        Assert.Equal(2, Regex.Matches(yml, @"run-(darling-pg|lite)-shard\.ps1 [^\r\n]*-EventName \$env:SLOW_EVENT").Count);
+        // The two shard steps hand the event on from the environment they set, and the nightly passes none. The build
+        // job's selected Darling pass (#5459) is the third caller of the Darling script, and passes it the same way.
+        Assert.Equal(3, Regex.Matches(yml, @"run-(darling-pg|lite)-shard\.ps1 [^\r\n]*-EventName \$env:SLOW_EVENT").Count);
 
         // And the environment each of the three steps reads is set from the run.
         Assert.Equal(3, Regex.Matches(yml, @"SLOW_EVENT: \$\{\{ github\.event_name \}\}").Count);
         Assert.Equal(3, Regex.Matches(yml, @"SLOW_PR: \$\{\{ github\.event\.pull_request\.number \}\}").Count);
         Assert.Equal(3, Regex.Matches(yml, @"SLOW_REPO: \$\{\{ github\.repository \}\}").Count);
+
+        // #5459: the base branch reaches all three slow-skip callers, so a pull request into main skips nothing.
+        Assert.Equal(3, Regex.Matches(yml, @"SLOW_BASE_REF: \$\{\{ github\.base_ref \}\}").Count);
+        Assert.Single(Regex.Matches(yml, @"slow-skip [^\r\n]*""--base-ref=\$env:SLOW_BASE_REF"""));
+        Assert.Single(Regex.Matches(darlingShard, @"slow-skip [^\r\n]*""--base-ref=\$env:SLOW_BASE_REF"""));
+        Assert.Single(Regex.Matches(liteShard, @"slow-skip [^\r\n]*""--base-ref=\$env:SLOW_BASE_REF"""));
     }
 }

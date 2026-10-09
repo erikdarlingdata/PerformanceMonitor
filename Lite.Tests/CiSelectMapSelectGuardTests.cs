@@ -78,7 +78,7 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     }
 
     private (int ExitCode, JsonElement Result) MapSelect(string map, string[] files, string[]? drift = null,
-        string eventName = "pull_request", string? root = null)
+        string eventName = "pull_request", string? root = null, string? baseRef = null)
     {
         var psi = new ProcessStartInfo("python")
         {
@@ -96,6 +96,12 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
         psi.ArgumentList.Add(root ?? Path.Combine(_dir, "tree"));
         psi.ArgumentList.Add("--event");
         psi.ArgumentList.Add(eventName);
+        if (baseRef is not null)
+        {
+            psi.ArgumentList.Add("--base-ref");
+            psi.ArgumentList.Add(baseRef);
+        }
+
         psi.ArgumentList.Add("--drift-file");
         if (drift is null || drift.Length == 0)
         {
@@ -369,5 +375,117 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
         var (_, r) = MapSelect(WriteMap(), new[] { "Lite.Tests/Own.cs" }, eventName: eventName);
 
         AssertFull(r, "always runs everything");
+    }
+
+    [Fact]
+    public void PullRequestIntoMain_IsFull_WhereTheSameOneIntoDevIsNarrowed()
+    {
+        // #5459: a good fresh map, zero drift and a one-file diff the map knows. Into dev it narrows; into main (the
+        // release gate) it always runs everything.
+        var map = WriteMap();
+        var files = new[] { "Lite.Tests/Own.cs" };
+
+        var (_, intoMain) = MapSelect(map, files, baseRef: "main");
+        AssertFull(intoMain, "a pull request into main always runs everything");
+        Assert.Equal("a pull request into main always runs everything", intoMain.GetProperty("reason").GetString());
+
+        var (_, intoDev) = MapSelect(map, files, baseRef: "dev");
+        Assert.False(intoDev.GetProperty("full").GetBoolean(), "a pull request into dev must still narrow:\n" + intoDev);
+        Assert.Equal("own file changed", Why(intoDev)["OwnTests"]);
+
+        // No base branch at all (the replay corpus has none) narrows as before.
+        var (_, noBase) = MapSelect(map, files);
+        Assert.False(noBase.GetProperty("full").GetBoolean(), "an absent base branch keeps today's behaviour:\n" + noBase);
+    }
+
+    [Fact]
+    public void AClassGatedOnAnEnvironmentTheMapShardsLack_IsAlwaysSelected_ForAnUnrelatedChange()
+    {
+        // #5459: the map shards set only DARLING_TEST_PG and DARLING_TEST_PGRUNTIME, so a class gated on any other
+        // DARLING_TEST_PG_* / DARLING_TEST_PGRUNTIME_* variable skips at map build and the map has no coverage edge for what
+        // its tests would run. The tree scan finds those classes from the source, so a change to code under one still runs it.
+        var tree = Path.Combine(_dir, "gated-tree");
+        var tests = Path.Combine(tree, "Lite.Tests");
+        Directory.CreateDirectory(tests);
+        File.WriteAllText(Path.Combine(tests, "Gated.cs"),
+            "public class GatedTests { string? T => Environment.GetEnvironmentVariable(\"DARLING_TEST_PG_CSVLOG\"); }\n");
+        File.WriteAllText(Path.Combine(tests, "Plain.cs"),
+            "public class PlainTests { string? T => Environment.GetEnvironmentVariable(\"DARLING_TEST_PG\"); }\n");
+        File.WriteAllText(Path.Combine(tests, "Runtime.cs"),
+            "public class RuntimeTests { string? T => Environment.GetEnvironmentVariable(\"DARLING_TEST_PGRUNTIME\"); }\n");
+        File.WriteAllText(Path.Combine(tests, "Upgrade.cs"),
+            "public class UpgradeTests { string? T => Environment.GetEnvironmentVariable(\"DARLING_TEST_PGRUNTIME_OLD\"); }\n");
+        File.WriteAllText(Path.Combine(tests, "Comment.cs"),
+            "/// <c>DARLING_TEST_PG_CSVLOG</c> in a comment only\npublic class CommentTests { }\n");
+        var map = Path.Combine(_dir, "gated-map.json");
+        File.WriteAllText(map, """
+            {"schema": 1, "sha": "0000000", "built_at": "@BUILT@", "tool": "synthetic",
+             "files": ["Lite/Services/A.cs", "Lite/Services/B.cs", "Lite.Tests/Gated.cs", "Lite.Tests/Plain.cs",
+                       "Lite.Tests/Runtime.cs", "Lite.Tests/Upgrade.cs", "Lite.Tests/Comment.cs"],
+             "classes": {"lite": {
+                "GatedTests":   {"own": 2, "files": [0], "seconds": 0.01},
+                "PlainTests":   {"own": 3, "files": [0], "seconds": 1.0},
+                "RuntimeTests": {"own": 4, "files": [0], "seconds": 1.0},
+                "UpgradeTests": {"own": 5, "files": [0], "seconds": 1.0},
+                "CommentTests": {"own": 6, "files": [0], "seconds": 1.0}}},
+             "text_patterns": {}}
+            """.Replace("@BUILT@", DateTime.UtcNow.ToString("o"), StringComparison.Ordinal));
+
+        // B.cs is in the map's universe but covered by no class: no class would be selected from the map alone.
+        var (_, r) = MapSelect(map, new[] { "Lite/Services/B.cs" }, root: tree);
+
+        Assert.False(r.GetProperty("full").GetBoolean(), r.ToString());
+        var why = Why(r);
+        Assert.Equal(["GatedTests", "UpgradeTests"], why.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal("gated on an environment the map shards lack", why["GatedTests"]);
+    }
+
+    [Fact]
+    public void TheMapShardsEnvironment_AndTheGateRule_CannotDriftApart()
+    {
+        // ci-select.py's MAP_SHARD_ENV must be exactly what nightly.yml's map shards set, and every DARLING_TEST_* variable
+        // either workflow sets must be a map-shard variable or one the gate rule finds in the source (the PG_ and PGRUNTIME_
+        // families). A new CI-set gate variable outside both fails here instead of silently never selecting its class.
+        var root = ParitySource.RepoRoot();
+        var script = File.ReadAllText(Path.Combine(root, ".github", "scripts", "ci-select.py"));
+        var declared = System.Text.RegularExpressions.Regex.Match(script, "MAP_SHARD_ENV = frozenset\\(\\{([^}]*)\\}\\)");
+        Assert.True(declared.Success, "ci-select.py no longer declares MAP_SHARD_ENV");
+        var mapEnv = System.Text.RegularExpressions.Regex.Matches(declared.Groups[1].Value, "\"(DARLING_TEST_\\w+)\"")
+            .Select(m => m.Groups[1].Value).OrderBy(v => v, StringComparer.Ordinal).ToList();
+
+        var nightly = File.ReadAllLines(Path.Combine(root, ".github", "workflows", "nightly.yml"));
+        var step = Array.FindIndex(nightly, l => l.Contains("- name: Run this shard's classes (instrumented", StringComparison.Ordinal));
+        Assert.True(step >= 0, "nightly.yml no longer has the map shards' run step");
+        var stepKeys = new List<string>();
+        foreach (var line in nightly.Skip(step + 1))
+        {
+            if (line.TrimStart().StartsWith("- name:", StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            var key = System.Text.RegularExpressions.Regex.Match(line, "^\\s+(DARLING_TEST_\\w+):");
+            if (key.Success)
+            {
+                stepKeys.Add(key.Groups[1].Value);
+            }
+        }
+
+        Assert.Equal(mapEnv, stepKeys.Distinct().OrderBy(v => v, StringComparer.Ordinal));
+
+        var gateShape = new System.Text.RegularExpressions.Regex("^DARLING_TEST_PG(RUNTIME)?_[A-Z0-9_]+$");
+        foreach (var wf in new[] { "build.yml", "nightly.yml" })
+        {
+            foreach (var line in File.ReadAllLines(Path.Combine(root, ".github", "workflows", wf)))
+            {
+                var key = System.Text.RegularExpressions.Regex.Match(line, "^\\s+(DARLING_TEST_\\w+):");
+                if (key.Success)
+                {
+                    var name = key.Groups[1].Value;
+                    Assert.True(mapEnv.Contains(name) || gateShape.IsMatch(name),
+                        wf + " sets " + name + ", which is neither a map-shard variable nor one ci-select.py's GATE_ENV_LITERAL finds");
+                }
+            }
+        }
     }
 }
