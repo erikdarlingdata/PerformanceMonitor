@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
@@ -39,7 +40,8 @@ public partial class DuckDbFactCollector
         DateTime? BestLastExec,
         string? QueryText,
         long? LatestPlanId,
-        long? BestPlanId);
+        long? BestPlanId,
+        bool Unverified = false);
 
     /// <summary>The candidates that stay, in the detector's order, and the two counts the fact reports.</summary>
     private sealed record PlanRegressionVerification(
@@ -57,56 +59,90 @@ public partial class DuckDbFactCollector
     /// candidates over the 2x threshold that pass the text check are fetched, in the detector's order, within
     /// <see cref="MaxPlanInputFetches"/> fetches, <see cref="PlanInputFetchTimeout"/> each and
     /// <see cref="PlanInputTotalTimeout"/> together. A candidate whose plans cannot be fetched or compared
-    /// stays, and is counted unverified. A fetch failure never fails the pass; the pass's own cancellation does
-    /// propagate. Plan XML lives in locals of <see cref="CompareFetchedPlansAsync"/> and nowhere else.
+    /// stays, and is counted unverified; so does one whose plans compare the same while its statement text is
+    /// missing or withheld, because the OPTION (RECOMPILE) check could not run on it. A fetch failure never fails
+    /// the pass; the pass's own cancellation does propagate. Plan XML lives in locals of
+    /// <see cref="CompareFetchedPlansAsync"/> and nowhere else.
+    ///
+    /// <para>The drill-down and the force targets name a query by (database, query_id), not by replica, so a query
+    /// that any replica's row excludes is out for every replica. A query is therefore judged whole, every replica
+    /// row of it, the first time its key comes up: the exclusion is known before any row of it is kept, and the cut
+    /// to 20 counts only rows that stay. The excluded count is distinct queries.</para>
     /// </summary>
     private async Task<PlanRegressionVerification> VerifyPlanRegressionInputsAsync(
         AnalysisContext context, List<PlanRegressionCandidate> candidates)
     {
         var kept = new List<PlanRegressionCandidate>();
-        var excluded = 0;
-        var unverified = 0;
+        var excludedKeys = new HashSet<(string Database, long QueryId)>();
+        var judgedKeys = new HashSet<(string Database, long QueryId)>();
+        var judgements = new Dictionary<int, bool>();
         var verdicts = new Dictionary<(string Database, long Latest, long Best), PlanInputVerdict>();
         var budget = new PlanFetchBudget();
 
         using var overall = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
         overall.CancelAfter(PlanInputTotalTimeout);
 
-        foreach (var candidate in candidates)
+        for (var i = 0; i < candidates.Count; i++)
         {
             if (kept.Count >= MaxPlanRegressionOffenders) break;
             context.CancellationToken.ThrowIfCancellationRequested();
 
-            if (PlanInputComparison.HasRecompileHint(candidate.QueryText))
+            var candidate = candidates[i];
+            var queryKey = (candidate.DatabaseName, candidate.QueryId);
+            if (judgedKeys.Add(queryKey))
             {
-                excluded++;
-                continue;
-            }
-
-            var verdict = PlanInputVerdict.Unknown;
-            if (_queryStorePlanSource is not null && candidate.LatestPlanId is long latestPlanId && candidate.BestPlanId is long bestPlanId)
-            {
-                /* Two replicas of one query are two candidates over the same two plans: one comparison. */
-                var key = (candidate.DatabaseName, latestPlanId, bestPlanId);
-                if (!verdicts.TryGetValue(key, out verdict))
+                for (var j = i; j < candidates.Count; j++)
                 {
-                    verdict = await CompareFetchedPlansAsync(
-                        context, budget, candidate.DatabaseName, latestPlanId, bestPlanId, overall.Token);
-                    verdicts[key] = verdict;
+                    if (candidates[j].DatabaseName != queryKey.DatabaseName || candidates[j].QueryId != queryKey.QueryId) continue;
+
+                    var judgement = await JudgePlanRegressionCandidateAsync(context, candidates[j], verdicts, budget, overall.Token);
+                    if (judgement.Exclude)
+                    {
+                        excludedKeys.Add(queryKey);
+                        break;
+                    }
+
+                    judgements[j] = judgement.Unverified;
                 }
             }
 
-            if (verdict == PlanInputVerdict.Different)
-            {
-                excluded++;
-                continue;
-            }
-
-            if (verdict == PlanInputVerdict.Unknown) unverified++;
-            kept.Add(candidate);
+            if (excludedKeys.Contains(queryKey)) continue;
+            kept.Add(candidate with { Unverified = judgements[i] });
         }
 
-        return new PlanRegressionVerification(kept, excluded, unverified);
+        return new PlanRegressionVerification(kept, excludedKeys.Count, kept.Count(k => k.Unverified));
+    }
+
+    /// <summary>What the inputs check decided about one row: leave its query out, or keep it (checked or not).</summary>
+    private readonly record struct PlanInputJudgement(bool Exclude, bool Unverified);
+
+    private async Task<PlanInputJudgement> JudgePlanRegressionCandidateAsync(
+        AnalysisContext context, PlanRegressionCandidate candidate,
+        Dictionary<(string Database, long Latest, long Best), PlanInputVerdict> verdicts,
+        PlanFetchBudget budget, CancellationToken overallToken)
+    {
+        if (PlanInputComparison.HasRecompileHint(candidate.QueryText))
+            return new PlanInputJudgement(Exclude: true, Unverified: false);
+
+        var verdict = PlanInputVerdict.Unknown;
+        if (_queryStorePlanSource is not null && candidate.LatestPlanId is long latestPlanId && candidate.BestPlanId is long bestPlanId)
+        {
+            /* Two replicas of one query can be two candidates over the same two plans: one comparison. */
+            var key = (candidate.DatabaseName, latestPlanId, bestPlanId);
+            if (!verdicts.TryGetValue(key, out verdict))
+            {
+                verdict = await CompareFetchedPlansAsync(
+                    context, budget, candidate.DatabaseName, latestPlanId, bestPlanId, overallToken);
+                verdicts[key] = verdict;
+            }
+        }
+
+        if (verdict == PlanInputVerdict.Different)
+            return new PlanInputJudgement(Exclude: true, Unverified: false);
+
+        var textUnknown = string.IsNullOrWhiteSpace(candidate.QueryText)
+            || WithheldStatementMarker.IsMarker(candidate.QueryText);
+        return new PlanInputJudgement(Exclude: false, Unverified: verdict == PlanInputVerdict.Unknown || textUnknown);
     }
 
     /// <summary>The verdict for one candidate's two plans; Unknown when either cannot be had or compared.</summary>

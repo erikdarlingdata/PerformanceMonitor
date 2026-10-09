@@ -42,6 +42,8 @@ public sealed class PlanRegressionInputsLiveTests
 {
     private const int ServerId = -563001;
     private const int CapServerId = -563002;
+    private const int ReplicaServerId = -563003;
+    private const int FailServerId = -563004;
     private const string Db = "inputsdb";
     private const int LiveTimeoutSeconds = 60;
 
@@ -218,6 +220,140 @@ public sealed class PlanRegressionInputsLiveTests
         }
     }
 
+    [Fact]
+    public async Task AQueryOneReplicaExcludes_LeavesBeforeTheCut_AndAPlaceGoesToTheNextQuery_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #5630 replica test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+        {
+            await DeleteTestRowsAsync(connection, ct);
+        }
+
+        try
+        {
+            var periodEnd = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
+            var periodStart = periodEnd.AddHours(-4);
+            const string Text = "SELECT o.order_id FROM dbo.orders AS o WHERE o.customer_id = @location_id";
+            const long Split = 399;
+
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                /* Twenty-two queries that stay; they share one pair of plans (compiled for the same value). */
+                await InsertPlanAsync(connection, 5001, PlanFor(Text, "(7)"), gz: true, periodEnd, ct, ReplicaServerId);
+                await InsertPlanAsync(connection, 5002, PlanFor(Text, "(7)"), gz: true, periodEnd, ct, ReplicaServerId);
+                for (long q = 300; q < 322; q++)
+                {
+                    await InsertStatsAsync(connection, ReplicaServerId, q, 5001, "0xBESTSHARED", 200_000, periodStart.AddDays(-5), periodStart, periodEnd, false, ct);
+                    await InsertStatsAsync(connection, ReplicaServerId, q, 5002, "0xLATESHARED", 600_000 + (q * 1_000), periodEnd, periodStart, periodEnd, false, ct);
+                    await InsertTextAsync(connection, ReplicaServerId, q, Text, periodEnd, ct);
+                }
+
+                /* Query 399 on two replicas. The primary's plans were compiled for the same value and rank first; the
+                   secondary's were compiled for different values and rank last, below the cut of the others. */
+                await InsertPlanAsync(connection, 5011, PlanFor(Text, "(7)"), gz: true, periodEnd, ct, ReplicaServerId);
+                await InsertPlanAsync(connection, 5012, PlanFor(Text, "(7)"), gz: true, periodEnd, ct, ReplicaServerId);
+                await InsertPlanAsync(connection, 5013, PlanFor(Text, "(7)"), gz: true, periodEnd, ct, ReplicaServerId);
+                await InsertPlanAsync(connection, 5014, PlanFor(Text, "(1)"), gz: true, periodEnd, ct, ReplicaServerId);
+                await InsertStatsAsync(connection, ReplicaServerId, Split, 5011, "0xP1", 200_000, periodStart.AddDays(-5), periodStart, periodEnd, false, ct, "PRIMARY");
+                await InsertStatsAsync(connection, ReplicaServerId, Split, 5012, "0xP2", 5_000_000, periodEnd, periodStart, periodEnd, false, ct, "PRIMARY");
+                await InsertStatsAsync(connection, ReplicaServerId, Split, 5013, "0xS1", 200_000, periodStart.AddDays(-5), periodStart, periodEnd, false, ct, "SECONDARY");
+                await InsertStatsAsync(connection, ReplicaServerId, Split, 5014, "0xS2", 500_000, periodEnd, periodStart, periodEnd, false, ct, "SECONDARY");
+                await InsertTextAsync(connection, ReplicaServerId, Split, Text, periodEnd, ct);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var pass = NewContext(ReplicaServerId, periodStart, periodEnd);
+            var fact = (await new PgFactCollector(postgres).CollectFactsAsync(pass))
+                .Single(f => f.Key == "PLAN_REGRESSION");
+
+            /* The query leaves whole, before the cut, so twenty of the twenty-two others fill the twenty places. */
+            Assert.Equal(20, fact.Metadata["offender_count"]);
+            Assert.Equal(1, fact.Metadata["cross_input_excluded_count"]);
+            Assert.Equal(20, pass.PlanRegressionOffenders!.Count);
+            Assert.DoesNotContain(pass.PlanRegressionOffenders, o => o.QueryId == Split);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteTestRowsAsync);
+        }
+    }
+
+    [Fact]
+    public async Task PlansThatCannotBeRead_AreOneEventForThePass_AndDoNotMarkTheFamilyNotRead_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #5630 plan-read failure test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+        {
+            await DeleteTestRowsAsync(connection, ct);
+        }
+
+        try
+        {
+            var periodEnd = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
+            var periodStart = periodEnd.AddHours(-4);
+            const string Text = "SELECT o.order_id FROM dbo.orders AS o WHERE o.customer_id = @location_id";
+
+            /* Three regressed queries whose stored plans are not readable: every plan read fails. */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                for (long q = 400; q < 403; q++)
+                {
+                    await InsertPlanAsync(connection, q * 10 + 1, PlanFor(Text, "(7)"), gz: false, periodEnd, ct, FailServerId, corruptGzip: true);
+                    await InsertPlanAsync(connection, q * 10 + 2, PlanFor(Text, "(7)"), gz: false, periodEnd, ct, FailServerId, corruptGzip: true);
+                    await InsertStatsAsync(connection, FailServerId, q, q * 10 + 1, "0xBEST" + q, 200_000, periodStart.AddDays(-5), periodStart, periodEnd, false, ct);
+                    await InsertStatsAsync(connection, FailServerId, q, q * 10 + 2, "0xLATE" + q, 600_000 + (q * 1_000), periodEnd, periodStart, periodEnd, false, ct);
+                    await InsertTextAsync(connection, FailServerId, q, Text, periodEnd, ct);
+                }
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var pass = NewContext(FailServerId, periodStart, periodEnd);
+            var fact = (await new PgFactCollector(postgres).CollectFactsAsync(pass))
+                .Single(f => f.Key == "PLAN_REGRESSION");
+
+            /* The check could not run, so the three stay, counted unverified, as before the check existed. */
+            Assert.Equal(3, fact.Metadata["offender_count"]);
+            Assert.Equal(0, fact.Metadata["cross_input_excluded_count"]);
+            Assert.Equal(3, fact.Metadata["inputs_unverified_count"]);
+
+            /* The fact was produced and carries the gap, so the family is not recorded as unread, and certainly not once
+               per failed read. */
+            Assert.DoesNotContain(pass.CollectionFailures, f => f.Read == "CollectPlanRegressionFactsAsync");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteTestRowsAsync);
+        }
+    }
+
     /* ── The seed ──────────────────────────────────────────────────────────────────────────────────────
        Each query has a cheap plan that last ran five days back and a costlier plan running at the window's end. */
     private static async Task SeedAsync(
@@ -296,7 +432,7 @@ public sealed class PlanRegressionInputsLiveTests
 
     private static async Task InsertStatsAsync(
         NpgsqlConnection connection, int serverId, long queryId, long planId, string planHash, long cpuUs, DateTime lastExec,
-        DateTime periodStart, DateTime periodEnd, bool intervalTable, CancellationToken ct)
+        DateTime periodStart, DateTime periodEnd, bool intervalTable, CancellationToken ct, string? replicaRole = null)
     {
         var firstExec = lastExec.AddHours(-1);
         if (intervalTable)
@@ -332,7 +468,7 @@ INSERT INTO query_store_stats
      runtime_stats_interval_id, interval_start_time_utc, first_execution_time, last_execution_time,
      query_hash, query_plan_hash, execution_count,
      avg_cpu_time_us, avg_duration_us, is_forced_plan, force_failure_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $10, $11, $12, $13, 50, $14, $15, false, 0)", connection)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $16, $8, $9, $10, $11, $12, $13, 50, $14, $15, false, 0)", connection)
         { CommandTimeout = LiveTimeoutSeconds };
         raw.Parameters.AddWithValue(CollectionIdGenerator.Next());
         raw.Parameters.AddWithValue(periodEnd.AddMinutes(-5));
@@ -349,6 +485,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $10, $11, $12, $13,
         raw.Parameters.AddWithValue(planHash);
         raw.Parameters.AddWithValue(cpuUs);
         raw.Parameters.AddWithValue(cpuUs + 20_000);
+        raw.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)replicaRole ?? DBNull.Value });
         await raw.ExecuteNonQueryAsync(ct);
     }
 
@@ -367,19 +504,25 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $10, $11, $12, $13,
     }
 
     private static async Task InsertPlanAsync(
-        NpgsqlConnection connection, long planId, string plan, bool gz, DateTime lastSeen, CancellationToken ct)
+        NpgsqlConnection connection, long planId, string plan, bool gz, DateTime lastSeen, CancellationToken ct,
+        int serverId = ServerId, bool corruptGzip = false)
     {
         /* A plan is stored once under its digest. The fixtures differ per plan_id by a comment, so no digest is shared
            between plans of different queries. */
         var stored = plan + "<!-- w5630 plan " + planId.ToString(CultureInfo.InvariantCulture) + " -->";
         await using (var dim = new NpgsqlCommand(
-            gz
+            gz || corruptGzip
                 ? "INSERT INTO query_plan_dim (digest, query_plan_gz, last_seen) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"
                 : "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
             connection) { CommandTimeout = LiveTimeoutSeconds })
         {
             dim.Parameters.AddWithValue(PayloadDimensions.Digest(stored));
-            if (gz)
+            if (corruptGzip)
+            {
+                /* Bytes that are not a gzip stream: reading the plan back throws. */
+                dim.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 } });
+            }
+            else if (gz)
             {
                 dim.Parameters.AddWithValue(PayloadDimensions.CompressContent(stored));
             }
@@ -395,7 +538,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $10, $11, $12, $13,
         await using var map = new NpgsqlCommand(
             "INSERT INTO collect.query_store_plan_map (server_id, database_name, plan_id, digest, plan_hash, last_seen) VALUES ($1, $2, $3, $4, $5, $6)",
             connection) { CommandTimeout = LiveTimeoutSeconds };
-        map.Parameters.AddWithValue(ServerId);
+        map.Parameters.AddWithValue(serverId);
         map.Parameters.AddWithValue(Db);
         map.Parameters.AddWithValue(planId);
         map.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = PayloadDimensions.Digest(stored) });
@@ -415,7 +558,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $10, $11, $12, $13,
 
     private static async Task DeleteTestRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var server in new[] { ServerId, CapServerId })
+        foreach (var server in new[] { ServerId, CapServerId, ReplicaServerId, FailServerId })
         {
             foreach (var table in new[]
             {
@@ -432,14 +575,17 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $10, $11, $12, $13,
         }
 
         /* The plans this class stored, through its map; a plan's dimension row goes with its last map row. */
-        await using var dims = new NpgsqlCommand(
-            "DELETE FROM query_plan_dim WHERE digest IN (SELECT digest FROM collect.query_store_plan_map WHERE server_id = $1)", connection)
-        { CommandTimeout = LiveTimeoutSeconds };
-        dims.Parameters.AddWithValue(ServerId);
-        await dims.ExecuteNonQueryAsync(ct);
+        foreach (var server in new[] { ServerId, ReplicaServerId, FailServerId })
+        {
+            await using var dims = new NpgsqlCommand(
+                "DELETE FROM query_plan_dim WHERE digest IN (SELECT digest FROM collect.query_store_plan_map WHERE server_id = $1)", connection)
+            { CommandTimeout = LiveTimeoutSeconds };
+            dims.Parameters.AddWithValue(server);
+            await dims.ExecuteNonQueryAsync(ct);
 
-        await using var maps = new NpgsqlCommand("DELETE FROM collect.query_store_plan_map WHERE server_id = $1", connection) { CommandTimeout = LiveTimeoutSeconds };
-        maps.Parameters.AddWithValue(ServerId);
-        await maps.ExecuteNonQueryAsync(ct);
+            await using var maps = new NpgsqlCommand("DELETE FROM collect.query_store_plan_map WHERE server_id = $1", connection) { CommandTimeout = LiveTimeoutSeconds };
+            maps.Parameters.AddWithValue(server);
+            await maps.ExecuteNonQueryAsync(ct);
+        }
     }
 }

@@ -94,6 +94,41 @@ public sealed class PlanInputComparisonTests
         Assert.Equal(PlanInputVerdict.Different, PlanInputComparison.Compare(a, Plan("SELECT 1")));
     }
 
+    /// <summary>A plan whose parameter has no compiled value (OPTIMIZE FOR UNKNOWN, PARAMETER_SNIFFING = OFF).</summary>
+    private static string PlanWithBareParameter(string column) =>
+        "<ShowPlanXML xmlns=\"" + Ns + "\" Version=\"1.564\"><BatchSequence><Batch><Statements>"
+        + "<StmtSimple StatementText=\"SELECT 1\" StatementId=\"1\" StatementType=\"SELECT\">"
+        + "<QueryPlan CachedPlanSize=\"16\"><ParameterList><ColumnReference Column=\"" + column + "\" ParameterDataType=\"int\"/></ParameterList>"
+        + "</QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>";
+
+    [Fact]
+    public void AParameterWithNoCompiledValueOnBothSidesIsUnknown_NeverSame()
+    {
+        var a = PlanWithBareParameter("@location_id");
+        var b = PlanWithBareParameter("@location_id");
+        Assert.Equal(PlanInputVerdict.Unknown, PlanInputComparison.Compare(a, b));
+    }
+
+    [Fact]
+    public void AParameterWithNoCompiledValueOnOneSideIsUnknown_NeverDifferent()
+    {
+        var bare = PlanWithBareParameter("@location_id");
+        var valued = Plan("SELECT 1", ("@location_id", "(7)"));
+        Assert.Equal(PlanInputVerdict.Unknown, PlanInputComparison.Compare(bare, valued));
+        Assert.Equal(PlanInputVerdict.Unknown, PlanInputComparison.Compare(valued, bare));
+    }
+
+    [Fact]
+    public void ABareParameterBesideADifferingValuedOneIsStillUnknown()
+    {
+        /* One parameter differs, another has no value: the verdict cannot be Different, because the bare one is unread. */
+        var a = "<ShowPlanXML xmlns=\"" + Ns + "\"><BatchSequence><Batch><Statements><StmtSimple StatementText=\"SELECT 1\">"
+            + "<QueryPlan><ParameterList><ColumnReference Column=\"@a\" ParameterCompiledValue=\"(1)\"/>"
+            + "<ColumnReference Column=\"@b\"/></ParameterList></QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>";
+        var b = Plan("SELECT 1", ("@a", "(2)"), ("@b", "(3)"));
+        Assert.Equal(PlanInputVerdict.Unknown, PlanInputComparison.Compare(a, b));
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

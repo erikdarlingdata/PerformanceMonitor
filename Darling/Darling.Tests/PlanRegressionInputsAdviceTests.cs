@@ -134,6 +134,72 @@ public sealed class PlanRegressionInputsAdviceTests
     }
 
     [Fact]
+    public void AFailingForceStillGetsItsGuidance_WhenParameterSensitivityFiredToo()
+    {
+        var advice = FactAdvice.Compose("PLAN_REGRESSION", Facts(
+            PlanRegression(new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 }),
+            ParameterSensitivity()));
+
+        Assert.NotNull(advice);
+        Assert.Contains("do NOT force the cheaper plan yet", advice!.Remediation, StringComparison.Ordinal);
+        Assert.Contains("clear the broken force", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("failing to apply", advice.Investigation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFailingForceWithoutParameterSensitivity_KeepsItsOwnGuidance()
+    {
+        var advice = FactAdvice.Compose("PLAN_REGRESSION", Facts(
+            PlanRegression(new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 })));
+
+        Assert.NotNull(advice);
+        Assert.StartsWith("Fix the failing force first", advice!.Remediation, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("CPU_SQL_PERCENT")]
+    [InlineData("CPU_SPIKE")]
+    public void TheCoFiredCauseList_NamesParameterSensitivityBeforeThePlanRegression(string rootKey)
+    {
+        var root = rootKey == "CPU_SPIKE" ? CpuSpike() : CpuSqlPercent();
+        var advice = FactAdvice.Compose(rootKey, Facts(root, PlanRegression(), ParameterSensitivity()));
+
+        Assert.NotNull(advice);
+        var text = advice!.Remediation;
+        var sensitivity = text.IndexOf("parameter sensitivity —", StringComparison.Ordinal);
+        var regression = text.IndexOf("a plan regression —", StringComparison.Ordinal);
+        if (rootKey == "CPU_SQL_PERCENT")
+        {
+            Assert.True(sensitivity >= 0, "the cause list names parameter sensitivity");
+            Assert.True(regression > sensitivity, "the cause list names the plan regression after it");
+        }
+        else
+        {
+            /* The spike's own sentence leads with the sensitivity guidance and does not name a plan regression first. */
+            Assert.StartsWith("Parameter sensitivity co-fired", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("CPU_SQL_PERCENT")]
+    [InlineData("CPU_SPIKE")]
+    public void TheStaticCpuText_NeverSaysToForceBeforeComparingCompiledValues(string rootKey)
+    {
+        /* No CPU metadata, so the composer falls back to the fixed text. */
+        var advice = FactAdvice.Compose(rootKey, Facts(new Fact { Key = rootKey, Severity = 1, Metadata = [] }, PlanRegression(), ParameterSensitivity()));
+
+        Assert.NotNull(advice);
+        var text = advice!.Remediation;
+        var force = text.IndexOf("force the historically faster plan", StringComparison.Ordinal);
+        var doNot = text.IndexOf("do NOT force", StringComparison.OrdinalIgnoreCase);
+        var compare = text.IndexOf("compare the compiled parameter values", StringComparison.Ordinal);
+        Assert.True(doNot >= 0, "the text says not to force when parameter sensitivity fired");
+        Assert.True(compare >= 0, "the text says to compare the compiled values");
+        Assert.True(force > compare, "the force sentence comes only after the compare sentence");
+        Assert.True(force > doNot, "the force sentence comes only after the do-not-force sentence");
+    }
+
+    [Fact]
     public void ThePlanRegressionAdviceCountsWhatTheInputCheckLeftOutAndWhatItCouldNotCheck()
     {
         var advice = FactAdvice.Compose("PLAN_REGRESSION", Facts(PlanRegression(new Dictionary<string, double>

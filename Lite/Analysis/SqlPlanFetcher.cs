@@ -39,8 +39,10 @@ public class SqlPlanFetcher : IPlanFetcher, IQueryStorePlanSource
         {
             ConnectTimeout = 5
         };
-        return await LocalDataService.FetchQueryStorePlanAsync(
-            builder.ConnectionString, databaseName, planId, cancellationToken);
+        /* The plan passes through the statement filter like every other live plan read (#4348): a statement the
+           filter withholds is replaced before the comparison, so it compares Unknown and the candidate stays. */
+        return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(
+            builder.ConnectionString, databaseName, planId, cancellationToken));
     }
 
     public async Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken)

@@ -193,11 +193,7 @@ public sealed class StatementScrubLivePlanDisplayTests
             if (relative.StartsWith("obj/", StringComparison.Ordinal)
                 || relative.StartsWith("bin/", StringComparison.Ordinal)
                 || relative.StartsWith("Services/LocalDataService", StringComparison.Ordinal)
-                || relative == "Mcp/McpPlanTools.cs"
-                /* #5630: the PLAN_REGRESSION inputs check fetches a plan to compare its compiled parameter values and
-                   needs the plan as the server wrote it. The XML stays in memory for that one comparison and never
-                   reaches a display, a log, a finding or an export, so there is nothing to scrub. */
-                || relative == "Analysis/SqlPlanFetcher.cs")
+                || relative == "Mcp/McpPlanTools.cs")
             {
                 continue;
             }
@@ -220,11 +216,11 @@ public sealed class StatementScrubLivePlanDisplayTests
             }
         }
 
-        /* A scan that found nothing would pass vacuously: the display sites are in these six files. The pattern takes any
+        /* A scan that found nothing would pass vacuously: the display sites are in these seven files (the analysis pass's plan fetcher included, #5630). The pattern takes any
            fetch-a-plan name (the by-sql_handle fetch the blocked-process and deadlock actions use included, #5320), so a
            fetch added under a new name fails here until it is wrapped. */
-        Assert.True(sites >= 18, "expected at least 18 live plan fetch call sites, found " + sites);
-        Assert.Equal(6, files.Count);
+        Assert.True(sites >= 19, "expected at least 19 live plan fetch call sites, found " + sites);
+        Assert.Equal(7, files.Count);
         Assert.Empty(problems);
     }
 

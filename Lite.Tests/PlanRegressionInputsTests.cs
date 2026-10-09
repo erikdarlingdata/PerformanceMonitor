@@ -15,8 +15,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
 using Xunit;
 
@@ -75,21 +77,29 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
         /// <summary>When set, every fetch calls it first (to throw, or to hang).</summary>
         public Func<long, CancellationToken, Task>? Behavior { get; set; }
 
-        public void Add(long planId, string? compiledValue) => _plans[planId] = Plan(compiledValue);
+        /// <summary>
+        /// Passes every plan through the statement filter before it is returned, as <c>SqlPlanFetcher</c> does for the
+        /// live read (#4348). <c>StatementScrubLivePlanDisplayTests</c> pins that call in the fetcher itself.
+        /// </summary>
+        public bool AppliesStatementFilter { get; set; }
+
+        public void Add(long planId, string? compiledValue, string statementText = "SELECT 1") =>
+            _plans[planId] = Plan(compiledValue, statementText);
 
         public async Task<string?> FetchQueryStorePlanXmlAsync(
             int serverId, string databaseName, long planId, CancellationToken cancellationToken)
         {
             Fetched.Enqueue(planId);
             if (Behavior is not null) await Behavior(planId, cancellationToken);
-            return _plans.TryGetValue(planId, out var xml) ? xml : null;
+            if (!_plans.TryGetValue(planId, out var xml)) return null;
+            return AppliesStatementFilter ? LivePlanDisplay.Filter(xml) : xml;
         }
     }
 
     /// <summary>A small ShowPlan carrying the compiled value of one parameter (none when null).</summary>
-    private static string Plan(string? compiledValue) =>
+    private static string Plan(string? compiledValue, string statementText = "SELECT 1") =>
         "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.564\" Build=\"16.0.1000.6\">" +
-        "<BatchSequence><Batch><Statements><StmtSimple StatementText=\"SELECT 1\" StatementType=\"SELECT\">" +
+        "<BatchSequence><Batch><Statements><StmtSimple StatementText=\"" + statementText + "\" StatementType=\"SELECT\">" +
         "<QueryPlan CachedPlanSize=\"16\">" +
         (compiledValue is null
             ? string.Empty
@@ -291,6 +301,150 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal(kept, (long)fact.Metadata["worst_query_id"]);
     }
 
+    /// <summary>The statement filter withholds this one (a credential in a login DDL), so its plan comes back as a placeholder.</summary>
+    private const string WithheldStatement = "CREATE LOGIN [example_login] WITH PASSWORD = N'example'";
+
+    [Fact]
+    public async Task APlanTheStatementFilterWithholds_ComparesUnknown_TheCandidateStaysUnverified()
+    {
+        /* Both plans carry the same compiled value, so unfiltered they would compare Same and count as checked. The
+           filter withholds the statement and its values: nothing is left to compare, and the candidate stays. */
+        var source = new FixturePlanSource { AppliesStatementFilter = true };
+        await SeedRegressionAsync(ManifestsB, PlainText, factor: 30);
+        source.Add(CheapPlanId(ManifestsB), "7", WithheldStatement);
+        source.Add(CostlyPlanId(ManifestsB), "7", WithheldStatement);
+
+        var pass = NewContext();
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(pass))
+            .Single(f => f.Key == "PLAN_REGRESSION");
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(0, fact.Metadata["cross_input_excluded_count"]);
+        Assert.Equal(1, fact.Metadata["inputs_unverified_count"]);
+        Assert.Equal([new PlanRegressionOffender(Database, ManifestsB)], pass.PlanRegressionOffenders);
+    }
+
+    [Fact]
+    public async Task AQueryOneReplicaExcludes_IsOutForEveryReplica_InTheFactTheOffendersAndTheDrillDown()
+    {
+        /* One query, two replica rows: the primary's two plans were compiled for the same value, the secondary's for
+           different values. The drill-down names a query by (database, query_id), so the query must leave whole. */
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(ManifestsB, PlainText, factor: 30, replicaRole: "PRIMARY", cheapPlanId: 71, costlyPlanId: 72);
+        source.Add(71, "7");
+        source.Add(72, "7");
+        await SeedRegressionAsync(ManifestsB, PlainText, factor: 30, replicaRole: "SECONDARY", cheapPlanId: 73, costlyPlanId: 74);
+        source.Add(73, "7");
+        source.Add(74, "1");
+        await SeedRegressionAsync(RealRegression, PlainText, factor: 3);
+        source.Add(CheapPlanId(RealRegression), "7");
+        source.Add(CostlyPlanId(RealRegression), "7");
+
+        var pass = NewContext();
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(pass))
+            .Single(f => f.Key == "PLAN_REGRESSION");
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(RealRegression, (long)fact.Metadata["worst_query_id"]);
+        Assert.Equal(1, fact.Metadata["cross_input_excluded_count"]);
+        Assert.Equal([new PlanRegressionOffender(Database, RealRegression)], pass.PlanRegressionOffenders);
+        var rows = await DrillDownRowsAsync(pass);
+        Assert.Equal([RealRegression], rows.Select(r => r.GetProperty("query_id").GetInt64()).Distinct());
+    }
+
+    [Fact]
+    public async Task ARecompileQueryOnTwoReplicas_CountsOnce()
+    {
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(RecompileQuery, RecompileText, factor: 40, replicaRole: "PRIMARY");
+        await SeedRegressionAsync(RecompileQuery, RecompileText, factor: 40, replicaRole: "SECONDARY");
+        await SeedRegressionAsync(RealRegression, PlainText, factor: 3);
+        source.Add(CheapPlanId(RealRegression), "7");
+        source.Add(CostlyPlanId(RealRegression), "7");
+
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(NewContext()))
+            .Single(f => f.Key == "PLAN_REGRESSION");
+
+        Assert.Equal(1, fact.Metadata["cross_input_excluded_count"]);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("   ")]
+    [InlineData(SensitiveStatements.PlaceholderText)]
+    public async Task PlansThatCompareSame_WithTheStatementTextMissingOrWithheld_AreCountedUnverified(string? text)
+    {
+        /* The OPTION (RECOMPILE) check reads the text; without it the Same verdict does not make the candidate checked. */
+        var source = new FixturePlanSource();
+        await SeedRegressionAsync(ManifestsB, text, factor: 30);
+        source.Add(CheapPlanId(ManifestsB), "7");
+        source.Add(CostlyPlanId(ManifestsB), "7");
+
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(NewContext()))
+            .Single(f => f.Key == "PLAN_REGRESSION");
+
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(1, fact.Metadata["inputs_unverified_count"]);
+    }
+
+    [Fact]
+    public async Task TiedPlanIdsInAGroup_PickTheHigherPlanId_OnEveryPass()
+    {
+        /* The latest group holds two plan_ids with the same executions and the same last run, compiled for different
+           values. The pick breaks the tie on plan_id (the higher one, 82, compiled for 1), so the verdict is the same on
+           every pass, and the same as Darling's. */
+        var source = new FixturePlanSource();
+        await SeedPlanAsync(ManifestsB, 83, "0xCHEAP83", PlainText, cpuUs: 100_000, firstIntervalId: 1, lastExec: PeriodStart.AddDays(-5));
+        await SeedPlanAsync(ManifestsB, 81, "0xTIED", PlainText, cpuUs: 3_000_000, firstIntervalId: 11, lastExec: PeriodEnd);
+        await SeedPlanAsync(ManifestsB, 82, "0xTIED", PlainText, cpuUs: 3_000_000, firstIntervalId: 11, lastExec: PeriodEnd);
+        source.Add(83, "7");
+        source.Add(81, "7");
+        source.Add(82, "1");
+
+        for (var pass = 0; pass < 2; pass++)
+        {
+            source.Fetched.Clear();
+            var facts = await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(NewContext());
+
+            Assert.DoesNotContain(facts, f => f.Key == "PLAN_REGRESSION");
+            Assert.Equal([82L, 83L], source.Fetched.ToArray());
+        }
+    }
+
+    [Fact]
+    public async Task TheCutToTwenty_CountsOnlyTheRowsThatStay_AReplicaRowBelowTheCutStillExcludes()
+    {
+        /* 22 queries that stay, then query 99 on two replicas: its primary row (factor 90) is kept and fills a place, its
+           secondary row (factor 4) is below the cut and compares Different. The query must leave and a 21st-ranked query
+           must take its place, so the fact reports 20 offenders, none of them query 99. */
+        var source = new FixturePlanSource();
+        const long Split = 99;
+        /* The 22 share one pair of plans: one comparison, so the pass's fetch budget is not what this test measures. */
+        source.Add(1001, "7");
+        source.Add(1002, "7");
+        for (long q = 1; q <= 22; q++)
+        {
+            await SeedRegressionAsync(q, PlainText, factor: 10 + q, cheapPlanId: 1001, costlyPlanId: 1002);
+        }
+
+        await SeedRegressionAsync(Split, PlainText, factor: 90, replicaRole: "PRIMARY", cheapPlanId: 991, costlyPlanId: 992);
+        source.Add(991, "7");
+        source.Add(992, "7");
+        await SeedRegressionAsync(Split, PlainText, factor: 4, replicaRole: "SECONDARY", cheapPlanId: 993, costlyPlanId: 994);
+        source.Add(993, "7");
+        source.Add(994, "1");
+
+        var pass = NewContext();
+        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(pass))
+            .Single(f => f.Key == "PLAN_REGRESSION");
+
+        Assert.Equal(20, fact.Metadata["offender_count"]);
+        Assert.Equal(1, fact.Metadata["cross_input_excluded_count"]);
+        Assert.Equal(20, pass.PlanRegressionOffenders!.Count);
+        Assert.DoesNotContain(pass.PlanRegressionOffenders, o => o.QueryId == Split);
+        Assert.Equal(22, (long)fact.Metadata["worst_query_id"]);
+    }
+
     private async Task<List<JsonElement>> DrillDownRowsAsync(AnalysisContext context)
     {
         var finding = new AnalysisFinding
@@ -310,16 +464,20 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
     }
 
     /// <summary>A cheap plan that ran five days back and a costlier one still running at the window's end.</summary>
-    private async Task SeedRegressionAsync(long queryId, string text, double factor)
+    private async Task SeedRegressionAsync(
+        long queryId, string? text, double factor, string? replicaRole = null, long? cheapPlanId = null, long? costlyPlanId = null)
     {
-        await SeedPlanAsync(queryId, CheapPlanId(queryId), "0xCHEAP" + queryId, text, cpuUs: 100_000,
-            firstIntervalId: 1, lastExec: PeriodStart.AddDays(-5));
-        await SeedPlanAsync(queryId, CostlyPlanId(queryId), "0xCOSTLY" + queryId, text, cpuUs: 100_000 * factor,
-            firstIntervalId: 11, lastExec: PeriodEnd);
+        var cheap = cheapPlanId ?? CheapPlanId(queryId);
+        var costly = costlyPlanId ?? CostlyPlanId(queryId);
+        await SeedPlanAsync(queryId, cheap, "0xCHEAP" + cheap, text, cpuUs: 100_000,
+            firstIntervalId: 1, lastExec: PeriodStart.AddDays(-5), replicaRole);
+        await SeedPlanAsync(queryId, costly, "0xCOSTLY" + costly, text, cpuUs: 100_000 * factor,
+            firstIntervalId: 11, lastExec: PeriodEnd, replicaRole);
     }
 
     private async Task SeedPlanAsync(
-        long queryId, long planId, string planHash, string text, double cpuUs, long firstIntervalId, DateTime lastExec)
+        long queryId, long planId, string planHash, string? text, double cpuUs, long firstIntervalId, DateTime lastExec,
+        string? replicaRole = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -341,7 +499,7 @@ INSERT INTO query_store_stats
      query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      query_plan_hash, is_forced_plan, force_failure_count,
      runtime_stats_interval_id, interval_start_time_utc, replica_role, query_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, false, 0, $15, $16, NULL, $17)";
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, false, 0, $15, $16, $18, $17)";
                 cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
                 cmd.Parameters.Add(new DuckDBParameter { Value = PeriodEnd.AddMinutes(-10 + collection) });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -358,7 +516,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
                 cmd.Parameters.Add(new DuckDBParameter { Value = planHash });
                 cmd.Parameters.Add(new DuckDBParameter { Value = firstIntervalId + interval });
                 cmd.Parameters.Add(new DuckDBParameter { Value = firstExec });
-                cmd.Parameters.Add(new DuckDBParameter { Value = text });
+                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)text ?? DBNull.Value });
+                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)replicaRole ?? DBNull.Value });
                 await cmd.ExecuteNonQueryAsync();
             }
         }

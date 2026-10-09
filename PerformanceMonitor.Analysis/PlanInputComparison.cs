@@ -24,7 +24,7 @@ public enum PlanInputVerdict
     /// <summary>The plans were compiled for different parameter values, so the cost difference may be the data, not the plan.</summary>
     Different,
 
-    /// <summary>The inputs could not be compared: a plan is missing, unreadable, or was stored with its values withheld.</summary>
+    /// <summary>The inputs could not be compared: a plan is missing, unreadable, was stored with its values withheld, or has a parameter with no compiled value.</summary>
     Unknown,
 }
 
@@ -99,8 +99,9 @@ public static class PlanInputComparison
     /// <summary>
     /// Compares the compiled parameter values of two plans. Different when some parameter's compiled value differs
     /// or the parameter sets differ; Same when they match (two plans with no parameters match); Unknown when either
-    /// plan is missing, empty or unreadable, or when either plan, or any compiled value in it, is the
-    /// withheld-statement placeholder (two placeholders must never compare Same).
+    /// plan is missing, empty or unreadable, when either plan, or any compiled value in it, is the
+    /// withheld-statement placeholder (two placeholders must never compare Same), or when any parameter in either
+    /// plan has no compiled value (there is no input to compare).
     /// </summary>
     public static PlanInputVerdict Compare(string? latestPlanXml, string? bestPlanXml)
     {
@@ -117,9 +118,9 @@ public static class PlanInputComparison
 
     /// <summary>
     /// The set of (column, compiled value) pairs in the plan's <c>ParameterList</c> elements, or null when the plan
-    /// cannot be judged (missing, unparseable, or carrying the placeholder).
+    /// cannot be judged (missing, unparseable, carrying the placeholder, or holding a parameter that has no compiled value).
     /// </summary>
-    private static HashSet<(string Column, string? Value)>? ReadCompiledValues(string? planXml)
+    private static HashSet<(string Column, string Value)>? ReadCompiledValues(string? planXml)
     {
         if (string.IsNullOrWhiteSpace(planXml))
             return null;
@@ -128,7 +129,7 @@ public static class PlanInputComparison
         if (WithheldStatementMarker.IsMarker(planXml))
             return null;
 
-        var result = new HashSet<(string Column, string? Value)>();
+        var result = new HashSet<(string Column, string Value)>();
         var settings = new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Prohibit,
@@ -158,7 +159,11 @@ public static class PlanInputComparison
                     {
                         var column = reader.GetAttribute("Column") ?? string.Empty;
                         var value = reader.GetAttribute("ParameterCompiledValue");
-                        if (value is not null && WithheldStatementMarker.IsMarker(value))
+
+                        // A parameter with no compiled value (OPTIMIZE FOR UNKNOWN, PARAMETER_SNIFFING = OFF) says nothing
+                        // about the input the plan was built for: two such plans are not "the same input", and one such
+                        // plan against a plan with a value is not "a different input".
+                        if (value is null || WithheldStatementMarker.IsMarker(value))
                             return null;
 
                         result.Add((column, value));

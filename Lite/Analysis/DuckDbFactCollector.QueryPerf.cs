@@ -397,8 +397,10 @@ plan_dedup AS
         -- #5630: one representative plan_id per plan group, for the compiled-inputs check. The latest group's is
         -- the plan that ran last; the best group's is the one that ran most. Their XML is fetched live, for
         -- candidates only.
-        arg_max(plan_id, last_exec) AS newest_plan_id,
-        arg_max(plan_id, execs) AS busiest_plan_id,
+        -- Ties break on plan_id (the struct orders by its second field), as Darling's read does, so the pick is the
+        -- same on every pass and in both products.
+        arg_max(plan_id, (last_exec, plan_id)) AS newest_plan_id,
+        arg_max(plan_id, (execs, plan_id)) AS busiest_plan_id,
         any_value(query_text) AS query_text
     FROM plan_agg
     GROUP BY database_name, query_id, replica_role, query_plan_hash

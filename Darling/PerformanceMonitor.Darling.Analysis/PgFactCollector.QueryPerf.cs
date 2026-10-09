@@ -806,27 +806,46 @@ ORDER BY c.regression_factor DESC";
 
             /* #5630: drop the queries whose two plans were not compiled for the same inputs, keep the worst 20 of the
                rest. Everything that reads the list downstream (the offenders, the regressed-queries drill-down, the
-               force-plan targets built from it) sees only the kept queries. */
+               force-plan targets built from it) sees only the kept queries. The drill-down names a query by
+               (database, query_id) and not by replica, so a query one replica's row excludes is out for every replica
+               (an excluded query must not reach a force): a query is judged whole, every replica row of it, the first
+               time its key comes up, so the exclusion is known before any row of it is kept and the cut to 20 counts
+               only rows that stay. */
             var kept = new List<PlanRegressionCandidate>();
             var excludedKeys = new HashSet<PlanRegressionOffender>();
-            foreach (var candidate in candidates)
+            var judgedKeys = new HashSet<PlanRegressionOffender>();
+            var judgements = new Dictionary<int, bool>();
+            var planReads = new PlanReadFailures();
+            for (var i = 0; i < candidates.Count; i++)
             {
                 if (kept.Count >= PlanRegressionMaxOffenders)
                     break;
 
-                var verdict = await JudgePlanRegressionInputsAsync(connection, context, candidate);
-                if (verdict.Exclude)
+                var candidate = candidates[i];
+                var queryKey = new PlanRegressionOffender(candidate.DatabaseName, candidate.QueryId);
+                if (judgedKeys.Add(queryKey))
                 {
-                    excludedKeys.Add(new PlanRegressionOffender(candidate.DatabaseName, candidate.QueryId));
-                    continue;
+                    for (var j = i; j < candidates.Count; j++)
+                    {
+                        if (candidates[j].DatabaseName != queryKey.DatabaseName || candidates[j].QueryId != queryKey.QueryId)
+                            continue;
+
+                        var verdict = await JudgePlanRegressionInputsAsync(connection, context, candidates[j], planReads);
+                        if (verdict.Exclude)
+                        {
+                            excludedKeys.Add(queryKey);
+                            break;
+                        }
+
+                        judgements[j] = verdict.Unverified;
+                    }
                 }
 
-                kept.Add(candidate with { Unverified = verdict.Unverified });
-            }
+                if (excludedKeys.Contains(queryKey))
+                    continue;
 
-            /* The drill-down names a query by (database, query_id) and not by replica, so a query one replica's row
-               excluded is out for every replica: an excluded query must not reach a force. */
-            kept.RemoveAll(k => excludedKeys.Contains(new PlanRegressionOffender(k.DatabaseName, k.QueryId)));
+                kept.Add(candidate with { Unverified = judgements[i] });
+            }
 
             var offenderCount = kept.Count;
             var unverified = kept.Count(k => k.Unverified);
@@ -872,6 +891,23 @@ ORDER BY c.regression_factor DESC";
             /* #5448: M is recorded only now, after the read has succeeded. A read that threw leaves "not known" (null), as the
                AnalysisContext doc says, so the drill-down does not start at an edge no fact read from. */
             context.PlanRegressionWindowStart = readsDays ? windowFloor : null;
+
+            /* #5630: plan reads that failed are one event for the pass, not one per candidate. The fact already carries
+               them (the kept candidates are counted unverified), so the family is recorded as not read only when there is
+               no fact to carry them. Only the exception's type is logged: a plan holds customer values. */
+            if (planReads.FirstFailure is Exception planReadFailure)
+            {
+                if (offenderCount == 0)
+                {
+                    context.RecordCollectionFailure(
+                        CollectionFailure.FamilyOf(nameof(CollectPlanRegressionFactsAsync)), nameof(CollectPlanRegressionFactsAsync),
+                        ClassifyOutcome(planReadFailure), planReadFailure);
+                }
+
+                _logger?.LogWarning(
+                    "[PgFactCollector] The PLAN_REGRESSION input check could not read the plans of {FailedReads} candidate(s) on server {ServerId} ({ExceptionType}); they are kept unverified",
+                    planReads.Count, context.ServerId, planReadFailure.GetType().Name);
+            }
 
             if (offenderCount == 0) return;
 
@@ -945,6 +981,20 @@ ORDER BY c.regression_factor DESC";
         string? StatementText,
         bool Unverified = false);
 
+    /// <summary>The plan reads of one PLAN_REGRESSION pass that failed: how many, and the first exception (#5630).</summary>
+    private sealed class PlanReadFailures
+    {
+        public int Count { get; private set; }
+
+        public Exception? FirstFailure { get; private set; }
+
+        public void Add(Exception ex)
+        {
+            Count++;
+            FirstFailure ??= ex;
+        }
+    }
+
     /// <summary>What the input check decided about one candidate: leave it out, or keep it (checked or not).</summary>
     private readonly record struct PlanInputJudgement(bool Exclude, bool Unverified);
 
@@ -970,7 +1020,7 @@ AND   m.plan_id = ANY($3)";
     /// counts as unverified. Only the verdict leaves <see cref="PlanInputComparison"/>: no value is logged or stored.
     /// </summary>
     private async Task<PlanInputJudgement> JudgePlanRegressionInputsAsync(
-        NpgsqlConnection connection, AnalysisContext context, PlanRegressionCandidate candidate)
+        NpgsqlConnection connection, AnalysisContext context, PlanRegressionCandidate candidate, PlanReadFailures planReads)
     {
         var text = candidate.StatementText;
         if (PlanInputComparison.HasRecompileHint(text))
@@ -1007,13 +1057,9 @@ AND   m.plan_id = ANY($3)";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* The check could not run, so the candidate stays, as it did before the check existed, and the failure is
-               recorded under the fact's family so the missing check is not mistaken for a clean one (#2826). Only the
-               exception's type is logged: a plan holds customer values. */
-            ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync));
-            _logger?.LogWarning(
-                "[PgFactCollector] The PLAN_REGRESSION input check could not read a plan on server {ServerId} ({ExceptionType}); the candidate is kept unverified",
-                context.ServerId, ex.GetType().Name);
+            /* The check could not run, so the candidate stays, as it did before the check existed. The caller records the
+               failure once for the pass (#2826), so a broken connection is one event, not one per candidate. */
+            planReads.Add(ex);
             return new PlanInputJudgement(Exclude: false, Unverified: true);
         }
 

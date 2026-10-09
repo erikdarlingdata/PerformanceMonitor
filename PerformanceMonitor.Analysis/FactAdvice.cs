@@ -974,15 +974,16 @@ public static class FactAdvice
     private static string QueryCauseClause(IReadOnlyDictionary<string, Fact> facts)
     {
         var bits = new List<string>();
+        /* #5630: parameter sensitivity leads when both fired: the plan regression beside it may compare plans compiled for
+           different inputs, so it is named second and carries no force advice. */
+        if (Fired(facts, "PARAMETER_SENSITIVITY"))
+            bits.Add("parameter sensitivity — a plan is far more expensive for some parameter values (that finding has the figures)");
         if (Fired(facts, "PLAN_REGRESSION"))
         {
-            /* #5630: with parameter sensitivity beside it the "faster" plan may only have served small inputs, so no force here. */
             bits.Add(Fired(facts, "PARAMETER_SENSITIVITY")
                 ? "a plan regression — compare the two plans' compiled parameter values before forcing anything, because parameter sensitivity co-fired (see that finding)"
                 : "a plan regression — force the historically faster plan (see that finding)");
         }
-        if (Fired(facts, "PARAMETER_SENSITIVITY"))
-            bits.Add("parameter sensitivity — a plan is far more expensive for some parameter values (that finding has the figures)");
         if (Fired(facts, "MISSING_INDEX"))
             bits.Add("missing-index requests — the missing-index card lists the optimizer's suggestions from this window's top plans as corroboration, with its caveat");
         if (Fired(facts, "PLAN_WARNING"))
@@ -1752,6 +1753,9 @@ public static class FactAdvice
             : forceFailing
             ? "Fix the failing force first — the recorded plan force is not taking effect (the plan was likely evicted or invalidated); re-force the good plan or clear the broken force, then confirm it sticks. Then address WHY the plan regressed — usually stale statistics or a parameter-sensitivity swing."
             : "The engine attaches a ready-to-run force statement for the historically faster plan — forcing it stops the bleeding immediately. Then address WHY the worse plan got chosen — usually stale statistics or a parameter-sensitivity swing — so you are not relying on a forced plan indefinitely.";
+        /* The failing force is still the first thing to clear when parameter sensitivity fired too (#5630). */
+        if (paramSensitive && forceFailing)
+            rem += " A forced plan is also failing to apply, so clear the broken force (or fix why it fails) — it is not taking effect, and the plan was likely evicted or invalidated — and do not re-force the cheaper plan until the compiled parameter values match.";
         if (!paramSensitive && unverified is > 0)
             rem += $" {Plural(unverified.Value, "reported query")} could not be checked for matching parameter values (a stored plan or the statement text was unavailable), so compare the two plans' compiled parameter values before forcing.";
 
@@ -2702,7 +2706,7 @@ public static class FactAdvice
             Investigation:
                 "Open the CPU tab to see the SQL vs. other-process split over the analysis window — that confirms SQL is the consumer rather than antivirus, a runaway agent job, or another tenant on the VM. The top CPU-consuming queries for the window are attached, ranked by total CPU. SOS_SCHEDULER_YIELD co-elevation on the Wait Stats tab means schedulers are saturated; a CPU spike means the load is bursty rather than steady.",
             Remediation:
-                "Tune the attached top queries — almost always cheaper than buying cores. If parameter sensitivity or a plan regression fired alongside this, they point at the specific cause: a plan cached for one parameter value reused for a worse one, or a plan worse than the same query used to run. For a plan regression, force the historically faster plan as a fast fix while you address why the worse one was chosen.");
+                "Tune the attached top queries — almost always cheaper than buying cores. If parameter sensitivity or a plan regression fired alongside this, they point at the specific cause: a plan cached for one parameter value reused for a worse one, or a plan worse than the same query used to run. If parameter sensitivity fired, do NOT force a plan: it locks in the wrong shape for the other parameter values, so use OPTION (RECOMPILE) on the affected statement or branch the procedure by parameter. For a plan regression alone, compare the compiled parameter values of the two plans first (the ParameterCompiledValue of each parameter in the plan XML), and only when they match force the historically faster plan as a fast fix while you address why the worse one was chosen.");
 
         t["CPU_SPIKE"] = new AdviceBlock(
             Headline:
@@ -2710,7 +2714,7 @@ public static class FactAdvice
             Investigation:
                 "Spikes differ from steady saturation: the box has headroom most of the time but something briefly burns it all. The exact peak time and the sessions active around it are attached. Open the CPU tab and zoom to that timestamp, then cross-check the Wait Stats tab for what waits dominated. A co-fired plan regression, parameter sensitivity, or CXPACKET points at the cause.",
             Remediation:
-                "If a plan regression co-fired, force the historically faster plan as the fast fix. If parameter sensitivity co-fired, do NOT force a plan — that locks in the wrong plan for the other parameter values; use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter value. For an ad-hoc reporting spike matching neither, Resource Governor or moving the report off-peak is the durable fix.");
+                "If parameter sensitivity co-fired, do NOT force a plan — that locks in the wrong plan for the other parameter values; use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter value. If a plan regression co-fired without it, compare the compiled parameter values of the two plans first (the ParameterCompiledValue of each parameter in the plan XML), and only when they match force the historically faster plan as the fast fix. For an ad-hoc reporting spike matching neither, Resource Governor or moving the report off-peak is the durable fix.");
 
         t["RUNNABLE_TASKS"] = new AdviceBlock(
             Headline:
