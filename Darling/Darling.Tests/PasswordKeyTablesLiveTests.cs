@@ -289,10 +289,30 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
     private static ProvisioningTarget TargetFor(bool managed, NpgsqlConnection owner, ScratchPostgres scratch) =>
         managed ? ProvisioningTarget.Managed : ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName);
 
-    private static string ProvisioningBatch(bool managed, NpgsqlConnection owner, ScratchPostgres scratch) =>
-        DarlingManagedRoles.BuildProvisioningSql(
+    private static string ProvisioningBatch(bool managed, NpgsqlConnection owner, ScratchPostgres scratch)
+    {
+        var batch = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
             15, PasswordReassert.All, TargetFor(managed, owner, scratch));
+        if (!managed)
+        {
+            return batch;
+        }
+
+        /* #5618: the managed target names the cluster's shared "darling" database in its three database-level
+           statements (REVOKE ALL ... FROM PUBLIC, and the CONNECT grants to admin, viewer and mcp). Database
+           privileges live in pg_database, which every database in the cluster shares, so running the batch inside a
+           scratch database still took CONNECT away from PUBLIC on "darling" and never gave it back: the next test
+           that opened a connection through PUBLIC's CONNECT failed with 42501. The managed shape stays managed (its
+           owner, its role marker, the PUBLIC revoke), pointed at this test's own database, the way ViewerGrantReplay
+           points its replays. */
+        var shared = "ON DATABASE " + ProvisioningTarget.Managed.DatabaseIdentifier + " ";
+        var scratchDatabase = "ON DATABASE \"" + scratch.DatabaseName.Replace("\"", "\"\"", StringComparison.Ordinal) + "\" ";
+        Assert.Contains("REVOKE ALL " + shared + "FROM PUBLIC;", batch, StringComparison.Ordinal);
+        batch = batch.Replace(shared, scratchDatabase, StringComparison.Ordinal);
+        Assert.DoesNotContain(shared, batch, StringComparison.Ordinal);
+        return batch;
+    }
 
     [Theory]
     [InlineData(true)]
@@ -310,15 +330,18 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
             await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) is true,
             "A cluster-wide admin/viewer/mcp role already exists on this cluster; the provisioning batch would adopt it.");
         Assert.SkipWhen(
-            managed && (OwnerRoleOf(owner) != DarlingManagedPostgres.UserName
-                        || await ScalarAsync(owner, "SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'darling')", ct) is true),
-            "The managed shape names the owner and database 'darling', which this connection does not have.");
+            managed && OwnerRoleOf(owner) != DarlingManagedPostgres.UserName,
+            "The managed shape names the owner 'darling', which this connection is not.");
 
         var bodySucceeded = false;
         try
         {
             await ExecAsync(owner, ProvisioningBatch(managed, owner, scratch), ct);
             await SeedRowsAsync(owner, ct);
+
+            /* #5618: the managed batch's PUBLIC revoke, proven on the scratch database it now names (the compose shape
+               leaves PUBLIC's CONNECT alone). The shared "darling" database is not this test's to change. */
+            Assert.Equal((object)!managed, await ScalarAsync(owner, "SELECT has_database_privilege('public', current_database(), 'CONNECT')", ct));
 
             /* The pin tables are read by the store owner only; the key and service-state tables are readable. */
             foreach (var (role, password) in new[]

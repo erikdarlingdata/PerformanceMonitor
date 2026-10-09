@@ -32,8 +32,13 @@ namespace Darling.Tests;
 /// <see cref="LivePostgresStoreFixture"/> would run its residue check against a store the parallel collections
 /// are still writing. <see cref="PgClusterObjectCensusTests"/> fails when a live class changes a cluster-wide
 /// object under a fixed name and is neither here nor on its allow list.</para>
+///
+/// <para><see cref="PublicConnectGuardAttribute"/> (#5618) runs around every test in it and fails the one that leaves
+/// PUBLIC without CONNECT on the shared test database. The product's managed batch revokes it, the privilege is
+/// cluster-wide, and the tests after the one that did it fail with "permission denied for database".</para>
 /// </summary>
 [CollectionDefinition("pg-cluster-roles", DisableParallelization = true)]
+[PublicConnectGuard]
 public sealed class PgClusterRolesCollection
 {
 }
