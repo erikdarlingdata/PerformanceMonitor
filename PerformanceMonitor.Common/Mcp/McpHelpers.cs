@@ -175,14 +175,31 @@ internal static class McpHelpers
     /// text) reads them back through <see cref="ErrorMessageOf"/>; nothing concatenates a validator's return
     /// any more, because it is no longer text.</para>
     /// </summary>
-    public static string? ValidateHoursBack(int hoursBack)
+    public static string? ValidateHoursBack(int hoursBack) => ValidateHoursBack(hoursBack, MaxHoursBack);
+
+    /// <summary>
+    /// <see cref="ValidateHoursBack(int)"/> against a ceiling the READ declares (#5562): the per-read opt-in by which
+    /// a bucketed trend read accepts a window longer than <see cref="MaxHoursBack"/>. Same two refusals, same envelope,
+    /// same sentences with the ceiling swapped in, so a caller who has seen the 168-hour refusal recognises this one.
+    /// Refuses, never clamps: a window past <paramref name="maxHours"/> is an error, not a quietly shorter question.
+    ///
+    /// <para><see cref="MaxHoursBack"/> itself never moves. A read opts in by passing its own ceiling here (one line
+    /// per read, from the web read-reach table), and every read that does not keeps the 168-hour rule.</para>
+    /// </summary>
+    public static string? ValidateHoursBack(int hoursBack, int maxHours)
     {
         if (hoursBack <= 0)
-            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer (1-{MaxHoursBack}).");
-        if (hoursBack > MaxHoursBack)
-            return Refusal("hours_back", $"hours_back value '{hoursBack}' exceeds maximum of {MaxHoursBack} hours (7 days). Use a smaller value.");
+            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer (1-{maxHours}).");
+        if (hoursBack > maxHours)
+            return Refusal("hours_back", $"hours_back value '{hoursBack}' exceeds maximum of {maxHours} hours{DescribeCeiling(maxHours)}. Use a smaller value.");
         return null;
     }
+
+    /// <summary>The ceiling as days when it is a whole number of them (168 is " (7 days)"), nothing otherwise.</summary>
+    private static string DescribeCeiling(int maxHours) =>
+        maxHours % 24 == 0
+            ? $" ({maxHours / 24} days)"
+            : string.Empty;
 
     /// <summary>
     /// Validates a <c>days_back</c> parameter against the ceiling its tool declares. Returns null if valid, an
@@ -213,11 +230,19 @@ internal static class McpHelpers
     /// <c>hours_back</c> first, exactly as they were before <c>as_of</c> existed. <paramref name="endUtc"/> is
     /// only meaningful when this returns null.</para>
     /// </summary>
-    public static string? ValidateWindow(int hoursBack, string? asOf, out DateTime endUtc)
+    public static string? ValidateWindow(int hoursBack, string? asOf, out DateTime endUtc) =>
+        ValidateWindow(hoursBack, asOf, MaxHoursBack, out endUtc);
+
+    /// <summary>
+    /// <see cref="ValidateWindow(int, string, out DateTime)"/> with the read's own ceiling (#5562): the opt-in a
+    /// bucketed trend read uses to accept a window past <see cref="MaxHoursBack"/>. Lists and rankings stay on the
+    /// 168-hour overload, except <c>get_alert_history</c> (a list, ruling R8), which passes its retention. Refuses, never clamps.
+    /// </summary>
+    public static string? ValidateWindow(int hoursBack, string? asOf, int maxHours, out DateTime endUtc)
     {
         endUtc = DateTime.UtcNow;
 
-        var hoursError = ValidateHoursBack(hoursBack);
+        var hoursError = ValidateHoursBack(hoursBack, maxHours);
         if (hoursError != null)
         {
             return hoursError;

@@ -26,6 +26,7 @@ namespace Lite.Tests;
 /// gates exists to avoid.
 /// </summary>
 [Trait("Reads", "Darling")]
+[Collection("timing")]
 public sealed class DetachedCollectorGateTests
 {
     /// <summary>THE POINT: a second acquirer is refused while the first holds the gate.</summary>

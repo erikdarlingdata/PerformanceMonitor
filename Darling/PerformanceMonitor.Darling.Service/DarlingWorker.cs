@@ -949,7 +949,7 @@ public sealed class DarlingWorker : BackgroundService
     /* #4732: the fleet collection gate's counts over the last hour (slots run, slots skipped, queue waits), the
        cadence the worker reads them on, and when it writes their log line. Nullable because a test that builds a
        worker without running its constructor never sets it, and the recording sites tolerate that. */
-    private readonly FleetGateStats? _fleetGateStats = new(static () => DateTime.UtcNow);
+    private readonly FleetGateStats? _fleetGateStats;
     private readonly FleetGateLogCadence? _fleetGateLog = new();
     private DateTime _nextFleetGateCheckUtc = DateTime.MinValue;
 
@@ -1417,6 +1417,10 @@ LIMIT 1";
         _readLatency = readLatency;
         _launchMemoryGuard = LaunchMemoryGuard.CreateDefault(logger);
 
+        /* #5597: the gate's counts read the floor's monotonic uptime when each slot is recorded, so which slots the alert leaves out
+           is decided then, not by the wall-clock minute they were stamped in. */
+        _fleetGateStats = new FleetGateStats(static () => DateTime.UtcNow, () => _skipCreditFloor.Uptime);
+
         /* #5592: the retention drain's "is collection behind" read, built from the fleet gate's own counts. */
         _collectionPressure = new CollectionPressure(_fleetGateStats);
     }
@@ -1520,6 +1524,12 @@ LIMIT 1";
         /* #5479: the held-slot watermarks, one per collector, while the memory launch guard holds collection off. Read and
            written ONLY by the sweep loop's own thread (CountHeldSlots), so a plain map is enough. */
         public Dictionary<string, HeldSlotMark> HeldSlotMarks { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>#5597: the UTC ticks at which the connect body finished seeding this server's collector due stamps (0 =
+        /// never). The stamps are seeded from a clock read before the body's on-load snapshots, so a slot that came due
+        /// while that body ran could not have run; the slot count starts at this instant
+        /// (<see cref="SkipCreditFloor.Skipped(DateTime, DateTime, TimeSpan, DateTime)"/>).</summary>
+        public long SeedFinishedTicks;
 
         private ServerClockStamp _clock = ServerClockStamp.Utc;
 
@@ -2398,7 +2408,7 @@ LIMIT 1";
     /// Pure and static, the <see cref="BuildWebTlsCertReport"/> precedent, so the mapping pins in a unit test.
     /// </summary>
     internal static DarlingSelfAlertEvaluator.FleetGateReport BuildFleetGateReport(
-        FleetGateSnapshot snapshot, int gateWidth, DateTime nowUtc)
+        FleetGateSnapshot snapshot, int gateWidth, DateTime nowUtc, int judgedMinutes = FleetGateStats.WindowMinutes)
         => new(
             Run: snapshot.Run,
             Skipped: snapshot.Skipped,
@@ -2406,7 +2416,29 @@ LIMIT 1";
             QueueWaitTotal: snapshot.QueueWaitTotal,
             QueueWaitMax: snapshot.QueueWaitMax,
             GateWidth: gateWidth,
-            WindowEndUtc: nowUtc);
+            WindowEndUtc: nowUtc,
+            JudgedMinutes: judgedMinutes);
+
+    /// <summary>#5597: whether the hourly line is a Warning ("Collection is falling behind"): the alert is standing, or the window the
+    /// alert judges meets its fire threshold. The alert's own judgment (<see cref="DarlingSelfAlertEvaluator.FleetGateReport.IsBehind"/>
+    /// leaves out the minutes right after a start), never the raw counts of the full hour the line prints.</summary>
+    internal static bool FleetGateLogIsBehind(bool alertStanding, DarlingSelfAlertEvaluator.FleetGateReport report) =>
+        alertStanding || report.IsBehind;
+
+    /// <summary>
+    /// #5597: reads the fleet gate twice: the full last hour (what the hourly log line reports, truthfully), and the counts the
+    /// "Collection Falling Behind" alert judges, which leave out the slots recorded in the first
+    /// <see cref="DarlingSelfAlertEvaluator.FleetGateStartupMinutes"/> minutes after the service started (<paramref name="uptime"/>,
+    /// <see cref="SkipCreditFloor.Uptime"/>; a start, never a stall, a pause or a launch-guard release). The one place that decides,
+    /// so the alert and the Warning level of the line cannot disagree.
+    /// </summary>
+    internal static (FleetGateSnapshot Full, DarlingSelfAlertEvaluator.FleetGateReport Report) ReadFleetGate(
+        FleetGateStats stats, TimeSpan? uptime, int gateWidth, DateTime nowUtc)
+    {
+        var full = stats.Snapshot();
+        var judgedMinutes = DarlingSelfAlertEvaluator.FleetGateJudgedMinutes(uptime);
+        return (full, BuildFleetGateReport(stats.SnapshotJudged(), gateWidth, nowUtc, judgedMinutes));
+    }
 
     /// <summary>
     /// #4732: reads the fleet gate's last-hour counts, hands them to the "Collection Falling Behind" self-alert, and
@@ -2423,19 +2455,18 @@ LIMIT 1";
         }
 
         var now = DateTime.UtcNow;
-        var snapshot = _fleetGateStats.Snapshot();
-        var report = BuildFleetGateReport(snapshot, EffectiveSweepWidth, now);
+        var (snapshot, report) = ReadFleetGate(_fleetGateStats, _skipCreditFloor.Uptime, EffectiveSweepWidth, now);
 
         var standing = _selfAlerts is not null
             && await _selfAlerts.EvaluateFleetGateAsync(report, cancellationToken);
-        var behind = standing || report.IsBehind;
+        var behind = FleetGateLogIsBehind(standing, report);
 
         if (!_fleetGateLog.ShouldLog(behind, now))
         {
             return;
         }
 
-        var line = FleetGateLine.Describe(snapshot, report.GateWidth);
+        var line = FleetGateLine.Describe(snapshot, report.GateWidth, FleetGateLine.SpanMinutes(_skipCreditFloor.Uptime));
         if (behind)
         {
             _logger.LogWarning("Collection is falling behind: {Line}", line);
@@ -4054,6 +4085,13 @@ LIMIT 1";
         if (_selfAlertPass is { IsCompleted: false })
         {
             inFlightSweeps.Add(_selfAlertPass);
+        }
+
+        /* #5574: the perfmon_stats re-group loop ends on the same cancellation; its chunk in flight rolls back or is left
+           for the compression policy, and the loop never faults. */
+        if (_perfmonRegroupDrain?.Completion is { IsCompleted: false } regroupRun)
+        {
+            inFlightSweeps.Add(regroupRun);
         }
 
         /* #4938: the daily runs detached from those bodies join the wait inside DrainInFlightAsync. */
@@ -10105,6 +10143,19 @@ AND   j.hypertable_name = '{relation}'", connection))
                 await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token, hourly: true);
             }
 
+            /* #5574: the perfmon_stats chunk re-group, AFTER the whole list because the "compression policies" step is what
+               moves the hypertable to the new grouping first (the re-group does nothing until it has). It is a background
+               loop on its own connection and the service's stopping token, not a step: the rewrite of a large store's chunk
+               takes minutes, and a step would hold this pass (and the sweep loop that awaits it) for them. Starting it costs
+               nothing here (no database work, and nothing when a run is already going); a converged store's run is two
+               catalog reads and it ends. Hourly pass only: the start path does not call it, so a restart is not held; the
+               first hourly pass, about 30 s after a start (its stamp seeds at MinValue, #3812/#3817), starts it, and
+               every hourly pass after. TimescaleDB-gated like the steps that need it. */
+            if (timescaleAvailable)
+            {
+                StartPerfmonRegroupDrain(cancellationToken);
+            }
+
             LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -10123,6 +10174,16 @@ AND   j.hypertable_name = '{relation}'", connection))
                 "Store object convergence could not run after {ElapsedMs} ms — every store object stays exactly as it is (a missing rollup family stays missing, a missing baseline relation keeps returning nothing) until the next hour retries or the service restarts: {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
         }
+    }
+
+    /// <summary>The perfmon_stats chunk re-group loop (#5574); null until the first hourly pass on a store with TimescaleDB.</summary>
+    private PerfmonRegroupDrain? _perfmonRegroupDrain;
+
+    /// <summary>Starts the re-group loop unless one is running. Never throws and does no database work on this thread.</summary>
+    private void StartPerfmonRegroupDrain(CancellationToken stoppingToken)
+    {
+        _perfmonRegroupDrain ??= new PerfmonRegroupDrain(token => _postgres!.OpenConnectionAsync(token), _logger);
+        _perfmonRegroupDrain.StartIfIdle(stoppingToken);
     }
 
     /// <summary>
@@ -11665,6 +11726,13 @@ AND   j.hypertable_name = '{relation}'", connection))
             await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
         }
 
+        /* #5582: the ninth tenant, same contract - its own method, its own catch-all, one awaited statement. The exact stamp-grain
+           rollup of the wide Query Store table (V173) needs no TimescaleDB (its tables are plain and the wide table is a plain
+           partitioned table), so it sits outside the gate and runs on every store shape. It sits BEFORE the I/O rollup, not
+           after it: the pins keep the I/O rollup directly before the module-map refresh and the PLAN_REGRESSION builder, which
+           can run up to a 10-minute tick, as the last await. At most six hours a tick, so a fault or a slow build skips nothing. */
+        await BuildQueryStoreComposeStampAsync(stoppingToken);
+
         /* #5495: the eighth tenant, same contract — its own method, its own catch-all, one awaited statement. The hourly
            PostgreSQL I/O rollup needs no TimescaleDB (its tables are plain), so it sits outside the gate and runs on every
            store shape. It sits BEFORE the module-map refresh and the PLAN_REGRESSION builder, not after them: the pins keep
@@ -11736,6 +11804,25 @@ AND   j.hypertable_name = '{relation}'", connection))
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("PLAN_REGRESSION daily totals could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's ninth tenant (#5582): builds the exact stamp-grain rollup of the wide Query Store table that
+    /// the Query Store panels of the composer read for the hours before the last three, one failure-isolated pass (see
+    /// <see cref="QueryStoreComposeStamp.RunTickAsync(Npgsql.NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/>). At most
+    /// <see cref="QueryStoreComposeStamp.MaxBuildsPerTick"/> hours per tick, stale hours first. Its own catch-all: nothing here can fail the tick.
+    /// </summary>
+    private async Task BuildQueryStoreComposeStampAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await QueryStoreComposeStamp.RunTickAsync(
+                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Query Store compose rollup could not run; the next hourly tick retries: {Message}", ex.Message);
         }
     }
 
@@ -12649,6 +12736,11 @@ AND   j.hypertable_name = '{relation}'", connection))
                 }
             }
 
+            /* #5597: every due stamp above was seeded from the clock read before the on-load runs, and this body is the
+               server's only body, so a slot that came due while it ran could not have run. Slots count as skipped from
+               here on (RunDueCollectorsAsync). The stamps themselves are not moved: when the first rows land is unchanged. */
+            Interlocked.Exchange(ref server.SeedFinishedTicks, DateTime.UtcNow.Ticks);
+
             /* Phase the first scheduled analysis over a SMALL fixed sub-2.5-minute window (#1553 jitter site 3):
                at a fleet restart every freshly connected server would otherwise become analysis-due in the same
                sweep, and with N=4 concurrency that clusters 4 analysis passes at once. A deterministic per-server
@@ -12981,7 +13073,8 @@ AND   j.hypertable_name = '{relation}'", connection))
                        clock that stepped forward or a pause leaves this stamp hours old, and none of those slots was
                        skipped by a gate that was too narrow. A body that starts late because the gate was full, while the
                        loop keeps ticking, still counts them all. */
-                    _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));
+                    var seeded = new DateTime(SkipCreditFloor.ClampSeedStamp(ref server.SeedFinishedTicks, now), DateTimeKind.Utc);
+                    _fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));
                     server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
                 }
 

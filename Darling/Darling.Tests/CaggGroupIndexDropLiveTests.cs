@@ -318,6 +318,18 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < QueryStoreComposeStamp.RungVersion)
+        {
+            /* V173 (#5582) - the stamp-grain rollup of the wide Query Store table, its validity tables and the two late-row triggers on the
+               wide parent; the hours table is the probe's sentinel. The triggers go first: the V171 rewind below renames the table they sit on. */
+            await using var dropStamp = new NpgsqlCommand(
+                "DROP TRIGGER IF EXISTS trg_query_store_compose_stamp_late_ins ON collect.query_store_interval_wide;"
+                + " DROP TRIGGER IF EXISTS trg_query_store_compose_stamp_late_upd ON collect.query_store_interval_wide;"
+                + " DROP TABLE IF EXISTS collect.query_store_compose_stamp_hours, collect.query_store_compose_stamp_built, collect.query_store_compose_stamp;"
+                + " DROP FUNCTION IF EXISTS collect.query_store_compose_stamp_mark_late();", connection);
+            await dropStamp.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < QueryStoreIntervalPartitionRungTests.LatestRungVersion)
         {
             /* V172 (#5571) - the latest Query Store interval table is partitioned; its relkind is the probe's sentinel. */

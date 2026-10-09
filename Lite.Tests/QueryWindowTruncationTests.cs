@@ -543,7 +543,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     {
         var effectiveStart = new DateTime(2026, 1, 15, 8, 30, 0, DateTimeKind.Unspecified);
 
-        var (visibility, text) = OnStaThread(() =>
+        var (visibility, text) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.SetWindowTruncatedBanner(banner, truncated: true, effectiveStart, TimeZoneInfo.Utc);
@@ -567,7 +567,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
         var eastern = ServerClock.Resolve("Eastern Standard Time", -300).AsTimeZone();
 
-        string BannerText(DateTime instant, TimeZoneInfo zone) => OnStaThread(() =>
+        string BannerText(DateTime instant, TimeZoneInfo zone) => StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.SetWindowTruncatedBanner(banner, truncated: true, instant, zone);
@@ -590,7 +590,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public void SetWindowTruncatedBanner_NotTruncated_HidesBanner()
     {
-        var (visibility, text) = OnStaThread(() =>
+        var (visibility, text) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock
             {
@@ -603,29 +603,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         Assert.Equal(System.Windows.Visibility.Collapsed, visibility);
         Assert.Equal(string.Empty, text);
-    }
-
-    /// <summary>WPF objects require STA; same shape as MainWindowAccessKeyTests/ThemeColorOverrideTests.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
     }
 
     /// <summary>

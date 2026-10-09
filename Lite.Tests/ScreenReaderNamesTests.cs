@@ -32,27 +32,6 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Reads", "Darling")]
 public class ScreenReaderNamesTests
 {
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
-
     private static string RepoRoot([CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, ".."));
 
@@ -84,7 +63,7 @@ public class ScreenReaderNamesTests
     [Fact]
     public void AGridsPanelHeaders_FilterButtons_AndBlankCells_AreNamedInTheAutomationTree()
     {
-        var names = OnStaThread(() =>
+        var names = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var grid = new DataGrid { AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column };
@@ -117,7 +96,7 @@ public class ScreenReaderNamesTests
     [Fact]
     public void ABlankCell_LosesItsBlankName_WhenItsTextFillsIn()
     {
-        var (blank, filled) = OnStaThread(() =>
+        var (blank, filled) = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var grid = new DataGrid { AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column };
@@ -162,7 +141,7 @@ public class ScreenReaderNamesTests
         Assert.Equal("example-sql-02 (Read-Only)", readOnly.ToString());
         Assert.Equal("example-sql-03", card.ToString());
 
-        var itemNames = OnStaThread(() =>
+        var itemNames = StaTestThread.Run(() =>
         {
             /* A closed ComboBox builds no item peers: its drop-down list is a ListBox, which names its items the same way. */
             var combo = new ListBox { ItemsSource = new[] { server, readOnly } };

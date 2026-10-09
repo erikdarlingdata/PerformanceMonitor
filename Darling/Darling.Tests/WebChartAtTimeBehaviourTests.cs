@@ -247,6 +247,17 @@ public sealed class WebChartAtTimeBehaviourTests
         Assert.Equal(UsualItems, Strings(r.GetProperty("offPlotMenuItems")));
     }
 
+    /// <summary>A chart drawn at a measured width (1,600 px, off the 1,000 px default, #5586) maps a right-click to the same
+    /// time, and the wait item still names the series drawn nearest the click.</summary>
+    [Fact]
+    public void AChartDrawnAtAMeasuredWidth_MapsTheRightClickToTheSameTimeAndSeries()
+    {
+        var r = Run();
+        Assert.Equal(1600, r.GetProperty("measuredWidth").GetDouble());
+        Assert.Equal(ClickedMs, r.GetProperty("measuredMiddle").GetInt64());
+        Assert.Contains("Show Queries With WAIT_A at This Time", Strings(r.GetProperty("measuredWaitItems")));
+    }
+
     [Fact]
     public void AMenuHeldOpenAcrossTheMinutePollRebuild_KeepsItsClickedTime()
     {

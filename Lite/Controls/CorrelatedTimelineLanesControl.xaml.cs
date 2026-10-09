@@ -381,6 +381,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         }
     }
 
+    /// <summary>Raised with the data start the blocking lane's note chose (#5562 R7), so the tab's picker can name it. Null when the note found none.</summary>
+    internal event Action<DateTime?>? DataStartFound;
+
     /// <summary>
     /// Raises or hides the blocking chart's "Showing since" note (#4966). The chart's two series, blocking and deadlocks, are
     /// event counts: an empty stretch before a series starts reads as "nothing happened". A window of 90 minutes or less
@@ -401,7 +404,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             {
                 var (on, first, zero) = await _dataService!.GetBlockedProcessThresholdOnAsync(_serverId, startUtc, endUtc);
                 return new LiteBlockingLaneDataStart.BlockedProcessThreshold(on, first, zero);
-            }));
+            }),
+            onStartChosen: start => DataStartFound?.Invoke(start));
     }
 
     private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,

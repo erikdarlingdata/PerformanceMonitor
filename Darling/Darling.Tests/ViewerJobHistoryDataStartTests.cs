@@ -117,11 +117,14 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
     {
         var load = MethodBody(ViewerFile("JobHistoryTab.xaml.cs"), @"private async Task LoadJobsAsync\(");
 
-        Assert.Equal(1, Matches(load, @"var nowUtc = DateTime\.UtcNow;"));
-        Assert.Equal(1, Matches(load, @"var sinceUtc = nowUtc\.AddHours\(-hoursBack\);"));
+        /* #5562: the window comes from the picker once; its start and end are the ones the read and the probe take. */
+        Assert.Equal(1, Matches(load, @"var nowUtc = windowEndUtc;"));
+        Assert.Equal(1, Matches(load, @"var sinceUtc = windowStartUtc;"));
+        Assert.Equal(1, Matches(load, @"ViewerTimeRangeWindow\.Window\("));
         Assert.Equal(0, Matches(load, @"DateTime\.UtcNow\.AddHours"));
         Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetJobHistoryDataStartAsync\(serverId,\s*sinceUtc,\s*nowUtc\);"));
-        Assert.Equal(1, Matches(load, @"var readTask = _dataService\.GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap\)"));
+        /* #5562 R6: a finished range hands its end to the read, so the end bound lands before the row cap. */
+        Assert.Equal(1, Matches(load, @"var readTask = _dataService\.GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap,\s*untilUtc:\s*windowIsLive \? null : windowEndUtc\)"));
         /* The probe starts beside the read, not after it. */
         Assert.True(
             load.IndexOf("GetJobHistoryDataStartAsync(", StringComparison.Ordinal) < load.IndexOf("var readTask = _dataService.GetJobHistoryAsync(", StringComparison.Ordinal),
@@ -195,7 +198,7 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
     private static string? BannerFor(Task<DateTime?> probe, IEnumerable<DateTime?> runTimes, DateTime? startUtc = null)
     {
         string? text = null;
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
@@ -279,22 +282,4 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(3), [null, At(4)]));
     }
 
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

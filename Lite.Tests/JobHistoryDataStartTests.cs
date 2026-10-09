@@ -198,7 +198,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
     private static string? BannerText(
         Func<Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc, IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc)
     {
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock { Visibility = System.Windows.Visibility.Visible, Text = "stale" };
             JobHistoryTab.ShowJobHistoryDataStartAsync(banner, probe, startUtc, endUtc, read, zone, inUtc).GetAwaiter().GetResult();
@@ -217,7 +217,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         Assert.Equal(2000, JobHistoryTab.RowCap);
 
         var tab = StripComments(File.ReadAllText(RepoFile("Lite", "Controls", "JobHistoryTab.xaml.cs")).Replace("\r\n", "\n"));
-        Assert.Single(Regex.Matches(tab, @"GetJobHistoryWithClocksAsync\(startUtc, RowCap, serverId, openTabClocks\)"));
+        Assert.Single(Regex.Matches(tab, @"GetJobHistoryWithClocksAsync\(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc\)"));
         Assert.Single(Regex.Matches(tab, @"ServerTab\.CappedGridBannerAsync\(runTimes, RowCap,"));
     }
 
@@ -412,7 +412,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
     [Fact]
     public void ASupersededLoad_WritesNoNote()
     {
-        var note = OnStaThread(() =>
+        var note = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock { Visibility = System.Windows.Visibility.Collapsed, Text = "newer" };
             JobHistoryTab.ShowJobHistoryDataStartAsync(
@@ -560,10 +560,10 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         var load = LoadJobsBody(tab);
 
         Assert.Single(Regex.Matches(load, @"var nowUtc = DateTime\.UtcNow;"));
-        Assert.Single(Regex.Matches(load, @"var startUtc = nowUtc\.AddHours\(-hoursBack\);"));
+        Assert.Single(Regex.Matches(load, @"var \(startUtc, rangeEndUtc\) = LiteTimeRange\.BoundsOf\(RangePicker, 24, nowUtc\);"));
         Assert.Empty(Regex.Matches(load, @"DateTime\.UtcNow\.AddHours"));
-        Assert.Single(Regex.Matches(load, @"_dataService\.GetJobHistoryWithClocksAsync\(startUtc,\s*RowCap,\s*serverId,\s*openTabClocks\)"));
-        Assert.Single(Regex.Matches(load, @"ShowDataStartNoteAsync\(serverId,\s*readClocks,\s*startUtc,\s*nowUtc,\s*all,\s*gen\)"));
+        Assert.Single(Regex.Matches(load, @"_dataService\.GetJobHistoryWithClocksAsync\(startUtc,\s*RowCap,\s*serverId,\s*openTabClocks,\s*rangeEndUtc\)"));
+        Assert.Single(Regex.Matches(load, @"ShowDataStartNoteAsync\(serverId,\s*readClocks,\s*startUtc,\s*rangeEndUtc \?\? nowUtc,\s*all,\s*gen\)"));
         Assert.Single(Regex.Matches(tab, @"service\.GetJobHistoryDataStartAsync\(serverId,\s*startUtc,\s*endUtc\)"));
         Assert.Single(Regex.Matches(tab, @"var openTabClocks = _openTabClocks\?\.Invoke\(\);"));
     }
@@ -634,26 +634,4 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
     private static string RepoFile(string folder, string subFolderOrFile, string? file = null, [CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", folder, subFolderOrFile, file ?? string.Empty));
 
-    /// <summary>WPF objects require STA, and a probe answer that has already completed keeps the continuation on this thread.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 }

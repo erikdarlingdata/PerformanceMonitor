@@ -88,6 +88,13 @@ public static class ServerTimeHelper
     };
 
     /// <summary>
+    /// The zone the process-wide display mode shows times in now (#5562): UTC, this machine's zone, or the active server's clock.
+    /// The History tabs and the FinOps pickers read typed times and calendar periods in it, so a picker's "Yesterday" and the
+    /// times the grid prints beside it are the same wall clock. The Viewer's twin is <c>ViewerTimeHelper.CurrentDisplayZone</c>.
+    /// </summary>
+    internal static TimeZoneInfo CurrentDisplayZone => DisplayZoneFor(CurrentDisplayMode, _serverClock);
+
+    /// <summary>
     /// The zone a time is shown in for <paramref name="mode"/> (#4766): UTC, this machine's zone, or the server's own
     /// clock (<paramref name="clock"/>: its time zone where one was collected, else its fixed offset). Pure, so a
     /// caller that holds its own server's clock (a server tab that is not the selected one, an alert row) names it

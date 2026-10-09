@@ -80,6 +80,16 @@ public sealed class WebChartZoomBehaviourTests
         Assert.NotEqual(Labels(r.GetProperty("before")), Labels(zoomed));
     }
 
+    /// <summary>The same brush on a chart drawn at a measured width (1,600 px, off the 1,000 px default, #5586) holds the
+    /// same minutes.</summary>
+    [Fact]
+    public void ABrushOnAChartDrawnAtAMeasuredWidth_HoldsTheSameSpan()
+    {
+        var z = Run().GetProperty("measuredZoom");
+        Assert.InRange(z.GetProperty("from").GetDouble(), 19.9, 20.1);
+        Assert.InRange(z.GetProperty("to").GetDouble(), 39.9, 40.1);
+    }
+
     [Fact]
     public void Reset_RestoresTheFullDomain_AndClearsTheHeldZoom()
     {

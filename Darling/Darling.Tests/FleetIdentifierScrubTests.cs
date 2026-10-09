@@ -80,6 +80,8 @@ public sealed class FleetIdentifierScrubTests
     private static readonly HashSet<string> OrdinalRoleWords = new(StringComparer.OrdinalIgnoreCase)
     {
         "prod", "dev", "local", "sql", "aurora", "srv", "box", "web", "target", "bench", "gone",
+        // A zone offset in the time range picker's label and tests ("UTC-04:00", #5562): a clock offset, never a tenant.
+        "utc",
     };
 
     /*

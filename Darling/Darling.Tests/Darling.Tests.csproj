@@ -15,6 +15,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- #5596: WPF builds one WeakEventTable per STA thread that touches a WeakEventManager, and each table
+         registers a ProcessExit handler. At exit that handler runs on the main thread, and when the table's
+         own thread is gone it asks the dead dispatcher to purge the table with a 300 ms timeout nobody ever
+         answers: about 0.3 seconds per STA test thread, spent after the run has returned. About fifty test files
+         start their own STA thread, so the exit stage grew past the 11 seconds xUnit v3 gives a process after the
+         run returns, and the runner printed "Foreground threads were left running" with exit code 1 and 0 failed
+         tests. This WPF switch (WindowsBase, BaseAppContextSwitches) makes the handler purge the table directly.
+         WpfExitSwitchTests pins that the switch is set, and that the runtime still knows its name. -->
+    <RuntimeHostConfigurationOption Include="Switch.MS.Internal.DoNotInvokeInWeakEventTableShutdownListener" Value="true" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="xunit.v3" />
     <!-- #4128: a live HTTP proof of the web host's gates (Host-allowlist, network-mode token/CIDR) through
          a real Kestrel TestServer pipeline, rather than the source-order pins above. -->
@@ -50,6 +62,8 @@
   <ItemGroup>
     <!-- system_health event samples for SystemHealthParser (one per feeder event; shapes per sp_HealthParser xpath). -->
     <None Include="Fixtures\FinOpsIndexAnalysis\golden.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The shared time range grammar cases (#5562); the web harness reads the same file. -->
+    <None Include="Fixtures\time-range-cases.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- real, scrubbed system_health event captures for SystemHealthParserRealEventTests -->
     <None Include="Fixtures\SystemHealth\real\*.xml" CopyToOutputDirectory="PreserveNewest" />

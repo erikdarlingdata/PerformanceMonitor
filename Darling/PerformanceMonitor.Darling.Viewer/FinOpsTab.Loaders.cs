@@ -377,13 +377,22 @@ public partial class FinOpsTab
         empty.Width = new GridLength(Math.Max(100 - clamped, 0.1), GridUnitType.Star);
     }
 
-    private static int HoursBackFromIndex(ComboBox combo) => combo.SelectedIndex switch { 0 => 1, 1 => 4, 2 => 12, 3 => 24, 4 => 168, _ => 24 };
+    /// <summary>The hours-back a FinOps list reads for its picker (#5562 R5). These reads take "hours back from now", so the
+    /// pickers are rolling-only in whole hours (<see cref="RollingUnitRule"/>): the span is the hours back, exactly. The
+    /// round-up in <see cref="ViewerTimeRangeWindow.HoursBack"/> is only a guard; the picker never offers a finished period
+    /// or a span under an hour.</summary>
+    private static int HoursBackFromPicker(TimeRangePicker picker)
+    {
+        var now = DateTime.UtcNow;
+        var (startUtc, _, _) = ViewerTimeRangeWindow.Window(picker.Value, now, ViewerTimeHelper.CurrentDisplayZone());
+        return ViewerTimeRangeWindow.HoursBack(startUtc, now);
+    }
 
     // ── Database Resources ──
 
     private async Task LoadFinOpsDatabaseResourcesAsync()
     {
-        var hoursBack = HoursBackFromIndex(FinOpsResourceUsageTimeRangeCombo);
+        var hoursBack = HoursBackFromPicker(FinOpsResourceUsageTimeRangeCombo);
         var data = await _dataService.GetDatabaseResourceUsageAsync(_server.ServerId, hoursBack);
         _finopsDbResourcesFilterMgr!.UpdateData(data);
         FinOpsNoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -487,7 +496,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsHighImpactAsync()
     {
-        var hoursBack = HoursBackFromIndex(FinOpsHighImpactTimeRangeCombo);
+        var hoursBack = HoursBackFromPicker(FinOpsHighImpactTimeRangeCombo);
         var data = await _dataService.GetHighImpactQueriesAsync(_server.ServerId, hoursBack);
         _finopsHighImpactFilterMgr!.UpdateData(data);
         FinOpsHighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -526,7 +535,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsWaitCategorySummaryAsync()
     {
-        var hoursBack = HoursBackFromIndex(FinOpsWaitStatsTimeRangeCombo);
+        var hoursBack = HoursBackFromPicker(FinOpsWaitStatsTimeRangeCombo);
         var data = await _dataService.GetWaitCategorySummaryAsync(_server.ServerId, hoursBack);
 
         /* Proportional cost share scaled to the window (mirrors Lite: the monthly budget scaled by the window hours). */
@@ -547,7 +556,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsExpensiveQueriesAsync()
     {
-        var hoursBack = HoursBackFromIndex(FinOpsExpensiveQueriesTimeRangeCombo);
+        var hoursBack = HoursBackFromPicker(FinOpsExpensiveQueriesTimeRangeCombo);
         var data = await _dataService.GetExpensiveQueriesAsync(_server.ServerId, hoursBack);
 
         /* Proportional cost share scaled to the window (mirrors Lite: the monthly budget scaled by the window hours). */
@@ -643,25 +652,25 @@ public partial class FinOpsTab
     }
     private async void FinOpsOptimizationRefresh_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsOptimizationAsync);
 
-    private async void FinOpsResourceUsageTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsResourceUsageTimeRange_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         await RunFinOpsLoad(LoadFinOpsDatabaseResourcesAsync);
     }
 
-    private async void FinOpsWaitStatsTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsWaitStatsTimeRange_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         await RunFinOpsLoad(LoadFinOpsWaitCategorySummaryAsync);
     }
 
-    private async void FinOpsExpensiveQueriesTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsExpensiveQueriesTimeRange_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         await RunFinOpsLoad(LoadFinOpsExpensiveQueriesAsync);
     }
 
-    private async void FinOpsHighImpactTimeRange_Changed(object sender, SelectionChangedEventArgs e)
+    private async void FinOpsHighImpactTimeRange_Changed(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded) return;
         await RunFinOpsLoad(LoadFinOpsHighImpactAsync);

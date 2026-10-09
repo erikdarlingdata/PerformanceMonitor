@@ -652,7 +652,7 @@ public sealed class ProvisioningSerializationTests
 /// scratch store: it must apply in full inside one explicit transaction (nothing in it may need to run outside one), and
 /// it must be re-runnable, since a second service re-runs it right after the first.
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class ProvisioningBatchLockedTransactionLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

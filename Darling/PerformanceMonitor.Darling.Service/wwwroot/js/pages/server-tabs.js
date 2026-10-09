@@ -50,6 +50,7 @@ import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
+import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -2893,6 +2894,11 @@ export const POSTGRES_TABS = [
     ],
   },
 ];
+
+/* Each tab's `reachReads` and `collector`, from server-tab-reach.js (#5562 r3): kept apart so a pin that counts a tab's fetches or
+   reads its neighbouring fields as text never sees a reach list. The tab objects carry both at run time. */
+withTabReach(SERVER_TABS, SQL_TAB_REACH);
+withTabReach(POSTGRES_TABS, POSTGRES_TAB_REACH);
 
 /**
  * The tab registry for a fleet card — the ONE place the engine branch lives.

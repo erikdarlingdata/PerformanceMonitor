@@ -53,7 +53,7 @@ public sealed class ServerTabToolbarAndTooltipsTests
     {
         var expected = new Dictionary<string, string>
         {
-            ["TimeRangeCombo"] = "Time range",
+            ["RangePicker"] = "Time range",
             ["CompareToCombo"] = "Compare to",
             ["AutoRefreshIntervalCombo"] = "Auto-refresh interval",
             ["TimeDisplayModeBox"] = "Time display",
@@ -155,27 +155,6 @@ public sealed class ServerTabToolbarAndTooltipsTests
         }
     }
 
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
-        }
-
-        return result;
-    }
-
     private static PlanNode Scan() => new()
     {
         PhysicalOp = "Clustered Index Scan",
@@ -193,7 +172,7 @@ public sealed class ServerTabToolbarAndTooltipsTests
     {
         var node = Scan();
 
-        var (name, help, isControl) = OnStaThread(() =>
+        var (name, help, isControl) = StaTestThread.Run(() =>
         {
             var box = new PlanNodeBorder();
             System.Windows.Automation.AutomationProperties.SetName(box, PlanNodeBorder.OperatorName(node));

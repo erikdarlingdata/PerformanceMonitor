@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// CREATE that is issued must be bounded by a lock_timeout. Own scratch database per test.
 /// </summary>
 /* #1776 own-store: each live fact mints its own scratch database through ScratchPostgres. */
+[Collection("timing")]
 public sealed class TuningHourlyCreateLiveTests
 {
     private static readonly string[] TunedIndexes =

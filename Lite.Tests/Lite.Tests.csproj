@@ -28,6 +28,15 @@
          fails, with the same message, rather than hanging the suite. The shipped app declares nothing
          here and keeps LocalDataService.DefaultWriteLockBudget. -->
     <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="120" />
+    <!-- #5596: WPF builds one WeakEventTable per STA thread that touches a WeakEventManager, and each table
+         registers a ProcessExit handler. At exit that handler runs on the main thread, and when the table's
+         own thread is gone it asks the dead dispatcher to purge the table with a 300 ms timeout nobody ever
+         answers: about 0.3 seconds per STA test thread, spent after the run has returned. About fifty test files
+         start their own STA thread, so the exit stage grew past the 11 seconds xUnit v3 gives a process after the
+         run returns, and the runner printed "Foreground threads were left running" with exit code 1 and 0 failed
+         tests. This WPF switch (WindowsBase, BaseAppContextSwitches) makes the handler purge the table directly.
+         WpfExitSwitchTests pins that the switch is set, and that the runtime still knows its name. -->
+    <RuntimeHostConfigurationOption Include="Switch.MS.Internal.DoNotInvokeInWeakEventTableShutdownListener" Value="true" />
   </ItemGroup>
 
   <ItemGroup>
@@ -50,8 +59,12 @@
     <Compile Include="..\Darling\Darling.Tests\StatementScrubCanary.cs" Link="StatementScrubCanary.cs" />
     <!-- #5459: the guard-stage scanner, so both suites tag their guard classes by one detector. -->
     <Compile Include="..\Darling\Darling.Tests\GuardStageScanner.cs" Link="GuardStageScanner.cs" />
-    <!-- #5559: the one gate every STA test helper takes, so no two test classes touch WPF's shared descriptor caches at once. -->
-    <Compile Include="..\Darling\Darling.Tests\WpfStaGate.cs" Link="WpfStaGate.cs" />
+    <!-- #5602 (was #5559's WpfStaGate): the one shared STA thread every WPF test body runs on, and the gate that keeps one body in at a time. -->
+    <Compile Include="..\Darling\Darling.Tests\StaTestThread.cs" Link="StaTestThread.cs" />
+    <!-- #5602: the timing scanner, so both suites keep a clock-starting class in the one `timing` collection by one detector. -->
+    <Compile Include="..\Darling\Darling.Tests\TimingTestScanner.cs" Link="TimingTestScanner.cs" />
+    <!-- #5596: the test that proves this process runs with the WPF exit switch on (the switch itself is declared above), so both suites check their own process. -->
+    <Compile Include="..\Darling\Darling.Tests\WpfExitSwitchTests.cs" Link="WpfExitSwitchTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

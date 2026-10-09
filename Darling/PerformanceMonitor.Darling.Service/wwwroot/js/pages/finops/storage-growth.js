@@ -15,6 +15,7 @@
 import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat, relTime, localTime } from "../../util.js";
 import { gatedEmptyStrip, gatedSections } from "./gate.js";
+import { finopsWindowControl } from "./window.js";
 
 const HOURS = 24;
 const OBJECT_LIMIT = 20;
@@ -22,12 +23,11 @@ const OBJECT_LIMIT = 20;
 // Database Sizes tab asks for its 500 files; the service's own default is the top 50 by 30-day growth.
 const DATABASE_LIMIT = 500;
 
-// The objects window, in days: the desktop's 7 / 30 / 90 picker. The service reads it as hours_back (days * 24); 30 days is its default.
-const WINDOWS = [
-  { value: 7, label: "Last 7 days" },
-  { value: 30, label: "Last 30 days" },
-  { value: 90, label: "Last 90 days" },
-];
+// The objects window, in whole days (the heatmap has one column per day). The service reads it as hours_back (days * 24) and takes up to
+// 2160 hours for this view (DarlingMcpFinOpsTools.MaxStorageGrowthHoursBack), though the get_finops catalog entry says 168 for its
+// other views. The catalog serves this view's own reach as `view_max_hours.storage_growth` (WebReadReach.ViewMaxHours, #5562 L4b), the
+// number the server validates, and the picker reads it from there. 30 days is the default.
+const DAY_MS = 86400000;
 const DEFAULT_DAYS = 30;
 
 // The drill per server: { level, database, object, days }. It lives at module scope because the page's 60 s poll calls build()
@@ -192,17 +192,20 @@ export const tab = {
 
     // The window picker (objects level only); the choice is kept in the drill, so the 60 s rebuild does not put it back to 30 days.
     function windowPicker() {
-      const sel = el(
-        "select",
-        { class: "range-select-inline", "aria-label": "Window" },
-        WINDOWS.map((w) => el("option", { value: w.value, text: w.label }))
-      );
-      sel.value = String(state.days);
-      sel.addEventListener("change", () => {
-        state.days = Number(sel.value);
-        load();
-      });
-      return el("label", { class: "range-control" }, [el("span", { text: "Window" }), sel]);
+      return finopsWindowControl({
+        hours: state.days * 24,
+        view: "storage_growth",
+        /* The page always offered 7 / 30 / 90 days as one click each; the view's reach is the 90 (#5562 review r2 L3). */
+        offerReach: true,
+        /* The server reads hours_back = 24 as its 30-day default and refuses 2 to 6 days (DarlingMcpFinOpsTools.StorageGrowthWindowDaysFor), so the
+           shortest length the picker offers is a week (#5562 review r1 H1). */
+        minSpanMs: 7 * DAY_MS,
+        stepMs: DAY_MS,
+        onChange: (hours) => {
+          state.days = hours / 24;
+          load();
+        },
+      }).node;
     }
 
     function chrome(content) {

@@ -148,7 +148,8 @@
   "minimize_to_tray": true,
   "time_display_mode": "ServerTime",   // "ServerTime" | "LocalTime" | "UTC"
   "color_theme": "Dark",               // "Dark" | "Light" | "CoolBreeze"
-  "default_time_range_hours": 4,       // initial range on every chart
+  "default_time_range_hours": 4,       // initial range on every chart, in whole hours (older builds read only this)
+  "default_time_range": "",            // optional (#5562), wins over the hours key: "30m" | "2d" | "1mo" | "today" | "previous-week" ... ("" = use the hours key)
 
   // ---- Auto-refresh (#3479) ------------------------------------------------------------------------
   // The server-tab toolbar's Auto-refresh checkbox and interval picker, written by the app when

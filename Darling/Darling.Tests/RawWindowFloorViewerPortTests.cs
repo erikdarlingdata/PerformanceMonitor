@@ -33,7 +33,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_ShowsSinceEffectiveStart_WhenTheFloorIsPastTheSlack()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var banner = new TextBlock();
             var floor = RequestedStart.AddDays(3);
@@ -48,7 +48,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_StaysCollapsed_WhenTheFloorIsInsideTheSlack()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             /* 30 minutes after the requested start — inside DurationTrendRouting.TruncationSlack's 90-minute
                allowance, so a normal cadence-start lag, not a retention cut (the #2364 / #4231 ruling). Seeded
@@ -65,7 +65,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_StaysCollapsed_WhenTheProbeFoundNoFloorAtAll()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var banner = new TextBlock();
 
@@ -73,27 +73,6 @@ public sealed class RawWindowFloorViewerPortTests
 
             Assert.Equal(Visibility.Collapsed, banner.Visibility);
         });
-    }
-
-    /// <summary>WPF objects require STA; same shape as Lite.Tests' MainWindowAccessKeyTests / Dashboard.Tests'
-    /// DataGridExport tests.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
     }
 
     private static string ViewerFile(string file) => ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file);
@@ -115,7 +94,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_TableServed_NamesTheEffectiveStartAndTheBound_AndTheRawSlicerFloor()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var wideStart = RequestedStart.AddDays(1);
             var plan = new QueryStoreIntervalWide.WideReadPlan(
@@ -151,7 +130,7 @@ public sealed class RawWindowFloorViewerPortTests
     [Fact]
     public void UpdateTruncationBanner_HourlyServed_NamesTheGridsStart_AndRawsFloorAsTheSlicers()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             const string Suffix = " - aggregated hourly";
             var banner = new TextBlock();

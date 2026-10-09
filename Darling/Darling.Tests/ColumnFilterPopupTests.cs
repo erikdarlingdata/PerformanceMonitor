@@ -26,24 +26,6 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ColumnFilterPopupTests
 {
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-            throw error;
-        return result;
-    }
-
     private static T Find<T>(DependencyObject root, Func<T, bool> where) where T : DependencyObject
     {
         foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
@@ -65,7 +47,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void The_list_section_shows_only_for_a_column_with_a_catalog()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var popup = new ColumnFilterPopup();
             var panel = Find<StackPanel>(popup, p => p.Name == "ValueListPanel");
@@ -84,7 +66,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void The_search_box_narrows_the_list_and_Select_All_covers_what_it_shows()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var popup = new ColumnFilterPopup();
             popup.Initialize("LoginName", null, Catalog("sa", "app", "job_svc", null));
@@ -113,7 +95,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void Nothing_ticked_shows_the_note_and_the_cap_note_shows_for_a_long_list()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var popup = new ColumnFilterPopup();
             popup.Initialize("LoginName", null, Catalog("a", "b"));
@@ -134,7 +116,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void An_existing_value_filter_comes_back_as_the_ticks_and_the_text_match_beside_it()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var existing = new ColumnFilterState { ColumnName = "LoginName", ValueMode = ColumnValueMode.Hide, Operator = FilterOperator.StartsWith, Value = "s" };
             existing.Values.Add("job_svc");
@@ -158,7 +140,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void A_column_without_a_list_keeps_a_stored_value_filter_when_the_text_match_is_applied()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var existing = new ColumnFilterState { ColumnName = "LoginName", ValueMode = ColumnValueMode.ShowOnly };
             existing.Values.Add("sa");
@@ -178,7 +160,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void A_text_only_apply_keeps_the_stored_value_part_even_when_todays_rows_have_drifted_from_it()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             /* Scenario A: stored ShowOnly {sa}, but the rows now hold only sa. Re-deriving the mode would find nothing
                unticked, give None, and drop the filter. */
@@ -214,7 +196,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void Select_All_unticked_shows_the_no_values_note_at_once()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var popup = new ColumnFilterPopup();
             popup.Initialize("LoginName", null, Catalog("a", "b"));
@@ -234,7 +216,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void A_stored_value_part_on_a_column_with_no_list_shows_read_only_with_a_way_to_clear_it()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var existing = new ColumnFilterState { ColumnName = "LoginName", ValueMode = ColumnValueMode.Hide };
             existing.Values.Add("a");
@@ -276,7 +258,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void Clear_all_filters_shows_only_when_the_grid_has_a_filter_and_raises_its_event()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var popup = new ColumnFilterPopup();
             var button = ButtonNamed(popup, "Clear all filters");
@@ -297,7 +279,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void Clear_applies_an_empty_filter_including_the_value_part()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var existing = new ColumnFilterState { ColumnName = "LoginName", ValueMode = ColumnValueMode.Hide };
             existing.Values.Add("a");
@@ -316,7 +298,7 @@ public sealed class ColumnFilterPopupTests
     [Fact]
     public void Esc_closes_the_popup_from_anywhere_in_it_and_the_list_is_virtualised_and_tab_stops_once()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var popup = new ColumnFilterPopup();
             popup.Initialize("LoginName", null, Catalog("a", "b"));

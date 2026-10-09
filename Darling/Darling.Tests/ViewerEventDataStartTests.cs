@@ -166,7 +166,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
     private static string? CappedBannerFor(DateTime coverageStartUtc, DateTime oldestShownUtc, int shownRows, int rowCap)
     {
         string? text = null;
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
@@ -216,7 +216,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
     [Fact]
     public void AProbeThatThrows_RaisesNoNotice_AndIsLogged()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             var banner = new TextBlock { Visibility = Visibility.Visible, Text = "Showing since 2026-09-04 00:00:00" };
@@ -332,7 +332,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
         Task<DateTime?> probe, DateTime startUtc, IEnumerable<DateTime?> shownUtc, int? rowCap = null, DateTime? cappedSourceOldestUtc = null)
     {
         string? text = null;
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             /* Seeded visible, so a no-op cannot pass as a hidden banner. */
@@ -349,7 +349,7 @@ public sealed class ViewerEventDataStartTests : IDisposable
     private static string? BannerFor(DateTime coverageStartUtc, DateTime earliestShownUtc)
     {
         string? text = null;
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             /* Seeded visible, so a no-op cannot pass as a hidden banner. */
@@ -451,22 +451,4 @@ public sealed class ViewerEventDataStartTests : IDisposable
     }
 
     /* WPF objects require STA; same shape as ViewerDataStartBannerTests. */
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

@@ -503,7 +503,28 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             JsonNodeResult(new JsonObject { ["can_edit"] = DarlingWebSeat.FromContext(context).CanEdit }));
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
-        app.MapGet("/api/catalog", () => JsonNodeResult(BuildCatalogNode()));
+        /* #5562: ?server= makes the collector intervals the SERVER's own (a per-server schedule row wins over the
+           fleet-wide one); without it they are the fleet-wide effective interval. Either way the read's reach
+           (max_hours) is the same: it belongs to the read, not the server. An unknown server is answered with the
+           resolver's refusal, not a silent fall back to the fleet's numbers. */
+        app.MapGet("/api/catalog", async (HttpContext context) =>
+        {
+            var serverName = context.Request.Query["server"].ToString();
+            if (string.IsNullOrWhiteSpace(serverName))
+            {
+                var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
+                return JsonNodeResult(BuildCatalogNode(null, fleetSchedules));
+            }
+
+            var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
+            if (resolveError != null)
+            {
+                return JsonNodeResult(JsonNode.Parse(resolveError)!.AsObject());
+            }
+
+            var schedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, resolved.ServerId, context.RequestAborted);
+            return JsonNodeResult(BuildCatalogNode(resolved.ServerId, schedules));
+        });
 
         /* List — a bare array of summaries (no definition); [] when none. */
         app.MapGet("/api/views", async (HttpContext context) =>
@@ -2860,9 +2881,32 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            a connection. Only checked for a panel that actually reads query_store_stats; every other panel
            pays nothing extra. */
         var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
-            ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken)
+            ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken, plan)
             : default;
         var queryStoreWideEligible = wideResolution.Eligible;
+
+        /* #5582: a wide-table read the daily summary says cannot finish inside the statement timeout is refused here, in
+           milliseconds, before any fact row is read. Both callers of this runner (the web endpoint and the MCP tool
+           run_custom_view_panel) get it, because it lives in the shared body. Fails open: no built day, or a fault in
+           the lookup, never refuses. The range passed is the one the wide table is read for. */
+        DateTime? stampThrough = null;
+        if (queryStoreWideEligible)
+        {
+            var countedStart = wideResolution.WideStart is { } wideReadStart && wideReadStart > start ? wideReadStart : start;
+            var limit = QueryStoreWideReadGuard.LimitFor(ComposeCompiler.RankedTimeSeriesScansFactRowsTwice(plan!, start, end, wideResolution.GroupMembers));
+            /* #5582 part 3: the hours the rollup answers count at ComposeLimits.StampRowWeight, but only when this panel's text really reads
+               the rollup. A panel it cannot serve compiles to the wide-table text, and keeping the stamp-through would under-count it. */
+            if (wideResolution.StampThrough is not null
+                && ComposeCompiler.ReadsStampRollup(plan!, new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, true, wideResolution.WideStart, QueryStoreStampThrough: wideResolution.StampThrough)))
+            {
+                stampThrough = wideResolution.StampThrough;
+            }
+
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken, limit, stampThrough) is { } tooBig)
+            {
+                return ComposeRunOutcome.BadRequest(tooBig);
+            }
+        }
 
         /* #5525: the scoped names that no registry row carries. The compiler scopes by server_id and keeps matching those names on the
            row's stored server_name, so a scope over a name that was never registered keeps matching what it matched before (a scoped name
@@ -2905,7 +2949,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -3032,7 +3076,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
     private const string QueryStoreWideServerIdsSql =
-        "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1)) ORDER BY server_id";
+        "SELECT server_id, server_name, is_enabled FROM collect.servers WHERE ($1::text[] IS NULL OR server_name = ANY($1)) ORDER BY server_id";
 
     /// <summary>
     /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
@@ -3046,9 +3090,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
     /// the same rule #3953 already applies to the single-server reads.
     /// </summary>
-    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer)> ResolveQueryStoreWideEligibleAsync(
+    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers, DateTime? StampThrough)> ResolveQueryStoreWideEligibleAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
-        DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken)
+        DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken, PanelPlan? groupMembersFor = null)
     {
         if (end - start < ComposeQueryStoreWideMinWindow)
         {
@@ -3071,6 +3115,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var wideServers = new List<(int Id, string Name)>();
+            /* #5582 L4: the stamp-through lookup takes every server in scope, enabled or not, because the read and the fleet stale arm
+               cover a disabled server's rows too. The eligibility checks and the group-member count below still see the enabled ones only. */
+            var scopedServerIds = new List<int>();
             await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 servers.Parameters.Add(new NpgsqlParameter
@@ -3081,7 +3128,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
+                    scopedServerIds.Add(reader.GetInt32(0));
+                    if (reader.GetBoolean(2))
+                    {
+                        wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
+                    }
                 }
             }
 
@@ -3123,7 +3174,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
             }
 
-            return (true, wideStart, bound, settingServer);
+            /* #5582: for a Query Store RankedTimeSeries panel, the members of its group dimension, on this same connection, so the
+               compiler can bound the single-scan base CTE (buckets x members). Null for any other panel, and when unknown. */
+            long? groupMembers = groupMembersFor is null
+                ? null
+                : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, cancellationToken);
+
+            /* #5582 part 3: where the compose rollup stops answering, on this same connection. Null (today's route) on any fault. */
+            var stampThrough = await ResolveQueryStoreStampThroughAsync(connection, scopedServerIds.ToArray(), wideStart, end, schemaVersion, cancellationToken);
+
+            return (true, wideStart, bound, settingServer, groupMembers, stampThrough);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3131,6 +3191,52 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return default;
         }
     }
+
+    /// <summary>
+    /// #5582 part 3: the first hour of the window the compose rollup (V173) cannot answer. The hours checked run from
+    /// <c>date_trunc('hour', wideStart)</c> to the hour of the window end. An hour is unusable when it is missing from
+    /// <c>query_store_compose_stamp_hours</c> (never built), or when a <c>_built</c> pair for a server in scope has
+    /// <c>built_seq IS DISTINCT FROM late_seq</c> (a late write since the build). The statement's own stale arm covers the
+    /// race between this lookup and the read, so this is only where the rollup arm stops and the wide-table tail starts.
+    /// Null means today's route: the schema is below V173, the very first hour is already unusable (nothing to gain), or
+    /// the lookup faulted (it leans toward the route that needs no rollup). A usable run to the end is capped at the window
+    /// end, because a later instant makes the rollup arm read rows the statement's outer WHERE throws away.
+    /// </summary>
+    internal static async Task<DateTime?> ResolveQueryStoreStampThroughAsync(
+        NpgsqlConnection connection, int[] serverIds, DateTime wideStart, DateTime end, int schemaVersion, System.Threading.CancellationToken cancellationToken)
+    {
+        if (schemaVersion < QueryStoreComposeStamp.RungVersion || end <= wideStart)
+        {
+            return null;
+        }
+
+        try
+        {
+            await using var lookup = new NpgsqlCommand(QueryStoreStampThroughSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(wideStart, DateTimeKind.Unspecified) });
+            lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
+            lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, Value = serverIds });
+            var found = await lookup.ExecuteScalarAsync(cancellationToken);
+            /* The series stops at the hour of the window end, so a found hour is never after the end, and it is never before the hour
+               of wideStart: the one test against wideStart covers "the very first hour is already unusable". */
+            var through = found is DateTime unusable ? unusable : end;
+            return through <= wideStart ? null : DateTime.SpecifyKind(through, DateTimeKind.Unspecified);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReadScope.NoteFallback(ReadFallback.GateFailed, "#5582 compose rollup stamp-through lookup", ex);
+            return null;
+        }
+    }
+
+    /// <summary>#5582 part 3: see <see cref="ResolveQueryStoreStampThroughAsync"/>. $1 wide start, $2 window end, $3 server ids in scope.</summary>
+    internal const string QueryStoreStampThroughSql = """
+        SELECT MIN(g.hour)
+        FROM generate_series(date_trunc('hour', $1::timestamp), date_trunc('hour', $2::timestamp), interval '1 hour') AS g(hour)
+        WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours h WHERE h.hour = g.hour)
+           OR EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_built b
+                      WHERE b.hour = g.hour AND b.server_id = ANY($3::integer[]) AND b.built_seq IS DISTINCT FROM b.late_seq)
+        """;
 
     /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a
     /// start later than the window's. Same wording as the MCP top-queries table route, and #4966 the same text for
@@ -4685,7 +4791,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>Builds the <c>/api/catalog</c> body: the reads (names taken from <see cref="BuildReadDispatch"/>,
     /// each enriched with its <see cref="CatalogDescriptors"/> metadata) and the viz vocabulary. Iterating the
     /// dispatch keys guarantees the catalog only advertises actually-dispatchable reads.</summary>
-    internal static JsonObject BuildCatalogNode()
+    internal static JsonObject BuildCatalogNode() => BuildCatalogNode(null, Array.Empty<ScheduleOverride>());
+
+    /// <summary>
+    /// The catalog with each windowed read's reach (#5562): its <c>hours</c> param carries <c>max_hours</c> (the longest
+    /// window the read's validator accepts, from <see cref="WebReadReach"/>), <c>shape</c>, and the main collector's
+    /// <c>collector</c> id, <c>collector_interval_minutes</c> (the schedule in force: <paramref name="schedules"/> over
+    /// the shipped default) and <c>collector_default_interval_minutes</c>, so the picker can grey out a longer period
+    /// with its reason and say "collected every N minutes" under a range too short to hold three samples.
+    /// </summary>
+    internal static JsonObject BuildCatalogNode(int? serverId, IReadOnlyList<ScheduleOverride> schedules)
     {
         var reads = new JsonArray();
         foreach (var name in BuildReadDispatch().Keys)
@@ -4694,13 +4809,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var parameters = new JsonArray();
             foreach (var p in descriptor.Params)
             {
-                parameters.Add(new JsonObject
+                var param = new JsonObject
                 {
                     ["name"] = p.Name,
                     ["type"] = p.Type,
                     ["required"] = p.Required,
                     ["default"] = ToJsonValue(p.Default),
-                });
+                };
+                if (p.Name == "hours")
+                {
+                    AddReach(param, name, serverId, schedules);
+                }
+
+                parameters.Add(param);
             }
 
             reads.Add(new JsonObject
@@ -4720,6 +4841,39 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         /* v1 keys (reads/viz) unchanged; the v2 composed-view catalog rides alongside under "compose". */
         return new JsonObject { ["reads"] = reads, ["viz"] = viz, ["compose"] = BuildComposeCatalogNode() };
+    }
+
+    /// <summary>Adds a windowed read's reach to its <c>hours</c> catalog param (#5562). A read with no row in
+    /// <see cref="WebReadReach.All"/> is advertised at the default reach with no collector; a census keeps that case
+    /// from shipping.</summary>
+    private static void AddReach(JsonObject param, string read, int? serverId, IReadOnlyList<ScheduleOverride> schedules)
+    {
+        WebReadReach.All.TryGetValue(read, out var reach);
+        var shape = reach?.Shape switch
+        {
+            ReadShape.BucketedTrend => "bucketed_trend",
+            ReadShape.LatestSnapshot => "latest_snapshot",
+            _ => "list",
+        };
+        var collector = reach?.Collector;
+        param["max_hours"] = reach?.MaxHours ?? WebReadReach.DefaultHours;
+        if (WebReadReach.ViewMaxHours.TryGetValue(read, out var views))
+        {
+            var viewReach = new JsonObject();
+            foreach (var (view, hours) in views)
+            {
+                viewReach[view] = hours;
+            }
+
+            param["view_max_hours"] = viewReach;
+        }
+
+        param["shape"] = shape;
+        param["collector"] = collector;
+        param["collector_interval_minutes"] = WebReadReach.CollectorIntervalMinutes(collector, serverId, schedules);
+        param["collector_default_interval_minutes"] = collector is not null && CollectorScheduleDefaults.All.TryGetValue(collector, out var def)
+            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(def.FrequencyMinutes)
+            : null;
     }
 
     /// <summary>
