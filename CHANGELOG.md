@@ -138,6 +138,8 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **Filter web grid columns by number, text operator or empty cell** ([#5255])
 - **Web sidebar search and tag grouping** ([#5259])
 - **Lite has a DuckDB memory limit setting** ([#5553])
+- **Column filters list a text column's values to tick, like Excel, and stay set across refreshes and restarts** ([#5577])
+- **One time range picker for Lite, the Darling Viewer and the Darling web pages** ([#5570])
 
 ### Changed
 
@@ -179,6 +181,9 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **The plan regression check in Darling reads stored per-day totals for closed days** ([#5467])
 - **procedure_stats now fetches plans only for plans the collector has not stored** ([#5502])
 - **Recommendations skip databases that are a secondary copy on this node** ([#5564])
+- **The Query Store interval tables are partitioned by day** ([#5573])
+- **A long one-counter perfmon trend loads faster** ([#5579])
+- **The retention purge gives way to collection** ([#5595])
 
 ### Fixed
 
@@ -312,6 +317,15 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **Select All in the Databases filter, or ticking every collected database, now means All** ([#5554])
 - **Empty server-tab grids in Lite and the Viewer say why they are empty, and screen readers get names for toolbar combos and plan operators** ([#5554])
 - **The web dashboard's footer time, Job History messages, saved views, offline fleet cards and service log read correctly** ([#5554])
+- **The module map refresh no longer holds back the collectors at service start** ([#5580])
+- **The module map's daily refresh no longer sorts every raw procedure_stats row** ([#5584])
+- **The first Query Store read after a big retention drain is no longer slow** ([#5585])
+- **Web charts draw at the panel's real width** ([#5590])
+- **Autovacuum on the Query Store interval tables can finish again** ([#5593])
+- **The Darling whole-tree guards CI job no longer fails after every test passes** ([#5598])
+- **"Collection Falling Behind" no longer fires in the first hour after every start** ([#5599])
+- **A hung test shard names its test and keeps its logs** ([#5591])
+- **One-day Custom Views panels on Query Store data read an hourly rollup, or are refused up front** ([#5588], [#5610])
 
 ## [3.9.0] - 2026-10-02
 
@@ -5158,3 +5172,18 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5564]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5564
 [#5566]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5566
 [#5572]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5572
+[#5570]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5570
+[#5573]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5573
+[#5577]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5577
+[#5579]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5579
+[#5580]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5580
+[#5584]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5584
+[#5585]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5585
+[#5588]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5588
+[#5590]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5590
+[#5591]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5591
+[#5593]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5593
+[#5595]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5595
+[#5598]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5598
+[#5599]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5599
+[#5610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5610
