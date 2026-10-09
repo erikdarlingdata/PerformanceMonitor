@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using Darling.Tests;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -264,8 +265,19 @@ public sealed class AggregateJobGraceReopenTests
 /// <para>The worker is made to run deterministically: the aggregate selects through an <c>IMMUTABLE</c>-labelled
 /// function that takes a shared advisory lock, and the test holds the exclusive one, so the refresh job the scheduler
 /// launches sits in <c>pg_stat_activity</c> as <c>Refresh Continuous Aggregate Policy [id]</c> until the test
-/// lets it go. The scheduler is left running (nothing here calls <c>stop_background_workers</c>); every policy starts a
-/// day out so none fires on its own.</para>
+/// lets it go. Every policy starts a day out so none fires on its own.</para>
+///
+/// <para><b>The scheduler (#5603).</b> It is left running: a job worker does not outlive it (measured:
+/// <c>_timescaledb_functions.stop_background_workers()</c> ends a parked worker within a millisecond), and it is what
+/// ends a worker whose job was stopped. Measured on PostgreSQL 18 with TimescaleDB 2.30.1: the scheduler wakes on a
+/// timer 5.005 s apart, and each wake shows in its own <c>pg_stat_activity</c> row (<c>state</c> goes <c>active</c>
+/// then <c>idle</c> and <c>state_change</c> moves). A job is launched, and a stopped job is noticed, only at a wake.
+/// At the wake that sees a stopped job it cancels the worker (SIGINT), waits 3 s, then terminates it (SIGTERM). So a
+/// worker is safe from the scheduler for most of the 5 s after the wake that launched it, but that wake is still
+/// running when the worker first shows up, and a stop that commits before it ends is acted on at once (in the #5603 CI
+/// failure the worker was cancelled about 30 ms after the stop). <see cref="StartParkedWorkerAsync"/> therefore returns
+/// only once the worker is blocked on the gate AND the scheduler is idle again after launching it: the next wake is
+/// then about 4.7 s away, and the sweep and every assertion about the worker run inside that gap.</para>
 /// </summary>
 public sealed class AggregateJobQuiesceLiveTests
 {
@@ -274,7 +286,9 @@ public sealed class AggregateJobQuiesceLiveTests
 
     private static readonly TimescaleSupport.AggregateJobQuiesceOptions FastCap = new(TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(100));
 
-    /// <summary>One look and no wait: the skip path of (c) runs before the scheduler can end the worker.</summary>
+    /// <summary>One look and no wait: the skip path of (c) is decided by the single look the sweep takes right after the
+    /// stop, so the whole sweep takes milliseconds and is over long before the scheduler's next wake (see the class
+    /// remarks, #5603).</summary>
     private static readonly TimescaleSupport.AggregateJobQuiesceOptions ZeroCap = new(TimeSpan.Zero, TimeSpan.FromMilliseconds(50));
 
     /// <summary>(a) The jobs are stopped before the drop, and the drop still removes the aggregate and its jobs.</summary>
@@ -330,15 +344,12 @@ public sealed class AggregateJobQuiesceLiveTests
         var gateOpen = false;
         try
         {
-            await StartRefreshWorkerAsync(connection, refreshJob, ct);
-            Assert.True(await WaitForAsync(async () => await WorkerCountAsync(connection, jobIds, ct) > 0, TimeSpan.FromSeconds(60), ct),
-                "the scheduler never started the refresh worker");
+            var worker = await StartParkedWorkerAsync(connection, refreshJob, ct);
+            var workerPid = worker.Pid;
 
             var log = new CapturingTestLogger();
             sweep = Task.Run(() => TimescaleSupport.DropRetiredBaselineAggregatesAsync(
                 sweeper, log, DateTime.UtcNow, new TimescaleSupport.AggregateJobQuiesceOptions(TimeSpan.FromSeconds(120), TimeSpan.FromMilliseconds(100)), ct), ct);
-
-            var workerPid = await ScalarAsync<int>(connection, $"SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type LIKE '% [{refreshJob}]'", ct);
 
             /* The jobs are stopped while the worker runs... */
             await WaitForJobsStoppedAsync(connection, jobIds, log, ct);
@@ -350,10 +361,9 @@ public sealed class AggregateJobQuiesceLiveTests
                has not removed the view yet. Each look reads the worker, then the sweeper's query, then the worker
                again, and judges only when the same worker was alive on both sides. The statement text is matched by
                its start (DO $do$) as well as DROP MATERIALIZED VIEW, because track_activity_query_size cuts the long
-               DO block short. TimescaleDB's own scheduler may end a worker whose job was just stopped (measured at
-               about 3-4 s): then nothing is left to hold the sweep, and the test only passes if it OBSERVED the hold
-               first - at least one look with the worker alive and the sweeper inside its wait loop (its last
-               statement is the worker count). Looked at for two seconds. */
+               DO block short. The scheduler cannot end the worker inside this loop (#5603: it is idle for about 4.7 s
+               after StartParkedWorkerAsync), so the hold must be OBSERVED: at least one look with the worker alive and
+               the sweeper inside its wait loop (its last statement is the worker count). Looked at for two seconds. */
             var sweeperPid = sweeper.ProcessID;
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
             var observedHold = false;
@@ -379,7 +389,7 @@ public sealed class AggregateJobQuiesceLiveTests
 
             if (!observedHold)
             {
-                Assert.Skip($"TimescaleDB ended the job worker before the hold could be observed, so this run proves nothing about the wait: {log.Joined}");
+                Assert.Fail($"the hold was never observed: the job worker (pid {workerPid}) was gone, or the sweeper was not waiting on it, within 2 s. The scheduler {(await SchedulerWokeSinceAsync(connection, worker.SchedulerIdleSince, ct) ? "HAD" : "had not")} woken since the worker was parked: {log.Joined}");
             }
 
             await ExecuteAsync(gate, $"SELECT pg_advisory_unlock({GateKey})", ct);
@@ -426,15 +436,14 @@ public sealed class AggregateJobQuiesceLiveTests
         var gateOpen = false;
         try
         {
-            await StartRefreshWorkerAsync(connection, refreshJob, ct);
-            Assert.True(await WaitForAsync(async () => await WorkerCountAsync(connection, jobIds, ct) > 0, TimeSpan.FromSeconds(60), ct),
-                "the scheduler never started the refresh worker");
-            var workerPid = await ScalarAsync<int>(connection, $"SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND backend_type LIKE '% [{refreshJob}]'", ct);
+            var worker = await StartParkedWorkerAsync(connection, refreshJob, ct);
+            var workerPid = worker.Pid;
 
             var log = new CapturingTestLogger();
             /* A zero cap: the first look sees the worker, so the skip and the resume follow within milliseconds of the
-               stop. TimescaleDB's scheduler ends a worker whose job was stopped within a few seconds (measured at
-               3-4 s), and a cap of seconds could let that land inside the wait, which would turn this into a drop. */
+               stop. The worker is parked on the gate and the scheduler is idle until a wake about 4.7 s away
+               (StartParkedWorkerAsync, #5603), so nothing but this sweep can touch the worker until the assertions
+               below are done; a cap of seconds would let that wake land inside the wait and turn this into a drop. */
             Assert.Equal(0, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, log, DateTime.UtcNow, ZeroCap, ct));
 
             Assert.True(await RelationExistsAsync(connection, Retired, ct), "the aggregate stays at the cap");
@@ -442,7 +451,11 @@ public sealed class AggregateJobQuiesceLiveTests
             Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
             Assert.Contains(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains(Retired, StringComparison.Ordinal) && l.Contains("#5551", StringComparison.Ordinal));
             /* The sweep itself ended nothing: the very same backend is still running. */
-            Assert.Equal(1L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {workerPid} AND backend_type LIKE '% [{refreshJob}]'", ct));
+            var stillRunning = await ScalarAsync<long>(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {workerPid} AND backend_type LIKE '% [{refreshJob}]'", ct);
+            if (stillRunning != 1L)
+            {
+                Assert.Fail($"the job worker (pid {workerPid}) the sweep must leave running is gone. The scheduler {(await SchedulerWokeSinceAsync(connection, worker.SchedulerIdleSince, ct) ? "HAD" : "had not")} woken since the worker was parked: {log.Joined}");
+            }
 
             await ExecuteAsync(gate, $"SELECT pg_advisory_unlock({GateKey})", ct);
             gateOpen = true;
@@ -487,9 +500,7 @@ public sealed class AggregateJobQuiesceLiveTests
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
-            await StartRefreshWorkerAsync(connection, refreshJob, ct);
-            Assert.True(await WaitForAsync(async () => await WorkerCountAsync(connection, jobIds, ct) > 0, TimeSpan.FromSeconds(60), ct),
-                "the scheduler never started the refresh worker");
+            await StartParkedWorkerAsync(connection, refreshJob, ct);
 
             var log = new CapturingTestLogger();
             var sweep = Task.Run(() => TimescaleSupport.DropRetiredBaselineAggregatesAsync(
@@ -754,6 +765,63 @@ $fn$", ct);
 
     private static async Task StartRefreshWorkerAsync(NpgsqlConnection connection, int refreshJob, CancellationToken ct)
         => await ExecuteAsync(connection, $"SELECT alter_job({refreshJob}, next_start => now(), scheduled => true)", ct);
+
+    private const string SchedulerBackend = "TimescaleDB Background Worker Scheduler";
+
+    /// <summary>A refresh worker parked on the gate, and the <c>state_change</c> of the scheduler's idle state after the
+    /// wake that launched it (the scheduler's next wake is about 5 s after that wake began).</summary>
+    private readonly record struct ParkedWorker(int Pid, DateTime SchedulerIdleSince);
+
+    /// <summary>
+    /// #5603: starts the refresh worker and returns only when it is in the one state a test about a RUNNING worker can
+    /// rely on. (1) It is listed in <c>pg_stat_activity</c>. (2) It is BLOCKED on the gate: its <c>pg_locks</c> row for
+    /// the shared advisory key is not granted, matched by the worker's pid. Listed is not enough: a listed worker can
+    /// still be in the DELETE that opens the refresh. (3) The scheduler is idle again after launching it (its
+    /// <c>pg_stat_activity</c> row is <c>idle</c> with a <c>state_change</c> later than the moment the job was made
+    /// due). The scheduler launches a job and notices a stopped job only at a wake, and the wake that launched the
+    /// worker is still running when the worker first shows up; a stop that committed inside it was acted on at once
+    /// (cancelled about 30 ms later in the CI failure). Once it has ended the next wake is about 5 s after it began,
+    /// so everything the caller does next, a sweep and its assertions, finishes inside that gap.
+    /// </summary>
+    private static async Task<ParkedWorker> StartParkedWorkerAsync(NpgsqlConnection connection, int refreshJob, CancellationToken ct)
+    {
+        var madeDueAt = await ScalarAsync<DateTime>(connection, "SELECT clock_timestamp()", ct);
+        await StartRefreshWorkerAsync(connection, refreshJob, ct);
+
+        var pid = 0;
+        Assert.True(
+            await WaitForAsync(async () => (pid = await ScalarAsync<int>(connection, $"SELECT coalesce(max(pid), 0) FROM pg_stat_activity WHERE datname = current_database() AND backend_type LIKE '% [{refreshJob}]'", ct)) != 0, TimeSpan.FromSeconds(60), ct),
+            "the scheduler never started the refresh worker");
+
+        Assert.True(
+            await WaitForAsync(async () => await ScalarAsync<long>(connection, $"SELECT count(*) FROM pg_locks WHERE pid = {pid} AND locktype = 'advisory' AND NOT granted AND classid = {GateKey >> 32} AND objid = {GateKey & 0xFFFFFFFFL} AND objsubid = 1", ct) > 0, TimeSpan.FromSeconds(30), ct),
+            $"the refresh worker (pid {pid}) never blocked on the gate");
+
+        DateTime? idleSince = null;
+        Assert.True(
+            await WaitForAsync(async () => (idleSince = await SchedulerIdleSinceAsync(connection, madeDueAt, ct)) is not null, TimeSpan.FromSeconds(30), ct),
+            "the scheduler never went idle again after launching the refresh worker (its pg_stat_activity row did not move)");
+        return new ParkedWorker(pid, idleSince!.Value);
+    }
+
+    /// <summary>The scheduler's <c>state_change</c> when it is idle and went idle after <paramref name="after"/>, else null.</summary>
+    private static async Task<DateTime?> SchedulerIdleSinceAsync(NpgsqlConnection connection, DateTime after, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            $"SELECT state_change FROM pg_stat_activity WHERE datname = current_database() AND backend_type = '{SchedulerBackend}' AND state = 'idle' AND state_change > $1", connection) { CommandTimeout = 120 };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.TimestampTz, Value = after });
+        return await command.ExecuteScalarAsync(ct) is DateTime changed ? changed : null;
+    }
+
+    /// <summary>True when the scheduler has woken since it went idle at <paramref name="idleSince"/>: it is running now,
+    /// or went idle again later. Read only after a failure, to say whether the scheduler could have ended the worker.</summary>
+    private static async Task<bool> SchedulerWokeSinceAsync(NpgsqlConnection connection, DateTime idleSince, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            $"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_type = '{SchedulerBackend}' AND state = 'idle' AND state_change <= $1", connection) { CommandTimeout = 120 };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.TimestampTz, Value = idleSince });
+        return (long)(await command.ExecuteScalarAsync(ct))! == 0;
+    }
 
     private static async Task<List<int>> JobIdsAsync(NpgsqlConnection connection, string view, CancellationToken ct)
     {

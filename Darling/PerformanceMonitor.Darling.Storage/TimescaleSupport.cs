@@ -1418,9 +1418,11 @@ $do$";
         /// 5 minutes for every step (<c>DarlingWorker</c>'s <c>s_storeObjectConvergenceBudget</c>). A drop happens once
         /// per store, on the pass that retires or reshapes that aggregate, and only a refresh that is ALREADY running
         /// when the jobs are stopped is waited for (stopping the jobs first means no new one starts). TimescaleDB's
-        /// scheduler usually ends such a worker itself within a few seconds of the stop (measured: about 3-4 s;
-        /// the worker's refresh rolls back), and one that finishes first is just as good, so the wait is a few
-        /// seconds for the baseline and reshape aggregates, which are small or only a day or two old. 30 seconds
+        /// scheduler ends such a worker itself at its next wake (measured on 2.30.1: it wakes on a timer 5.005 s
+        /// apart, so that is anywhere from tens of milliseconds to about 5 s after the stop; it cancels the worker,
+        /// and terminates one that has not left 3 s later, so 8 s at most; the worker's refresh rolls back), and one
+        /// that finishes first is just as good, so the wait is a few seconds for the baseline and reshape
+        /// aggregates, which are small or only a day or two old. 30 seconds
         /// covers that with room, and it is a cap a start can afford. The worst case is every
         /// relation of both sweeps (two superseded, two retired, four reshaped = eight) stuck behind a running
         /// worker, 8 x 30 s = 4 minutes, which still fits inside the hourly pass's 5. A longer cap would let a stuck
@@ -1527,8 +1529,9 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     /// pass. A final look that lists none lets the drop go ahead.</description></item>
     /// </list>
     /// <para><b>This method does not cancel or terminate a backend itself, but stopping a job makes TimescaleDB's
-    /// scheduler end that job's running worker</b> (measured on TimescaleDB 2.30.1: within a few seconds of the
-    /// stop). The refresh then rolls back, which is harmless to the data, the server log records the worker's error
+    /// scheduler end that job's running worker</b> (measured on TimescaleDB 2.30.1: at the scheduler's next wake,
+    /// which comes every 5.005 s, so from tens of milliseconds to about 5 s after the stop; it cancels the worker and
+    /// terminates it if it has not left 3 s later). The refresh then rolls back, which is harmless to the data, the server log records the worker's error
     /// ("job N threw an error"), and the job's statistics record one failed run (<c>total_failures</c> + 1,
     /// <c>last_run_status</c> = Failed). After a successful drop the job and its statistics row are gone with the
     /// aggregate; on the skip and failed-drop paths the job stays, scheduled again, with that failure on its record
