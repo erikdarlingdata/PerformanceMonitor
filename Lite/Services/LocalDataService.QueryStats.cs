@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
@@ -26,7 +27,8 @@ public partial class LocalDataService
     /// Validates that a database name exists on the server and returns the properly quoted name.
     /// This prevents SQL injection via malicious database names.
     /// </summary>
-    private static async Task<string?> GetValidatedDatabaseNameAsync(SqlConnection connection, string databaseName)
+    private static async Task<string?> GetValidatedDatabaseNameAsync(
+        SqlConnection connection, string databaseName, CancellationToken cancellationToken = default)
     {
         using var command = new SqlCommand(@"
 SELECT
@@ -34,7 +36,7 @@ SELECT
 FROM sys.databases AS d
 WHERE d.name = @database_name;", connection);
         command.Parameters.Add(new SqlParameter("@database_name", SqlDbType.NVarChar, 128) { Value = databaseName });
-        var result = await command.ExecuteScalarAsync();
+        var result = await command.ExecuteScalarAsync(cancellationToken);
         return result as string;
     }
 

@@ -193,7 +193,11 @@ public sealed class StatementScrubLivePlanDisplayTests
             if (relative.StartsWith("obj/", StringComparison.Ordinal)
                 || relative.StartsWith("bin/", StringComparison.Ordinal)
                 || relative.StartsWith("Services/LocalDataService", StringComparison.Ordinal)
-                || relative == "Mcp/McpPlanTools.cs")
+                || relative == "Mcp/McpPlanTools.cs"
+                /* #5630: the PLAN_REGRESSION inputs check fetches a plan to compare its compiled parameter values and
+                   needs the plan as the server wrote it. The XML stays in memory for that one comparison and never
+                   reaches a display, a log, a finding or an export, so there is nothing to scrub. */
+                || relative == "Analysis/SqlPlanFetcher.cs")
             {
                 continue;
             }

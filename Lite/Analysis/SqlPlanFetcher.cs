@@ -12,13 +12,35 @@ namespace PerformanceMonitorLite.Analysis;
 /// Lite implementation of IPlanFetcher — fetches plans from SQL Server
 /// using the server connection managed by ServerManager.
 /// </summary>
-public class SqlPlanFetcher : IPlanFetcher
+public class SqlPlanFetcher : IPlanFetcher, IQueryStorePlanSource
 {
     private readonly ServerManager _serverManager;
 
     public SqlPlanFetcher(ServerManager serverManager)
     {
         _serverManager = serverManager;
+    }
+
+    /// <summary>
+    /// The Query Store plan of <paramref name="planId"/> (#5630), for the PLAN_REGRESSION inputs check. A short
+    /// connect timeout keeps an unreachable server from holding the analysis pass; the caller also bounds each
+    /// fetch with its own timeout and token.
+    /// </summary>
+    public async Task<string?> FetchQueryStorePlanXmlAsync(
+        int serverId, string databaseName, long planId, CancellationToken cancellationToken)
+    {
+        var server = _serverManager.GetAllServers()
+            .FirstOrDefault(s =>
+                RemoteCollectorService.GetDeterministicHashCode(
+                    RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
+        if (server == null) return null;
+
+        var builder = new SqlConnectionStringBuilder(_serverManager.CredentialResolver.GetConnectionString(server))
+        {
+            ConnectTimeout = 5
+        };
+        return await LocalDataService.FetchQueryStorePlanAsync(
+            builder.ConnectionString, databaseName, planId, cancellationToken);
     }
 
     public async Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken)
