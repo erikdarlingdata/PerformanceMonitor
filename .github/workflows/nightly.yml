@@ -64,12 +64,17 @@ jobs:
   # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
   # manual one — which executes from the dispatched ref (dev for the scheduled path).
   #
-  # Each checkout resolves that ref EXPLICITLY rather than pinning `ref: dev`. Three of these
-  # were pinned, so a manual dispatch onto any other branch published dev's artifacts while
-  # reporting the dispatched ref as the run's head SHA — the run, the API and the release page
-  # all named a branch that was not what got built. That is worse than simply ignoring the
-  # input, because the mismatch is invisible: it surfaced as a release-candidate build stamping
-  # the PREVIOUS version, which is only noticeable if you happen to read the artifact name.
+  # Each checkout resolves the run's own COMMIT (`github.sha`) rather than pinning `ref: dev`.
+  # Three of these were pinned, so a manual dispatch onto any other branch published dev's
+  # artifacts while reporting the dispatched ref as the run's head SHA — the run, the API and
+  # the release page all named a branch that was not what got built. That is worse than simply
+  # ignoring the input, because the mismatch is invisible: it surfaced as a release-candidate
+  # build stamping the PREVIOUS version, which is only noticeable if you happen to read the
+  # artifact name. The commit, not the branch name, is what every job checks out: a branch name
+  # resolves to the branch tip at the moment each job starts, so a merge to dev in the middle of
+  # a run made the later jobs (the shards, publish) build a different commit than the earlier
+  # ones, and dev had to freeze for every nightly (#5616). `github.sha` is fixed when the run is
+  # dispatched, so a merge to dev mid-run does not change what any later job builds.
   check:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -80,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
           fetch-depth: 0
 
       # The nightly prerelease stamp, derived ONCE for the whole run and consumed by every job
@@ -149,7 +154,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
@@ -385,14 +390,16 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5]
 
     steps:
-      # Scheduled runs always test dev (schedules execute from the default branch, so ref_name
-      # would be main). A manual dispatch tests the DISPATCHED ref — the only way to validate a
-      # branch's gated-pg test changes before merge; the build job stays pinned to dev either
-      # way. The build job checks out the same dispatched ref, so what keeps a branch dispatch from shipping
-      # branch binaries is the publish job's `github.ref == 'refs/heads/dev'` condition (#5616).
+      # Every job checks out the commit this run was dispatched at (`github.sha`), so a merge to dev
+      # mid-run does not change what a later job builds. Scheduled runs test dev: the redispatch job
+      # runs this workflow with `--ref dev`, so that run's commit is dev's tip when it was dispatched.
+      # A manual dispatch tests the DISPATCHED ref's commit, the only way to validate a branch's
+      # gated-pg test changes before merge. The build job checks out the same commit, so what keeps a
+      # branch dispatch from shipping branch binaries is the publish job's
+      # `github.ref == 'refs/heads/dev'` condition (#5616).
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
@@ -657,7 +664,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
@@ -744,7 +751,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
@@ -1392,7 +1399,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
@@ -1510,7 +1517,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
       - name: Download windows release assets
         uses: actions/download-artifact@v6
