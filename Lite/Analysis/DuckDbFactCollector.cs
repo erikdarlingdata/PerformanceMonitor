@@ -25,10 +25,20 @@ public partial class DuckDbFactCollector : IFactCollector
     /// </summary>
     private readonly Func<int, string, int?>? _collectorFrequencyMinutes;
 
-    public DuckDbFactCollector(DuckDbInitializer duckDb, Func<int, string, int?>? collectorFrequencyMinutes = null)
+    /// <summary>
+    /// Where the PLAN_REGRESSION detector fetches Query Store plans to compare the inputs two plans were compiled
+    /// for (#5630). Null fetches nothing: every candidate then counts as unverified and stays.
+    /// </summary>
+    private readonly IQueryStorePlanSource? _queryStorePlanSource;
+
+    public DuckDbFactCollector(
+        DuckDbInitializer duckDb,
+        Func<int, string, int?>? collectorFrequencyMinutes = null,
+        IQueryStorePlanSource? queryStorePlanSource = null)
     {
         _duckDb = duckDb;
         _collectorFrequencyMinutes = collectorFrequencyMinutes;
+        _queryStorePlanSource = queryStorePlanSource;
     }
 
     /// <summary>

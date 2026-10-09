@@ -135,7 +135,10 @@ public class AnalysisService
         _duckDb = duckDb;
         SharedBaselineCache = baselineCache;
         _findingStore = new FindingStore(duckDb);
-        _collector = new DuckDbFactCollector(duckDb, collectorFrequencyMinutes);
+        _collector = new DuckDbFactCollector(
+            duckDb, collectorFrequencyMinutes,
+            /* #5630: the same fetcher serves the plan-regression inputs check; a caller with none passes no source. */
+            planFetcher as IQueryStorePlanSource);
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);

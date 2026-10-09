@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
@@ -849,16 +850,17 @@ ORDER BY collection_time";
     /// Fetches a query plan on-demand from Query Store by plan_id.
     /// Uses three-part naming with sp_executesql for Azure SQL DB compatibility.
     /// </summary>
-    public static async Task<string?> FetchQueryStorePlanAsync(string connectionString, string databaseName, long planId)
+    public static async Task<string?> FetchQueryStorePlanAsync(
+        string connectionString, string databaseName, long planId, CancellationToken cancellationToken = default)
     {
         using var connection = new SqlConnection(connectionString);
-        await connection.OpenAsync();
+        await connection.OpenAsync(cancellationToken);
 
         /*
         Validate the database name exists and get the QUOTENAME'd version
         to prevent SQL injection via malicious database names
         */
-        var quotedDbName = await GetValidatedDatabaseNameAsync(connection, databaseName);
+        var quotedDbName = await GetValidatedDatabaseNameAsync(connection, databaseName, cancellationToken);
         if (quotedDbName == null)
         {
             return null;
@@ -882,7 +884,7 @@ OPTION(RECOMPILE);',
 
         using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
         command.Parameters.Add(new SqlParameter("@plan_id", SqlDbType.BigInt) { Value = planId });
-        var result = await command.ExecuteScalarAsync();
+        var result = await command.ExecuteScalarAsync(cancellationToken);
         return result as string;
     }
     /// <summary>
