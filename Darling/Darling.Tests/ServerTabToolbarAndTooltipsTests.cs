@@ -53,7 +53,7 @@ public sealed class ServerTabToolbarAndTooltipsTests
     {
         var expected = new Dictionary<string, string>
         {
-            ["TimeRangeCombo"] = "Time range",
+            ["RangePicker"] = "Time range",
             ["CompareToCombo"] = "Compare to",
             ["AutoRefreshIntervalCombo"] = "Auto-refresh interval",
             ["TimeDisplayModeBox"] = "Time display",

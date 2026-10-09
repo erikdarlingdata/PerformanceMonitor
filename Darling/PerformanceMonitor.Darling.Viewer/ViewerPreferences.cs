@@ -42,8 +42,16 @@ public sealed class ViewerPreferences
     internal const int MaxTimeRangeIndex = 4;
     internal const int MaxAutoRefreshIntervalIndex = 2;
 
-    /// <summary>Default time window for a newly-opened server tab: 0=1h, 1=4h, 2=12h, 3=24h, 4=7d.</summary>
+    /// <summary>LEGACY default time window for a newly-opened server tab: 0=1h, 1=4h, 2=12h, 3=24h, 4=7d. Kept so a file
+    /// written before the shared time range picker (#5562) still opens on the same range, and so a file written now
+    /// still opens on an older build (the nearest of the five). <see cref="DefaultTimeRange"/> wins when it holds a range.</summary>
     public int DefaultTimeRangeIndex { get; set; } = DefaultTimeRangeIndexValue;
+
+    /// <summary>The default time window as the picker names it (#5562): a rolling length ("4h", "1w", "1mo") or a calendar
+    /// period ("today", "previous-week"). Null or unrecognised means the legacy <see cref="DefaultTimeRangeIndex"/> decides.
+    /// A fixed or since range is never kept here: like Custom, it names concrete instants that make no sense as a standing
+    /// default.</summary>
+    public string? DefaultTimeRange { get; set; }
 
     /// <summary>Whether a newly-opened server tab starts with auto-refresh running.</summary>
     public bool AutoRefreshEnabled { get; set; } = true;
@@ -69,6 +77,12 @@ public sealed class ViewerPreferences
         {
             DefaultTimeRangeIndex = DefaultTimeRangeIndexValue;
         }
+
+        /* #5562: the string id wins when it names a range a default can be; otherwise it is rebuilt from the legacy index
+           (an old file, or a hand edit to something unknown), so the two always agree on what a new tab opens on. */
+        var chosen = ViewerTimeRangeWindow.DefaultFor(this);
+        DefaultTimeRange = chosen.Id;
+        DefaultTimeRangeIndex = ViewerTimeRangeWindow.ToLegacyIndex(chosen);
 
         if (AutoRefreshIntervalIndex < 0 || AutoRefreshIntervalIndex > MaxAutoRefreshIntervalIndex)
         {

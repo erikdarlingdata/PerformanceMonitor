@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { pickRange, pickerText, pickerItems, popupShape, withDocumentListeners } from "./web-picker-driver.mjs";
 
 const jsDir = process.argv[2];
 
@@ -53,11 +54,11 @@ class FakeNode {
 }
 
 globalThis.Node = FakeNode;
-globalThis.document = {
+globalThis.document = withDocumentListeners({
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
-};
+});
 
 const fetches = [];
 let body = "{}";
@@ -88,13 +89,18 @@ try {
     const run = async (server, pick) => {
       fetches.length = 0;
       const root = tab.build(server, {});
-      const select = find(root, "select");
-      if (pick != null) {
-        select.value = String(pick);
-        select.handlers.change();
-      }
+      if (pick != null) pickRange(root, "Window", pick + "h");
       await new Promise((r) => setTimeout(r, 20));
-      return { select: select.value, hours: fetches.map(hoursOf), options: select.children.map((o) => o.attrs.value) };
+      /* The catalog read the picker makes is not a FinOps read; only get_finops reads count. */
+      const reads = fetches.filter((u) => u.includes("get_finops"));
+      return {
+        select: pickerText(root, "Window"),
+        hours: reads.map(hoursOf),
+        options: pickerItems(root, "Window").filter((i) => !i.disabled).map((i) => i.name),
+        disabled: pickerItems(root, "Window").filter((i) => i.disabled).map((i) => i.name + ": " + i.why),
+        shape: popupShape(root, "Window"),
+        refused: { subHour: pickRange(root, "Window", "30m"), calendar: pickRange(root, "Window", "yesterday"), fractional: pickRange(root, "Window", "90m"), tooLong: pickRange(root, "Window", "30d") },
+      };
     };
     out[name] = {
       first: await run("srv-a"),

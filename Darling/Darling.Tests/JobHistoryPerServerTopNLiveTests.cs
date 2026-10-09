@@ -211,7 +211,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
                 serverName: "darling-4477-gone-raw");
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerDeregistered);
 
-            var rows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit: 2000, ct);
+            var rows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit: 2000, cancellationToken: ct);
             var orphan = rows.SingleOrDefault(r => r.JobId == "orphan_job" && r.ServerId == ServerDeregistered);
 
             Assert.NotNull(orphan);
@@ -220,7 +220,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
             Assert.Equal("darling-4477-gone-raw", orphan!.ServerName);
 
             /* And it is reachable server-scoped too — the read's other parameter shape. */
-            var scoped = await viewer.GetJobHistoryAsync(sinceUtc, ServerDeregistered, 2000, ct);
+            var scoped = await viewer.GetJobHistoryAsync(sinceUtc, ServerDeregistered, 2000, cancellationToken: ct);
             Assert.Contains(scoped, r => r.JobId == "orphan_job");
 
             bodySucceeded = true;
@@ -327,7 +327,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
             const int limit = 20;
 
             var oldRows = await ReadOldFleetAsync(connection, sinceUtc, limit, ct);
-            var newRows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit, ct);
+            var newRows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit, cancellationToken: ct);
 
             Assert.Equal(limit, newRows.Count);
             Assert.Equal(oldRows.Count, newRows.Count);
@@ -339,7 +339,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
             /* And scoped-to-one-server, for the server with the same-server tie — the other parameter shape,
                same equivalence requirement. */
             var oldScopedRows = await ReadOldScopedFullAsync(connection, sinceUtc, ServerZeroOffset, limit, ct);
-            var newScopedRows = await viewer.GetJobHistoryAsync(sinceUtc, ServerZeroOffset, limit, ct);
+            var newScopedRows = await viewer.GetJobHistoryAsync(sinceUtc, ServerZeroOffset, limit, cancellationToken: ct);
             Assert.Equal(oldScopedRows.Count, newScopedRows.Count);
             for (var i = 0; i < oldScopedRows.Count; i++)
             {

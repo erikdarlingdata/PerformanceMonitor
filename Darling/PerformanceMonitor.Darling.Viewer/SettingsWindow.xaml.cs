@@ -274,19 +274,40 @@ public partial class SettingsWindow : Window
         var normalized = new ViewerPreferences
         {
             DefaultTimeRangeIndex = preferences.DefaultTimeRangeIndex,
+            DefaultTimeRange = preferences.DefaultTimeRange,
             AutoRefreshEnabled = preferences.AutoRefreshEnabled,
             AutoRefreshIntervalIndex = preferences.AutoRefreshIntervalIndex,
         }.Normalize();
 
-        DefaultTimeRangeCombo.SelectedIndex = normalized.DefaultTimeRangeIndex;
+        DefaultTimeRangeCombo.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        DefaultTimeRangeCombo.Value = ViewerTimeRangeWindow.DefaultFor(normalized);
+        _lastPersistableDefaultRange = DefaultTimeRangeCombo.Value;
         AutoRefreshCheckBox.IsChecked = normalized.AutoRefreshEnabled;
         AutoRefreshIntervalCombo.SelectedIndex = normalized.AutoRefreshIntervalIndex;
         AutoRefreshIntervalCombo.IsEnabled = normalized.AutoRefreshEnabled;
     }
 
+    /// <summary>A fixed or since range cannot be a standing default (#5562): it stays on the picker's last rolling or period
+    /// pick, so Save never writes concrete dates.</summary>
+    private void DefaultTimeRange_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
+    {
+        if (ViewerTimeRangeWindow.IsPersistable(e.Spec))
+        {
+            _lastPersistableDefaultRange = e.Spec;
+        }
+        else
+        {
+            DefaultTimeRangeCombo.Value = _lastPersistableDefaultRange;
+        }
+    }
+
+    private TimeRangeSpec _lastPersistableDefaultRange = TimeRangePresets.Find("1d")!;
+
     private ViewerPreferences BuildViewerPreferences() => new ViewerPreferences
     {
-        DefaultTimeRangeIndex = DefaultTimeRangeCombo.SelectedIndex,
+        DefaultTimeRange = ViewerTimeRangeWindow.IsPersistable(DefaultTimeRangeCombo.Value)
+            ? DefaultTimeRangeCombo.Value.Id
+            : _lastPersistableDefaultRange.Id,
         AutoRefreshEnabled = AutoRefreshCheckBox.IsChecked == true,
         AutoRefreshIntervalIndex = AutoRefreshIntervalCombo.SelectedIndex,
     }.Normalize();

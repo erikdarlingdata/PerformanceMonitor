@@ -3,6 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
              mc:Ignorable="d"
              d:DesignHeight="450" d:DesignWidth="900">
     <!-- Fleet-wide retained SQL Agent job-run history (issue #1433), a structural sibling of
@@ -69,14 +70,9 @@
                        Foreground="{DynamicResource ForegroundBrush}"/>
             <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ComboBox x:Name="TimeRangeComboBox" Width="100" VerticalAlignment="Center"
-                      SelectionChanged="Filter_SelectionChanged">
-                <ComboBoxItem Content="Last 24 Hours" Tag="24" IsSelected="True"/>
-                <ComboBoxItem Content="Last 7 Days" Tag="168"/>
-                <ComboBoxItem Content="Last 30 Days" Tag="720"/>
-                <ComboBoxItem Content="Last 90 Days" Tag="2160"/>
-                <ComboBoxItem Content="Last Year" Tag="8760"/>
-            </ComboBox>
+            <!-- #5562: the shared time range picker. 30 days is the "1mo" preset, a year is the longest choice ("Last Year", 365 days), 90 days is typed ("90d"). -->
+            <ui:TimeRangePicker x:Name="TimeRangePickerControl" Compact="True" VerticalAlignment="Center"
+                                RangeChanged="TimeRangePicker_RangeChanged"/>
             <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"
                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <ComboBox x:Name="ServerFilterComboBox" Width="150" VerticalAlignment="Center"
