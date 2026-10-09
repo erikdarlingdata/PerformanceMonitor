@@ -79,6 +79,34 @@ public sealed class PgClusterObjectCensusTests
             "renders the shipped compose-store role statements and retargets them at a per-run role; the fixed roles are not written",
     };
 
+    /// <summary>
+    /// The allow-listed classes whose only matches are sample statement text, pinned to the exact code lines that match
+    /// (trimmed). The class-level allow entry above would let a NEW literal-role statement into one of these files
+    /// unnoticed, so a match that is not on this list fails, and a listed line that no longer matches fails too (#5602).
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string[]> PinnedSampleText = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["PgStatementTextScrubLiveTests"] = new string[]
+        {
+            @"private const string Secret = ""ALTER ROLE app PASSWORD 'secret-x'"";",
+        },
+        ["StatementAnalysisReadCutLiveTests"] = new string[]
+        {
+            @"var marker = ""SELECT marker_pg_ssf"" + string.Concat(Enumerable.Repeat("", 1"", 800)) + "" ; CREATE ROLE zz_ssf"";",
+        },
+        ["StoreLogRemaskLiveTests"] = new string[]
+        {
+            @"Prefix + ""ERROR:  canceling statement due to statement timeout\n"" + Prefix + ""STATEMENT:  ALTER ROLE admin PASSWORD 'Remask3915a'""),",
+        },
+        ["StoreStatementStatsLiveTests"] = new string[]
+        {
+            @"(""ALTER ROLE app PASSWORD 'x'"", false, true),",
+            @"(""ALTER SYSTEM SET primary_conninfo = 'host=x password=hunter2'"", false, true),",
+            @"(""ALTER ROLE app PASSWORD $$x$$"", false, true),",
+            @"(""ALTER ROLE app PASSWORD E'x'"", false, true),",
+        },
+    };
+
     [Fact]
     public void TheCollectionThatRunsAlone_IsDefinedWithParallelizationOff()
     {
@@ -106,6 +134,11 @@ public sealed class PgClusterObjectCensusTests
             if (AllowList.ContainsKey(hit.ClassName))
             {
                 allowed.Add(hit.ClassName);
+                if (PinnedSampleText.TryGetValue(hit.ClassName, out var pinned) && !pinned.Contains(hit.Text, StringComparer.Ordinal))
+                {
+                    offenders.Add($"{hit.File}:{hit.Line}  {hit.ClassName}  [{hit.Rule}]  {hit.Text}  (NOT PINNED: this class is allowed only for the sample statement text listed in PgClusterObjectCensusTests.PinnedSampleText)");
+                }
+
                 continue;
             }
 
@@ -137,6 +170,26 @@ public sealed class PgClusterObjectCensusTests
         foreach (var (name, reason) in AllowList)
         {
             Assert.False(string.IsNullOrWhiteSpace(reason), $"allow-list entry {name} needs a reason");
+        }
+    }
+
+    [Fact]
+    public void EveryPinnedSampleStatement_StillMatchesInItsClass()
+    {
+        var seen = ScanClasses().Where(h => !h.InCollection).Select(h => (h.ClassName, h.Text)).ToHashSet();
+        var stale = PinnedSampleText
+            .SelectMany(p => p.Value.Select(text => (Class: p.Key, Text: text)))
+            .Where(p => !seen.Contains((p.Class, p.Text)))
+            .Select(p => p.Class + "  " + p.Text)
+            .ToList();
+
+        Assert.True(stale.Count == 0,
+            "These pinned sample statements no longer match a rule in their class (the line changed or went away). Update or delete them in "
+            + "PgClusterObjectCensusTests.PinnedSampleText:\n" + string.Join("\n", stale));
+
+        foreach (var name in PinnedSampleText.Keys)
+        {
+            Assert.True(AllowList.ContainsKey(name), $"pinned class {name} is not on the allow list");
         }
     }
 

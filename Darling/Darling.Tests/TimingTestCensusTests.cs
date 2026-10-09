@@ -39,7 +39,7 @@ public sealed class TimingTestCensusTests
 
     private const string Diagnostic = "diagnostic: the time is written to the test output and nothing asserts on it";
 
-    private const string LiveStore = "live-postgres member: it needs that collection's shared migrated store, and a class is in one collection only; the bound is a server-side timeout with a wide margin";
+    private const string LiveStore = "live-postgres member (#5602): it needs that collection's shared migrated store, and a class is in one collection only. The bound is wide (a server-side timeout or a hang guard of 10 s and up, against work that takes milliseconds), so runner load does not trip it. It stays: a second copy of the shared-store fixture in the timing collection would read the process-wide LiveCleanupBatch ledger again and report every live class's residue twice";
 
     /// <summary>Anti-vacuity: the timing collection holds well over this many classes, so a scan that stopped seeing it fails.</summary>
     private const int TimingMemberFloor = 15;
@@ -51,7 +51,6 @@ public sealed class TimingTestCensusTests
         ["CollectionLogSegmentByLiveTests.cs"] = LiveStore + "; the 30 s ceiling is a hang guard on a lock wait",
         ["ComposeTimeoutPhaseLiveTests.cs"] = HangGuard + " (60 s against a 5 s compose timeout)",
         ["DarlingManagedPostgresTests.cs"] = PollLoop + " (a retry of a file operation the OS may still hold)",
-        ["MigrationLockWaitContentionTests.cs"] = LiveStore + "; the 750 ms ceiling separates a first-attempt acquire (one round trip) from the one-second poll sleep, 3 orders of magnitude of headroom",
         ["MoveDirectoryOnceReleasedTests.cs"] = "lower bound only: it asserts the retry waited its patience before giving up; load makes the wait longer, never shorter",
         ["PerDatabaseFaultPathSplitTests.cs"] = "the clock is a running slice the code under test reads; the test spins until it passes a minimum and asserts it keeps running and freezes when stopped, with no upper bound",
         ["PgWaitSamplerLiveTests.cs"] = LiveStore + "; the bound is the sampling window plus 30 s, with the window as the lower bound",
@@ -72,7 +71,7 @@ public sealed class TimingTestCensusTests
         ["StatementFilterPlanReadsLiveTests.cs"] = LiveStore + "; the 15 s bound is a hang guard on a filter that judges a plan in tens of milliseconds",
         ["StatementScrubBlockingTests.cs"] = Diagnostic + " (scrub throughput records)",
         ["StatementScrubSnapshotTests.cs"] = HangGuard + " (2 minutes for a worst-case snapshot read)",
-        ["StoreCopyPhaseLivePostgresTests.cs"] = LiveStore + "; the window is the copy-start deadline (its own clock, not Npgsql's) minus 1 s up to the command timeout",
+        ["StoreCopyPhaseLivePostgresTests.cs"] = "live-postgres member; lower bound only (the start phase must not give up before the sweep deadline less a second); the upper bound moved to the exact fault type and message asserts, which tell the deadline from Npgsql's own timeout (#5602)",
         ["TrendStaleStatsLiveTests.cs"] = Diagnostic + " (the assertions are on the answer status)",
         ["TuningDropLockRecoveryLiveTests.cs"] = HangGuard + " (60 s against a single blocked drop)",
         ["WebExceptionTextCensusTests.cs"] = "the stopwatch's reading is passed as the elapsed-milliseconds argument of a fake tool's timeout result; no assertion is made on a time",
