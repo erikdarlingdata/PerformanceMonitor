@@ -60,6 +60,7 @@ public sealed class BlockingListPlanFlagsLivePostgresTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* The tool reads its "last N hours" window from the real clock, which the test clock override cannot move (#5608). */
             var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
 
             /* Newest first by event_time: spid 101 (both plans), 102 (blocked only), 103 (blocking only), 104 (empty strings),
@@ -132,6 +133,7 @@ VALUES ($1,$2,$3,$4,$5,'PlanFlagsDb',$6,0,$7,0,1000,'X','SELECT 1','UPDATE t SET
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* The tool reads its "last N hours" window from the real clock, which the test clock override cannot move (#5608). */
             var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
 
             /* Newest first by deadlock_time: a plan, an empty string, NULL, and an older plan the page of three leaves out. */
@@ -180,7 +182,7 @@ VALUES ($1,$2,$3,$4,$5,$6,'UPDATE t SET c = 1','<deadlock/>',$7,'PlanFlagsDb')",
         await connection.OpenAsync(ct);
         await PrepareStoreAsync(cs, connection, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         foreach (var sql in new[]
         {
             DarlingBlockingReader.BlockedProcessReportsSql,

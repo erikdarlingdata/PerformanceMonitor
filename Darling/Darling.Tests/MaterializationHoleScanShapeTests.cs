@@ -216,8 +216,8 @@ ORDER BY b.bucket";
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-            var h0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-6), DateTimeKind.Unspecified);
-            Assert.True(DateTime.UtcNow - h0.AddHours(48) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
+            var h0 = LiveClock.Now().Date.AddDays(-6);
+            Assert.True(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) - h0.AddHours(48) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
 
             var collected = Enumerable.Range(0, 48).Where(h => h is not (>= 5 and <= 8) and not 20).ToArray();
             await PlantHoursAsync(connection, h0, collected, ct);

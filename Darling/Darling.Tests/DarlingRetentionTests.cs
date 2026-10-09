@@ -601,7 +601,7 @@ public sealed class DarlingRetentionTests
         try
         {
             /* All timestamps Kind-Unspecified — naive-UTC storage, see PgCollectorRowWriter. */
-            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var utcNow = LiveClock.Now();
 
             /* wait_stats retention is 30 days: one row well past it, one fresh. Payload columns
                are nullable, so the standard prefix is enough. */
@@ -905,7 +905,7 @@ public sealed class DarlingRetentionTests
         var bodySucceeded = false;
         try
         {
-            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var utcNow = LiveClock.Now();
 
             using (var insert = new NpgsqlCommand(
                 "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)", connection))

@@ -199,7 +199,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var sinceUtc = now.AddHours(-1);
             var at = now.AddMinutes(-5);
 
@@ -255,7 +255,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var sinceUtc = now.AddDays(-3);
 
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerPlus60, "darling-4477-plus60", ct);
@@ -413,7 +413,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerZeroOffset, "darling-4477-plan", ct);
 
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var sinceUtc = now.AddDays(-3);
 
             for (var i = 0; i < 500; i++)
@@ -667,7 +667,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
             @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes)
               VALUES ($1, $2, $3, $4, $5)", connection);
         command.Parameters.AddWithValue(4_477_000_000L + serverId);
-        command.Parameters.AddWithValue(DarlingMcpTestData.Naive(DateTime.UtcNow));
+        command.Parameters.AddWithValue(DarlingMcpTestData.Naive(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc)));
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue("srv" + serverId.ToString(CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue(offsetMinutes);

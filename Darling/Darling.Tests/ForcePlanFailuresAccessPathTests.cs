@@ -207,7 +207,8 @@ public sealed class ForcePlanFailuresAccessPathTests
                100 ns, so a raw UtcNow does not survive the round trip and the #3579 stamp assertion below
                (tick-equality against what was seeded) would fail on any clock that is not itself
                microsecond-aligned — Windows' is not; the first CI run proved it by three ticks. */
-            var rawNow = DateTime.UtcNow;
+            /* #5608: the end of the window is a fixed point inside one chunk, so the chunk layout the plan is read against is the same at any hour. */
+            var rawNow = DateTime.SpecifyKind(LiveClock.AnchoredEnd(), DateTimeKind.Utc);
             var utcNow = DateTime.SpecifyKind(new DateTime(rawNow.Ticks - (rawNow.Ticks % 10)), DateTimeKind.Unspecified);
             for (var pass = 7; pass >= 0; pass--)
             {

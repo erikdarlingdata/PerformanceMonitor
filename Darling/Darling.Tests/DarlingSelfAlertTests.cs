@@ -5675,7 +5675,7 @@ public sealed class DarlingSelfAlertTests
         var bodySucceeded = false;
         try
         {
-            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var utcNow = LiveClock.Now();
 
             /* One old SUCCESS (45 min ago), then 12 recent ERRORs — the last 10 runs are all failures and
                the last success is well past the staleness window. */
@@ -5693,14 +5693,14 @@ public sealed class DarlingSelfAlertTests
             Assert.Equal(DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold, recentRuns);
             Assert.Equal(0, recentSuccess);
             Assert.True(DarlingSelfAlertEvaluator.IsCollectionStopped(
-                lastSuccess, recentRuns, recentSuccess, DateTime.UtcNow, out _));
+                lastSuccess, recentRuns, recentSuccess, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), out _));
 
             /* Full path (#4757): the seeded 45-minute-old success and the stored failure streak are both
                pre-restart rows to an evaluator that has just started, so at startup it must stay silent: the
                staleness is judged from the service start (the later of the two), and the stored streak is
                not armed until the server has been seen online. Once it has, the streak fires. Real-time
                clock so the seeded rows read as stale in the store. */
-            var h = new Harness { Now = DateTime.UtcNow };
+            var h = new Harness { Now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) };
             var evaluator = h.Build();
 
             await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
@@ -5713,7 +5713,7 @@ public sealed class DarlingSelfAlertTests
             /* A second evaluator that never sees the server online is the server that stays down across a
                restart: silent at the start, fired by the staleness arm once the window has passed since the
                start. Taken before the capture-down rows below, which add a fresh success. */
-            var hDown = new Harness { Now = DateTime.UtcNow };
+            var hDown = new Harness { Now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) };
             var downEvaluator = hDown.Build();
 
             await downEvaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
@@ -5780,7 +5780,7 @@ public sealed class DarlingSelfAlertTests
         var bodySucceeded = false;
         try
         {
-            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var utcNow = LiveClock.Now();
             var older = utcNow.AddMinutes(-10);
             var newest = utcNow.AddMinutes(-1);
 
@@ -5863,7 +5863,7 @@ public sealed class DarlingSelfAlertTests
         var bodySucceeded = false;
         try
         {
-            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var utcNow = LiveClock.Now();
             var older = utcNow.AddMinutes(-5);
 
             /* An older snapshot that must be filtered out by the MAX(collection_time) predicate, a current one
@@ -5901,7 +5901,7 @@ public sealed class DarlingSelfAlertTests
             /* End to end through the sweep entry point, against rows that are genuinely fresh: the disconnect
                and the suspend are first sightings (silent baselines), and the 900-second lag is past the
                300-second default, so exactly one alert lands. */
-            var h = new Harness { Now = DateTime.UtcNow };
+            var h = new Harness { Now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) };
             var evaluator = h.Build();
             await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
 

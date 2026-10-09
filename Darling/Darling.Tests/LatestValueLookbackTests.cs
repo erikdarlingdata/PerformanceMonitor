@@ -420,7 +420,7 @@ public sealed class LatestValueLookbackLivePostgresTests
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedLiveAndGhostAsync(connection, LiveServerId, end, ct);
 
             await using var postgres = NpgsqlDataSource.Create(connectionString!);
@@ -487,7 +487,7 @@ public sealed class LatestValueLookbackLivePostgresTests
             await DeleteSentinelsAsync(connection, ct);
 
             /* Everything a day and an hour old: the collectors stopped, or the server went away. */
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var stale = end.AddHours(-25);
             await InsertFileIoAsync(connection, StaleServerId, stale, "StaleDb", "StaleDb_data", 4096, ct);
             await InsertSizeAsync(connection, StaleServerId, stale, "StaleDb", 1, "ROWS", "StaleDb_data", 20_480, percentGrowth: true, "D:\\", 1_000_000, 10_000, ct);
@@ -545,7 +545,7 @@ public sealed class LatestValueLookbackLivePostgresTests
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddDays(-3), 3604, status: true, ct);
             await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddDays(-1), 2371, status: true, ct);
             await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddHours(-6), 2371, status: true, ct);
@@ -589,7 +589,7 @@ public sealed class LatestValueLookbackLivePostgresTests
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddDays(-1), 3604, status: true, ct);
             await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddDays(-1), 2371, status: true, ct);
             await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddHours(-6), 2371, status: true, ct);
@@ -635,7 +635,7 @@ public sealed class LatestValueLookbackLivePostgresTests
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await InsertTraceFlagAsync(connection, TraceFlagAllOffServerId, end.AddDays(-3), 1222, status: true, ct);
 
             await using var postgres = NpgsqlDataSource.Create(connectionString!);
@@ -668,7 +668,7 @@ public sealed class LatestValueLookbackLivePostgresTests
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedLiveAndGhostAsync(connection, LiveServerId, end, ct);
 
             /* Twenty hours ago the dropped database was still there (last seen five hours before that), and none
@@ -733,7 +733,7 @@ public sealed class LatestValueLookbackLivePostgresTests
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             using (var seed = new NpgsqlCommand(@"
 INSERT INTO file_io_stats
     (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, size_mb)
@@ -805,7 +805,7 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await InsertOverrideAsync(connection, DailyServerId, "database_size_stats", 1440, ct);
             await InsertOverrideAsync(connection, DailyStaleServerId, "database_size_stats", 1440, ct);
 
@@ -871,7 +871,7 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await InsertOverrideAsync(connection, OnLoadServerId, "file_io_stats", 0, ct);
             await InsertOverrideAsync(connection, OnLoadServerId, "memory_stats", 0, ct);
 
@@ -921,7 +921,7 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await InsertOverrideAsync(connection, null, FleetOverrideCollector, 1440, ct);
             await InsertOverrideAsync(connection, FleetOverriddenServerId, FleetOverrideCollector, 60, ct);
             await InsertClerkAsync(connection, FleetServerId, end.AddHours(-30), "MEMORYCLERK_SQLBUFFERPOOL", 800, ct);
@@ -973,7 +973,7 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
         {
             await DeleteSentinelsAsync(connection, ct);
 
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await InsertOverrideAsync(connection, PlanShapeDailyServerId, "database_size_stats", 1440, ct);
             using (var seed = new NpgsqlCommand(@"
 INSERT INTO database_size_stats
