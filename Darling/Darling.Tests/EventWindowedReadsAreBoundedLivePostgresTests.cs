@@ -265,7 +265,7 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var marks = Marks(now);
             await SeedAsync(connection, now, marks, ct);
 
@@ -365,7 +365,7 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var marks = Marks(now);
             await SeedAsync(connection, now, marks, ct);
             var floor = EventWindowFloor.For(marks.WindowStart);

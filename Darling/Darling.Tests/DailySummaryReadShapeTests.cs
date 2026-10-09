@@ -556,9 +556,9 @@ public sealed class DailySummaryReadShapeLiveTests
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             await RegisterServerAsync(connection, ct);
 
-            var d0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-14), DateTimeKind.Unspecified);
+            var d0 = LiveClock.Now().Date.AddDays(-14);
             var days = Enumerable.Range(0, 10).Select(n => d0.AddDays(n)).ToArray();
-            Assert.True(DateTime.UtcNow - days[^1].AddDays(1) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
+            Assert.True(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) - days[^1].AddDays(1) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
 
             foreach (var (day, hashes) in new[] { (0, 3), (2, 5), (3, 4), (5, 6), (6, 2), (7, 3), (8, 1) })
             {
@@ -634,7 +634,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue(ServerName);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(LiveClock.Now());
         await command.ExecuteNonQueryAsync(ct);
     }
 

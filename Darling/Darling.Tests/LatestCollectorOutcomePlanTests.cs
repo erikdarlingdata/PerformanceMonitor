@@ -57,7 +57,7 @@ public sealed class LatestCollectorOutcomePlanTests
             await stop.ExecuteNonQueryAsync(ct);
         }
 
-        var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var utcNow = LiveClock.Now();
         await SeedHistoryAsync(connection, utcNow, ct);
 
         using (var analyze = new NpgsqlCommand("ANALYZE collect.collection_log", connection))

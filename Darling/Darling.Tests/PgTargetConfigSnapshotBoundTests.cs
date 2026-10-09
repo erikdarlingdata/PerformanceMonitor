@@ -212,7 +212,7 @@ public sealed class PgTargetConfigSnapshotBoundLiveTests
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, PlanShapeServerId, ServerName, "postgres", 18, ct);
 
             /* shared_buffers 128 MB (16384 x 8kB) on every snapshot but the newest, which says 256 MB. */
-            var end = TruncateToSeconds(DateTime.UtcNow);
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             using (var seed = new NpgsqlCommand(@"
 INSERT INTO pg_server_config (collection_id, collection_time, server_id, server_name, name, setting, unit, source)
 SELECT 9_392_801_000 + (EXTRACT(EPOCH FROM t)::bigint % 1_000_000) * 10 + s.k, t, $1, $2, s.name,
@@ -283,7 +283,7 @@ CROSS JOIN (VALUES (1, 'shared_buffers', '16384', '8kB'), (2, 'fsync', 'on', NUL
         {
             await DeleteSentinelsAsync(connection, ct);
             await using var postgres = NpgsqlDataSource.Create(connectionString!);
-            var now = TruncateToSeconds(DateTime.UtcNow);
+            var now = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
 
             /* Dark: the newest snapshot is 72 hours before the window's end; an older one disagrees with it. */
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, DarkServerId, ServerName, "postgres", 18, ct);

@@ -807,7 +807,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
 
             /* Registered, but no collection_log row is ever inserted for this server_id. */
             await InsertServerAsync(connection, NoHistoryServerId, NoHistoryName, 3, ct);
@@ -848,7 +848,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
             var at = now.AddMinutes(-5);   // inside the [now-1h, now] card window
 
             /* Plant representative editions so the read-through card platform can be asserted end-to-end:

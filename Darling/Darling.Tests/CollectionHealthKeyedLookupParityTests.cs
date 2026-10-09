@@ -261,7 +261,7 @@ public sealed class CollectionHealthKeyedLookupParityTests
 
     private static DateTime Now()
     {
-        var now = DateTime.UtcNow;
+        var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
         return new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerMillisecond), DateTimeKind.Utc);
     }
 

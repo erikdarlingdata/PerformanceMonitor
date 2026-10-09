@@ -213,7 +213,7 @@ FROM generate_series(1, 60000) AS g", connection))
             Assert.NotNull(materialization);
 
             /* Midnight UTC twenty days back: below every refresh policy's window. */
-            var h0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-20), DateTimeKind.Unspecified);
+            var h0 = LiveClock.Now().Date.AddDays(-20);
             return new Store(scratch, connection, h0, target, materialization.Value);
         }
         catch

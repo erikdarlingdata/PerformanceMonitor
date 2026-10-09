@@ -112,11 +112,11 @@ FROM latest WHERE rn = 1";
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static DateTime Now()
-    {
-        var now = DateTime.UtcNow;
-        return DateTime.SpecifyKind(new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
-    }
+    /* #5608: the end of every window is the fixed anchor, never the clock. The perfmon read's block count depends on where
+       the day-sized raw chunk boundary falls in the seeded window: the 4-hour window straddles it between 00:00 and 04:00
+       UTC, and the newest read then walks a different number of rows inside the newest chunk, so a 3x margin that held at
+       midday failed at 00:50 (perfmon old=264 new=120). The anchor keeps the window inside one chunk at any hour. */
+    private static DateTime Now() => LiveClock.AnchoredEnd();
 
     private static AnalysisContext Context(int serverId, DateTime end) => new()
     {

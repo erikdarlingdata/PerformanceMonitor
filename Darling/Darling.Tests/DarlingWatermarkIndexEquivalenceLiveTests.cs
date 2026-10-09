@@ -58,7 +58,8 @@ public sealed class DarlingWatermarkIndexEquivalenceLiveTests
         var bodySucceeded = false;
         try
         {
-            var nowUtc = DateTime.UtcNow;
+            /* #5608: the end of the window is a fixed point inside one chunk, so the chunk layout the plan is read against is the same at any hour. */
+            var nowUtc = DateTime.SpecifyKind(LiveClock.AnchoredEnd(), DateTimeKind.Utc);
             long logId = 4_150_100_000;
 
             /* Several real collector names (a mix of cadences), 10 days of history so most chunks

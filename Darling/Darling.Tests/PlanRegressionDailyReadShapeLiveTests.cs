@@ -134,7 +134,7 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        var utcNow = DateTime.UtcNow;
+        var utcNow = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc); // #5608: the clock override reaches the seed
         var promoted = await QueryStoreIntervalPartitions.RunPromotionAsync(
             connection, QueryStoreIntervalPartitions.Latest, utcNow.AddDays(-19), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
             TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(50), ct);
@@ -184,7 +184,7 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
     /// </summary>
     private static async Task<(DateTime Today, List<DateTime> Built)> SeedAndBuildAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now(); // #5608: whole UTC days from here; the clock override reaches the seed
         var today = now.Date;
 
         /* The late-row trigger fires per row for anything in its 16-day reach; the seed is not a late arrival, so it is

@@ -70,7 +70,7 @@ public sealed class RawChunkIntervalReconcilerLiveTests
             "SELECT create_hypertable('collect.rci_test', by_range('ts', INTERVAL '24 hours'), if_not_exists => true, migrate_data => true)", ct);
         await ExecAsync(connection, "ALTER TABLE collect.rci_test SET (timescaledb.compress, timescaledb.compress_orderby = 'ts')", ct);
 
-        var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var utcNow = LiveClock.Now();
         await PlantChunkAsync(connection, utcNow.AddDays(-3), ct);
         await PlantChunkAsync(connection, utcNow.AddDays(-2), ct);
         await ExecAsync(connection, "SELECT compress_chunk(c) FROM show_chunks('collect.rci_test') c", ct);
@@ -78,7 +78,7 @@ public sealed class RawChunkIntervalReconcilerLiveTests
         Assert.Equal(24, await CurrentIntervalHoursAsync(connection, ct));
 
         /* ---- phase 1: narrows one rung, applies, records ---- */
-        var changed1 = await RawChunkIntervalReconciler.ReconcileAsync(connection, budgetBytes: 1.0, DateTime.UtcNow, logger: null, ct);
+        var changed1 = await RawChunkIntervalReconciler.ReconcileAsync(connection, budgetBytes: 1.0, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), logger: null, ct);
         Assert.Equal(1, changed1);
         Assert.Equal(12, await CurrentIntervalHoursAsync(connection, ct));
 
@@ -96,7 +96,7 @@ public sealed class RawChunkIntervalReconcilerLiveTests
         Assert.Equal(1L, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.raw_chunk_interval_reconcile_runs", ct));
 
         /* ---- phase 2: same day, held — proves IntervalLastChangedUtc came from the history table ---- */
-        var changed2 = await RawChunkIntervalReconciler.ReconcileAsync(connection, budgetBytes: 1.0, DateTime.UtcNow, logger: null, ct);
+        var changed2 = await RawChunkIntervalReconciler.ReconcileAsync(connection, budgetBytes: 1.0, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), logger: null, ct);
         Assert.Equal(0, changed2);
         Assert.Equal(12, await CurrentIntervalHoursAsync(connection, ct));
         Assert.Equal(1L, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.raw_chunk_interval_rung_history", ct));
@@ -233,7 +233,7 @@ WHERE hypertable_schema = 'collect' AND hypertable_name = 'rci_test' AND dimensi
             "SELECT create_hypertable('collect.rated_test', by_range('ts', INTERVAL '24 hours'), if_not_exists => true, migrate_data => true)", ct);
         await ExecAsync(connection, "ALTER TABLE collect.rated_test SET (timescaledb.compress, timescaledb.compress_orderby = 'ts')", ct);
 
-        var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var utcNow = LiveClock.Now();
         for (var day = 1; day <= 5; day++)
         {
             await PlantRatedChunkAsync(connection, utcNow.AddDays(-day), ct);
@@ -263,7 +263,7 @@ WHERE ccs.before_compression_total_bytes IS NOT NULL", connection))
         var budgetBytes = openBytesAt24Hours / 2.55;
 
         var logger = new CapturingTestLogger();
-        var changed = await RawChunkIntervalReconciler.ReconcileAsync(connection, budgetBytes, DateTime.UtcNow, logger, ct);
+        var changed = await RawChunkIntervalReconciler.ReconcileAsync(connection, budgetBytes, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), logger, ct);
 
         Assert.Equal(1, changed);
         Assert.Equal(12, await CurrentIntervalHoursAsync(connection, "rated_test", ct));
@@ -282,7 +282,7 @@ WHERE ccs.before_compression_total_bytes IS NOT NULL", connection))
            either pass runs — that held line is asserted at Information too, by exact prefix. ---- */
         var loggerNoChange = new CapturingTestLogger();
         var changedNoChange = await RawChunkIntervalReconciler.ReconcileAsync(
-            connection, budgetBytes: openBytesAt24Hours * 1_000, DateTime.UtcNow, loggerNoChange, ct);
+            connection, budgetBytes: openBytesAt24Hours * 1_000, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), loggerNoChange, ct);
 
         Assert.Equal(0, changedNoChange);
         var summaryNoChange = loggerNoChange.Lines.FirstOrDefault(l =>

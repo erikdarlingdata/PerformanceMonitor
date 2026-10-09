@@ -133,7 +133,7 @@ public sealed class FrozenRollupLiveTests
                (DarlingCliCommands' rollup-backfill verb) — the service start path never runs a backfill slice
                on its own, so there is no third step to run here. */
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-            await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, DateTime.UtcNow, ct);
+            await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), ct);
 
             var after = await ReadDailyTotalsAsync(connection, TimescaleSupport.QueryStatsDailyView, ServerId, D0, cutoff, ct);
             Assert.Equal(before, after);
@@ -1869,7 +1869,7 @@ public sealed class FrozenRollupLiveTests
             /* now() anchor, truncated to the hour so the seeded hourly rows line up with the buckets the
                probe walks. The legacy froze a few hours back (H-6..H-4); raw kept collecting every hour
                since, up to and including the current hour, but the successor never ran its first refresh. */
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
 
             for (var hoursAgo = 0; hoursAgo <= 6; hoursAgo++)
@@ -1949,7 +1949,7 @@ public sealed class FrozenRollupLiveTests
                itself (H-72, H-71) holds no hole. The successor also materializes a much later bucket, H-2,
                but skips H-30 (T2) in between — a real hole, entirely inside the successor's own span above
                T1, which the seam probe must stop short of and never reach. */
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
 
             await InsertProcedureStatsAsync(connection, h.AddHours(-72), "seam_proc_legacy_floor", 900, 9, 3600, ct);
@@ -2032,7 +2032,7 @@ public sealed class FrozenRollupLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
             var legacyLast = h.AddDays(-3);
 
@@ -2111,6 +2111,7 @@ public sealed class FrozenRollupLiveTests
         var bodySucceeded = false;
         try
         {
+            /* The freeze verdict reads the store session's own clock, which the test clock override cannot move (#5608), so this seed stays on the real clock. */
             var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
             var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
 

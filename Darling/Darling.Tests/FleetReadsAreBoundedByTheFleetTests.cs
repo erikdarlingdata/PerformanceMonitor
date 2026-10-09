@@ -382,7 +382,7 @@ GROUP BY server_id";
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
 
             /* The newest-row reads: identical rows for every compared sentinel. */
@@ -513,7 +513,7 @@ GROUP BY server_id";
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
 
             var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-1), now, now, cancellationToken: ct);
@@ -551,7 +551,7 @@ GROUP BY server_id";
             Assert.Equal(ServerCollectionStatus.Offline.Word(), dark.Status);
             Assert.False(dark.AwaitingFirstCollection);
             Assert.NotNull(dark.LastCollectionTime);
-            Assert.InRange((DateTime.UtcNow - dark.LastCollectionTime!.Value).TotalDays, 4.5, 5.5);
+            Assert.InRange((DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) - dark.LastCollectionTime!.Value).TotalDays, 4.5, 5.5);
 
             var never = cards[NeverCollected];
             Assert.Null(never.CpuPercent);
@@ -620,7 +620,7 @@ GROUP BY server_id";
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
 
             var first = await DarlingFleetReader.ReadLastCollectionAsync(postgres, now, null, ct);
@@ -680,7 +680,7 @@ GROUP BY server_id";
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
             using (var analyze = new NpgsqlCommand("ANALYZE collect.memory_stats; ANALYZE collect.deadlocks; ANALYZE collect.servers;", connection))
             {

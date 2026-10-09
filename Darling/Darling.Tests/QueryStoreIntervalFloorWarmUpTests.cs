@@ -389,7 +389,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
             await PgMigrations.MigrateAsync(connection, ct);
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
             var log = new CapturingTestLogger();
-            var utcNow = DateTime.UtcNow;
+            var utcNow = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc); // #5608: the test clock override reaches the seed
 
             var dropped = new List<string>();
             foreach (var table in QueryStoreIntervalPartitions.All)
@@ -478,7 +478,8 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
            retention pass row-purges it by name: that is where the dead index entries are. */
         await ExecuteAsync(connection, $"ALTER TABLE {table.Legacy} SET (autovacuum_enabled = false)", ct);
 
-        var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        /* #5608: the rows land in the one legacy table (MINVALUE..MAXVALUE), so no chunk or day boundary is in play; the clock goes through LiveClock so a run can be proved at any hour. */
+        var utcNow = LiveClock.Now();
         var expiredStart = utcNow.AddDays(-(table.HorizonDays + 5));
         var keptStart = utcNow.AddDays(-1);
         foreach (var serverId in ServerIds)
