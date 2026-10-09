@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Ui;
 
@@ -108,7 +109,8 @@ public sealed class PlanNavigationController
             $"[{(string.IsNullOrEmpty(databaseName) ? "default" : databaseName)}].\n\n" +
             "Make sure you understand what the query does before proceeding.\n" +
             "The query will execute with SET STATISTICS XML ON to capture the actual plan.\n" +
-            "All data results will be discarded.",
+            "All data results will be discarded.\n\n" +
+            QueryModificationDetector.CapturedQueryNotice,
             "Get Actual Plan", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.OK) return;
 
