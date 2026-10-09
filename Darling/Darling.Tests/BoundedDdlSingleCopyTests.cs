@@ -35,7 +35,9 @@ public sealed class BoundedDdlSingleCopyTests
         var helper = text.IndexOf("internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(", StringComparison.Ordinal);
         Assert.True(helper >= 0 && helper < first && first - helper < 1200,
             "the one SET LOCAL lock_timeout must sit inside TryRunBoundedDdlAsync");
-        Assert.Equal(1, text.Split("BoundedDdlOutcome> TryRun", StringSplitOptions.None).Length - 1);
+        /* Two overloads since #5574 (the statement-list one calls the body one, which owns the SET LOCAL above); a third
+           would be a second copy of the helper. */
+        Assert.Equal(2, text.Split("BoundedDdlOutcome> TryRun", StringSplitOptions.None).Length - 1);
     }
 
     [Fact]

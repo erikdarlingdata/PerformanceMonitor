@@ -4074,6 +4074,13 @@ LIMIT 1";
             inFlightSweeps.Add(_selfAlertPass);
         }
 
+        /* #5574: the perfmon_stats re-group loop ends on the same cancellation; its chunk in flight rolls back or is left
+           for the compression policy, and the loop never faults. */
+        if (_perfmonRegroupDrain?.Completion is { IsCompleted: false } regroupRun)
+        {
+            inFlightSweeps.Add(regroupRun);
+        }
+
         /* #4938: the daily runs detached from those bodies join the wait inside DrainInFlightAsync. */
         await DrainInFlightAsync(inFlightSweeps);
 
@@ -10123,6 +10130,19 @@ AND   j.hypertable_name = '{relation}'", connection))
                 await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token, hourly: true);
             }
 
+            /* #5574: the perfmon_stats chunk re-group, AFTER the whole list because the "compression policies" step is what
+               moves the hypertable to the new grouping first (the re-group does nothing until it has). It is a background
+               loop on its own connection and the service's stopping token, not a step: the rewrite of a large store's chunk
+               takes minutes, and a step would hold this pass (and the sweep loop that awaits it) for them. Starting it costs
+               nothing here (no database work, and nothing when a run is already going); a converged store's run is two
+               catalog reads and it ends. Hourly pass only: the start path does not call it, so a restart is not held; the
+               first hourly pass, about 30 s after a start (its stamp seeds at MinValue, #3812/#3817), starts it, and
+               every hourly pass after. TimescaleDB-gated like the steps that need it. */
+            if (timescaleAvailable)
+            {
+                StartPerfmonRegroupDrain(cancellationToken);
+            }
+
             LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -10141,6 +10161,16 @@ AND   j.hypertable_name = '{relation}'", connection))
                 "Store object convergence could not run after {ElapsedMs} ms — every store object stays exactly as it is (a missing rollup family stays missing, a missing baseline relation keeps returning nothing) until the next hour retries or the service restarts: {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
         }
+    }
+
+    /// <summary>The perfmon_stats chunk re-group loop (#5574); null until the first hourly pass on a store with TimescaleDB.</summary>
+    private PerfmonRegroupDrain? _perfmonRegroupDrain;
+
+    /// <summary>Starts the re-group loop unless one is running. Never throws and does no database work on this thread.</summary>
+    private void StartPerfmonRegroupDrain(CancellationToken stoppingToken)
+    {
+        _perfmonRegroupDrain ??= new PerfmonRegroupDrain(token => _postgres!.OpenConnectionAsync(token), _logger);
+        _perfmonRegroupDrain.StartIfIdle(stoppingToken);
     }
 
     /// <summary>
