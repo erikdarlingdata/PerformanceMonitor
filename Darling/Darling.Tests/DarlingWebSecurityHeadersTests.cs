@@ -232,6 +232,18 @@ public sealed class DarlingWebSecurityHeadersTests
         Assert.DoesNotContain("'unsafe-inline'", csp.Replace("style-src-attr 'unsafe-inline'", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("\r\n")]
+    [InlineData("\r")]
+    public void PolicyForInlinePage_HashesTheTextTheBrowserBuilds_NotTheLineEndsOfTheSource(string lineEnd)
+    {
+        // A page held in a CR LF source file is served with CR LF, and the browser hashes the block after turning each CR LF (or CR) into LF.
+        const string lf = "<html><head><style>\n  body { margin: 0; }\n</style></head><body><script>\nvar a = 1;\nvar b = 2;\n</script></body></html>";
+        var served = lf.Replace("\n", lineEnd, StringComparison.Ordinal);
+
+        Assert.Equal(DarlingWebSecurityHeaders.PolicyForInlinePage(lf), DarlingWebSecurityHeaders.PolicyForInlinePage(served));
+    }
+
     [Fact]
     public void PolicyForInlinePage_WithNoInlineBlock_IsTheDefaultPolicy()
         => Assert.Equal(
@@ -241,7 +253,8 @@ public sealed class DarlingWebSecurityHeadersTests
     private static void AssertEveryInlineBlockIsHashed(string html, string csp)
     {
         var blocks = Regex.Matches(html, @"<(script|style)\b[^>]*>(?<body>.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase)
-            .Select(m => (Kind: m.Groups[1].Value.ToLowerInvariant(), Body: m.Groups["body"].Value))
+            // The browser's HTML parser turns CR LF into LF before it builds a block's text, and the hash is of that text.
+            .Select(m => (Kind: m.Groups[1].Value.ToLowerInvariant(), Body: m.Groups["body"].Value.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n')))
             .Where(b => b.Body.Length > 0)
             .ToList();
         Assert.NotEmpty(blocks);

@@ -120,7 +120,10 @@ internal sealed class DarlingWebSecurityHeaders
         var hashes = new List<string>();
         foreach (Match match in pattern.Matches(html))
         {
-            var body = match.Groups["body"].Value;
+            /* A browser's HTML parser turns every CR LF and lone CR into LF before it builds the block's text, and the
+               hash is taken over that text. A page held in a source file with CR LF line ends (this repository's
+               default) would otherwise get a hash of text the browser never sees, and the block would stay blocked. */
+            var body = match.Groups["body"].Value.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
             if (body.Length == 0)
             {
                 continue;
