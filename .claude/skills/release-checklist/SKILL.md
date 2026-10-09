@@ -150,9 +150,11 @@ Quick click-through of any new features or significant changes listed in the cha
 
 Covers the **desktop apps' own** upgrade via Velopack (`*-Setup.exe`) for **Lite** and the **Darling Viewer**.
 
-This step is a gate. Run it before step 10 on every release, even when the upgrade code did not change. Publishing notifies everyone who watches the repo, and the apps offer the new version in Help → About. A check after publishing finds a broken upgrade only after users can install it.
+This step is a gate. Run it after step 10 opens the release PR and before step 11 tags the release. Run it on every release, even when the upgrade code did not change. Publishing notifies everyone who watches the repo, and the apps offer the new version in Help → About. A check after publishing finds a broken upgrade only after users can install it.
 
-Before the cut, build each new Setup.exe from the release PR's head commit as `build.yml` does. Run `dotnet publish` for the self-contained build, then `vpk download` and `vpk pack` with the same arguments. These Setup.exe files are unsigned. Run each one on a clean Windows machine over the prior release's signed Setup.exe. After publishing, repeat item 2 with the signed Setup.exe to confirm that signing changed nothing. That repeat is not the gate.
+Before the cut, build each new Setup.exe from the release PR's head commit as `build.yml` does. Run `dotnet publish` for the self-contained build, then `vpk download` and `vpk pack` with the same arguments, except `-p`. In `build.yml`, `-p` points at the signed payload (`signed/Lite-Velopack`, `signed/DarlingViewer-Velopack`). Point it at the unsigned publish folder instead (`publish/Lite-velopack`, `publish/DarlingViewer-velopack`). These Setup.exe files are unsigned. Run each one on a clean Windows machine over the prior release's signed Setup.exe.
+
+After publishing, repeat item 2 with the signed Setup.exe to confirm that signing changed nothing. That repeat is not the gate.
 
 Test the upgrade over a **running** prior version:
 
