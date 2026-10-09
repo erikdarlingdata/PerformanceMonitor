@@ -8198,7 +8198,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         {
             holders = new List<string>();
             using var lookup = await connection.BeginTransactionAsync(cancellationToken);
-            using (var limits = new NpgsqlCommand(LockHolderLookupLimitsSql, connection, lookup))
+            using (var limits = new NpgsqlCommand(LockHolderLookupLimitsSql, connection, lookup) { CommandTimeout = 30 })
             {
                 await limits.ExecuteNonQueryAsync(cancellationToken);
             }
