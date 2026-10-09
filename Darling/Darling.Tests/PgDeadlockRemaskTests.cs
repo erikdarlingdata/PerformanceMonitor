@@ -674,6 +674,74 @@ public sealed class PgDeadlockRemaskTests
     }
 
     /// <summary>
+    /// #5634: a stage that fails twice and then succeeds logs ONE information line naming the stage and the two
+    /// failed passes; the warnings stop at the last failure, so without it nothing says the stage came back.
+    /// </summary>
+    [Fact]
+    public async Task AStageThatRecoversAfterFailures_LogsOneRecoveryLine_WithTheFailureCount()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        await PlantRawReportsAsync(connection, 5, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
+
+        /* The alert stage's table is away for two passes (the second waits one tick out), then back. */
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log RENAME TO config_alert_log_away", ct);
+        var logger = new CountingLogger();
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        Assert.Equal(2, progress.Alerts.ConsecutiveFailures);
+        Assert.DoesNotContain(logger.Informations, line => line.Contains("recovered", StringComparison.Ordinal));
+
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log_away RENAME TO config_alert_log", ct);
+        for (var tick = 0; tick < 6 && progress.Pending; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        }
+
+        Assert.Equal(0, progress.Alerts.ConsecutiveFailures);
+
+        /* The other two alert-table stages fail on the same missing table, so each logs its own line, once. */
+        var recovered = Assert.Single(logger.Informations, line => line.Contains("stored alert rows recovered", StringComparison.Ordinal));
+        Assert.Contains("2 earlier", recovered, StringComparison.Ordinal);
+        Assert.All(progress.Stages, stage => Assert.True(
+            logger.Informations.Count(line => line.Contains($"stored {stage.Name} rows recovered", StringComparison.Ordinal)) <= 1, stage.Name));
+    }
+
+    /// <summary>
+    /// #5634: a stage that never failed logs no recovery line on a clean pass.
+    /// </summary>
+    [Fact]
+    public async Task ACleanPassWithNoEarlierFailure_LogsNoRecoveryLine()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        await PlantRawReportsAsync(connection, 5, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
+
+        var logger = new CountingLogger();
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        for (var tick = 0; tick < 6 && progress.Pending; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        }
+
+        Assert.True(progress.Done);
+        Assert.Equal(0, logger.Warnings);
+        Assert.NotEmpty(logger.Informations);
+        Assert.DoesNotContain(logger.Informations, line => line.Contains("recovered", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// #4036's round-2 review, finding 2(b): an alert stage that fails once (no ticks skipped) must not let the
     /// reports run in that tick. A report rewritten before its alert is rebuilt leaves the alert naming a hash no
     /// report carries, and the alert-key stage then keys it: cut from its report for good. The alert must end naming
@@ -1434,10 +1502,12 @@ WHERE victim_pid = 10004", ct);
 
     private static Microsoft.Extensions.Logging.ILogger NullLoggerFor() => Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
-    /* Counts the warnings the driver logs, one per failure. */
+    /* Counts the warnings the driver logs, one per failure, and keeps the information lines it logs (#5634). */
     private sealed class CountingLogger : Microsoft.Extensions.Logging.ILogger
     {
         public int Warnings { get; private set; }
+
+        public List<string> Informations { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -1448,6 +1518,10 @@ WHERE victim_pid = 10004", ct);
             if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
             {
                 Warnings++;
+            }
+            else if (logLevel == Microsoft.Extensions.Logging.LogLevel.Information)
+            {
+                Informations.Add(formatter(state, exception));
             }
         }
     }
