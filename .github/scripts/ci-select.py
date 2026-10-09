@@ -295,7 +295,26 @@ _TRAIT = re.compile(r'Trait\(\s*"(\w+)"\s*,\s*"(\w+)"\s*\)')
 # mapped classes, 12 to 44 coverage files each against 100 and more for a fully covered class). The map cannot tell
 # us, so the SOURCE does: every class in a file that names such a variable in a quoted literal carries the Gate=Env
 # trait and map_select always selects it. It is found from the source at selection time, so a new gated class needs
-# no list edit. The cost is a few seconds: on a pull request where the variable is unset the class skips.
+# no list edit.
+#
+# What the scan cannot see (a miss here is silent, so a new gate must be written to be seen): it reads each test file
+# on its own, for a quoted "DARLING_TEST_PG_..." or "DARLING_TEST_PGRUNTIME_..." literal. A gate variable that a class
+# reads through a constant or a helper declared in ANOTHER file, or one that is not named DARLING_TEST_PG_* /
+# DARLING_TEST_PGRUNTIME_*, is invisible to it, and the class stays unmarked and unmapped. A new gate of either kind
+# must also name its variable as a quoted literal in the class's own file (or take the Gate=Env trait by hand).
+#
+# What it costs: the mark is per CLASS, not per test, so a class where only some tests are gated runs whole on every
+# narrowed Darling pull request, and the darling-pg job sets these variables, so the gated tests really run. Measured
+# on a full run of this change (workflow run 37911378693, the 19 test classes that carry the mark, summed test time
+# per class, the shard each lands on in brackets): DarlingStoreUpgradeTests 274 s [shard 5],
+# ManagedConfUpgradePathTests 85 s [4], DarlingManagedPostgresTests 73 s [3], PgServerLogTailCsvJsonRotationLiveTests
+# 44 s [1], PgLogBurstAndRotationLiveTests 38 s [2], PgRaiseShapedRecordsLiveTests 31 s [1],
+# PgServerLogTailRotationLiveTests 15 s [1], and 12 more classes of 11 s or less (29 s together): about 590 s of test
+# time in all. Per shard that is 274 s on shard 5, 100 s on shard 4, 90 s on shard 1, 73 s on shard 3, 43 s on shard 2
+# and 9 s on shard 0. A class runs on one thread, so shard 5 cannot get below the 274 s of DarlingStoreUpgradeTests: on
+# a narrowed pull request whose other shards finish in a minute or two, shard 5 becomes the slowest by about 3
+# minutes (it is 174 s ahead of shard 4, the next). It never passes the full run's slowest shard (shard 0, 589 s of
+# test time, against 509 s for shard 5 in that run). The shard cut is unchanged.
 MAP_SHARD_ENV = frozenset({"DARLING_TEST_PG", "DARLING_TEST_PGRUNTIME"})
 GATE_TRAIT = "Gate=Env"
 GATE_ENV_LITERAL = re.compile(r'"DARLING_TEST_PG(?:RUNTIME)?_[A-Z0-9_]+"')
@@ -314,6 +333,16 @@ SUITE_BY_PREFIX = {
     "Dashboard.Tests": "dashboard",
     "Installer.Tests": "installer",
 }
+
+
+def split_failed_class(cls: str) -> tuple[str, str]:
+    """(namespace prefix, simple class name) of a failing test class's full name. A nested class is reported as
+    `Ns.Outer+Inner` (some runners use `Ns.Outer/Inner`): the prefix is the namespace of the OUTER class, the text
+    before the first '+', and the simple name is the innermost class, which is the name _walk_classes yields for a
+    nested declaration. Splitting on the last '.' alone left `Outer+Inner` as the "simple name", found no such class
+    in the tree, and so never counted a nested failure as a miss (#5459)."""
+    head = re.split(r"[+/]", cls, maxsplit=1)[0]
+    return head.rpartition(".")[0], re.split(r"[.+/]", cls)[-1]
 
 
 def _walk_classes(root: str):
@@ -549,7 +578,7 @@ def replay(corpus: str = CORPUS, root: str = ROOT, quiet: bool = False) -> int:
             d = decide(row["changed_files"], row["event"], rules)
             skipped = slow.skip(row["changed_files"], row["event"])
             for cls in row["failed_classes"]:
-                prefix, _, simple = cls.rpartition(".")
+                prefix, simple = split_failed_class(cls)
                 suite = SUITE_BY_PREFIX.get(prefix)
                 if suite is None:
                     continue
@@ -869,7 +898,7 @@ def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, 
             sel = map_select(test_map, row["changed_files"], [], tree, event=row["event"], max_age_days=None, **extra)
             full_rows += bool(sel["full"])
             for cls in row["failed_classes"]:
-                prefix, _, simple = cls.rpartition(".")
+                prefix, simple = split_failed_class(cls)
                 suite = SUITE_BY_PREFIX.get(prefix)
                 if suite is None or simple not in tree.get(suite, {}):
                     continue

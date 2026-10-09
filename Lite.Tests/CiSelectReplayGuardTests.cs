@@ -70,6 +70,42 @@ public sealed class CiSelectReplayGuardTests
             + "Narrow the cut, or list the row in .github/ci-history/replay-accepted.txt with the reason it is not a selection gap:\n" + output);
     }
 
+    /// <summary>
+    /// A nested test class is reported as <c>Ns.Outer+Inner</c> (some runners write <c>Ns.Outer/Inner</c>). The replay
+    /// used to split the name at its last '.', so the "simple name" was <c>Outer+Inner</c>, found no class in the
+    /// tree and skipped the failure: a nested class could never be counted as a miss (#5459). It must take the
+    /// innermost name, and look the namespace up from the text before the first '+'. The corpus here is one row whose
+    /// failures name a real class (this one) behind a nested path; the third failure sits in a namespace no suite owns
+    /// and must still be skipped.
+    /// </summary>
+    [Fact]
+    public void ANestedClassFailure_IsCheckedByItsInnermostName_NotSkipped()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ci-replay-nested-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var corpus = Path.Combine(dir, "failures.jsonl");
+            File.WriteAllText(corpus,
+                "{\"date\":\"2026-10-01\",\"head_sha\":\"0123456789abcdef\",\"event\":\"pull_request\","
+                + "\"changed_files\":[\"Lite.Tests/CiSelectReplayGuardTests.cs\"],\"failed_classes\":["
+                + "\"Lite.Tests.SomeOuter+CiSelectReplayGuardTests\","
+                + "\"Lite.Tests.SomeOuter/CiSelectReplayGuardTests\","
+                + "\"Elsewhere.Ns.SomeOuter+CiSelectReplayGuardTests\"]}\n");
+
+            var (_, output) = RunScript("--replay", "--corpus", corpus);
+
+            var summary = Regex.Match(output, @"replay: (\d+) rows, (\d+) failing classes checked, (\d+) exempt");
+            Assert.True(summary.Success, "ci-select.py --replay printed no summary:\n" + output);
+            Assert.Equal("2", summary.Groups[2].Value);
+            Assert.Equal("0", summary.Groups[3].Value);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     [Fact]
     public void TheDecisions_ForKnownChanges_AreWhatTheWorkflowDocuments()
     {
