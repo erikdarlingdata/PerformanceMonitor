@@ -217,6 +217,12 @@ public sealed class PurgeContinuationTests
         Assert.True(manual > 0);
         Assert.Contains("NotePurgePassEnded(summary, DateTime.UtcNow);", worker[manual..(manual + 1200)], StringComparison.Ordinal);
 
+        /* #5592: the stamp is written under the same lock the launchers check and set it under. */
+        var note = worker.IndexOf("internal bool NotePurgePassEnded(", StringComparison.Ordinal);
+        Assert.True(note > 0);
+        var body = System.Text.RegularExpressions.Regex.Replace(worker[note..(note + 900)], @"\s+", " ");
+        Assert.Contains("lock (_purgeTaskLock) { if (_nextPurgeUtc <= continueAtUtc)", body, StringComparison.Ordinal);
+
         /* The note is the sweep's own result: not inside a catch or finally, which would also run on a failure. */
         Assert.DoesNotContain("finally\n        {\n            NotePurgePassEnded", worker.Replace("\r\n", "\n"), StringComparison.Ordinal);
     }
