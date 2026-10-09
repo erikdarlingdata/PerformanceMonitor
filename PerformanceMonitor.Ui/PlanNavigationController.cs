@@ -104,14 +104,13 @@ public sealed class PlanNavigationController
             return;
         }
 
+        /* Data-modification gate, the same one the Darling viewer's and Lite's server tab flows run: detect from the
+           estimated plan XML (fail-safe to "modifying" when the plan is missing or cannot be analyzed) and flag it
+           in the prompt, since re-executing an INSERT/UPDATE/DELETE/MERGE re-applies its writes. */
+        var modification = QueryModificationDetector.Detect(estimatedPlanXml, queryText);
         var confirm = MessageBox.Show(_owner,
-            $"You are about to execute this query against {_targetDescription} in database " +
-            $"[{(string.IsNullOrEmpty(databaseName) ? "default" : databaseName)}].\n\n" +
-            "Make sure you understand what the query does before proceeding.\n" +
-            "The query will execute with SET STATISTICS XML ON to capture the actual plan.\n" +
-            "All data results will be discarded.\n\n" +
-            QueryModificationDetector.CapturedQueryNotice,
-            "Get Actual Plan", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+            BuildConfirmationText(_targetDescription, databaseName, modification),
+            ConfirmationTitle(modification), MessageBoxButton.OKCancel, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.OK) return;
 
         _actualPlanCts?.Dispose();
@@ -150,6 +149,31 @@ public sealed class PlanNavigationController
         _setStatus?.Invoke("Actual plan captured successfully.");
         await _showPlan(actualPlanXml, label, queryText);
     }
+
+    /// <summary>The confirmation prompt: the data-modification block first when the query may modify data, then the
+    /// usual "about to execute" text and the captured-query notice.</summary>
+    internal static string BuildConfirmationText(string targetDescription, string? databaseName, QueryModificationInfo modification)
+    {
+        var modificationWarning = QueryModificationDetector.BuildConsentWarning(modification, databaseName);
+        var prompt = new System.Text.StringBuilder();
+        if (modificationWarning.Length > 0)
+        {
+            prompt.AppendLine(modificationWarning);
+            prompt.AppendLine("──────────────────────────────────────────");
+            prompt.AppendLine();
+        }
+
+        prompt.Append($"You are about to execute this query against {targetDescription} in database " +
+            $"[{(string.IsNullOrEmpty(databaseName) ? "default" : databaseName)}].\n\n" +
+            "Make sure you understand what the query does before proceeding.\n" +
+            "The query will execute with SET STATISTICS XML ON to capture the actual plan.\n" +
+            "All data results will be discarded.\n\n" +
+            QueryModificationDetector.CapturedQueryNotice);
+        return prompt.ToString();
+    }
+
+    internal static string ConfirmationTitle(QueryModificationInfo modification)
+        => modification.ModifiesData ? "Get Actual Plan - DATA WILL BE MODIFIED" : "Get Actual Plan";
 
     private static BusyScope SetBusy()
     {
