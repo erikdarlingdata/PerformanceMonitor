@@ -874,11 +874,11 @@ folded line then says how many further refusals it stands for — so a scanner h
 the log, and you still see that it happened. If the budget for distinct sources fills, the line says it is
 speaking for several, which is itself the signal that the port is being scanned.
 
-If the block itself is bad the service *is* loud, and it fails closed to loopback rather than half-exposing:
+If the block itself is bad the service *is* loud, and it fails closed rather than half-exposing: a missing token or a bad CIDR list falls back to loopback-only, and a token that is set but cannot be used stops that listener from starting:
 
 ```
 MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set — refusing to expose; binding loopback-only. Set mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token.
-MCP network token could not be decrypted (...) — refusing to expose; binding loopback-only.
+MCP network token could not be decrypted (...); MCP server not started.
 MCP network exposure requested but mcp.network.allowFrom '...' is not a valid CIDR list or an entry's address family does not match mcp.network.listen — refusing to expose; binding loopback-only. Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked (192.168.1.5/24 means 192.168.1.0/24).
 mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container) only and is ignored ...
 ```

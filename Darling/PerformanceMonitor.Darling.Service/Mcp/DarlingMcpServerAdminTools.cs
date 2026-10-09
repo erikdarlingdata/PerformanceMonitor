@@ -93,9 +93,9 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /// <summary>
     /// The reply for a failed connection test. Every reply to an MCP or web client carries one fixed sentence naming
-    /// the host and port the caller sent, and nothing the driver said: the driver's text (a resolved address, a
-    /// certificate subject, a login name, the server's own wording) goes to the service log only, with the typed
-    /// secrets redacted. <paramref name="revealConnectError"/> is true for the <c>--add-server</c> verb, which is typed
+    /// the host and port the caller sent, and nothing the driver said: the driver's text goes to the service log
+    /// only, with the typed secrets redacted, line breaks and other control characters replaced, and the length
+    /// capped. <paramref name="revealConnectError"/> is true for the <c>--add-server</c> verb, which is typed
     /// at the service host's own command line by the person who administers it; that caller gets the driver's text.
     /// </summary>
     internal static string ConnectFailureReply(
@@ -103,7 +103,11 @@ public sealed partial class DarlingMcpServerAdminTools
     {
         var target = server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
         var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)" : RedactEditSecret(probe.Error, secrets);
-        logger?.LogWarning("Connection test to {Target} failed: {DriverText}", target, driverText);
+        /* The logged copy is one line of bounded length: the driver text and the target both come from the server the
+           caller named, so each goes through the refusal log's sanitizer. The --add-server reply below keeps the
+           full redacted text for the person at the service host's own command line. */
+        logger?.LogWarning("Connection test to {Target} failed: {DriverText}",
+            Hosting.DarlingHttpRefusalLog.Sanitize(target, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
         if (revealConnectError && !string.IsNullOrWhiteSpace(probe.Error))
         {
             return $"Could not connect: {driverText}";
@@ -256,7 +260,8 @@ public sealed partial class DarlingMcpServerAdminTools
                 if (!probeResult.Success)
                 {
                     results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.ConnectionFailed,
-                        ConnectFailureReply(entry.ProbeConfig, probeResult, logger, revealConnectError, entry.PlaintextPassword)));
+                        ConnectFailureReply(entry.ProbeConfig, probeResult, logger, revealConnectError,
+                            entry.PlaintextPassword, entry.ProbeConfig.AwsExternalId)));
                     continue;
                 }
 

@@ -134,7 +134,7 @@
                             VerticalAlignment="Center"
                             Click="AutoPortButton_Click"/>
                 </StackPanel>
-                <TextBlock x:Name="McpStatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"/>
+                <TextBlock x:Name="McpStatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap"/>
                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                     <Button x:Name="CopyMcpCommandButton" Content="Cop_y Setup Command" Click="CopyMcpCommandButton_Click"/>
                     <TextBlock Text="Works with Claude Code. Other LLMs may apply, but why would you?"
