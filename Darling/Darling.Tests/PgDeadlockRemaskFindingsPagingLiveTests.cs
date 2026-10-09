@@ -123,6 +123,98 @@ public sealed class PgDeadlockRemaskFindingsPagingLiveTests
             await ScalarAsync(connection, "SELECT count(*) FROM analysis_findings WHERE story_text LIKE '%4721%' OR drill_down_json LIKE '%4111111111111111%'", ct));
     }
 
+    /// <summary>A table rewrite (<c>VACUUM FULL</c>, <c>CLUSTER</c>, <c>pg_repack</c>) between two pages sends the walk
+    /// back to block 0 (#5625): it packs live rows toward the start of a new file, so a raw finding that sat past the
+    /// cursor can land before it and would never be read. Here the early rows are deleted, then the table is rewritten
+    /// after the first page, which moves the last finding from beyond the cursor to inside the first page's range.</summary>
+    [Fact]
+    public async Task ATableRewriteMidWalk_SendsTheWalkBackToBlockZero_AndTheMovedFindingIsRewritten()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live findings paging test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var at = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Unspecified);
+        var (drillDown, story) = PgDeadlockRemaskTests.LegacyFinding();
+        await PgDeadlockRemaskTests.PlantFindingAsync(connection, 1, at, drillDown, story, ct);
+        await SeedBulkAsync(connection, 100, 100 + 100_000, at, ct);
+        await PgDeadlockRemaskTests.PlantFindingAsync(connection, 2, at, drillDown, story, ct);
+        var blocks = await ScalarAsync(connection, "SELECT pg_relation_size('analysis_findings') / current_setting('block_size')::bigint", ct);
+        var blocksPerPass = (long)PgDeadlockRemask.FindingBlocksPerPass;
+        Assert.True(blocks > blocksPerPass + 100, $"the table must span two pages; it has {blocks} blocks");
+        await ExecuteAsync(connection, "DELETE FROM analysis_findings WHERE finding_id BETWEEN 100 AND 100 + 99000", ct);
+
+        var walk = new PgDeadlockRemask.FindingWalk();
+        var (first, firstExamined, firstRewritten, _) = await PgDeadlockRemask.RemaskStoredFindingsAsync(connection, null, null, walk, ct);
+        Assert.Equal(blocksPerPass, first);
+        Assert.Equal(1, firstExamined);
+        Assert.Equal(1, firstRewritten);
+        Assert.NotNull(walk.Filenode);
+        Assert.False(walk.Restarted);
+        var fileBefore = walk.Filenode;
+
+        await ExecuteAsync(connection, "VACUUM FULL analysis_findings", ct);
+
+        /* The next page sees another file: nothing is read, the cursor is block 0, and the walk is marked. */
+        var (back, backExamined, backRewritten, _) = await PgDeadlockRemask.RemaskStoredFindingsAsync(connection, first, null, walk, ct);
+        Assert.Equal(0L, back);
+        Assert.Equal(0, backExamined);
+        Assert.Equal(0, backRewritten);
+        Assert.True(walk.Restarted);
+        Assert.NotEqual(fileBefore, walk.Filenode);
+
+        /* The restarted walk reaches the moved finding and ends; the file no longer changes under it. */
+        long? cursor = back;
+        var rewritten = 0;
+        var pages = 0;
+        do
+        {
+            var (next, _, w, _) = await PgDeadlockRemask.RemaskStoredFindingsAsync(connection, cursor, null, walk, ct);
+            Assert.False(walk.Restarted);
+            rewritten += w;
+            cursor = next;
+            Assert.True(++pages < 20, "the walk must end");
+        }
+        while (cursor is not null);
+
+        Assert.Equal(1, rewritten);
+        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM analysis_findings WHERE story_text LIKE '%4721%' OR drill_down_json LIKE '%4111111111111111%'", ct));
+    }
+
+    /// <summary>The stage counts a walk that was restarted by a table rewrite as cut short: it is walked once more
+    /// before the stage is done (#5625). The cursor and file are set as if a walk had begun in another file.</summary>
+    [Fact]
+    public async Task AWalkRestartedByATableRewrite_IsNotTheCleanWalkTheStageIsDoneAfter()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live findings paging test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var progress = new PgDeadlockRemask.RemaskProgress { FindingCursor = 2048, FindingFilenode = -1 };
+        progress.Alerts.Done = true;
+        progress.Reports.Done = true;
+        progress.AlertKeys.Done = true;
+        progress.FindingAlerts.Done = true;
+        await PgDeadlockRemask.RunAsync(connection, progress, null, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
+
+        Assert.True(progress.Findings.Done);
+        Assert.Equal(2, progress.Findings.Walks);
+        Assert.Null(progress.FindingCursor);
+        Assert.Null(progress.FindingFilenode);
+    }
+
     /// <summary>An empty table, and a cursor past the table's end, end the walk at once with nothing examined.</summary>
     [Fact]
     public async Task AnEmptyTable_AndACursorPastTheEnd_EndTheWalk()
@@ -168,8 +260,22 @@ FROM generate_series($1::bigint, $2::bigint) AS i", connection);
 
     /// <summary>The plan of the page that reads <c>[from, from + K)</c>: the scan node's type and the buffers the
     /// statement touched.</summary>
-    private static async Task<(string ScanType, long Buffers)> ExplainPageAsync(NpgsqlConnection connection, long from, CancellationToken ct)
+    private static async Task<(string ScanType, long Buffers)> ExplainPageAsync(NpgsqlConnection connection, long from, CancellationToken ct, bool warmUp = true)
     {
+        if (warmUp)
+        {
+            /* The first run of the page's operators in a backend reads catalog pages (types, operators, collations)
+               that the statement's own buffer count then includes: about 50 on a connection the pool has just opened.
+               Run the page once, so the bound below measures the scan. */
+            await using var warm = new NpgsqlCommand(PgDeadlockRemask.FindingPageSql, connection);
+            warm.Parameters.Add(new NpgsqlParameter { Value = string.Create(CultureInfo.InvariantCulture, $"({from},0)"), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            warm.Parameters.Add(new NpgsqlParameter { Value = string.Create(CultureInfo.InvariantCulture, $"({from + PgDeadlockRemask.FindingBlocksPerPass},0)"), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            await using var warmReader = await warm.ExecuteReaderAsync(ct);
+            while (await warmReader.ReadAsync(ct))
+            {
+            }
+        }
+
         await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + PgDeadlockRemask.FindingPageSql, connection);
         command.Parameters.Add(new NpgsqlParameter { Value = string.Create(CultureInfo.InvariantCulture, $"({from},0)"), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
         command.Parameters.Add(new NpgsqlParameter { Value = string.Create(CultureInfo.InvariantCulture, $"({from + PgDeadlockRemask.FindingBlocksPerPass},0)"), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });

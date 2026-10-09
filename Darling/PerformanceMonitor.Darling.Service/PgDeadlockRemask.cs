@@ -105,8 +105,9 @@ public static class PgDeadlockRemask
     /// instant finished under <see cref="ServerId"/> and <see cref="MetricName"/> (rows tied at it are finished
     /// too); null means that server and metric are still to be read from their first row. The log is not walked in
     /// <c>alert_time</c> order across servers because no index serves that: the walk would read every row of every
-    /// server on each page. Nothing depends on the global order: a row that an UPDATE or a new alert puts behind the
-    /// cursor is reached by the next walk, as it was before.
+    /// server on each page. Nothing depends on the global order: no UPDATE changes <c>server_id</c>,
+    /// <c>metric_name</c> or <c>alert_time</c>, so a rewritten or dismissed row keeps its place in this index order, and
+    /// an alert written after this build is already in its final form, wherever it lands.
     /// </summary>
     public readonly record struct AlertLogCursor(int ServerId, string MetricName, DateTime? AlertTime);
 
@@ -139,10 +140,11 @@ WHERE (a.server_id, a.metric_name) > ($1, $2)
 ORDER BY a.server_id, a.metric_name
 LIMIT 1";
 
-    /// <summary>How many statements one alert page may run besides the row reads that fill it (#5625): each step to
-    /// the next server or metric is one. A page that meets no row to examine still ends, with a cursor on the pair
-    /// it reached, so a log whose remaining metrics hold nothing to look at costs a few pages rather than one that
-    /// runs a statement per metric.</summary>
+    /// <summary>How many probe statements one alert page may run besides the row reads that fill it (#5625): every
+    /// step to the next server (deadlock stage) or to the next server and metric (finding-alert stage) is one,
+    /// whatever the metric's name and whether or not rows follow it. A page that meets no row to examine still ends,
+    /// with a cursor on the place it reached, so a log whose remaining metrics hold nothing to look at costs a few
+    /// pages rather than one that runs a statement per metric.</summary>
     public const int MaxAlertStepsPerPage = 100;
 
     /// <summary>
@@ -923,7 +925,28 @@ AND   xmin = $4::xid";
     /// slice, so a table that grew during the walk is walked to its new end (rows this build writes are already
     /// stamped; the ones the walk rewrites are found again by the next walk).</summary>
     public const string FindingBlockCountSql = @"
-SELECT pg_catalog.pg_relation_size('analysis_findings'::regclass) / pg_catalog.current_setting('block_size')::bigint";
+SELECT pg_catalog.pg_relation_size('analysis_findings'::regclass) / pg_catalog.current_setting('block_size')::bigint,
+       pg_catalog.pg_relation_filenode('analysis_findings'::regclass)::bigint";
+
+    /// <summary>The file the block walk is reading (#5625). A <c>VACUUM FULL</c>, <c>CLUSTER</c> or <c>pg_repack</c>
+    /// of <c>analysis_findings</c> writes the live rows to a new file, packed toward block 0, so rows that sat at or
+    /// after the walk's cursor can land before it. <see cref="Filenode"/> is the file the walk's cursor belongs to
+    /// (null before its first page); <see cref="RemaskStoredFindingsAsync"/> reads the table's current one with the
+    /// block count and, when the two differ, sends the walk back to block 0 and sets <see cref="Restarted"/>.</summary>
+    public sealed class FindingWalk
+    {
+        /// <summary>The <c>pg_relation_filenode</c> of the table when the walk's cursor was last set.</summary>
+        public long? Filenode { get; set; }
+
+        /// <summary>True when the last page found a different file than the walk began in and returned to block 0.</summary>
+        public bool Restarted { get; private set; }
+
+        internal void Update(long? filenode, bool restarted)
+        {
+            Filenode = filenode;
+            Restarted = restarted;
+        }
+    }
 
     /// <summary>One page of stored analysis findings that carry a deadlock exemplar section, from one physical block
     /// range of the table (#5625): <c>$1</c> is the first block's <c>(block,0)</c> and <c>$2</c> the end of the range,
@@ -991,21 +1014,43 @@ AND   xmin = $4::xid";
     /// they were and need the table read again. A cancel inside a slice leaves the cursor at the slice's start: the
     /// rows it rewrote are stamped, so the next tick reads them no more. <paramref name="rowDone"/> is called with a
     /// null cursor, for the same reason.
+    /// <paramref name="walk"/> carries the table's file across the walk's slices (#5625): when the file under a
+    /// cursor has been replaced (a table rewrite), the slice reads nothing and returns block 0, so the walk starts
+    /// again, and <see cref="FindingWalk.Restarted"/> tells the caller that walk is not a clean one.
     /// </summary>
+    public static Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsAsync(
+        NpgsqlConnection connection, long? afterCursor, Action<long?, RowOutcome>? rowDone,
+        CancellationToken cancellationToken = default) =>
+        RemaskStoredFindingsAsync(connection, afterCursor, rowDone, null, cancellationToken);
+
+    /// <inheritdoc cref="RemaskStoredFindingsAsync(NpgsqlConnection, long?, Action{long?, RowOutcome}?, CancellationToken)"/>
     public static async Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsAsync(
         NpgsqlConnection connection, long? afterCursor, Action<long?, RowOutcome>? rowDone,
-        CancellationToken cancellationToken = default)
+        FindingWalk? walk, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         var from = afterCursor ?? 0L;
         long blocks;
+        long filenode;
         var page = new List<(string Ctid, string DrillDown, string Story, uint Xmin)>();
         await using (var transaction = await BeginBoundedAsync(connection, cancellationToken))
         {
             await using (var size = new NpgsqlCommand(FindingBlockCountSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
             {
-                blocks = Convert.ToInt64(await size.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+                await using var sizeReader = await size.ExecuteReaderAsync(cancellationToken);
+                await sizeReader.ReadAsync(cancellationToken);
+                blocks = sizeReader.GetInt64(0);
+                filenode = sizeReader.GetInt64(1);
+            }
+
+            if (walk is { Filenode: { } walkFilenode } && afterCursor is not null && walkFilenode != filenode)
+            {
+                /* The table was rewritten under the cursor: rows may now sit before it. Nothing is read; the walk
+                   begins again at block 0 and is not counted clean. */
+                await transaction.CommitAsync(cancellationToken);
+                walk.Update(filenode, restarted: true);
+                return (0L, 0, 0, 0);
             }
 
             if (from < blocks)
@@ -1049,6 +1094,7 @@ AND   xmin = $4::xid";
         }
 
         var next = from + FindingBlocksPerPass >= blocks ? (long?)null : from + FindingBlocksPerPass;
+        walk?.Update(next is null ? null : filenode, restarted: false);
         return (next, page.Count, rewritten, raced);
     }
 
@@ -1349,8 +1395,9 @@ AND   xmin = $3::xid";
             DateTime? after;
             if (afterCursor is { } resume)
             {
-                /* A cursor only ever names a pair the walk read rows of, or one whose name said Analysis. */
-                pair = (resume.ServerId, resume.MetricName, true);
+                /* A step cap can end a page on a pair of any name (#5625), so the cursor's own name says whether it is
+                   an Analysis one, the same test the probe's LIKE makes. */
+                pair = (resume.ServerId, resume.MetricName, resume.MetricName.StartsWith("Analysis: ", StringComparison.Ordinal));
                 after = resume.AlertTime;
             }
             else
@@ -1405,9 +1452,10 @@ AND   xmin = $3::xid";
 
                 pair = await NextAlertPairAsync(connection, transaction, (current.Server, current.Metric), cancellationToken);
                 after = null;
-                if (pair is { IsAnalysis: true } following && ++steps >= MaxAlertStepsPerPage)
+                if (pair is { } following && ++steps >= MaxAlertStepsPerPage)
                 {
-                    /* Many servers and metrics with little to look at: end the page on the pair it reached. */
+                    /* Many servers and metrics with little to look at: end the page on the pair it reached, whatever its
+                       name, so every probe counts. */
                     next = new AlertLogCursor(following.Server, following.Metric, null);
                     break;
                 }
@@ -1578,6 +1626,10 @@ AND   xmin = $3::xid";
         /// <summary>The finding walk's cursor (#5625): the next heap block to read.</summary>
         public long? FindingCursor { get; set; }
 
+        /// <summary>The file of <c>analysis_findings</c> the finding walk's cursor belongs to (#5625); a different
+        /// one at the next page means the table was rewritten and the walk starts again.</summary>
+        public long? FindingFilenode { get; set; }
+
         /// <summary>The finding-alert walk's cursor: the last row it finished.</summary>
         public AlertLogCursor? FindingAlertCursor { get; set; }
 
@@ -1657,7 +1709,7 @@ AND   xmin = $3::xid";
                 if (ReferenceEquals(stage, progress.Alerts)) progress.AlertCursor = null;
                 else if (ReferenceEquals(stage, progress.Reports)) progress.ReportCursor = null;
                 else if (ReferenceEquals(stage, progress.AlertKeys)) progress.AlertKeyCursor = null;
-                else if (ReferenceEquals(stage, progress.Findings)) progress.FindingCursor = null;
+                else if (ReferenceEquals(stage, progress.Findings)) { progress.FindingCursor = null; progress.FindingFilenode = null; }
                 else progress.FindingAlertCursor = null;
             }
         }
@@ -1748,9 +1800,12 @@ AND   xmin = $3::xid";
                     }
                     else if (ReferenceEquals(stage, progress.Findings))
                     {
+                        var walk = new FindingWalk { Filenode = progress.FindingFilenode };
                         var (next, e, _, _) = await RemaskStoredFindingsAsync(
-                            connection, progress.FindingCursor, (row, outcome) => { progress.FindingCursor = row ?? progress.FindingCursor; Counted(outcome); }, cancellationToken);
+                            connection, progress.FindingCursor, (row, outcome) => { progress.FindingCursor = row ?? progress.FindingCursor; Counted(outcome); }, walk, cancellationToken);
                         progress.FindingCursor = next;
+                        progress.FindingFilenode = walk.Filenode;
+                        stage.WalkInterrupted |= walk.Restarted;
                         page = (next is null, e);
                     }
                     else

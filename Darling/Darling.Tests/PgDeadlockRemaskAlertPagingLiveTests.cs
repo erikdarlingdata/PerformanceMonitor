@@ -339,6 +339,273 @@ FROM generate_series(1, 450) AS i", connection))
     /// <c>Analysis: </c> alerts that need nothing (97 metric names on every server, a tenth of the rows older than the
     /// finding-alert section); current deadlock alerts; and raw deadlock alerts on four servers, twelve at a time tied
     /// on one instant per server.</summary>
+    /// <summary>The finding-alert stage counts every probe against <see cref="PgDeadlockRemask.MaxAlertStepsPerPage"/>,
+    /// whatever a metric is called (#5625). 150 servers hold four ordinary metrics each (600 pairs, one alert apiece) and
+    /// the only <c>Analysis: </c> alerts are two at the last server: a page that counted only the steps onto an
+    /// Analysis metric would run all 600 probes in one statement chain. Each page here ends at its cap with a cursor
+    /// that moved, the cursor may rest on an ordinary metric (whose rows are not read: its name says it is no
+    /// Analysis one), and the walk still reaches the two alerts and ends.</summary>
+    [Fact]
+    public async Task FindingAlerts_TheStepCap_CountsEveryProbe_AndAnOrdinaryMetricCursorReadsNoRows()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert paging test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var (drillDown, story) = PgDeadlockRemaskTests.LegacyFinding();
+        var (metric, rawContext) = PgDeadlockRemaskTests.LegacyFindingAlert(drillDown, story, "5625abcd00000001");
+        await ExecuteAsync(connection, @"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, muted, context_json)
+SELECT timestamp '2026-10-05' + g * interval '1 second', 1 + g % 150, 'example-pg-' || (1 + g % 150),
+       (ARRAY['Blocking', 'High CPU', 'Low Memory', 'Poor Wait Stats'])[1 + (g / 150) % 4], 1, 1, true, 'webhook', false, '{""Details"":[]}'
+FROM generate_series(0, 599) AS g", ct);
+        await PlantAsync(connection, 150, metric, new DateTime(2026, 10, 6, 12, 0, 0, DateTimeKind.Unspecified), rawContext, ct);
+        await PlantAsync(connection, 150, metric, new DateTime(2026, 10, 6, 12, 1, 0, DateTimeKind.Unspecified), rawContext, ct);
+        await ExecuteAsync(connection, "ANALYZE config_alert_log", ct);
+
+        PgDeadlockRemask.AlertLogCursor? cursor = null;
+        int pages = 0, examined = 0, rewritten = 0;
+        var cursorsOnOrdinaryMetrics = 0;
+        do
+        {
+            var (next, e, w, _) = await PgDeadlockRemask.RemaskStoredFindingAlertsAsync(connection, cursor, null, ct);
+            Assert.True(next is null || next != cursor, "the cursor must move on every page");
+            pages++;
+            examined += e;
+            rewritten += w;
+            cursorsOnOrdinaryMetrics += next is { } at && !at.MetricName.StartsWith("Analysis: ", StringComparison.Ordinal) ? 1 : 0;
+            cursor = next;
+            Assert.True(pages < 50, "the walk must end");
+        }
+        while (cursor is not null);
+
+        /* 600 ordinary pairs at 100 probes a page. */
+        Assert.InRange(pages, 6, 8);
+        Assert.True(cursorsOnOrdinaryMetrics > 0, "a page that ends on an ordinary metric hands the next page a cursor on it");
+        Assert.Equal(2, examined);
+        Assert.Equal(2, rewritten);
+    }
+
+    /// <summary>The deadlock stage's step cap ends a page after <see cref="PgDeadlockRemask.MaxAlertStepsPerPage"/>
+    /// servers with nothing to read (200 servers between two that hold deadlock alerts), and a server id of -1 or 0 is
+    /// walked like any other: the walk starts below every id, not at 0 (#5625). The finding-alert stage meets the same
+    /// ids.</summary>
+    [Fact]
+    public async Task TheStepCap_EndsADeadlockPage_AndServerIdsBelowOneAreWalkedByBothStages()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert paging test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var (drillDown, story) = PgDeadlockRemaskTests.LegacyFinding();
+        var (metric, rawContext) = PgDeadlockRemaskTests.LegacyFindingAlert(drillDown, story, "5625abcd00000002");
+        var at = new DateTime(2026, 10, 6, 12, 0, 0, DateTimeKind.Unspecified);
+        var gone = GoneContext();
+
+        /* Servers -1 and 0 through 250 hold one ordinary alert each; raw deadlock alerts sit at -1, 0, 1 and 201, so
+           200 servers lie between the last two. */
+        await ExecuteAsync(connection, @"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, muted)
+SELECT timestamp '2026-10-05' + g * interval '1 second', g, 'example-pg-' || g, 'High CPU', 1, 1, true, 'webhook', false
+FROM generate_series(-1, 250) AS g", ct);
+        foreach (var server in new[] { -1, 0, 1, 201 })
+        {
+            await PlantAsync(connection, server, AlertEngine.DeadlockWatermarkMetric, at, gone, ct);
+        }
+
+        await PlantAsync(connection, -1, metric, at, rawContext, ct);
+        await ExecuteAsync(connection, "ANALYZE config_alert_log", ct);
+
+        PgDeadlockRemask.AlertLogCursor? cursor = null;
+        int pages = 0, rewritten = 0;
+        do
+        {
+            var (next, _, w, _) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, cursor, s_key, true, null, ct);
+            Assert.True(next is null || next != cursor, "the cursor must move on every page");
+            pages++;
+            rewritten += w;
+            cursor = next;
+            Assert.True(pages < 50, "the walk must end");
+        }
+        while (cursor is not null);
+
+        /* 252 servers at 100 steps a page. */
+        Assert.InRange(pages, 3, 4);
+        Assert.Equal(4, rewritten);
+        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM config_alert_log WHERE context_json LIKE '%Leak5625%'", ct));
+
+        /* The finding-alert stage: its one alert is at server -1. */
+        cursor = null;
+        var findingRewritten = 0;
+        pages = 0;
+        do
+        {
+            var (next, _, w, _) = await PgDeadlockRemask.RemaskStoredFindingAlertsAsync(connection, cursor, null, ct);
+            Assert.True(next is null || next != cursor, "the cursor must move on every page");
+            findingRewritten += w;
+            cursor = next;
+            Assert.True(++pages < 50, "the walk must end");
+        }
+        while (cursor is not null);
+
+        Assert.Equal(1, findingRewritten);
+        Assert.Equal(0L, await CountAsync(connection, "SELECT count(*) FROM config_alert_log WHERE metric_name = $1 AND context_json = $2", metric, rawContext, ct));
+    }
+
+    /// <summary>A cancel in the middle of a page leaves the cursor at the last instant finished, and that instant is
+    /// told from the next row's by its server (deadlock alerts) or its server and metric (finding alerts), not by its
+    /// time alone (#5625): rows of two servers, or two metrics, can carry the same <c>alert_time</c>. The row after the
+    /// cancel is read again by the resumed page, and no row before it is.</summary>
+    [Fact]
+    public async Task ACancelMidPage_AcrossTwoServersOrTwoMetrics_LosesNoRowAndRepeatsNone()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert paging test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var at = new DateTime(2026, 10, 6, 12, 0, 0, DateTimeKind.Unspecified);
+
+        /* Deadlock alerts: server 1 at t, server 2 at t and at t + 1 s (the same instant on two servers). */
+        var gone = GoneContext();
+        await PlantAsync(connection, 1, AlertEngine.DeadlockWatermarkMetric, at, gone, ct);
+        await PlantAsync(connection, 2, AlertEngine.DeadlockWatermarkMetric, at, gone, ct);
+        await PlantAsync(connection, 2, AlertEngine.DeadlockWatermarkMetric, at.AddSeconds(1), gone, ct);
+
+        using (var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            PgDeadlockRemask.AlertLogCursor? last = null;
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, null, s_key, true, (row, _) =>
+                {
+                    last = row ?? last;
+                    cancel.Cancel();
+                }, cancel.Token));
+
+            Assert.Equal(new PgDeadlockRemask.AlertLogCursor(1, AlertEngine.DeadlockWatermarkMetric, at), last);
+            var (next, examined, rewritten, _) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, last, s_key, true, null, ct);
+            Assert.Null(next);
+            Assert.Equal(2, examined);
+            Assert.Equal(2, rewritten);
+        }
+
+        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM config_alert_log WHERE context_json LIKE '%Leak5625%'", ct));
+
+        /* Finding alerts: server 1, one metric at t, another at t and at t + 1 s. */
+        var (drillDown, story) = PgDeadlockRemaskTests.LegacyFinding();
+        var (metric, rawContext) = PgDeadlockRemaskTests.LegacyFindingAlert(drillDown, story, "5625abcd00000003");
+        var otherMetric = metric + "~";
+        await PlantAsync(connection, 1, metric, at, rawContext, ct);
+        await PlantAsync(connection, 1, otherMetric, at, rawContext, ct);
+        await PlantAsync(connection, 1, otherMetric, at.AddSeconds(1), rawContext, ct);
+
+        using (var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            PgDeadlockRemask.AlertLogCursor? last = null;
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await PgDeadlockRemask.RemaskStoredFindingAlertsAsync(connection, null, (row, _) =>
+                {
+                    last = row ?? last;
+                    cancel.Cancel();
+                }, cancel.Token));
+
+            Assert.Equal(new PgDeadlockRemask.AlertLogCursor(1, metric, at), last);
+            var (next, examined, rewritten, _) = await PgDeadlockRemask.RemaskStoredFindingAlertsAsync(connection, last, null, ct);
+            Assert.Null(next);
+            Assert.Equal(2, examined);
+            Assert.Equal(2, rewritten);
+        }
+
+        Assert.Equal(0L, await CountAsync(connection, "SELECT count(*) FROM config_alert_log WHERE metric_name LIKE $1 AND context_json = $2", metric + "%", rawContext, ct));
+    }
+
+    /// <summary>A server (and metric) with thousands of alerts: a page reads the page size and the rows tied with its
+    /// last, an ordered range of the index that stops there, not the server's whole set (#5625). Both stages, and the
+    /// plans, on 6,000 alerts of one server.</summary>
+    [Fact]
+    public async Task APageOnAServerWithThousandsOfAlerts_StopsAtThePageSize()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert paging test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        const int Alerts = 6_000;
+        await using (var seed = new NpgsqlCommand(@"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, muted, context_json)
+SELECT timestamp '2026-10-05' + g * interval '1 second', 7, 'example-pg-7', m.name, 1, 1, true, 'webhook', false, '{""Incidents"":[]}'
+FROM generate_series(1, $1) AS g
+CROSS JOIN (VALUES ($2), ('Analysis: big [00000001]')) AS m(name)", connection))
+        {
+            seed.Parameters.Add(Param(Alerts, NpgsqlDbType.Integer));
+            seed.Parameters.Add(Param(AlertEngine.DeadlockWatermarkMetric, NpgsqlDbType.Text));
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        await ExecuteAsync(connection, "ANALYZE config_alert_log", ct);
+
+        var deadlock = await ExplainAsync(connection, PgDeadlockRemask.AlertPageSql,
+        [
+            Param(7, NpgsqlDbType.Integer), Param(null, NpgsqlDbType.Timestamp), Param((long)PgDeadlockRemask.MaxAlertRowsPerPass, NpgsqlDbType.Bigint),
+        ], ct);
+        AssertIndexRange(deadlock, "the deadlock slice of a server with many alerts");
+        Assert.True(
+            deadlock.RowsRead <= PgDeadlockRemask.MaxAlertRowsPerPass + 20,
+            $"a slice read {deadlock.RowsRead} rows from the log; its page is {PgDeadlockRemask.MaxAlertRowsPerPass} of the server's {Alerts}");
+
+        var findings = await ExplainAsync(connection, PgDeadlockRemask.FindingAlertPageSql,
+        [
+            Param(7, NpgsqlDbType.Integer), Param("Analysis: big [00000001]", NpgsqlDbType.Text), Param(null, NpgsqlDbType.Timestamp), Param((long)PgDeadlockRemask.MaxFindingAlertRowsPerPass, NpgsqlDbType.Bigint),
+        ], ct);
+        AssertIndexRange(findings, "the finding alert slice of a pair with many alerts");
+        Assert.True(
+            findings.RowsRead <= PgDeadlockRemask.MaxFindingAlertRowsPerPass + 20,
+            $"a slice read {findings.RowsRead} rows from the log; its page is {PgDeadlockRemask.MaxFindingAlertRowsPerPass} of the pair's {Alerts}");
+
+        /* The pages themselves: the page size, and a cursor inside the server. */
+        var (next, examined, _, _) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, null, s_key, true, null, ct);
+        Assert.InRange(examined, PgDeadlockRemask.MaxAlertRowsPerPass, PgDeadlockRemask.MaxAlertRowsPerPass + 20);
+        Assert.Equal(7, next?.ServerId);
+        Assert.NotNull(next?.AlertTime);
+
+        var (findingNext, findingExamined, _, _) = await PgDeadlockRemask.RemaskStoredFindingAlertsAsync(connection, null, null, ct);
+        Assert.InRange(findingExamined, PgDeadlockRemask.MaxFindingAlertRowsPerPass, PgDeadlockRemask.MaxFindingAlertRowsPerPass + 20);
+        Assert.Equal("Analysis: big [00000001]", findingNext?.MetricName);
+        Assert.NotNull(findingNext?.AlertTime);
+    }
+
+    /// <summary>A deadlock alert's context as an incident whose report retention has dropped: raw, and re-masked by the
+    /// walk (it names a statement literal that must leave the store).</summary>
+    private static string GoneContext() => AlertContextSerializer.Serialize(new AlertContext
+    {
+        Incidents = [new AlertIncident(PgDeadlockLogParser.HashOf("a report retention dropped"), ["UPDATE creds SET pw = 'Leak5625' WHERE id = 7"])],
+    });
+
     private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using (var filler = new NpgsqlCommand(@"
