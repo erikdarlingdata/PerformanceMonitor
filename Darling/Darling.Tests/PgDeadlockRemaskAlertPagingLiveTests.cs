@@ -40,6 +40,7 @@ namespace Darling.Tests;
    DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres, then works entirely inside it: the
    walks read the whole log, so they must not meet another class's alerts. Leave it out; this comment is here so the
    next sweep does not "fix" it. */
+[Trait("Cost", "Slow")]
 public sealed class PgDeadlockRemaskAlertPagingLiveTests
 {
     private const int Servers = 50;
@@ -75,6 +76,9 @@ public sealed class PgDeadlockRemaskAlertPagingLiveTests
         ], ct);
         AssertIndexRange(slice, "the deadlock slice");
         AssertEquality(slice, "the deadlock slice", "server_id", "metric_name");
+        Assert.True(
+            slice.RowsRead <= PgDeadlockRemask.MaxAlertRowsPerPass + 20,
+            $"a slice read {slice.RowsRead} rows from the log; its page is {PgDeadlockRemask.MaxAlertRowsPerPass} (the old page read every deadlock alert: {RawDeadlockAlerts + CurrentDeadlockAlerts})");
         Assert.True(
             slice.Buffers <= 2L * PgDeadlockRemask.MaxAlertRowsPerPass + 200,
             $"a slice read {slice.Buffers} buffers; its page is {PgDeadlockRemask.MaxAlertRowsPerPass} rows");
@@ -171,6 +175,7 @@ public sealed class PgDeadlockRemaskAlertPagingLiveTests
         AssertIndexRange(slice, "the finding alert slice");
         AssertEquality(slice, "the finding alert slice", "server_id", "metric_name");
         Assert.Contains(slice.IndexConditions, condition => condition.Contains("alert_time >=", StringComparison.Ordinal));
+        Assert.True(slice.RowsRead <= PgDeadlockRemask.MaxFindingAlertRowsPerPass + 20, $"a slice read {slice.RowsRead} rows from the log; its page is {PgDeadlockRemask.MaxFindingAlertRowsPerPass}");
         Assert.True(slice.Buffers <= 2L * PgDeadlockRemask.MaxFindingAlertRowsPerPass + 200, $"a slice read {slice.Buffers} buffers");
 
         /* The loose scan between metrics: a row comparison on the index's first two columns. */
@@ -261,6 +266,74 @@ public sealed class PgDeadlockRemaskAlertPagingLiveTests
         Assert.Equal(((PgDeadlockRemask.AlertLogCursor?)null, 0, 0, 0), await PgDeadlockRemask.RemaskStoredFindingAlertsAsync(connection, pastTheEnd, null, ct));
     }
 
+    /// <summary>The slice also looks up the stored reports its incidents name (the <c>reports</c> CTE, by server and
+    /// hash). With 100,000 stored reports over 50 servers and a slice of 450 alerts whose keys all match stored
+    /// reports, that lookup goes through <c>idx_pg_deadlocks_identity (server_id, deadlock_hash)</c>, never a scan of the
+    /// table, and reads only the keys' own rows. No migration: the index is V104's.</summary>
+    [Fact]
+    public async Task TheReportLookupOfASlice_UsesTheIdentityIndex_AndReadsOnlyTheSlicesKeys()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert paging test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        const string dummyKey = "00000000000000000000000000000000";
+        var template = AlertContextSerializer.Serialize(new AlertContext { Incidents = [new AlertIncident(dummyKey, ["UPDATE t SET c = 1"])] });
+        Assert.Contains(dummyKey, template, StringComparison.Ordinal);
+
+        /* 100,000 stored reports over 50 servers, each its own hash. */
+        await ExecuteAsync(connection, @"
+INSERT INTO pg_deadlocks
+    (collection_id, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count, deadlock_hash, graph_text)
+SELECT g, timestamp '2026-10-01' + g * interval '20 seconds', 1 + g % 50, 'example-pg-' || (1 + g % 50),
+       timestamp '2026-10-01' + g * interval '20 seconds' - interval '5 seconds', 1000 + g % 5000, 2,
+       upper(md5(g::text)), 'Process 1 waits for ShareLock on transaction ' || g
+FROM generate_series(1, 100000) AS g", ct);
+
+        /* 450 deadlock alerts on server 9, each naming the hash of one of that server's stored reports (g = 8 + 50 i). */
+        await using (var alerts = new NpgsqlCommand(@"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, muted, context_json)
+SELECT timestamp '2026-10-04' + i * interval '1 second', 9, 'example-pg-9', $2, 1, 1, true, 'webhook', false,
+       replace($1, $3, upper(md5((8 + 50 * i)::text)))
+FROM generate_series(1, 450) AS i", connection))
+        {
+            alerts.Parameters.Add(Param(template, NpgsqlDbType.Text));
+            alerts.Parameters.Add(Param(AlertEngine.DeadlockWatermarkMetric, NpgsqlDbType.Text));
+            alerts.Parameters.Add(Param(dummyKey, NpgsqlDbType.Text));
+            await alerts.ExecuteNonQueryAsync(ct);
+        }
+
+        await ExecuteAsync(connection, "ANALYZE pg_deadlocks", ct);
+        await ExecuteAsync(connection, "ANALYZE config_alert_log", ct);
+
+        var plan = await ExplainScansAsync(connection, PgDeadlockRemask.AlertPageSql,
+        [
+            Param(9, NpgsqlDbType.Integer), Param(null, NpgsqlDbType.Timestamp), Param((long)PgDeadlockRemask.MaxAlertRowsPerPass, NpgsqlDbType.Bigint),
+        ], ct);
+
+        var reports = plan.Where(scan => !scan.Relation.Equals("a", StringComparison.Ordinal)).ToList();
+        var summary = string.Join("; ", plan.Select(scan => $"{scan.Relation}/{scan.NodeType}/{scan.IndexName}/{scan.RowsRead}"));
+        Assert.True(reports.Count > 0, $"no scan of the stored reports in the plan: {summary}");
+        Assert.All(reports, scan => Assert.True(
+            scan.NodeType != "Seq Scan" && scan.IndexName == "idx_pg_deadlocks_identity",
+            $"the report lookup scanned {scan.Relation} with {scan.NodeType} {scan.IndexName}: {summary}"));
+        var read = reports.Sum(scan => scan.RowsRead);
+        Assert.True(read <= 450 + 50, $"the report lookup read {read} stored reports for 450 keys (the table holds 100,000): {summary}");
+        Assert.True(read >= 450, $"the report lookup read {read} stored reports; each of the 450 keys has one: {summary}");
+
+        /* And the slice's reports come back: a walk over it finds each alert's report. */
+        var (_, examined, _, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, null, s_key, true, null, ct);
+        Assert.Equal(450, examined);
+        Assert.Equal(0, raced);
+    }
+
     /* ───────────────────────── seeding ───────────────────────── */
 
     /// <summary>About 500,000 alert rows over 50 servers in one INSERT ... SELECT each: mostly other metrics; 40,000
@@ -345,7 +418,7 @@ VALUES ($1, $2, 'example-pg-' || $2, $3, 1, 1, true, 'webhook', false, $4)", con
 
     private sealed record PlanFacts(
         IReadOnlyList<string> ScanTypes, IReadOnlyList<string> Indexes, IReadOnlyList<string> IndexConditions, long Buffers,
-        long RowsRemovedByFilter, IReadOnlyList<long> IndexSearches);
+        long RowsRemovedByFilter, long RowsRead, IReadOnlyList<long> IndexSearches);
 
     /// <summary>The statement's plan, run with the same typed parameters the service binds (an unnamed statement, so
     /// planned with their values): the scan nodes over <c>config_alert_log</c>, their index conditions, the buffers they
@@ -364,7 +437,7 @@ VALUES ($1, $2, 'example-pg-' || $2, $3, 1, 1, true, 'webhook', false, $4)", con
         var indexes = new List<string>();
         var conditions = new List<string>();
         var searches = new List<long>();
-        long buffers = 0, removed = 0;
+        long buffers = 0, removed = 0, read = 0;
         void Walk(JsonElement node)
         {
             var type = node.GetProperty("Node Type").GetString()!;
@@ -374,6 +447,7 @@ VALUES ($1, $2, 'example-pg-' || $2, $3, 1, 1, true, 'webhook', false, $4)", con
                 scans.Add(type);
                 buffers += node.GetProperty("Shared Hit Blocks").GetInt64() + node.GetProperty("Shared Read Blocks").GetInt64();
                 removed += node.TryGetProperty("Rows Removed by Filter", out var filtered) ? filtered.GetInt64() : 0;
+                read += (long)(node.GetProperty("Actual Rows").GetDouble() * node.GetProperty("Actual Loops").GetDouble());
             }
 
             /* An index node over the log: Index Scan and Index Only Scan carry their relation, a Bitmap Index Scan
@@ -402,7 +476,7 @@ VALUES ($1, $2, 'example-pg-' || $2, $3, 1, 1, true, 'webhook', false, $4)", con
         }
 
         Walk(document.RootElement[0].GetProperty("Plan"));
-        return new PlanFacts(scans, indexes, conditions, buffers, removed, searches);
+        return new PlanFacts(scans, indexes, conditions, buffers, removed, read, searches);
     }
 
     /// <summary>One index range on <c>idx_config_alert_log_time</c>: the log is read only through that index (a Bitmap Heap
@@ -430,6 +504,50 @@ VALUES ($1, $2, 'example-pg-' || $2, $3, 1, 1, true, 'webhook', false, $4)", con
                 Assert.True(condition.Contains(column + " = ", StringComparison.Ordinal), $"{what}: index condition '{condition}' has no equality on {column}");
             }
         }
+    }
+
+    private sealed record ScanFacts(string Relation, string NodeType, string? IndexName, long RowsRead);
+
+    /// <summary>Every scan of the statement's plan with its alias, its index and the rows it returned in all its loops.
+    /// A Bitmap Heap Scan takes the index of its Bitmap Index Scan child. The alert-log scan is the alias <c>a</c>.</summary>
+    private static async Task<List<ScanFacts>> ExplainScansAsync(NpgsqlConnection connection, string sql, NpgsqlParameter[] parameters, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, connection);
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        var json = (string)(await command.ExecuteScalarAsync(ct))!;
+        using var document = JsonDocument.Parse(json);
+        var scans = new List<ScanFacts>();
+        void Walk(JsonElement node)
+        {
+            var type = node.GetProperty("Node Type").GetString()!;
+            if (node.TryGetProperty("Relation Name", out var relation) && type.EndsWith("Scan", StringComparison.Ordinal))
+            {
+                var index = node.TryGetProperty("Index Name", out var name) ? name.GetString() : null;
+                if (type == "Bitmap Heap Scan" && node.TryGetProperty("Plans", out var kids))
+                {
+                    index = kids.EnumerateArray().Select(kid => kid.TryGetProperty("Index Name", out var kidIndex) ? kidIndex.GetString() : null).FirstOrDefault(kidIndex => kidIndex is not null);
+                }
+
+                scans.Add(new ScanFacts(
+                    node.TryGetProperty("Alias", out var alias) ? alias.GetString()! : relation.GetString()!,
+                    type, index, (long)(node.GetProperty("Actual Rows").GetDouble() * node.GetProperty("Actual Loops").GetDouble())));
+            }
+
+            if (node.TryGetProperty("Plans", out var children))
+            {
+                foreach (var child in children.EnumerateArray())
+                {
+                    Walk(child);
+                }
+            }
+        }
+
+        Walk(document.RootElement[0].GetProperty("Plan"));
+        return scans;
     }
 
     private static NpgsqlParameter Param(object? value, NpgsqlDbType type) =>
