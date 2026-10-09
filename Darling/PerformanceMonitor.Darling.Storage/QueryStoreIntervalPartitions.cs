@@ -180,8 +180,15 @@ public static class QueryStoreIntervalPartitions
         public string DayPartition(DateTime day) => $"{Schema}.{Name}_p{day:yyyyMMdd}";
     }
 
-    /// <summary>The wide table (9 days).</summary>
-    public static readonly IntervalTable Wide = new("query_store_interval_wide", 9);
+    /// <summary>
+    /// The wide table's retention horizon in days: the ONE constant behind the partition maintenance (<see cref="Wide"/>), the
+    /// purge and the wide read's floor (<c>DarlingRetention.QueryStoreIntervalWideRetentionDays</c>), and the compose rollup's floor
+    /// (<see cref="QueryStoreComposeStamp.FloorHour"/>, #5582): a rollup hour must not outlive, or start below, what the table keeps.
+    /// </summary>
+    public const int WideHorizonDays = 9;
+
+    /// <summary>The wide table (<see cref="WideHorizonDays"/> days).</summary>
+    public static readonly IntervalTable Wide = new("query_store_interval_wide", WideHorizonDays);
 
     /// <summary>The latest-snapshot table (15 days).</summary>
     public static readonly IntervalTable Latest = new("query_store_interval_latest", 15);

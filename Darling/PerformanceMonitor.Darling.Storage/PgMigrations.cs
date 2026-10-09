@@ -918,6 +918,20 @@ END $$;";
     private static readonly string V172Sql = BuildQueryStoreIntervalPartitionRungSql(wide: false);
 
     /// <summary>
+    /// V173 (#5582) — the exact stamp-grain rollup of <c>collect.query_store_interval_wide</c>: <c>collect.query_store_compose_stamp</c>,
+    /// its per-(server, hour) validity table <c>_built</c>, the fleet-level <c>_hours</c> table, and two row triggers on the partitioned
+    /// PARENT <c>collect.query_store_interval_wide</c> (INSERT, UPDATE) that mark a (server, hour) stale when a row lands in, or leaves,
+    /// an hour the builder may have done. The text, the column map and the reasoning are on <see cref="QueryStoreComposeStamp"/>, which
+    /// the rung embeds. <b>Catalog-only:</b> the tables are created empty, and <c>CREATE TRIGGER</c> on a partitioned table is a catalog
+    /// change that clones the trigger onto each existing leaf (the legacy table, DEFAULT, the day partitions) without scanning one. The
+    /// lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V171's, because the trigger needs a SHARE ROW EXCLUSIVE
+    /// lock on the parent and each leaf; no collector writes during a rung. Plain tables, no GRANT (the <c>collect</c> schema's blanket
+    /// SELECT covers them). The service's hourly tick fills the rollup (<see cref="QueryStoreComposeStamp.RunTickAsync(Npgsql.NpgsqlDataSource, DateTime, int, Microsoft.Extensions.Logging.ILogger, CancellationToken)"/>).
+    /// <b>No Lite twin:</b> Lite has no PostgreSQL store.
+    /// </summary>
+    private static readonly string V173Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.CreateSql;
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1201,6 +1215,7 @@ $rung$;";
         new Migration(170, "pg-io-stats-hourly", V170Sql),
         new Migration(171, "query-store-interval-wide-partitioned", V171Sql),
         new Migration(172, "query-store-interval-latest-partitioned", V172Sql),
+        new Migration(173, "query-store-compose-stamp", V173Sql),
     };
 
     /// <summary>
@@ -7841,7 +7856,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         int applied;
         try
         {
-            applied = await MigrateLockedAsync(connection, cancellationToken);
+            applied = await MigrateLockedAsync(connection, logger, cancellationToken);
         }
         finally
         {
@@ -8007,7 +8022,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         return Convert.ToInt32(await read.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
     }
 
-    private static async Task<int> MigrateLockedAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<int> MigrateLockedAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
     {
         /* Resolve bare names through collect/config for this migrate session. Load-bearing from V8
            on: V8 moves darling_schema_version into collect, and the version stamp below writes it by
@@ -8042,9 +8057,19 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
 
             using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-            using (var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds })
+            try
             {
+                using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds };
                 await apply.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+            {
+                /* #5582: the rung's SET LOCAL lock_timeout fired, so a session holds a lock on a table the rung needs. Roll back first
+                   (the aborted transaction cannot run the diagnostic query), say who holds what, then let the failure go on: the
+                   store-migrate loop retries the rung, and collection waits behind that loop. */
+                await TryRollbackAsync(transaction);
+                await LogLockHoldersAsync(connection, logger, migration.Version, migration.Name, ex.MessageText, cancellationToken);
+                throw;
             }
 
             using (var stamp = new NpgsqlCommand(
@@ -8062,6 +8087,120 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         }
 
         return applied;
+    }
+
+    private static async Task TryRollbackAsync(NpgsqlTransaction transaction)
+    {
+        try
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+        }
+        catch
+        {
+            /* The failed statement already aborted the transaction; disposing it ends it either way. */
+        }
+    }
+
+    /// <summary>The least often the lock-holder list is logged, so a retry loop that fails every minute says it once per this long.</summary>
+    internal static readonly TimeSpan LockHolderLogInterval = TimeSpan.FromMinutes(10);
+
+    private static readonly object s_lockHolderLogGate = new();
+    private static DateTime s_lastLockHolderLogUtc = DateTime.MinValue;
+
+    /// <summary>Claims the right to log the lock holders at <paramref name="nowUtc"/>: true when none was logged in the last
+    /// <see cref="LockHolderLogInterval"/>. Static on purpose, because each retry of the rung is a fresh call.</summary>
+    internal static bool TryClaimLockHolderLog(DateTime nowUtc)
+    {
+        lock (s_lockHolderLogGate)
+        {
+            if (s_lastLockHolderLogUtc != DateTime.MinValue && nowUtc - s_lastLockHolderLogUtc < LockHolderLogInterval)
+            {
+                return false;
+            }
+
+            s_lastLockHolderLogUtc = nowUtc;
+            return true;
+        }
+    }
+
+    /// <summary>Test seam: forgets the last lock-holder log.</summary>
+    internal static void ResetLockHolderLogThrottleForTests()
+    {
+        lock (s_lockHolderLogGate)
+        {
+            s_lastLockHolderLogUtc = DateTime.MinValue;
+        }
+    }
+
+    /// <summary>The most lock-holding sessions one log line names ($1 of <see cref="LockHoldersSql"/>).</summary>
+    internal const int LockHolderListCap = 20;
+
+    /// <summary>The sessions of this database holding a lock on a <c>collect</c> table that blocks a schema change, one row per session
+    /// with the tables it holds. Row-share locks (what a plain SELECT takes) do not block DDL, so they are left out.</summary>
+    internal const string LockHoldersSql = """
+        SELECT a.pid,
+               a.backend_type,
+               a.state,
+               a.xact_start,
+               left(a.query, 200) AS query,
+               string_agg(DISTINCT c.relname || ' (' || l.mode || ')', ', ') AS held
+        FROM pg_locks l
+        JOIN pg_class c ON c.oid = l.relation
+        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'collect'
+        JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE l.locktype = 'relation'
+          AND l.granted
+          AND a.datname = current_database()
+          AND a.pid <> pg_backend_pid()
+          AND l.mode IN ('RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+        GROUP BY a.pid, a.backend_type, a.state, a.xact_start, left(a.query, 200)
+        ORDER BY a.xact_start NULLS LAST, a.pid
+        LIMIT $1
+        """;
+
+    /// <summary>
+    /// #5582: after a rung hit <c>lock_timeout</c>, logs the sessions that hold a blocking lock on a <c>collect</c> table: pid, backend
+    /// type, state, transaction start and the first 200 characters of the query. At most once per <see cref="LockHolderLogInterval"/>.
+    /// A fault in the diagnostic is swallowed, because the rung's own failure is what the caller reports.
+    /// </summary>
+    internal static async Task LogLockHoldersAsync(
+        NpgsqlConnection connection, ILogger? logger, int version, string name, string reason, CancellationToken cancellationToken, Func<DateTime>? utcNow = null)
+    {
+        if (logger is null || !TryClaimLockHolderLog((utcNow ?? (() => DateTime.UtcNow))()))
+        {
+            return;
+        }
+
+        try
+        {
+            var holders = new List<string>();
+            using var command = new NpgsqlCommand(LockHoldersSql, connection) { CommandTimeout = 30 };
+            command.Parameters.AddWithValue(LockHolderListCap);
+            using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    holders.Add(string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "pid {0} ({1}), state {2}, transaction started {3:u}, holding {4}, query: {5}",
+                        reader.GetInt32(0),
+                        reader.IsDBNull(1) ? "unknown" : reader.GetString(1),
+                        reader.IsDBNull(2) ? "none" : reader.GetString(2),
+                        reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3),
+                        reader.GetString(5),
+                        reader.IsDBNull(4) ? string.Empty : reader.GetString(4)));
+                }
+            }
+
+            logger.LogWarning(
+                "Store migration V{Version} ({Name}) could not get its table lock in time ({Reason}). Collection waits until it applies. " +
+                "Sessions holding a lock on a collect table: {Holders}",
+                version, name, reason, holders.Count == 0 ? "none found" : string.Join("; ", holders));
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            logger.LogDebug("The lock-holder lookup for store migration V{Version} failed: {Message}", version, ex.Message);
+        }
     }
 
     /// <summary>

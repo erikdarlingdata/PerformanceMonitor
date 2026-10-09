@@ -29,6 +29,67 @@ public static class ComposeLimits
     /// bucket over a long window from fanning out to hundreds of thousands of buckets.</summary>
     public const int MaxBuckets = 5_000;
 
+    /// <summary>
+    /// The most Query Store wide-table rows (<c>collect.query_store_interval_wide</c>) one composed panel that reads them ONCE may be
+    /// expected to read (#5582), judged from the daily summary's row counts BEFORE the statement runs; over it the panel is refused
+    /// with a message that says what to narrow. Measured on a large production store: a cold read of 8,457,483 rows took 55.2 s,
+    /// which is 6.53 us per row. The budget is 45 s, 75% of the 60 s <see cref="StatementTimeout"/>, because three cold runs of the
+    /// same store differed by 14% (5.71 to 6.53 us per row) while autovacuum was busy on it. 45 s at 6.53 us is 6.89 million rows,
+    /// rounded down to 6.8 million. The previous limit, 9.4 million rows, would take 61.4 s cold at that rate, so it was over the
+    /// timeout. One constant, so the value is adjusted in one place from a store measurement.
+    /// </summary>
+    public const long MaxQueryStoreWideRows = 6_800_000;
+
+    /// <summary>
+    /// The most wide-table rows a panel that reads them TWICE may be expected to read (#5582): a RankedTimeSeries panel that
+    /// still compiles the two-scan text (a <c>query_hash</c> group, a series past <see cref="MaxSingleScanBuckets"/> buckets, or
+    /// one whose bucket x member product passes <see cref="MaxSingleScanBaseRows"/>). The same 45 s budget over 8.19 us per row:
+    /// 6.53 us for the cold first scan, 0.13 us for the hash aggregate, and 1.54 us for the second scan, which was measured WARM
+    /// (the rank-measure text took 19.2 s over 8.37 million rows, and the first scan alone 6.4 s warm). Warm is the right basis for
+    /// the second scan because it reads the same pages seconds after the first, through shared buffers (a bitmap heap scan has no
+    /// ring buffer), and 5.4 million wide rows is about 6 GB, under that store's 8 GB of shared_buffers. 45 s over 8.19 us is
+    /// 5.49 million, rounded down to 5.4 million. Halving the one-scan limit (3.4 million) would refuse the flagship "top 10
+    /// queries over time, fleet, one day" panel on any day about 8% busier than the measured one. What is still at risk: a store
+    /// whose memory cannot hold the window's pages. There a panel near this limit takes about 71 s and stops at the 60 s
+    /// timeout, as it did before #5582. The guard improves the message; <c>statement_timeout</c> and <c>temp_file_limit</c> remain
+    /// the safety limits, and neither changes.
+    /// </summary>
+    public const long MaxQueryStoreWideRowsTwoScans = 5_400_000;
+
+    /// <summary>
+    /// The weight of an hour served from the rollup of the wide table (<c>collect.query_store_compose_stamp</c>), against 1.0
+    /// for an hour read from the wide table itself (#5582). An estimate: the closest measurement is a read at the composer's grain
+    /// of 7,040,921 rows of 205 bytes, which took 5.493 s warm, 1.556 s of it I/O. That read is 0.02505 blocks per row; at 22,121
+    /// blocks per second (the cold wide read's rate) that is 1.13 us of I/O per row, and the CPU is (5.493 - 1.556) s over 7.04
+    /// million rows, 0.56 us per row. Scaled for a 240-byte rollup row against 205, that is about 1.89 us per rollup row. A rollup
+    /// row stands for 1.17 wide rows, so it is 1.61 us per wide row, and 1.61 / 6.53 is 0.25, rounded up to 0.3. A fleet day with
+    /// a 2.5-hour tail on the wide table is 0.88 million wide rows plus 0.3 x 7.57 million, 3.15 million equivalent rows: it passes
+    /// both limits (about 21 s cold for one scan, about 33 s for two). Two days is 5.7 million (one scan passes, two scans are
+    /// refused) and three days is 8.2 million (refused).
+    /// </summary>
+    public const double StampRowWeight = 0.3;
+
+    /// <summary>
+    /// The most rows a single-scan RankedTimeSeries base CTE may hold (#5582): buckets x members of the group dimension. The
+    /// single-scan text writes about 436 bytes of temp file per base row (measured on a large production store in its worst shape,
+    /// a <c>query_hash</c> group: 1,021,784 kB for 2,397,235 base rows), against <see cref="TempFileLimit"/> of 1 GB. At one
+    /// million base rows that is about 436 MB, 43% of the limit, and the bound is high because fewer groups spill less per group.
+    /// At 24 hour buckets it allows about 41,600 members; at 100 buckets, 10,000.
+    /// </summary>
+    public const long MaxSingleScanBaseRows = 1_000_000;
+
+    /// <summary>
+    /// The most buckets a Query Store RankedTimeSeries panel may span and still read the wide table once (#5582). The
+    /// single-scan statement holds one row per (bucket, group) in a CTE, and the field measured that row at 436 bytes of temp file
+    /// (the materialized CTE, the sort or hash spill that builds it, and the rank's own re-aggregation; the rig's earlier figure
+    /// of 150 to 180 bytes was wrong) against <see cref="TempFileLimit"/> of 1 GB. So 100 buckets x 30 thousand members (the module
+    /// names of a large fleet), 3 million rows, would write about 1.3 GB and fail. The rows are at most buckets x members, and
+    /// <see cref="MaxSingleScanBaseRows"/> bounds that product; this constant bounds the series length alone. A longer series, or a
+    /// <c>query_hash</c> group (one member per statement, as many as the fact rows), compiles the two-scan text instead: its temp
+    /// use follows the group count alone.
+    /// </summary>
+    public const int MaxSingleScanBuckets = 100;
+
     /// <summary>The ceiling on a ranked panel's <c>topN</c> (mirrors the read surface's row clamp).</summary>
     public const int MaxTopN = 1_000;
 

@@ -203,8 +203,14 @@ public sealed class ComposeServerScopeByIdTests
         var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         var lookup = web.IndexOf("await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken", StringComparison.Ordinal);
         var snapshot = web.IndexOf("await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate", StringComparison.Ordinal);
-        var context = web.IndexOf("new ComposeRunContext(serverScope, start, end", StringComparison.Ordinal);
+        /* #5582: the ReadsStampRollup gate earlier in the runner builds a throwaway context only to ask whether the plan reads the
+           rollup. That one is never compiled, so the pin anchors on the assignment of the context the runner compiles. */
+        var context = web.IndexOf("var runContext = new ComposeRunContext(serverScope, start, end", StringComparison.Ordinal);
         Assert.True(lookup > 0 && snapshot > lookup && context > snapshot, "lookup, then the snapshot, then the run context");
+        var gate = web.IndexOf("ComposeCompiler.ReadsStampRollup(plan!, new ComposeRunContext(", StringComparison.Ordinal);
+        Assert.True(gate > 0 && gate < lookup, "the stamp-rollup gate's context is a separate, earlier, throwaway one");
+        Assert.Equal(2, Regex.Matches(web, @"new ComposeRunContext\(").Count);
+        Assert.Contains("ComposeCompiler.Compile(plan!, runContext)", web[context..], StringComparison.Ordinal);
         Assert.Contains("cancellationToken, unregisteredServers);", web[snapshot..context], StringComparison.Ordinal);
         Assert.Contains("UnregisteredServers: unregisteredServers", web[context..(context + 700)], StringComparison.Ordinal);
         Assert.Single(Regex.Matches(web, @"ComposeServerScope\.FindUnregisteredAsync\("));
