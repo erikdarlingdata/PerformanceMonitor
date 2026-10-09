@@ -272,12 +272,29 @@ public sealed class AggregateJobGraceReopenTests
 /// ends a worker whose job was stopped. Measured on PostgreSQL 18 with TimescaleDB 2.30.1: the scheduler wakes on a
 /// timer 5.005 s apart, and each wake shows in its own <c>pg_stat_activity</c> row (<c>state</c> goes <c>active</c>
 /// then <c>idle</c> and <c>state_change</c> moves). A job is launched, and a stopped job is noticed, only at a wake.
-/// At the wake that sees a stopped job it cancels the worker (SIGINT), waits 3 s, then terminates it (SIGTERM). So a
-/// worker is safe from the scheduler for most of the 5 s after the wake that launched it, but that wake is still
-/// running when the worker first shows up, and a stop that commits before it ends is acted on at once (in the #5603 CI
-/// failure the worker was cancelled about 30 ms after the stop). <see cref="StartParkedWorkerAsync"/> therefore returns
+/// At the wake that sees a stopped job it cancels the worker (SIGINT), stays <c>active</c> for the 3.3 s it waits,
+/// then terminates it (SIGTERM). No SQL can stop that, and in the #5603 CI failure it came about 30 ms after the stop.
+/// So a test cannot rely on SEEING a worker alive inside a time window: under load the window is missed. Each test
+/// reads facts that stay true instead.</para>
+///
+/// <list type="bullet">
+/// <item><description><b>The hold test</b> gives its gate function a trap: it catches <c>query_canceled</c>, counts the
+/// cancel in a sequence (<c>nextval</c> is not transactional, so the count survives the worker's death and rollback)
+/// and goes back to waiting. The worker then outlives the scheduler's cancel by 3.3 s, and the test waits (60 s
+/// safety bound only) for a count of 1. That count is a durable proof that the worker outlived the stop. A second
+/// count is bumped when the scheduler was NOT in a wake at that moment (a cancel the sweep itself sent would be
+/// swallowed and counted too), and must stay 0. An event trigger on the DROP records whether a worker of the view was
+/// listed when it started, and that must be 0.</description></item>
+/// <item><description><b>The cancel test</b> polls every ten minutes: after the stop and the first look the sweep
+/// sits in <c>Task.Delay</c> and cannot reach a second look, let alone the drop, so the test's cancel always lands in
+/// the wait, whatever the scheduler does to the worker.</description></item>
+/// <item><description><b>The at-the-cap test</b> keeps a plain gate (a trap would hide a sweep that cancels the
+/// worker itself) and needs the worker alive across a zero-cap sweep. <see cref="StartParkedWorkerAsync"/> returns
 /// only once the worker is blocked on the gate AND the scheduler is idle again after launching it: the next wake is
-/// then about 4.7 s away, and the sweep and every assertion about the worker run inside that gap.</para>
+/// then about 4.7 s away. Its one remaining exposure is a wake landing between the sweep's stop and its resume (a
+/// few milliseconds of round trips, with no assertion in between; once the jobs are scheduled again a wake leaves a
+/// running worker alone), or a stall of the test process longer than that gap before the sweep starts.</description></item>
+/// </list>
 /// </summary>
 public sealed class AggregateJobQuiesceLiveTests
 {
@@ -287,7 +304,8 @@ public sealed class AggregateJobQuiesceLiveTests
     private static readonly TimescaleSupport.AggregateJobQuiesceOptions FastCap = new(TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(100));
 
     /// <summary>One look and no wait: the skip path of (c) is decided by the single look the sweep takes right after the
-    /// stop, so the whole sweep takes milliseconds and is over long before the scheduler's next wake (see the class
+    /// stop, so the jobs are stopped for a few milliseconds only. A scheduler wake that lands in that gap would cancel
+    /// the worker, and <see cref="StartParkedWorkerAsync"/> puts the next wake about 4.7 s away (see the class
     /// remarks, #5603).</summary>
     private static readonly TimescaleSupport.AggregateJobQuiesceOptions ZeroCap = new(TimeSpan.Zero, TimeSpan.FromMilliseconds(50));
 
@@ -322,6 +340,10 @@ public sealed class AggregateJobQuiesceLiveTests
     /// (b) A running job worker holds the drop until it exits. Real worker: the gate keeps it inside the refresh.
     /// While it runs the jobs are stopped (the scheduler cannot start another), the aggregate is still there and the
     /// sweep is still waiting; once the worker exits the drop goes ahead, with no warning.
+    ///
+    /// <para>#5603: TimescaleDB's scheduler ends the worker at its first wake after the stop, so the test cannot count
+    /// on seeing the worker alive for any length of time. The gate traps the scheduler's cancel instead, and the test
+    /// waits for the recorded fact that the worker outlived the stop (see the class remarks).</para>
     /// </summary>
     [Fact]
     public async Task RunningJobWorker_HoldsTheDrop_UntilItExits_AgainstDevPostgres()
@@ -334,6 +356,8 @@ public sealed class AggregateJobQuiesceLiveTests
         await CreateRetiredAggregateAsync(connection, Retired, ct);
         var jobIds = await JobIdsAsync(connection, Retired, ct);
         var refreshJob = await RefreshJobIdAsync(connection, Retired, ct);
+        await PlantTrappingGateAsync(connection, ct);
+        await PlantDropBesideWorkerProbeAsync(connection, jobIds, ct);
 
         await using var gate = new NpgsqlConnection(scratch.ConnectionString);
         await gate.OpenAsync(ct);
@@ -344,8 +368,8 @@ public sealed class AggregateJobQuiesceLiveTests
         var gateOpen = false;
         try
         {
-            var worker = await StartParkedWorkerAsync(connection, refreshJob, ct);
-            var workerPid = worker.Pid;
+            /* No scheduler alignment: the trap makes the scheduler's cancel, whenever it comes, harmless. */
+            var workerPid = await StartBlockedWorkerAsync(connection, refreshJob, ct);
 
             var log = new CapturingTestLogger();
             sweep = Task.Run(() => TimescaleSupport.DropRetiredBaselineAggregatesAsync(
@@ -359,38 +383,52 @@ public sealed class AggregateJobQuiesceLiveTests
                pg_stat_activity.query (blocked on the worker's locks, or running) from the moment the jobs are
                stopped, while a relation-exists check alone passes either way, because a DROP blocked behind the worker
                has not removed the view yet. Each look reads the worker, then the sweeper's query, then the worker
-               again, and judges only when the same worker was alive on both sides. The statement text is matched by
-               its start (DO $do$) as well as DROP MATERIALIZED VIEW, because track_activity_query_size cuts the long
-               DO block short. The scheduler cannot end the worker inside this loop (#5603: it is idle for about 4.7 s
-               after StartParkedWorkerAsync), so the hold must be OBSERVED: at least one look with the worker alive and
-               the sweeper inside its wait loop (its last statement is the worker count). Looked at for two seconds. */
+               again, and judges only when the same worker was alive on both sides, so a worker that dies between two
+               reads can never fail a look. The statement text is matched by its start (DO $do$) as well as DROP
+               MATERIALIZED VIEW, because track_activity_query_size cuts the long DO block short.
+               #5603: no time window. The looks run from the moment the jobs are stopped until the gate has counted the
+               scheduler's cancel (the worker survives it, and is ended 3.3 s later at the earliest). The scheduler only
+               cancels a worker whose job was stopped, so the count is a durable proof that the worker outlived the stop,
+               however slowly this loop ran. 60 s is a safety bound, not a window. */
             var sweeperPid = sweeper.ProcessID;
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
-            var observedHold = false;
-            while (DateTime.UtcNow < deadline)
+            var safety = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+            var looks = 0;
+            while (true)
             {
                 var existsBefore = await RelationExistsAsync(connection, Retired, ct);
                 var aliveBefore = await WorkerAliveAsync(connection, workerPid, refreshJob, ct);
                 var sweeperQuery = await ScalarAsync<string>(connection, $"SELECT coalesce(query, '') FROM pg_stat_activity WHERE pid = {sweeperPid}", ct);
                 var aliveAfter = await WorkerAliveAsync(connection, workerPid, refreshJob, ct);
-                if (!aliveBefore || !aliveAfter)
+                var cancels = await SequenceCountAsync(connection, "w5551_cancels", ct);
+                if (aliveBefore && aliveAfter)
+                {
+                    Assert.True(existsBefore, $"the aggregate was dropped under a running job worker: {log.Joined}");
+                    Assert.False(
+                        sweeperQuery.Contains("DROP MATERIALIZED VIEW", StringComparison.Ordinal) || sweeperQuery.TrimStart().StartsWith("DO $do$", StringComparison.Ordinal),
+                        $"the sweeper reached its DROP while the job worker (pid {workerPid}) was still alive: {log.Joined}");
+                    Assert.False(sweep.IsCompleted, $"the sweep finished while a worker was running: {log.Joined}");
+                    looks++;
+                }
+                else
+                {
+                    /* Only the scheduler's cancel, then its SIGTERM 3.3 s later, can end this worker (it is held on the
+                       gate), and the gate counts the cancel first. A death with no count was something else's doing. */
+                    Assert.True(cancels >= 1, $"the job worker (pid {workerPid}) was gone and its gate never counted a cancel: something other than the scheduler's cancel ended it: {log.Joined}");
+                }
+
+                if (cancels >= 1)
                 {
                     break;
                 }
 
-                Assert.True(existsBefore, $"the aggregate was dropped under a running job worker: {log.Joined}");
-                Assert.False(
-                    sweeperQuery.Contains("DROP MATERIALIZED VIEW", StringComparison.Ordinal) || sweeperQuery.TrimStart().StartsWith("DO $do$", StringComparison.Ordinal),
-                    $"the sweeper reached its DROP while the job worker (pid {workerPid}) was still alive: {log.Joined}");
-                Assert.False(sweep.IsCompleted, $"the sweep finished while a worker was running: {log.Joined}");
-                observedHold |= sweeperQuery.Contains("pg_stat_activity", StringComparison.Ordinal);
+                Assert.True(DateTime.UtcNow < safety, $"the scheduler never cancelled the stopped job's worker (pid {workerPid}) within 60 s, after {looks} looks: {log.Joined}");
                 await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
             }
 
-            if (!observedHold)
-            {
-                Assert.Fail($"the hold was never observed: the job worker (pid {workerPid}) was gone, or the sweeper was not waiting on it, within 2 s. The scheduler {(await SchedulerWokeSinceAsync(connection, worker.SchedulerIdleSince, ct) ? "HAD" : "had not")} woken since the worker was parked: {log.Joined}");
-            }
+            /* The count must be the scheduler's: a cancel the sweep itself sent is swallowed by the same trap and
+               counted too, but it lands while the scheduler is idle (measured: the scheduler is active, with an
+               unchanged state_change, from before its cancel until after the SIGTERM that follows it). */
+            Assert.Equal(0L, await SequenceCountAsync(connection, "w5551_foreign_cancels", ct));
 
             await ExecuteAsync(gate, $"SELECT pg_advisory_unlock({GateKey})", ct);
             gateOpen = true;
@@ -398,6 +436,11 @@ public sealed class AggregateJobQuiesceLiveTests
             Assert.Equal(1, await sweep.WaitAsync(TimeSpan.FromSeconds(60), ct));
             Assert.False(await RelationExistsAsync(connection, Retired, ct), "the drop goes ahead once the worker has exited");
             Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
+
+            /* The event trigger saw the DROP start (so the next count is not empty for want of a trigger), and no worker
+               of the view was listed when it did: the drop did not start beside the worker. */
+            Assert.True(await SequenceCountAsync(connection, "w5551_drop_starts", ct) >= 1, "the event trigger never saw the DROP start");
+            Assert.Equal(0L, await SequenceCountAsync(connection, "w5551_drop_beside_worker", ct));
         }
         finally
         {
@@ -442,8 +485,11 @@ public sealed class AggregateJobQuiesceLiveTests
             var log = new CapturingTestLogger();
             /* A zero cap: the first look sees the worker, so the skip and the resume follow within milliseconds of the
                stop. The worker is parked on the gate and the scheduler is idle until a wake about 4.7 s away
-               (StartParkedWorkerAsync, #5603), so nothing but this sweep can touch the worker until the assertions
-               below are done; a cap of seconds would let that wake land inside the wait and turn this into a drop. */
+               (StartParkedWorkerAsync, #5603). The jobs are stopped only between the sweep's stop and its resume, a few
+               round trips with no assertion in them, and a wake after the resume leaves a running worker of a scheduled
+               job alone. A cap of seconds would let that wake land inside the wait and turn this into a drop. The one
+               exposure left is a wake inside that gap (or a stall here longer than the 4.7 s before the sweep starts);
+               this test keeps a plain gate because a trap would hide a sweep that cancels the worker itself. */
             Assert.Equal(0, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, log, DateTime.UtcNow, ZeroCap, ct));
 
             Assert.True(await RelationExistsAsync(connection, Retired, ct), "the aggregate stays at the cap");
@@ -500,11 +546,15 @@ public sealed class AggregateJobQuiesceLiveTests
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
-            await StartParkedWorkerAsync(connection, refreshJob, ct);
+            await StartBlockedWorkerAsync(connection, refreshJob, ct);
 
             var log = new CapturingTestLogger();
+            /* #5603: a poll interval of ten minutes. After the stop and its first look the sweep sits in Task.Delay and
+               cannot reach a second look, let alone the drop, whatever the scheduler does to the worker meanwhile (it
+               may end it at its next wake). So the cancel below always lands in the wait, or in the first look, which
+               takes the same catch-and-resume path; it never depends on how long the worker lives. */
             var sweep = Task.Run(() => TimescaleSupport.DropRetiredBaselineAggregatesAsync(
-                sweeper, log, DateTime.UtcNow, new TimescaleSupport.AggregateJobQuiesceOptions(TimeSpan.FromSeconds(120), TimeSpan.FromMilliseconds(100)), cancel.Token));
+                sweeper, log, DateTime.UtcNow, new TimescaleSupport.AggregateJobQuiesceOptions(TimeSpan.FromSeconds(120), TimeSpan.FromMinutes(10)), cancel.Token));
             await WaitForJobsStoppedAsync(connection, jobIds, log, ct);
 
             cancel.Cancel();
@@ -773,19 +823,13 @@ $fn$", ct);
     private readonly record struct ParkedWorker(int Pid, DateTime SchedulerIdleSince);
 
     /// <summary>
-    /// #5603: starts the refresh worker and returns only when it is in the one state a test about a RUNNING worker can
-    /// rely on. (1) It is listed in <c>pg_stat_activity</c>. (2) It is BLOCKED on the gate: its <c>pg_locks</c> row for
-    /// the shared advisory key is not granted, matched by the worker's pid. Listed is not enough: a listed worker can
-    /// still be in the DELETE that opens the refresh. (3) The scheduler is idle again after launching it (its
-    /// <c>pg_stat_activity</c> row is <c>idle</c> with a <c>state_change</c> later than the moment the job was made
-    /// due). The scheduler launches a job and notices a stopped job only at a wake, and the wake that launched the
-    /// worker is still running when the worker first shows up; a stop that committed inside it was acted on at once
-    /// (cancelled about 30 ms later in the CI failure). Once it has ended the next wake is about 5 s after it began,
-    /// so everything the caller does next, a sweep and its assertions, finishes inside that gap.
+    /// #5603: starts the refresh worker and returns its pid only when it is BLOCKED on the gate: listed in
+    /// <c>pg_stat_activity</c> AND its <c>pg_locks</c> row for the shared advisory key is not granted, matched by the
+    /// worker's pid. Listed is not enough: a listed worker can still be in the DELETE that opens the refresh, where a
+    /// cancel is an error and not a wait the gate can trap.
     /// </summary>
-    private static async Task<ParkedWorker> StartParkedWorkerAsync(NpgsqlConnection connection, int refreshJob, CancellationToken ct)
+    private static async Task<int> StartBlockedWorkerAsync(NpgsqlConnection connection, int refreshJob, CancellationToken ct)
     {
-        var madeDueAt = await ScalarAsync<DateTime>(connection, "SELECT clock_timestamp()", ct);
         await StartRefreshWorkerAsync(connection, refreshJob, ct);
 
         var pid = 0;
@@ -796,6 +840,22 @@ $fn$", ct);
         Assert.True(
             await WaitForAsync(async () => await ScalarAsync<long>(connection, $"SELECT count(*) FROM pg_locks WHERE pid = {pid} AND locktype = 'advisory' AND NOT granted AND classid = {GateKey >> 32} AND objid = {GateKey & 0xFFFFFFFFL} AND objsubid = 1", ct) > 0, TimeSpan.FromSeconds(30), ct),
             $"the refresh worker (pid {pid}) never blocked on the gate");
+        return pid;
+    }
+
+    /// <summary>
+    /// #5603: <see cref="StartBlockedWorkerAsync"/>, and then the scheduler is idle again after launching the worker
+    /// (its <c>pg_stat_activity</c> row is <c>idle</c> with a <c>state_change</c> later than the moment the job was made
+    /// due). The scheduler launches a job and notices a stopped job only at a wake, and the wake that launched the
+    /// worker is still running when the worker first shows up; a stop that committed inside it was acted on at once
+    /// (cancelled about 30 ms later in the CI failure). Once it has ended the next wake is about 5 s after it began.
+    /// For a test that needs a PLAIN gate and the worker alive across a very short sweep; the tests that cannot
+    /// depend on how long the worker lives trap the cancel or never reach a second look instead.
+    /// </summary>
+    private static async Task<ParkedWorker> StartParkedWorkerAsync(NpgsqlConnection connection, int refreshJob, CancellationToken ct)
+    {
+        var madeDueAt = await ScalarAsync<DateTime>(connection, "SELECT clock_timestamp()", ct);
+        var pid = await StartBlockedWorkerAsync(connection, refreshJob, ct);
 
         DateTime? idleSince = null;
         Assert.True(
@@ -803,6 +863,77 @@ $fn$", ct);
             "the scheduler never went idle again after launching the refresh worker (its pg_stat_activity row did not move)");
         return new ParkedWorker(pid, idleSince!.Value);
     }
+
+    /// <summary>
+    /// #5603: replaces the gate with one that TRAPS the scheduler's cancel. It catches <c>query_canceled</c>, bumps
+    /// <c>collect.w5551_cancels</c> and waits again, so the worker outlives the cancel (until the scheduler's SIGTERM,
+    /// 3.3 s later, or until the test opens the gate). A sequence is not transactional: the count survives the
+    /// worker's death and rollback. The same handler also bumps <c>collect.w5551_foreign_cancels</c> when the
+    /// scheduler is not in a wake (<c>state</c> other than <c>active</c>): the scheduler cancels only inside a wake
+    /// (measured: <c>active</c> from before the cancel to after the SIGTERM), so a cancel at any other time came from
+    /// somewhere else, for example a sweep that cancelled the worker itself.
+    /// </summary>
+    private static async Task PlantTrappingGateAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await ExecuteAsync(connection, "CREATE SEQUENCE collect.w5551_cancels", ct);
+        await ExecuteAsync(connection, "CREATE SEQUENCE collect.w5551_foreign_cancels", ct);
+        await ExecuteAsync(connection, $@"
+CREATE OR REPLACE FUNCTION collect.w5551_gate(x double precision) RETURNS double precision LANGUAGE plpgsql IMMUTABLE AS $f$
+BEGIN
+    LOOP
+        BEGIN
+            PERFORM pg_advisory_lock_shared({GateKey});
+            EXIT;
+        EXCEPTION WHEN query_canceled THEN
+            PERFORM nextval('collect.w5551_cancels');
+            PERFORM pg_stat_clear_snapshot();
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_stat_activity AS a
+                WHERE a.datname = current_database() AND a.backend_type = '{SchedulerBackend}' AND a.state = 'active')
+            THEN
+                PERFORM nextval('collect.w5551_foreign_cancels');
+            END IF;
+        END;
+    END LOOP;
+    PERFORM pg_advisory_unlock_shared({GateKey});
+    RETURN x;
+END
+$f$", ct);
+    }
+
+    /// <summary>
+    /// #5603: records, at the start of every DROP of a view, whether a job worker of the given jobs was listed in
+    /// <c>pg_stat_activity</c> at that moment (<c>collect.w5551_drop_beside_worker</c>), and that a DROP started at all
+    /// (<c>collect.w5551_drop_starts</c>). Measured: the trigger fires for the sweep's DROP inside its <c>DO $do$</c>
+    /// block BEFORE the DROP waits on the worker's locks, so a sweep that does not wait for the worker is counted
+    /// whether or not the DROP ever finishes. The job ids are literals: the trigger does not read the jobs view
+    /// while the drop is taking it apart.
+    /// </summary>
+    private static async Task PlantDropBesideWorkerProbeAsync(NpgsqlConnection connection, IReadOnlyCollection<int> jobIds, CancellationToken ct)
+    {
+        await ExecuteAsync(connection, "CREATE SEQUENCE collect.w5551_drop_starts", ct);
+        await ExecuteAsync(connection, "CREATE SEQUENCE collect.w5551_drop_beside_worker", ct);
+        await ExecuteAsync(connection, $@"
+CREATE OR REPLACE FUNCTION collect.w5551_drop_probe() RETURNS event_trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+    PERFORM nextval('collect.w5551_drop_starts');
+    PERFORM pg_stat_clear_snapshot();
+    IF EXISTS (
+        SELECT 1 FROM pg_stat_activity AS a
+        WHERE a.datname = current_database()
+        AND   EXISTS (SELECT 1 FROM unnest(ARRAY[{string.Join(", ", jobIds)}]) AS id WHERE a.backend_type LIKE '% [' || id::text || ']'))
+    THEN
+        PERFORM nextval('collect.w5551_drop_beside_worker');
+    END IF;
+END
+$fn$", ct);
+        await ExecuteAsync(connection, "CREATE EVENT TRIGGER w5551_drop_probe ON ddl_command_start WHEN TAG IN ('DROP VIEW', 'DROP MATERIALIZED VIEW') EXECUTE FUNCTION collect.w5551_drop_probe()", ct);
+    }
+
+    /// <summary>How many times a sequence of the probe above has been used (0 when it never was). Sequence reads see the
+    /// newest value at once, whichever transaction took it.</summary>
+    private static async Task<long> SequenceCountAsync(NpgsqlConnection connection, string sequence, CancellationToken ct)
+        => await ScalarAsync<long>(connection, $"SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM collect.{sequence}", ct);
 
     /// <summary>The scheduler's <c>state_change</c> when it is idle and went idle after <paramref name="after"/>, else null.</summary>
     private static async Task<DateTime?> SchedulerIdleSinceAsync(NpgsqlConnection connection, DateTime after, CancellationToken ct)
