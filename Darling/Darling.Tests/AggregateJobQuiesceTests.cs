@@ -295,6 +295,8 @@ public sealed class AggregateJobGraceReopenTests
 /// few milliseconds of round trips, with no assertion in between; once the jobs are scheduled again a wake leaves a
 /// running worker alone), or a stall of the test process longer than that gap before the sweep starts.</description></item>
 /// </list>
+///
+/// <para>Every test mints its own scratch database (the #1776 own-store rule above).</para>
 /// </summary>
 public sealed class AggregateJobQuiesceLiveTests
 {
