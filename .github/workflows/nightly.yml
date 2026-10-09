@@ -1,0 +1,1595 @@
+name: Nightly Build
+
+on:
+  schedule:
+    # 6:00 AM UTC (1:00 AM EST / 2:00 AM EDT)
+    - cron: '0 6 * * *'
+  workflow_dispatch: # manual trigger — and the vehicle the scheduled re-dispatch below rides
+    inputs:
+      from_schedule:
+        description: 'Set true by the scheduled re-dispatch so the 24h new-commit check applies. Leave false for manual runs, which always build.'
+        type: boolean
+        required: false
+        default: false
+      publish:
+        description: 'Publish the release artifacts (gh release, the ghcr image push) once build, linux and the Darling PostgreSQL tests all succeed. Set false for a diagnostic re-run that should build and test without publishing.'
+        type: boolean
+        required: false
+        default: true
+      test_map:
+        description: 'Build the class-to-file test map (#5459): the whole Darling.Tests and Lite.Tests suites under AltCover, sharded, joined into the test-map artifact. On by default, including in the scheduled re-dispatch; set false to skip it for one dispatch. It publishes nothing, gates nothing, and a failure in it does not fail the nightly.'
+        type: boolean
+        required: false
+        default: true
+      altcover_probe:
+        description: 'Run the AltCover per-test coverage probe job (#5459). Off by default and never set by the scheduled re-dispatch; it only measures, publishes nothing and gates nothing.'
+        type: boolean
+        required: false
+        default: false
+
+# Read-only by default; the release-publishing steps (gh release, the ghcr push, cosign, the
+# provenance attestation) run only in the publish job below, which declares its own write
+# permissions scoped to itself. No other job needs to write anything.
+permissions:
+  contents: read
+
+jobs:
+  # Scheduled workflows always execute the DEFAULT branch's copy of this file, while nightly
+  # artifacts deliberately build from dev's tree. That skew is how the 2026-07-26 nightly
+  # failed (run 30194606068): main's stale copy still read Dashboard/Dashboard.csproj, a path
+  # #1612 moved to deprecated/ on dev, so 'Set nightly version' died on a file missing from
+  # the tree it had just checked out — and the same trap bit before (#1550/#1551). The cure
+  # is structural, not another sync: on schedule this workflow does NOTHING but re-dispatch
+  # itself onto the dev REF, because a workflow_dispatch run executes the dispatched ref's
+  # copy of this file — dev's, current by definition. Once main carries this shape, its copy
+  # has exactly one job that must keep working, and that job references no tree paths at
+  # all; every future change to the real nightly logic lands on dev and takes effect the
+  # night it merges, no promotion to main needed. GITHUB_TOKEN can create workflow_dispatch
+  # runs (the Actions recursion guard exempts workflow_dispatch and repository_dispatch),
+  # and the dispatched run cannot loop back here because it arrives as workflow_dispatch,
+  # not schedule. Until main is synced once, the scheduled run still executes main's OLD
+  # copy and keeps failing nightly — the one-time sync is in the PR that introduced this.
+  redispatch:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-dispatch this workflow onto the dev ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run nightly.yml --repo ${{ github.repository }} --ref dev -f from_schedule=true
+
+  # Everything below runs only in a workflow_dispatch run — the scheduled re-dispatch or a
+  # manual one — which executes from the dispatched ref (dev for the scheduled path).
+  #
+  # Each checkout resolves that ref EXPLICITLY rather than pinning `ref: dev`. Three of these
+  # were pinned, so a manual dispatch onto any other branch published dev's artifacts while
+  # reporting the dispatched ref as the run's head SHA — the run, the API and the release page
+  # all named a branch that was not what got built. That is worse than simply ignoring the
+  # input, because the mismatch is invisible: it surfaced as a release-candidate build stamping
+  # the PREVIOUS version, which is only noticeable if you happen to read the artifact name.
+  check:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+      stamp: ${{ steps.stamp.outputs.stamp }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+          fetch-depth: 0
+
+      # The nightly prerelease stamp, derived ONCE for the whole run and consumed by every job
+      # that names an artifact (#3390). Two properties matter and a per-job `date` has neither.
+      #
+      # Stable across jobs: `linux` needs `build`, which takes ~8.5 minutes, so the two jobs read
+      # their clocks ~8.5 minutes apart. Each deriving its own date means a run whose two stamp
+      # steps straddle midnight UTC ships a Windows zip dated one day and a Linux tarball dated
+      # the next, from one commit.
+      #
+      # Unique per build: the date alone is not. Multiple dispatches a day are normal here - over
+      # 2026-08-24..09-12, 13 of 20 days published two or more distinct source trees under one
+      # version string, peaking at five - and nothing in the artifact then distinguishes them.
+      # `InformationalVersion` — and the Win32 ProductVersion built from it — and the asset names
+      # all carry this string (#3455 is what actually threads it into the binaries; FileVersion
+      # stays the numeric prefix), and the apphost exe is byte-identical across builds, so with a
+      # colliding stamp there is no read that answers "which nightly is this".
+      #
+      # run_number is monotonic and numeric, so SemVer 2.0 compares these prereleases in build
+      # order; the date stays leftmost and human-readable. A short sha would identify the tree
+      # but sorts as an alphanumeric identifier, which outranks every numeric one.
+      - name: Derive the nightly stamp
+        id: stamp
+        shell: bash
+        run: |
+          set -euo pipefail
+          stamp="$(date -u +%Y%m%d).${{ github.run_number }}"
+          # Shape, not emptiness. A `date` that exited 0 having printed nothing yields
+          # ".<run_number>" - non-empty, so it passes every downstream `-n` /
+          # IsNullOrWhiteSpace guard and stamps both artifacts with a malformed version instead
+          # of failing here. Asserting the shape at the one place the stamp is produced makes
+          # those guards a backstop against broken output wiring rather than the only check.
+          shape='^[0-9]{8}\.[0-9]+$'
+          [[ "${stamp}" =~ ${shape} ]] || { echo "::error::Derived a malformed nightly stamp: '${stamp}'"; exit 1; }
+          echo "stamp=${stamp}" >> "$GITHUB_OUTPUT"
+          echo "Nightly stamp: ${stamp}"
+
+      - name: Check for new commits in last 24 hours
+        id: check
+        run: |
+          RECENT=$(git log --since="24 hours ago" --oneline | head -1)
+          if [ -n "$RECENT" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "New commits found — building nightly"
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No new commits — skipping nightly build"
+          fi
+
+  build:
+    needs: check
+    # Manual dispatches always build (from_schedule defaults false); the scheduled
+    # re-dispatch sets from_schedule=true and builds only when dev changed in the last
+    # 24h — the same policy the schedule applied when it ran these jobs directly.
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    runs-on: windows-latest
+    # Full pipeline (restore, tests, four publishes, cold pg-runtime fetch, vpk pack,
+    # release upload) is well under an hour; 90 minutes means hung-not-slow. Nightly ships
+    # unsigned, so unlike build.yml's release path there is no manual signing gate to wait on.
+    #
+    # Raised from 90 to 150 (#5208). The unsharded "Run tests" step alone went 45 -> 64 -> over 89
+    # minutes on hosted runners and hit this cap, so no nightly published. The one-log design is
+    # kept on purpose. This is a guard, not a fix: the slowdown is tracked in #5208, and this value
+    # should come back down to 90 when it is fixed.
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      # The stamp must reach the BINARIES, not just the names around them. This step's output feeds
+      # every artifact name and the vpk pack below, but a name is not a stamp: each assembly records
+      # whatever the msbuild version property resolves to at build time, and that is the clean
+      # release string Directory.Build.props declares unless the build overrides it. Until #3455
+      # nothing did, so a zip named 3.7.0-nightly.20260915.438 shipped a service whose informational
+      # version read bare 3.7.0 — and the informational version is the one surface a RUNNING service
+      # answers build questions from: DarlingCliCommands.ProductVersion() reads that attribute for
+      # --version, and #3453's get_collection_health service block deliberately serves the same
+      # method's result. The night #3453 shipped, its first live reading came back bare on a .438
+      # nightly — the question "which nightly is this" answered with silence at the read built to
+      # answer it.
+      #
+      # So every dotnet publish below passes -p:Version with this value. The SDK derives the
+      # informational version from it verbatim, while AssemblyVersion and FileVersion derive as the
+      # numeric prefix (3.7.0.0) — identical to a release build, so nothing assembly-identity-shaped
+      # differs between the two. No +sha metadata rides along: Directory.Build.props suppresses the
+      # source-revision append tree-wide (#3222), the stamp's run_number already names the build
+      # uniquely, and ProductVersion() strips any +suffix from display regardless. Release builds
+      # keep their clean string by CONSTRUCTION rather than by restraint — build.yml passes no
+      # version property — and NightlyVersionInjectionTests pins both halves, so the next copied-in
+      # publish step cannot quietly ship a bare-versioned nightly again.
+      - name: Set nightly version
+        id: version
+        shell: pwsh
+        env:
+          NIGHTLY_STAMP: ${{ needs.check.outputs.stamp }}
+        run: |
+          $base = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }
+          if ([string]::IsNullOrWhiteSpace($base)) { throw "Read no version from Directory.Build.props." }
+          if ([string]::IsNullOrWhiteSpace($env:NIGHTLY_STAMP)) { throw "Read no stamp from the check job." }
+          $nightly = "$base-nightly.$env:NIGHTLY_STAMP"
+          echo "VERSION=$nightly" >> $env:GITHUB_OUTPUT
+          echo "Nightly version: $nightly"
+
+      # `shell: bash` with errexit for the reason build.yml's restore step carries it (#3143): a multi-line
+      # run block executes under pwsh on Windows, which reports the block's exit code as the LAST command's,
+      # so the two restores ahead of the last could print NU1004 and leave this step green. The project list
+      # is what this workflow publishes rather than the whole tree — build.yml's is the one that gates a
+      # merge, and LockedModeRestoreCoverageTests requires whole-tree lock-file coverage there and only there.
+      - name: Restore dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
+          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+          dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
+
+      # #5587: the hang report build.yml's shards carry (PR 5591). `-longRunning 300` makes the runner print a test that
+      # has run for 5 minutes while the step is still alive, so a hang names its test. The runner output is teed to
+      # TestResults/lite-runner-nightly.log and uploaded by the always() step below. The Tee-Object pipe leaves
+      # $LASTEXITCODE as the runner's, and the explicit check keeps the step failing when the runner fails.
+      # The step timeout is from numbers: the last 5 completed nightly runs on dev (2026-10-06 to 2026-10-08) ran this
+      # step for 32.4, 39.8, 40.6, 41.4 and 44.2 minutes, and the job ran 4.0 to 4.9 minutes longer than the step
+      # (setup before it, publish and packaging after it). The job's timeout is 150, so the step's is
+      # 150 - 4.9 - 5 = 140 (rounded down). The longest step, 44.2 minutes, is 32% of that, under the 70% bar. A job
+      # timeout would cancel the job and leave the uploads pending; a step timeout fails only this step.
+      - name: Run tests
+        timeout-minutes: 140
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path TestResults | Out-Null
+          dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release -- -xml TestResults/lite-timing-nightly.xml -longRunning 300 | Tee-Object -FilePath TestResults/lite-runner-nightly.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # #5208: where the time goes. Informational; a parse problem must never turn the job red.
+      - name: Lite test timing summary
+        if: always()
+        continue-on-error: true
+        run: python .github/scripts/lite-timing-top.py TestResults
+
+      - name: Upload Lite test timings
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-tests-timing-nightly
+          path: |
+            TestResults/lite-timing-*.xml
+            TestResults/lite-timing-*.xml.cpu.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # #5587: the runner output, uploaded whatever the test step did (failed, cancelled or timed out).
+      - name: Upload Lite runner output
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-runner-log-nightly
+          path: TestResults/lite-runner-*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # #2501: -r win-x64 --self-contained, and it makes the portable ZIP SMALLER, not bigger.
+      # The RID-agnostic framework-dependent publish this replaced copied every platform its
+      # packages ship - 537 MB of runtimes\ on a 565 MB tree, of which only the 52 MB win-x64
+      # folder can ever load on Windows (DuckDB.NET.Bindings.Full is most of it, SkiaSharp and
+      # SqlClient behind it). Pinning the RID drops ~485 MB of unloadable native payload, which
+      # is far more than the bundled .NET/WPF/ASP.NET runtime adds back. Measured on the same
+      # commit and SDK: 565 MB tree / 212.7 MB zipped becomes 277 MB / 114.2 MB.
+      #
+      # The size was the secondary reason. The primary one is #2489: a framework-dependent ZIP
+      # unzipped onto a stock Windows Server dies on the .NET host's own "You must install .NET
+      # to run this application" before a line of our code runs, so Lite cannot report it, and
+      # #2499 could only ship a READ-ME-FIRST.txt next to the exe. Self-contained there is
+      # nothing to install and nothing to fail. That matters most for the nightly ZIP, which is
+      # the UAT download and is not offered as a Setup.exe at all.
+      #
+      # Lite/PerformanceMonitorLite.csproj declares RuntimeIdentifiers so the committed lock
+      # file covers this RID; see the comment there before removing either half.
+      - name: Publish Lite
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite -p:Version=${{ steps.version.outputs.VERSION }}
+
+      - name: Publish Darling Service
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService -p:Version=${{ steps.version.outputs.VERSION }}
+
+      - name: Publish Darling Viewer
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -o publish/DarlingViewer -p:Version=${{ steps.version.outputs.VERSION }}
+
+      # Self-contained viewer publish that feeds the remote-seat Velopack Setup.exe (#1555), the same
+      # publish shape build.yml uses for the Dashboard/Lite Velopack packs. This is IN ADDITION to the
+      # framework-dependent "Publish Darling Viewer" above, which still feeds the co-located viewer\
+      # folder inside PerformanceMonitorDarling-*.zip — that zip is unchanged.
+      - name: Publish Darling Viewer (self-contained for Velopack)
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer-velopack -p:Version=${{ steps.version.outputs.VERSION }}
+
+      # Same cache key as build.yml's release path: the fetch script's content hash (the SHA256
+      # pins live inside it). The ~340MB EDB/TimescaleDB fetch runs at most once per pin-set per
+      # branch; nightly and release runs share the assembled zip whenever the cache is visible.
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          New-Item -ItemType Directory -Force -Path releases
+
+          Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
+
+
+          # Same layout as the release zip (build.yml "Package Darling (signed)"): service at the
+          # archive root with darling.sample.json alongside, viewer under viewer\, pg-runtime.zip
+          # beside the service exe where DarlingManagedPostgres extracts it on first run. Nightly
+          # zips are unsigned across the board, so this stages from publish/ instead of signed/.
+          $darlingDir = 'publish/Darling'
+          New-Item -ItemType Directory -Force -Path "$darlingDir/viewer" | Out-Null
+          Copy-Item 'publish/DarlingService/*' $darlingDir -Recurse
+          Copy-Item 'publish/DarlingViewer/*' "$darlingDir/viewer" -Recurse
+          Copy-Item 'Darling/artifacts/pg-runtime.zip' $darlingDir
+
+          Compress-Archive -Path 'publish/Darling/*' -DestinationPath "releases/PerformanceMonitorDarling-$version.zip" -Force
+
+      # Darling viewer remote-seat installer (#1555). Nightly ships it UNSIGNED like every other nightly
+      # artifact. Mirrors build.yml's release vpk pack (same pack id / exe / channel) but packs from the
+      # raw self-contained publish (no SignPath), and deliberately does NOT touch the Velopack update
+      # feed: the nightly GitHub release is deleted + recreated each night, so there is no persistent
+      # delta chain to `vpk download`/`vpk upload` from — we ship a standalone full Setup.exe as a plain
+      # release asset. Copied to a deterministic name so the checksum + upload steps below pick it up.
+      # Purely additive: the co-located viewer inside PerformanceMonitorDarling-*.zip is untouched.
+      - name: Create Darling Viewer Setup.exe (Velopack, unsigned)
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          dotnet tool install -g vpk --version 1.2.158
+          New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
+          vpk pack -u PerformanceMonitorDarlingViewer -v $version -p publish/DarlingViewer-velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer
+          $setup = Get-ChildItem releases/velopack-darlingviewer/*Setup.exe | Select-Object -First 1
+          Copy-Item $setup.FullName "releases/PerformanceMonitorDarlingViewer-$version-Setup.exe"
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $checksums = Get-ChildItem releases/*.zip, releases/*.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          }
+          # LF and no BOM, written explicitly (#2383). Out-File on Windows emits CRLF whatever
+          # the encoding, and `shasum -c` on macOS/Linux then takes the trailing \r as part of
+          # the FILENAME - every entry reports "No such file or directory / FAILED open or
+          # read", which is precisely what a tampered download looks like. The hashes were
+          # always right; the file just could not be used by the tool it exists for, on the two
+          # platforms where that tool is the default. A BOM breaks the first line the same way.
+          #
+          # This is the SECOND copy of that step. #2384 fixed the release workflow and left this
+          # one, so every nightly since has published a checksum file nobody outside Windows can
+          # verify - and the nightly is the build most likely to be checked by hand.
+          [IO.File]::WriteAllText(
+            "$PWD/releases/SHA256SUMS.txt",
+            (($checksums -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false))
+          Write-Host "Checksums:"
+          $checksums | ForEach-Object { Write-Host $_ }
+
+      # The release-publishing steps (gh release create, the linux upload, the ghcr push) moved to
+      # the publish job below, which waits on build, linux AND darling-pg. This job hands off its
+      # windows release assets (the zips, the Setup.exe, SHA256SUMS.txt) and the version string as a
+      # workflow artifact instead of publishing them itself, so a nightly can no longer publish
+      # while the Darling PostgreSQL tests are red: publish downloads exactly what this job built
+      # and cannot run until darling-pg reports success.
+      - name: Upload windows release assets
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-release-assets
+          path: |
+            releases/*.zip
+            releases/*.exe
+            releases/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Save the nightly version string
+        shell: bash
+        run: echo "${{ steps.version.outputs.VERSION }}" > windows-version.txt
+
+      # The commit build actually checked out, so publish can name the release after the tree it
+      # built rather than dev's tip at publish time (20-60 minutes later, once darling-pg is done).
+      - name: Save the built commit SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "${sha}" > windows-commit-sha.txt
+          echo "Built commit: ${sha}"
+
+      - name: Upload the nightly version string
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-version
+          path: |
+            windows-version.txt
+            windows-commit-sha.txt
+          if-no-files-found: error
+          retention-days: 3
+
+  # Darling.Tests has live-PostgreSQL tests gated on env vars that the per-PR/push build never
+  # sets, so regular CI runs only the ungated subset. This job stands up a throwaway PostgreSQL
+  # from the bundled pg-runtime and runs the full Darling suite against it nightly, so the
+  # Postgres + managed-bootstrap paths get real coverage. The one live-SQL-Server E2E stays
+  # skipped (no SQL Server on the runner) — expected. Gated like the build job so it only runs
+  # when dev actually changed (or on manual dispatch).
+  darling-pg:
+    name: Darling PostgreSQL tests
+    needs: check
+    # Same gating as the build job: manual dispatches always run, the scheduled
+    # re-dispatch (from_schedule=true) runs only when dev changed in the last 24h.
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    runs-on: windows-latest
+    # Cold pg-runtime fetch + build + the full live-PG suite fits well inside an hour; a
+    # cluster that never comes up (pg_ctl -w) is the hang this bounds.
+    timeout-minutes: 60
+
+    steps:
+      # Scheduled runs always test dev (schedules execute from the default branch, so ref_name
+      # would be main). A manual dispatch tests the DISPATCHED ref — the only way to validate a
+      # branch's gated-pg test changes before merge; the build job stays pinned to dev either
+      # way, so a branch dispatch can never ship branch binaries.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      # Darling bundles a PostgreSQL 18 + TimescaleDB runtime (pg-runtime.zip). The fetch script
+      # pulls ~340MB of pinned EDB/TimescaleDB archives, so cache the assembled zip on the SAME
+      # key build.yml's release job uses (the fetch script's own content hash) — nightly and
+      # release share one cache entry, so a warm cache means no download here.
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      # One uniform path for hit and miss: we always have the zip (restored or freshly built),
+      # so always extract it — simpler than branching on the script's -KeepWork assembled tree.
+      # ExtractToDirectory mirrors the fetch script's own API and reads any zip it writes.
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      # The PREVIOUS-major runtime, for the upgraded-in-place fixture (#1706). Without it the gated
+      # store-upgrade E2E skips, and with it skips the ONLY behavioral coverage of the in-place
+      # 17-to-18 path: the runtime rescue, the TimescaleDB bridge, the data-directory swap, the
+      # revert, and the loopback override that stops pg_upgrade dialing ::1 against our IPv4-only
+      # listen_addresses. String assertions catch that constant being deleted; nothing but this
+      # catches the override ceasing to TAKE EFFECT, and the failure mode is a fleet-wide hang.
+      # Only the DOWNLOADS are cached (~680MB of pinned archives, both fixture runtimes): the script
+      # re-verifies them by SHA256 and re-assembles in seconds, so a warm cache costs no network.
+      - name: Cache upgrade-fixture downloads (previous-major runtime)
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/upgrade-fixture/work/downloads
+          key: upgrade-fixture-${{ runner.os }}-${{ hashFiles('Darling/tools/new-upgraded-store-fixture.ps1') }}
+
+      # -SkipNew: the CURRENT runtime is already built/cached above as pg-runtime.zip, which is what
+      # DARLING_TEST_PGRUNTIME_NEWZIP points at. This step only needs the old sides: the previous major,
+      # and (#3906) the previous release on the current major.
+      - name: Build previous-major runtime for the upgrade fixture
+        shell: pwsh
+        run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
+
+      - name: Restore Darling.Tests
+        run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+
+      - name: Build Darling.Tests
+        run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      # Stand up a throwaway cluster from the bundled runtime. initdb TRUST auth is acceptable
+      # ONLY here: an ephemeral CI runner, loopback-only, throwaway data. The PRODUCT default is
+      # the opposite (scram-sha-256 + a generated credential; see DarlingManagedPostgres). The
+      # appended settings mirror DarlingManagedPostgres.BuildConfAppend (timescaledb preload —
+      # the Timescale-gated tests detect and use it — plus the port and loopback bind) and
+      # BuildWorkerSizingConfAppend (the two worker settings). Port 5541 is fixed and distinct; the
+      # managed-bootstrap E2E starts its OWN postgres on a random free port, so there is no collision.
+      #
+      # #1888: the worker settings are load-bearing, not garnish. PostgreSQL's default
+      # max_worker_processes = 8 cannot launch TimescaleDB's per-hypertable compression, retention
+      # and continuous-aggregate policy jobs, so without them this job tested a configuration no
+      # customer runs and made scheduler-racing failures luck-of-the-slot instead of reproducible.
+      # Values are the product's own derivation from the live hypertable count
+      # (TimescaleSupport.HypertableCount = the 62-collector catalog + collection_log = 63):
+      #   timescaledb.max_background_workers = HypertableCount + 2  = 74
+      #   max_worker_processes = 3 + (HypertableCount + 2) + 8      = 85
+      # Kept honest by CiClusterWorkerSizingTests (parses this file against the formula) and
+      # CiClusterWorkerSizingLiveTests (asserts the running cluster serves them). Must configure
+      # the cluster identically to build.yml's darling-pg job: that guard parses the appended
+      # settings out of BOTH files and requires the two sets to be equal, so a fix applied to one
+      # workflow and not the other — the ordinary way these hand-maintained copies drift — fails.
+      - name: Initialize and start throwaway PostgreSQL
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          $logFile = "$env:RUNNER_TEMP\darling-pg.log"
+          # The bootstrap superuser is named "darling", not "postgres": the V8 schema-split
+          # migration runs CREATE SCHEMA ... AUTHORIZATION darling (PgSchemaGenerator.OwnerRole),
+          # so a cluster without that role fails every fresh-store migration. Matching managed
+          # mode's shape (DarlingManagedPostgres also initdbs its owner as "darling").
+          & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
+          if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
+          # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
+          & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
+          if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
+          & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
+          if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
+
+      # DARLING_TEST_PG lights up the [Collection("live-postgres")] classes; DARLING_TEST_PGRUNTIME
+      # lights up the managed-bootstrap E2E. DARLING_TEST_SQL is intentionally unset — the one
+      # live-SQL-Server E2E stays skipped (no SQL Server on the runner).
+      # #5587: the hang report build.yml's shards carry (PR 5591): `-longRunning 300` names a test that has run for
+      # 5 minutes, and the runner output is teed to TestResults/darling-runner-nightly.log and uploaded by the
+      # always() step further down. The Tee-Object pipe leaves $LASTEXITCODE as the runner's; the explicit check keeps
+      # the step failing when the runner fails.
+      # NO step timeout, from numbers: the last 5 completed nightly runs on dev (2026-10-06 to 2026-10-08) ran this step
+      # for 32.2, 32.3, 36.8, 41.1 and 41.2 minutes, and the job ran 4.2 to 5.1 minutes longer than the step. The job's
+      # timeout is 60, so a step timeout would be 60 - 5.1 - 5 = 49 (rounded down). The longest step, 41.2 minutes, is
+      # 84% of that, over the 70% bar, so a step timeout would fail a slow but healthy run. The job's own timeout stays
+      # the bound; if it cancels the job, the uploads below stay pending, which is the gap the timeout would have closed.
+      - name: Run Darling PG tests
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
+          DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
+          # #1706: the pair that lights up the upgraded-in-place store-upgrade E2E — a real
+          # previous-major store (hypertable, TOAST-sized plan XML, continuous aggregate,
+          # compressed chunk) upgraded through the production bootstrap and compared by ordered
+          # row checksum before and after. This is the [#1705] CI gap: every other job only ever
+          # sees a FRESH store, so nothing else can catch an upgrade path that breaks.
+          DARLING_TEST_PGRUNTIME_OLD: ${{ github.workspace }}\Darling\artifacts\upgrade-fixture\old\pg-runtime
+          DARLING_TEST_PGRUNTIME_NEWZIP: ${{ github.workspace }}\Darling\artifacts\pg-runtime.zip
+          # #3906: the previous release's runtime on the bundle's OWN major, for the same-major E2E. That
+          # swap (no pg_upgrade, same data directory) is what nearly every field host takes on a release
+          # that moves PostgreSQL's minor, and nothing else runs it with real data, stamped or not.
+          DARLING_TEST_PGRUNTIME_PREVIOUS: ${{ github.workspace }}\Darling\artifacts\upgrade-fixture\previous\pg-runtime
+        run: |
+          New-Item -ItemType Directory -Force -Path TestResults | Out-Null
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -trx TestResults/darling-nightly.trx -longRunning 300 | Tee-Object -FilePath TestResults/darling-runner-nightly.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # PR #5480: a TimescaleDB job worker died with 0xC0000005 in two CI runs and both runs read "success",
+      # because the postmaster restarts and the tests retry. The crash shows only in the PostgreSQL log, as
+      # "terminated by exception", so this step turns it into a warning on the run. It only warns: it never
+      # fails the job, and it runs when the tests failed too.
+      - name: Warn if a PostgreSQL worker crashed
+        if: always()
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\darling-pg.log"
+          if (Test-Path $log) {
+            $hits = @(Select-String -Path $log -Pattern 'terminated by exception' -SimpleMatch)
+            foreach ($hit in ($hits | Select-Object -First 5)) {
+              $line = $hit.Line
+              if ($line.Length -gt 300) { $line = $line.Substring(0, 300) }
+              Write-Host "::warning title=PostgreSQL worker terminated by exception::$line"
+            }
+            if ($hits.Count -gt 0) { Write-Host "$($hits.Count) 'terminated by exception' line(s) in darling-pg.log" }
+          }
+          exit 0
+
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+          exit 0
+
+      # The gated upgrade-path tests stand up their OWN throwaway clusters under the runner's temp
+      # directory (Directory.CreateTempSubdirectory, prefixes like "darling-pg17boot-" and
+      # "darling-managedconf-"), separate from the fixed darling-pgdata cluster this job starts
+      # above. When one of those tests fails, its cluster's own server log (pg_ctl's -l file,
+      # named "logfile" inside each temp root, plus any "log\\" ring directory a managed-conf boot
+      # writes) is the only record of what postgres itself said, and it wasn't captured before.
+      # Those clusters land under %TEMP% (the Windows per-user temp directory), NOT
+      # ${{ runner.temp }} (RUNNER_TEMP) - the two are different directories on this runner - so
+      # this step copies them into RUNNER_TEMP first, preserving relative paths, before the
+      # upload step below (which can only reach RUNNER_TEMP). A test's own "finally" block may
+      # already have deleted its temp root by the time this runs, so this only catches clusters
+      # that survive; the test's own failure message (the in-place upgrade test appends the
+      # upgraded server's own log to its assertion) remains the primary record.
+      - name: Collect the gated tests' own cluster logs
+        if: failure()
+        shell: pwsh
+        run: |
+          $dest = "$env:RUNNER_TEMP\darling-cluster-logs"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $maxBytes = 50MB
+          $copied = 0
+          $roots = Get-ChildItem -Path $env:TEMP -Directory -Filter "darling-*" -ErrorAction SilentlyContinue
+          foreach ($root in $roots) {
+            $files = Get-ChildItem -Path $root.FullName -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+              $_.Name -eq "logfile" -or $_.Name -like "*.log" -or
+              $_.FullName -match "\\log\\" -or $_.FullName -match "\\pg_log\\"
+            }
+            foreach ($file in $files) {
+              if ($file.Length -gt $maxBytes) { continue }
+              $relative = $file.FullName.Substring($env:TEMP.Length).TrimStart("\")
+              $target = Join-Path $dest $relative
+              New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
+              Copy-Item -Path $file.FullName -Destination $target -ErrorAction SilentlyContinue
+              $copied++
+            }
+          }
+          Write-Host "Collected $copied gated-test cluster log file(s) into $dest"
+
+      # #5587: the runner output, uploaded whatever the test step did (failed, cancelled or timed out).
+      - name: Upload Darling runner output
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-runner-log-nightly
+          path: TestResults/darling-runner-*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload PG log and test results on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-pg-failure
+          path: |
+            ${{ runner.temp }}/darling-pg.log
+            ${{ runner.temp }}/darling-cluster-logs/**
+            TestResults/
+          if-no-files-found: ignore
+          overwrite: true
+
+  # ── AltCover per-test coverage probe (#5459, change 4 slice 2) ───────────────────────────────────
+  # Dispatch-only and off by default: the scheduled re-dispatch never sets `altcover_probe`, so the
+  # nightly never runs this. It answers one question for the class-to-file map the PR test selection
+  # would read: can AltCover (--callContext on [Fact]/[Theory]) give a per-test-class list of product
+  # source files for the Darling xUnit v3 project on .NET 10, at what overhead, and with what holes?
+  # It runs about 100 Darling classes (plain, TestHost/web, live PostgreSQL) and about 60 Lite classes
+  # (plain, DuckDB-backed, collector-starting) once plain and once instrumented, and uploads the raw
+  # OpenCover reports plus a summary and the schema-1 `classes` map for each suite. Nothing here
+  # publishes or gates, and no job lists it in `needs`.
+  # Dispatch on a branch with:
+  #   gh workflow run nightly.yml --ref <branch> -f altcover_probe=true -f publish=false
+  altcover-probe:
+    name: AltCover per-test coverage probe
+    # Waits for build and darling-pg so it does not take their runners (#5459); always() keeps it running after a failed one.
+    needs: [check, build, darling-pg]
+    if: always() && needs.check.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.altcover_probe == true
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      # Pinned: a probe whose tool floats cannot be compared run to run.
+      ALTCOVER_VERSION: '9.0.145'
+      PROBE_BIN: ${{ github.workspace }}\Darling\Darling.Tests\bin\Release\net10.0-windows
+      PROBE_BIN_LITE: ${{ github.workspace }}\Lite.Tests\bin\Release\net10.0-windows
+      # PROBE_OUT (the scratch folder under the runner's temp directory) is exported by the install step:
+      # the `runner` context is not available in a job-level env block.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      - name: Restore Darling.Tests
+        run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+
+      - name: Build Darling.Tests
+        run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      # Lite.Tests is built up front too, but probed after the Darling pass (its own bin folder, so the in-place
+      # instrumentation of the two suites never touches the same files).
+      - name: Restore Lite.Tests
+        run: dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build Lite.Tests
+        run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # The same throwaway cluster the darling-pg job stands up (CiClusterWorkerSizingTests compares the
+      # appended settings of both jobs), so the live classes in the sample behave as they do there.
+      - name: Initialize and start throwaway PostgreSQL
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          $logFile = "$env:RUNNER_TEMP\darling-pg.log"
+          & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
+          if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
+          # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
+          & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
+          if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
+          & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
+          if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
+
+      - name: Install AltCover (pinned)
+        shell: pwsh
+        run: |
+          dotnet tool install altcover.global --version $env:ALTCOVER_VERSION --tool-path "$env:RUNNER_TEMP\altcover-tool"
+          if ($LASTEXITCODE -ne 0) { throw "altcover install failed ($LASTEXITCODE)" }
+          $out = "$env:RUNNER_TEMP\altcover-probe"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          "PROBE_OUT=$out" | Add-Content -Path $env:GITHUB_ENV
+
+      # About 100 classes, spread over plain unit classes, TestHost/web classes and live PostgreSQL
+      # classes, taken from the built assembly's own class listing (Stage=Guard classes read source text
+      # and never run product code, so they are left out).
+      - name: Choose the sample classes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = @(& "$env:PROBE_BIN\Darling.Tests.exe" -list classes/json -trait- Stage=Guard)
+          if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count)" }
+          Set-Content -Path "$env:PROBE_OUT\all-classes.json" -Value $json[0]
+          python .github/scripts/altcover-probe.py select --list "$env:PROBE_OUT\all-classes.json" --tests-dir Darling/Darling.Tests --root . --total 100 --want web=25 --want live=12 --out "$env:PROBE_OUT\classes.txt" --manifest "$env:PROBE_OUT\manifest.json"
+          if ($LASTEXITCODE -ne 0) { throw "class selection failed ($LASTEXITCODE)" }
+
+      # Baseline: the same classes, un-instrumented. Failures here are recorded, not fatal: this is a
+      # measurement, and a class that fails plain is a hole in the comparison, not in the tool.
+      - name: Run the sample classes (plain)
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $classes = @(Get-Content "$env:PROBE_OUT\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:PROBE_BIN\Darling.Tests.exe" @classArgs -xml "$env:PROBE_OUT\plain.xml"
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "plain run: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s for $($classes.Count) classes"
+          @{ plain_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); plain_exit = $code; classes = $classes.Count } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-plain.json"
+          exit 0
+
+      # Instrument IN PLACE (originals saved aside): the tests locate the repository by walking up from
+      # their own directory, so an instrumented copy outside the checkout would read nothing. Product,
+      # test and Lite assemblies only; every NuGet dependency stays un-instrumented. --methodpoint keeps
+      # one visit record per method, which is all a file-level map needs.
+      - name: Instrument the assemblies (AltCover, callContext on Fact and Theory)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" --inplace --inputDirectory $env:PROBE_BIN --outputDirectory "$env:PROBE_OUT\saved" `
+            --report "$env:PROBE_OUT\coverage.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" --methodpoint `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Tee-Object -FilePath "$env:PROBE_OUT\altcover-instrument.log" | Select-Object -Last 15
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "instrument: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+          @{ instrument_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrument_exit = $code } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-instrument.json"
+          if ($code -ne 0) { throw "altcover instrumentation failed ($code)" }
+
+      - name: Run the sample classes (instrumented, AltCover runner)
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $classes = @(Get-Content "$env:PROBE_OUT\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" Runner --recorderDirectory $env:PROBE_BIN --workingDirectory $env:PROBE_BIN --executable "$env:PROBE_BIN\Darling.Tests.exe" -- @classArgs -xml "$env:PROBE_OUT\instrumented.xml" 2>&1 | Tee-Object -FilePath "$env:PROBE_OUT\altcover-run.log" | Select-Object -Last 25
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "instrumented run: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+          @{ instrumented_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrumented_exit = $code } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-instrumented.json"
+          exit 0
+
+      # Overhead comparison only: put the original assemblies back, instrument again with AltCover's default
+      # (sequence-point and branch) recording, run the same classes, and keep only the timings and the report
+      # size. The method-level pass above is what the summary and the map read.
+      - name: Overhead comparison (default line and branch recording)
+        continue-on-error: true
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          Copy-Item -Path "$env:PROBE_OUT\saved\*" -Destination $env:PROBE_BIN -Recurse -Force
+          $altcover = "$env:RUNNER_TEMP\altcover-tool\altcover.exe"
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & $altcover --inplace --inputDirectory $env:PROBE_BIN --outputDirectory "$env:PROBE_OUT\saved-line" `
+            --report "$env:PROBE_OUT\coverage-line.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Out-Null
+          $instrument = $LASTEXITCODE
+          $instrumentSeconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+          if ($instrument -ne 0) { Write-Host "line instrumentation failed ($instrument)"; exit 0 }
+          $classes = @(Get-Content "$env:PROBE_OUT\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch.Restart()
+          & $altcover Runner --recorderDirectory $env:PROBE_BIN --workingDirectory $env:PROBE_BIN --executable "$env:PROBE_BIN\Darling.Tests.exe" -- @classArgs -xml "$env:PROBE_OUT\instrumented-line.xml" 2>&1 | Out-Null
+          $code = $LASTEXITCODE
+          $runSeconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+          $bytes = if (Test-Path "$env:PROBE_OUT\coverage-line.xml") { (Get-Item "$env:PROBE_OUT\coverage-line.xml").Length } else { 0 }
+          Write-Host "line and branch recording: instrument $instrumentSeconds s, run $runSeconds s (exit $code), report $bytes bytes"
+          @{ line_instrument_seconds = $instrumentSeconds; line_run_seconds = $runSeconds; line_run_exit = $code; line_report_bytes = $bytes } | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing-line.json"
+          Remove-Item "$env:PROBE_OUT\coverage-line.xml" -Force -ErrorAction SilentlyContinue
+          exit 0
+
+      - name: Summarize the coverage (map for the sampled classes)
+        if: always()
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $timing = @{}
+          foreach ($name in 'plain', 'instrument', 'instrumented', 'line') {
+            $file = "$env:PROBE_OUT\timing-$name.json"
+            if (Test-Path $file) { (Get-Content $file -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $timing[$_.Name] = $_.Value } }
+          }
+          $timing | ConvertTo-Json | Set-Content "$env:PROBE_OUT\timing.json"
+          # AltCover makes an instrumented async test wait on its own task, so a dynamic skip arrives wrapped in an
+          # AggregateException and xunit reports a failure. Put those back to skips, but only where the plain run
+          # skipped the same test.
+          if ((Test-Path "$env:PROBE_OUT\plain.xml") -and (Test-Path "$env:PROBE_OUT\instrumented.xml")) {
+            python .github/scripts/altcover-probe.py unwrap-skips --plain "$env:PROBE_OUT\plain.xml" --instr "$env:PROBE_OUT\instrumented.xml" | Select-Object -First 30
+          }
+          $report = "$env:PROBE_OUT\coverage.xml"
+          if (-not (Test-Path $report)) { Write-Host "::warning::no coverage report was produced"; exit 0 }
+          $item = Get-Item $report
+          Write-Host "coverage.xml: $($item.Length) bytes"
+          python .github/scripts/altcover-probe.py summarize --report $report --root $env:GITHUB_WORKSPACE --manifest "$env:PROBE_OUT\manifest.json" --plain-xml "$env:PROBE_OUT\plain.xml" --instr-xml "$env:PROBE_OUT\instrumented.xml" --timing "$env:PROBE_OUT\timing.json" --tool "altcover $env:ALTCOVER_VERSION" --summary-out "$env:PROBE_OUT\summary.json" --map-out "$env:PROBE_OUT\test-map-probe.json" | Select-Object -First 80
+          if (Test-Path "$env:PROBE_OUT\summary.json") {
+            "### AltCover probe" | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```json' | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content "$env:PROBE_OUT\summary.json" -TotalCount 120 | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+          exit 0
+
+      # ── Lite.Tests: the same measurement, in its own scratch folder ──────────────────────────────────
+      # About 60 classes: collector-starting (they mention RemoteCollectorService), DuckDB-backed, and plain.
+      - name: Choose the Lite sample classes
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "$env:PROBE_OUT\lite"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $lines = @(& "$env:PROBE_BIN_LITE\Lite.Tests.exe" -list classes/json -trait- Stage=Guard)
+          if ($LASTEXITCODE -ne 0) { throw "Lite class listing failed with exit code $LASTEXITCODE" }
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the Lite class listing, got $($json.Count)" }
+          Set-Content -Path "$out\all-classes.json" -Value $json[0]
+          python .github/scripts/altcover-probe.py select --profile lite --list "$out\all-classes.json" --tests-dir Lite.Tests --root . --total 60 --want collector=8 --want duckdb=20 --out "$out\classes.txt" --manifest "$out\manifest.json"
+          if ($LASTEXITCODE -ne 0) { throw "Lite class selection failed ($LASTEXITCODE)" }
+
+      - name: Run the Lite sample classes (plain)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          $classes = @(Get-Content "$out\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:PROBE_BIN_LITE\Lite.Tests.exe" @classArgs -xml "$out\plain.xml"
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "Lite plain run: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s for $($classes.Count) classes"
+          @{ plain_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); plain_exit = $code; classes = $classes.Count } | ConvertTo-Json | Set-Content "$out\timing-plain.json"
+          exit 0
+
+      - name: Instrument the Lite assemblies (AltCover, callContext on Fact and Theory)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" --inplace --inputDirectory $env:PROBE_BIN_LITE --outputDirectory "$out\saved" `
+            --report "$out\coverage.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" --methodpoint `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Tee-Object -FilePath "$out\altcover-instrument.log" | Select-Object -Last 15
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "Lite instrument: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+          @{ instrument_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrument_exit = $code } | ConvertTo-Json | Set-Content "$out\timing-instrument.json"
+          if ($code -ne 0) { throw "Lite altcover instrumentation failed ($code)" }
+
+      - name: Run the Lite sample classes (instrumented, AltCover runner)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          $classes = @(Get-Content "$out\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" Runner --recorderDirectory $env:PROBE_BIN_LITE --workingDirectory $env:PROBE_BIN_LITE --executable "$env:PROBE_BIN_LITE\Lite.Tests.exe" -- @classArgs -xml "$out\instrumented.xml" 2>&1 | Tee-Object -FilePath "$out\altcover-run.log" | Select-Object -Last 25
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "Lite instrumented run: exit $code in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+          @{ instrumented_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); instrumented_exit = $code } | ConvertTo-Json | Set-Content "$out\timing-instrumented.json"
+          exit 0
+
+      - name: Lite overhead comparison (default line and branch recording)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          Copy-Item -Path "$out\saved\*" -Destination $env:PROBE_BIN_LITE -Recurse -Force
+          $altcover = "$env:RUNNER_TEMP\altcover-tool\altcover.exe"
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & $altcover --inplace --inputDirectory $env:PROBE_BIN_LITE --outputDirectory "$out\saved-line" `
+            --report "$out\coverage-line.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Out-Null
+          $instrument = $LASTEXITCODE
+          $instrumentSeconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+          if ($instrument -ne 0) { Write-Host "Lite line instrumentation failed ($instrument)"; exit 0 }
+          $classes = @(Get-Content "$out\classes.txt" | Where-Object { $_ })
+          $classArgs = foreach ($class in $classes) { '-class'; $class }
+          $watch.Restart()
+          & $altcover Runner --recorderDirectory $env:PROBE_BIN_LITE --workingDirectory $env:PROBE_BIN_LITE --executable "$env:PROBE_BIN_LITE\Lite.Tests.exe" -- @classArgs -xml "$out\instrumented-line.xml" 2>&1 | Out-Null
+          $code = $LASTEXITCODE
+          $runSeconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+          $bytes = if (Test-Path "$out\coverage-line.xml") { (Get-Item "$out\coverage-line.xml").Length } else { 0 }
+          Write-Host "Lite line and branch recording: instrument $instrumentSeconds s, run $runSeconds s (exit $code), report $bytes bytes"
+          @{ line_instrument_seconds = $instrumentSeconds; line_run_seconds = $runSeconds; line_run_exit = $code; line_report_bytes = $bytes } | ConvertTo-Json | Set-Content "$out\timing-line.json"
+          Remove-Item "$out\coverage-line.xml" -Force -ErrorAction SilentlyContinue
+          exit 0
+
+      - name: Summarize the Lite coverage
+        if: always()
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = "$env:PROBE_OUT\lite"
+          $timing = @{}
+          foreach ($name in 'plain', 'instrument', 'instrumented', 'line') {
+            $file = "$out\timing-$name.json"
+            if (Test-Path $file) { (Get-Content $file -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $timing[$_.Name] = $_.Value } }
+          }
+          $timing | ConvertTo-Json | Set-Content "$out\timing.json"
+          if ((Test-Path "$out\plain.xml") -and (Test-Path "$out\instrumented.xml")) {
+            python .github/scripts/altcover-probe.py unwrap-skips --plain "$out\plain.xml" --instr "$out\instrumented.xml" | Select-Object -First 30
+          }
+          $report = "$out\coverage.xml"
+          if (-not (Test-Path $report)) { Write-Host "::warning::no Lite coverage report was produced"; exit 0 }
+          Write-Host "Lite coverage.xml: $((Get-Item $report).Length) bytes"
+          python .github/scripts/altcover-probe.py summarize --suite Lite.Tests --report $report --root $env:GITHUB_WORKSPACE --manifest "$out\manifest.json" --plain-xml "$out\plain.xml" --instr-xml "$out\instrumented.xml" --timing "$out\timing.json" --tool "altcover $env:ALTCOVER_VERSION" --summary-out "$out\summary.json" --map-out "$out\test-map-probe.json" | Select-Object -First 80
+          if (Test-Path "$out\summary.json") {
+            "### AltCover probe (Lite.Tests)" | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```json' | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content "$out\summary.json" -TotalCount 120 | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+          exit 0
+
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+          exit 0
+
+      - name: Upload the raw coverage and the summary
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: altcover-probe
+          path: |
+            ${{ runner.temp }}/altcover-probe/coverage.xml
+            ${{ runner.temp }}/altcover-probe/summary.json
+            ${{ runner.temp }}/altcover-probe/test-map-probe.json
+            ${{ runner.temp }}/altcover-probe/manifest.json
+            ${{ runner.temp }}/altcover-probe/classes.txt
+            ${{ runner.temp }}/altcover-probe/timing.json
+            ${{ runner.temp }}/altcover-probe/plain.xml
+            ${{ runner.temp }}/altcover-probe/instrumented.xml
+            ${{ runner.temp }}/altcover-probe/instrumented.raw.xml
+            ${{ runner.temp }}/altcover-probe/altcover-*.log
+            ${{ runner.temp }}/altcover-probe/lite/coverage.xml
+            ${{ runner.temp }}/altcover-probe/lite/summary.json
+            ${{ runner.temp }}/altcover-probe/lite/test-map-probe.json
+            ${{ runner.temp }}/altcover-probe/lite/manifest.json
+            ${{ runner.temp }}/altcover-probe/lite/classes.txt
+            ${{ runner.temp }}/altcover-probe/lite/timing.json
+            ${{ runner.temp }}/altcover-probe/lite/plain.xml
+            ${{ runner.temp }}/altcover-probe/lite/instrumented.xml
+            ${{ runner.temp }}/altcover-probe/lite/instrumented.raw.xml
+            ${{ runner.temp }}/altcover-probe/lite/altcover-*.log
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true
+
+  # ── Test map: which test classes run which source files (#5459, change 4 slice 3) ────────────────
+  # The producer for the class-to-file map that ci-select.py's map_select() reads. It runs the WHOLE
+  # Darling.Tests suite (6 shards, with a live PostgreSQL store and the runtime variable) and the WHOLE
+  # Lite.Tests suite (4 shards) under AltCover (--callContext on [Fact]/[Theory], the version the probe
+  # job pins), cut by class-name hash exactly as build.yml's Darling PostgreSQL shards are, then joins the
+  # shards in `test-map` with what the test sources say (path and tool-name literals, the type-name rule,
+  # whole-tree readers) and uploads `test-map.json.gz` for 14 days.
+  # It changes no other job's result: nothing lists it in `needs`, both jobs are continue-on-error, and a
+  # failed test inside a shard only costs that class its coverage. It runs in every re-dispatch that builds
+  # (the same gate as darling-pg) and in manual dispatches; `-f test_map=false` turns it off for one dispatch.
+  # Nothing reads the map yet (slice 4 does, in shadow mode). On a branch:
+  #   gh workflow run nightly.yml --ref <branch> -f publish=false
+  test-map-shard:
+    name: Test map shard (${{ matrix.suite }} ${{ matrix.shard }})
+    # Waits for build and darling-pg so the 10 windows legs do not take their runners (#5459); always() keeps the map
+    # running after a failed one.
+    needs: [check, build, darling-pg]
+    if: always() && needs.check.result == 'success' && (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.test_map != false
+    continue-on-error: true
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { suite: darling, shard: 0, shards: 6 }
+          - { suite: darling, shard: 1, shards: 6 }
+          - { suite: darling, shard: 2, shards: 6 }
+          - { suite: darling, shard: 3, shards: 6 }
+          - { suite: darling, shard: 4, shards: 6 }
+          - { suite: darling, shard: 5, shards: 6 }
+          - { suite: lite, shard: 0, shards: 4 }
+          - { suite: lite, shard: 1, shards: 4 }
+          - { suite: lite, shard: 2, shards: 4 }
+          - { suite: lite, shard: 3, shards: 4 }
+    env:
+      # The version the probe job pins: a map whose tool floats cannot be compared run to run.
+      ALTCOVER_VERSION: '9.0.145'
+      MAP_BIN: ${{ github.workspace }}\${{ matrix.suite == 'darling' && 'Darling\Darling.Tests' || 'Lite.Tests' }}\bin\Release\net10.0-windows
+      MAP_EXE: ${{ matrix.suite == 'darling' && 'Darling.Tests.exe' || 'Lite.Tests.exe' }}
+      # MAP_OUT (the scratch folder under the runner's temp directory) is exported by the install step:
+      # the `runner` context is not available in a job-level env block.
+    steps:
+      # The dispatched commit, not the ref name: every shard and the join job must read the same tree even
+      # if dev moves while the run is queued.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Cache Darling pg-runtime.zip
+        if: matrix.suite == 'darling'
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: matrix.suite == 'darling' && steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Extract pg-runtime
+        if: matrix.suite == 'darling'
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      - name: Restore Darling.Tests
+        if: matrix.suite == 'darling'
+        run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+
+      - name: Build Darling.Tests
+        if: matrix.suite == 'darling'
+        run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      - name: Restore Lite.Tests
+        if: matrix.suite == 'lite'
+        run: dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build Lite.Tests
+        if: matrix.suite == 'lite'
+        run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # The same throwaway cluster the darling-pg job stands up (CiClusterWorkerSizingTests compares the
+      # appended settings of every job), so the live classes behave as they do there.
+      - name: Initialize and start throwaway PostgreSQL
+        if: matrix.suite == 'darling'
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          $logFile = "$env:RUNNER_TEMP\darling-pg.log"
+          & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
+          if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
+          # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
+          & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
+          if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
+          & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
+          if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
+
+      - name: Install AltCover (pinned)
+        shell: pwsh
+        run: |
+          dotnet tool install altcover.global --version $env:ALTCOVER_VERSION --tool-path "$env:RUNNER_TEMP\altcover-tool"
+          if ($LASTEXITCODE -ne 0) { throw "altcover install failed ($LASTEXITCODE)" }
+          $out = "$env:RUNNER_TEMP\test-map"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          "MAP_OUT=$out" | Add-Content -Path $env:GITHUB_ENV
+
+      # This shard's classes, cut by the hash build.yml's Darling PostgreSQL shards use, into chunks that
+      # stay under the Windows command-line cap (#5100). Every class is listed, Stage=Guard ones included: a
+      # class the map never saw would run as a "new class" on every pull request.
+      - name: Cut this shard's classes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = @(& "$env:MAP_BIN\$env:MAP_EXE" -list classes/json)
+          if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count)" }
+          Set-Content -Path "$env:MAP_OUT\all-classes.json" -Value $json[0]
+          python .github/scripts/test-map.py cut --list "$env:MAP_OUT\all-classes.json" --shards ${{ matrix.shards }} --shard ${{ matrix.shard }} --out "$env:MAP_OUT\cut"
+          if ($LASTEXITCODE -ne 0) { throw "the cut failed ($LASTEXITCODE)" }
+
+      # Instrument IN PLACE: the tests locate the repository by walking up from their own directory. Product,
+      # test and Lite assemblies only; every NuGet dependency stays un-instrumented. --methodpoint keeps one
+      # visit record per method, which is all a file-level map needs (the probe measured it at 0.93x to 1.15x).
+      - name: Instrument the assemblies (AltCover, callContext on Fact and Theory)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" --inplace --inputDirectory $env:MAP_BIN --outputDirectory "$env:MAP_OUT\saved" `
+            --report "$env:MAP_OUT\coverage.xml" --reportFormat OpenCover `
+            --callContext "[Fact]" --callContext "[Theory]" --methodpoint `
+            --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Tee-Object -FilePath "$env:MAP_OUT\altcover-instrument.log" | Select-Object -Last 15
+          if ($LASTEXITCODE -ne 0) { throw "altcover instrumentation failed ($LASTEXITCODE)" }
+
+      # One runner invocation per chunk. A failing test is a fact about the tests, not about the map: the
+      # step never fails on a test exit code, and each chunk's report is kept (a later chunk's report may
+      # already hold the earlier visits; the join takes the union). DARLING_TEST_PGRUNTIME lights up the
+      # classes gated on the bundled runtime; the store-upgrade fixtures (~680 MB of archives) are not built
+      # here, so those classes skip and get text patterns instead of coverage.
+      - name: Run this shard's classes (instrumented, AltCover runner)
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: ${{ matrix.suite == 'darling' && 'Host=127.0.0.1;Port=5541;Username=darling;Database=darling' || '' }}
+          DARLING_TEST_PGRUNTIME: ${{ matrix.suite == 'darling' && format('{0}\Darling\artifacts\pg-runtime', github.workspace) || '' }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          $worst = 0
+          $chunks = @(Get-ChildItem "$env:MAP_OUT\cut" -Filter 'chunk-*.txt' | Sort-Object Name)
+          $number = 0
+          foreach ($chunk in $chunks) {
+              $number++
+              $classes = @(Get-Content $chunk.FullName | Where-Object { $_ })
+              $classArgs = foreach ($class in $classes) { '-class'; $class }
+              & "$env:RUNNER_TEMP\altcover-tool\altcover.exe" Runner --recorderDirectory $env:MAP_BIN --workingDirectory $env:MAP_BIN --executable "$env:MAP_BIN\$env:MAP_EXE" -- @classArgs -xml "$env:MAP_OUT\chunk-$number.xml" 2>&1 | Tee-Object -FilePath "$env:MAP_OUT\altcover-run-$number.log" | Select-Object -Last 8
+              $code = $LASTEXITCODE
+              if ($code -gt $worst) { $worst = $code }
+              Copy-Item "$env:MAP_OUT\coverage.xml" "$env:MAP_OUT\coverage-$number.xml"
+              Write-Host "chunk ${number}: $($classes.Count) classes, exit $code"
+          }
+          $watch.Stop()
+          Write-Host "instrumented run: $($chunks.Count) chunk(s) in $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s, worst exit $worst"
+          "$worst" | Set-Content "$env:MAP_OUT\tests-exit.txt"
+          @{ run_seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1); chunks = $chunks.Count; worst_exit = $worst } | ConvertTo-Json | Set-Content "$env:MAP_OUT\timing.json"
+          exit 0
+
+      # AltCover makes an instrumented async test wait on its own task, so a dynamic skip arrives wrapped in an
+      # AggregateException and xunit reports a failure (see altcover-probe.py). There is no plain run to
+      # compare with here, so the skip token alone puts the skip back.
+      - name: Put wrapped skips back
+        shell: pwsh
+        run: |
+          foreach ($xml in @(Get-ChildItem "$env:MAP_OUT" -Filter 'chunk-*.xml')) {
+            python .github/scripts/altcover-probe.py unwrap-skips --instr $xml.FullName | Select-Object -First 3
+          }
+          exit 0
+
+      - name: Write this shard's report
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exit = if (Test-Path "$env:MAP_OUT\tests-exit.txt") { [int](Get-Content "$env:MAP_OUT\tests-exit.txt" -TotalCount 1) } else { -1 }
+          $reports = @(Get-ChildItem "$env:MAP_OUT" -Filter 'coverage-*.xml' | ForEach-Object { '--report'; $_.FullName })
+          $xmls = @(Get-ChildItem "$env:MAP_OUT" -Filter 'chunk-*.xml' | ForEach-Object { '--xml'; $_.FullName })
+          if ($reports.Count -eq 0) { throw 'no coverage report was produced' }
+          python .github/scripts/test-map.py shard-report --suite ${{ matrix.suite }} --shard ${{ matrix.shard }} --root $env:GITHUB_WORKSPACE --listed "$env:MAP_OUT\cut\listed.txt" @reports @xmls --tests-exit $exit --out "$env:MAP_OUT\shard-${{ matrix.suite }}-${{ matrix.shard }}.json"
+          if ($LASTEXITCODE -ne 0) { throw "shard-report failed ($LASTEXITCODE)" }
+
+      - name: Stop PostgreSQL
+        if: always() && matrix.suite == 'darling'
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+          exit 0
+
+      - name: Upload this shard's report
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-map-shard-${{ matrix.suite }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/test-map/shard-${{ matrix.suite }}-${{ matrix.shard }}.json
+          retention-days: 3
+          if-no-files-found: error
+
+  # Joins the shards into the map. Linux: it only reads JSON and the checkout (git ls-files, the test
+  # sources). It refuses to write a map when a shard is missing, because a map without a shard's classes
+  # would run those classes as "new" on every pull request and hide what they cover.
+  test-map:
+    name: Test map (join the shards)
+    needs: test-map-shard
+    if: always() && needs.test-map-shard.result != 'skipped' && needs.test-map-shard.result != 'cancelled'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download the shard reports
+        uses: actions/download-artifact@v6
+        with:
+          pattern: test-map-shard-*
+          path: shards
+
+      - name: Build test-map.json.gz
+        run: |
+          python .github/scripts/test-map.py build --root . --shards shards --sha "${{ github.sha }}" \
+            --expect darling=6 --expect lite=4 --out test-map.json.gz --summary test-map-summary.md
+          cat test-map-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the map
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-map
+          path: |
+            test-map.json.gz
+            test-map-summary.md
+          retention-days: 14
+          if-no-files-found: error
+
+  # ── Linux artifact + container image (#1804) ─────────────────────────────────────────────────────
+  # Runs in parallel with the windows build job — it shares only the check job's nightly stamp,
+  # not any windows artifact. Publishes the linux-x64 service tar.gz with its own checksum file
+  # (the windows job owns SHA256SUMS.txt; a cross-job rewrite of one file is a race), and builds
+  # the service container image, saving it to a tar for the publish job below to push — this job
+  # talks to neither the release nor ghcr. The bundled pg-runtime is deliberately absent from the
+  # linux artifact — the compose distribution pairs the service with the official
+  # timescale/timescaledb image, and managed mode stays Windows.
+  linux:
+    # Only check: this job reads no output of build's beyond the shared stamp (#3390), and
+    # nothing here consumes a windows artifact, so it runs in parallel with build rather than
+    # waiting on it.
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Set nightly version
+        id: version
+        shell: bash
+        env:
+          NIGHTLY_STAMP: ${{ needs.check.outputs.stamp }}
+        run: |
+          set -euo pipefail
+          base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)
+          [ -n "${base}" ] || { echo "::error::Read no version from Directory.Build.props."; exit 1; }
+          [ -n "${NIGHTLY_STAMP}" ] || { echo "::error::Read no stamp from the check job."; exit 1; }
+          echo "VERSION=${base}-nightly.${NIGHTLY_STAMP}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${base}-nightly.${NIGHTLY_STAMP}"
+
+      # -p:Version for the reason the windows build job's version step documents (#3455): the name
+      # on the tarball is not the stamp in the service, and the informational version is what
+      # --version prints and what the get_collection_health service block serves.
+      - name: Publish service (linux-x64)
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux -p:Version=${{ steps.version.outputs.VERSION }}
+
+      - name: Package linux artifact + checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          mkdir -p releases
+          tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          echo "${version}" > releases/linux-version.txt
+
+      # The container image build needs THIS checkout (docker build's context is the repo root,
+      # #1804), so it stays here rather than moving to publish, which has no source tree. Only the
+      # PUSH, the signing and the release upload are release-publishing steps, and those move to
+      # publish below: this job saves the built image to a tar (docker save) and hands it, the
+      # linux tarball and its checksum file to publish as workflow artifacts. Nothing here talks to
+      # ghcr or the nightly release.
+      - name: Build container image (ghcr tags, not pushed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
+          # VERSION reaches the publish that runs INSIDE the image build (#3455): an image tagged
+          # with the nightly string whose service answers the clean release string is the zip
+          # defect again, one artifact over. The Dockerfile defaults the arg to empty, so
+          # build.yml's release image and any hand-run docker build keep publishing against the
+          # clean declared version.
+          docker build -f Darling/Dockerfile --build-arg VERSION="${version}" -t "${image}:nightly" -t "${image}:${version}" .
+          mkdir -p releases
+          docker save "${image}:nightly" "${image}:${version}" -o releases/darling-container-image.tar
+
+      - name: Upload linux release assets
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-release-assets
+          path: |
+            releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
+            releases/SHA256SUMS-linux.txt
+            releases/linux-version.txt
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload container image
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-container-image
+          path: releases/darling-container-image.tar
+          if-no-files-found: error
+          retention-days: 3
+
+  # ── Publish (#4336 follow-up) ─────────────────────────────────────────────────────────────────
+  # The one job that talks to the outside world: the GitHub release, the ghcr push, the signature,
+  # the provenance attestation. It downloads exactly what build and linux built above — nothing
+  # here rebuilds or republishes — and it needs all three of build, linux and darling-pg to have
+  # SUCCEEDED, so a red Darling PostgreSQL run can no longer ship a release built on top of it. The
+  # workflow_dispatch `publish` input is a second, independent gate for a diagnostic re-run that
+  # wants the build and test coverage without touching the release.
+  publish:
+    needs: [build, linux, darling-pg]
+    if: |
+      needs.build.result == 'success' &&
+      needs.linux.result == 'success' &&
+      needs.darling-pg.result == 'success' &&
+      (github.event_name != 'workflow_dispatch' || format('{0}', inputs.publish) != 'false')
+    # A scheduled re-dispatch and a manual dispatch both land the same tag (`nightly`); two
+    # close dispatches otherwise race on this job's delete-then-create of the release, so only
+    # one publish runs at a time and a queued second one waits rather than colliding.
+    concurrency:
+      group: nightly-publish
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      # #1804: pushes the nightly container image to ghcr.
+      packages: write
+      # Sigstore keyless signing + GitHub provenance for the linux artifact: id-token lets this job
+      # obtain its OIDC identity (Fulcio issues the short-lived signing cert against it),
+      # attestations lets attest-build-provenance store the tarball's provenance.
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+
+      - name: Download windows release assets
+        uses: actions/download-artifact@v6
+        with:
+          name: windows-release-assets
+          path: releases
+
+      - name: Download the nightly version string
+        uses: actions/download-artifact@v6
+        with:
+          name: windows-version
+          path: .
+
+      - name: Download linux release assets
+        uses: actions/download-artifact@v6
+        with:
+          name: linux-release-assets
+          path: releases
+
+      - name: Download container image
+        uses: actions/download-artifact@v6
+        with:
+          name: darling-container-image
+          path: releases
+
+      - name: Read the nightly version string
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cat windows-version.txt)"
+          [ -n "${version}" ] || { echo "::error::windows-version.txt was empty."; exit 1; }
+          echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${version}"
+
+      # The full SHA build actually checked out (written by the build job's own `git rev-parse
+      # HEAD`), so the release below names the tree that was built rather than dev's tip at
+      # publish time — 20-60 minutes later, once darling-pg finishes.
+      - name: Read the built commit SHA
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(cat windows-commit-sha.txt)"
+          [ -n "${sha}" ] || { echo "::error::windows-commit-sha.txt was empty."; exit 1; }
+          echo "SHA=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Built commit: ${sha}"
+
+      # publish takes its release version from the windows handoff but ships linux's tag and
+      # container image too; a mismatch would mean the two build jobs disagreed about which
+      # nightly stamp they were building, and shipping under one label anyway is the wrong call.
+      - name: Verify windows and linux versions match
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows_version="${{ steps.version.outputs.VERSION }}"
+          linux_version="$(cat releases/linux-version.txt)"
+          if [ "${windows_version}" != "${linux_version}" ]; then
+            echo "::error::Windows and Linux nightly versions do not match. windows=${windows_version} linux=${linux_version}"
+            exit 1
+          fi
+          echo "Windows and Linux versions match: ${windows_version}"
+
+      - name: Delete previous nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete nightly --yes --cleanup-tag || true
+
+      - name: Create nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          sha="${{ steps.commit.outputs.SHA }}"
+          short_sha="${sha:0:7}"
+          echo "Naming the release after the built commit: ${sha}"
+          body=$(cat <<EOF
+          Automated nightly build from \`dev\` branch.
+
+          **Version:** \`${version}\`
+          **Commit:** \`${short_sha}\`
+          **Built:** $(date -u +"%Y-%m-%d %H:%M UTC")
+
+          > These builds include the latest changes and may be unstable.
+          > For production use, download the [latest stable release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest).
+          EOF
+          )
+
+          gh release create nightly \
+            --target "${sha}" \
+            --title "Nightly Build (${version})" \
+            --notes "${body}" \
+            --prerelease \
+            releases/*.zip releases/*.exe releases/SHA256SUMS.txt
+
+      - name: Upload linux artifact to the nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload nightly releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
+
+      - name: Push container image (ghcr, :nightly)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker load -i releases/darling-container-image.tar
+          docker push "${image}:nightly"
+          docker push "${image}:${version}"
+
+      # Keyless Sigstore signing: Fulcio issues a short-lived certificate against this job's OIDC
+      # identity and the signature lands in ghcr next to the image, logged in Rekor. No keys exist
+      # anywhere to manage or leak — the signature attests "built by this repository's workflow",
+      # which is the claim a container consumer actually wants verified. Verify:
+      #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:nightly \
+      #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign container image (keyless, Sigstore)
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${image}:nightly")"
+          cosign sign --yes "${digest}"
+
+      # GitHub-native provenance for the tarball (SLSA): verified with
+      #   gh attestation verify PerformanceMonitorDarling-linux-x64-<v>.tar.gz -R erikdarlingdata/PerformanceMonitor
+      - name: Attest the linux tarball (GitHub provenance)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
