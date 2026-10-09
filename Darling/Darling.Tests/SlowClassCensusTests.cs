@@ -295,12 +295,24 @@ public sealed class SlowClassCensusTests
 
         // Each use sits inside a `pull_request` condition, so a push, a merge-queue run, the nightly (whose legs pass no
         // event) and a release run every class.
-        Assert.Single(Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request'"));
-        Assert.Single(Regex.Matches(darlingShard, @"\$EventName -eq 'pull_request'"));
-        Assert.Single(Regex.Matches(liteShard, @"\$EventName -eq 'pull_request'"));
+        // The test map selection (#5459) has its own pull_request condition beside it, in the build job's step and in each
+        // shard script. A usable selection replaces the skip, so in the scripts the skip sits in the `elseif` of the
+        // selection's `if`: the skip never runs on a pull request that was narrowed, and never on anything but a pull request.
+        Assert.Single(Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request' -and \$scopeArgs\.Count -eq 0"));
+        Assert.Single(Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request' -and \$env:TEST_MAP_SELECTION"));
+        Assert.Equal(2, Regex.Matches(yml, @"\$env:SLOW_EVENT -eq 'pull_request'").Count);
+        foreach (var shard in new[] { darlingShard, liteShard })
+        {
+            Assert.Single(Regex.Matches(shard, @"\$EventName -eq 'pull_request' -and \$SelectionFile"));
+            Assert.Single(Regex.Matches(shard, @"elseif \(\$EventName -eq 'pull_request'\) \{"));
+            Assert.Equal(2, Regex.Matches(shard, @"\$EventName -eq 'pull_request'").Count);
+            Assert.True(shard.IndexOf("elseif ($EventName -eq 'pull_request')", StringComparison.Ordinal)
+                < shard.IndexOf("slow-skip --suite", StringComparison.Ordinal), "the skip must sit inside the elseif");
+        }
 
-        // The two shard steps hand the event on from the environment they set, and the nightly passes none.
-        Assert.Equal(2, Regex.Matches(yml, @"run-(darling-pg|lite)-shard\.ps1 [^\r\n]*-EventName \$env:SLOW_EVENT").Count);
+        // The two shard steps hand the event on from the environment they set, and the nightly passes none. The build
+        // job's selected Darling pass (#5459) is the third caller of the Darling script, and passes it the same way.
+        Assert.Equal(3, Regex.Matches(yml, @"run-(darling-pg|lite)-shard\.ps1 [^\r\n]*-EventName \$env:SLOW_EVENT").Count);
 
         // And the environment each of the three steps reads is set from the run.
         Assert.Equal(3, Regex.Matches(yml, @"SLOW_EVENT: \$\{\{ github\.event_name \}\}").Count);

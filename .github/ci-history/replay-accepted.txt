@@ -95,3 +95,35 @@ f07bfc441f PerformanceMonitorLite.Tests.TrendEmptyParityToolTests
 # tools/changelog/archive-census.txt) are documentation, so a splice takes the docs fast path and selects no
 # class; the failure on that run was not caused by the splice.
 e20c881360 Darling.Tests.MigrationUpgradeLadderLiveTests
+
+# Map replay against the first nightly map (#5459, run 37892110132): six misses left after the map's own links, each
+# checked against the failing job's log (measured) and the corpus. None is a selection gap; none is listed to hide
+# one. A sha here is the head of a pull request run, and the map, if it were live, would have given that run no
+# reason to run the class because the class is unrelated to the diff.
+#
+# LiteServerTagsStoreTests (a304350fe3, measured): the diff is the Lite logger (AppLogger, App.xaml.cs, the
+# collector runner) and the failure is a TimeoutException from LocalDataService.OpenWriteConnectionAsync, "Could not
+# acquire database write lock", on the class's first write and then its second. Nothing in the diff opens or holds
+# a store write lock. Every later head of the same pull request (9981020a8a, 54244d4282, f415eae60c) passed, with
+# the logger files still in its diff, and no other row of the corpus has this class failing. A shared-fixture lock
+# timeout on a loaded runner (the lock holder is inferred, not seen).
+a304350fe3 Lite.Tests.LiteServerTagsStoreTests
+#
+# EventWindowedReadsAreBoundedLivePostgresTests (the four heads of one pull request on 2026-09-25, measured): the
+# test had been failing on dev itself from the merge of #4235 (06:11Z) until its fix, #4275 (10:34Z): the corpus
+# holds it failing on two dev pushes (f5e001fe65, 659e11a39b) and on nine other pull-request heads that day, all
+# changing other things, nearly all with "Darling PG tests (0)" as the failed job. The four heads ran 09:33Z to
+# 10:14Z, inside that window; the first one's log shows the plan test's own message ("expected the floor to exclude at
+# least 2 of the 4 seeded old-day chunks"). The change the four heads carry (how the store host is set up) does not
+# explain the failure: the failure predates it.
+f1a1894fd8 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+69ce7ff7be Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+4b3fe51a97 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+3747867b5a Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+#
+# StoreMetricsLatestSkipScanLiveTests (3bb3ae8fe9, measured): attempt 1 of the run failed in "Darling PG tests (2)"
+# only, five classes within one second (06:52:04 to 06:52:05), with "57P03: the database system is in recovery
+# mode" (the shard's PostgreSQL server had restarted after a backend crash) and the scratch-database drops retrying
+# on the same error. Attempt 2 of the same head passed every shard. A first-attempt environment fault of the
+# shard's server; the 28 changed files (viewer data-start work) did not cause it.
+3bb3ae8fe9 Darling.Tests.StoreMetricsLatestSkipScanLiveTests

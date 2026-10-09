@@ -18,15 +18,17 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// Pins shadow mode for the test-class map (#5459, change 4, slice 4): the rules that close the holes the replay
-/// found, the shadow-check row, and the workflow wiring that keeps shadow mode from selecting anything.
+/// Pins the test-class map's selection and its shadow check (#5459, change 4): the rules that close the holes the
+/// replay found, the shadow-check row, and the workflow wiring that lets exactly three jobs narrow their classes.
 ///
-/// <para><b>Why.</b> Shadow mode computes the selection for every pull request and still runs everything, so the
-/// one thing it must never do is change what runs. The workflow pins below fail if a job that executes tests
-/// reads the map, if a shadow job can fail the run, or if anything but the shadow check waits on them. The rule
-/// cases pin what the replay of the failure corpus asked for: a path written only in a comment, a class named by
-/// a sibling test file, a partial type declared in many files, a class that would otherwise be a hole, and a
-/// documentation file a test reads by name.</para>
+/// <para><b>Why.</b> The selection job computes the selection for every pull request, and the Darling PG shards, the
+/// Lite shards and the build job's no-store Darling pass keep only the classes it names (the shard scripts' `map-keep`
+/// call). The one thing it must never do is run LESS than the full suite by accident, so the pins below fail if a
+/// FULL, missing, unreadable or empty selection narrows anything, if any other job reads the selection, if the
+/// selection job can fail the run, or if a push, the nightly or a release run gets a selection. The rule cases pin
+/// what the replay of the failure corpus asked for: a path written only in a comment, a class named by a sibling
+/// test file, a partial type declared in many files, a class that would otherwise be a hole, and a documentation
+/// file a test reads by name.</para>
 /// </summary>
 [Trait("Stage", "Guard")]
 [Trait("Reads", "Darling")]
@@ -414,47 +416,93 @@ public sealed class TestMapShadowGuardTests : IDisposable
         return next.Success && next.Index > 0 ? yaml.Substring(start, next.Index + 1) : yaml[start..];
     }
 
+    private static readonly string[] s_selectionConsumers = ["build", "darling-pg", "lite-tests"];
+
     [Fact]
-    public void ShadowMode_SelectsNothing_NoJobThatRunsTestsReadsTheMap()
+    public void OnlyTheThreeTestJobs_ReadTheSelection_EachThroughOneDownloadStep_AndNoJobReadsTheMapItself()
     {
         var yml = BuildYml();
         var jobNames = Regex.Matches(yml, @"^  ([a-z][a-z0-9-]*):\s*$", RegexOptions.Multiline).Select(m => m.Groups[1].Value)
             .Where(n => n is not ("on" or "permissions" or "env" or "concurrency" or "jobs")).ToList();
-        Assert.Contains("test-map-shadow", jobNames);
+        Assert.Contains("test-map-select", jobNames);
         Assert.Contains("shadow-check", jobNames);
-        foreach (var name in jobNames.Where(n => n is not ("gate" or "test-map-shadow" or "shadow-check")))
+        Assert.DoesNotContain("test-map-shadow", jobNames);
+        Assert.DoesNotContain("test-map-shadow-selection", yml, StringComparison.Ordinal);
+
+        // Before the selection went live no test job read the map; now exactly these three read the SELECTION, and
+        // still never the map: the pinned map (gate outputs test_map_*) belongs to the selection job alone.
+        foreach (var name in jobNames.Where(n => n is not ("gate" or "test-map-select" or "shadow-check")))
         {
             var job = Job(yml, name);
-            Assert.DoesNotContain("map-select", job, StringComparison.Ordinal);
             Assert.DoesNotContain("test_map", job, StringComparison.Ordinal);
+            Assert.DoesNotContain("ci-select.py map-select", job, StringComparison.Ordinal);
             Assert.DoesNotContain("shadow-check", job, StringComparison.Ordinal);
-            Assert.DoesNotContain("test-map-shadow", job, StringComparison.Ordinal);
+            if (s_selectionConsumers.Contains(name))
+            {
+                continue;
+            }
+
+            Assert.DoesNotContain("test-map-select", job, StringComparison.Ordinal);
+            Assert.DoesNotContain("test-map-selection", job, StringComparison.Ordinal);
+            Assert.DoesNotContain("TEST_MAP_SELECTION", job, StringComparison.Ordinal);
         }
 
-        // The two shadow jobs run on pull requests only, cannot redden the run, and only the check waits on the selector.
-        foreach (var name in new[] { "test-map-shadow", "shadow-check" })
+        // The selection job and the check run on pull requests only and cannot redden the run. The selection job is
+        // capped at 5 minutes because the three test jobs wait for it; the check is capped at 10.
+        foreach (var (name, minutes) in new[] { ("test-map-select", 5), ("shadow-check", 10) })
         {
             var job = Job(yml, name);
             Assert.Contains("continue-on-error: true\n    permissions:", job, StringComparison.Ordinal);
             Assert.Contains("github.event_name == 'pull_request'", job, StringComparison.Ordinal);
-            Assert.Contains("timeout-minutes: 10", job, StringComparison.Ordinal);
+            Assert.Contains($"timeout-minutes: {minutes}\n", job, StringComparison.Ordinal);
         }
 
-        Assert.Contains("needs: [gate]", Job(yml, "test-map-shadow"), StringComparison.Ordinal);
-        Assert.Contains("needs: [gate, guard-tests, test-map-shadow, darling-pg, lite-tests]", Job(yml, "shadow-check"), StringComparison.Ordinal);
+        Assert.Contains("needs: [gate]", Job(yml, "test-map-select"), StringComparison.Ordinal);
+        Assert.Contains("needs: [gate, guard-tests, test-map-select, darling-pg, lite-tests]", Job(yml, "shadow-check"), StringComparison.Ordinal);
         Assert.Contains("always()", Job(yml, "shadow-check"), StringComparison.Ordinal);
-        foreach (var name in jobNames.Where(n => n is not "shadow-check"))
+
+        // Each consumer waits on the selection job, never fails because of it (`!cancelled()` in its own `if`), and
+        // downloads this run's artifact in ONE step that cannot fail the job.
+        foreach (var name in s_selectionConsumers)
+        {
+            var job = Job(yml, name);
+            var needs = Regex.Match(job, @"\n    needs: (\[[^\]]*\])");
+            Assert.Contains("test-map-select", needs.Groups[1].Value, StringComparison.Ordinal);
+            Assert.Contains("!cancelled()", Regex.Match(job, @"\n    if: [^\n]*").Value, StringComparison.Ordinal);
+            var step = job[job.IndexOf("- name: Download the test map selection", StringComparison.Ordinal)..];
+            step = step[..step.IndexOf("\n\n", StringComparison.Ordinal)];
+            Assert.Equal(1, Regex.Matches(job, "- name: Download the test map selection").Count);
+            Assert.Contains("id: map-selection", step, StringComparison.Ordinal);
+            Assert.Contains("if: github.event_name == 'pull_request' && needs.test-map-select.result == 'success'", step, StringComparison.Ordinal);
+            Assert.Contains("continue-on-error: true", step, StringComparison.Ordinal);
+            Assert.Contains("uses: actions/download-artifact@v6", step, StringComparison.Ordinal);
+            Assert.Contains("name: test-map-selection", step, StringComparison.Ordinal);
+            Assert.DoesNotContain("run-id", step, StringComparison.Ordinal);
+            // Empty unless the download succeeded: every failure leaves the shard running everything.
+            Assert.Contains("TEST_MAP_SELECTION: ${{ steps.map-selection.outcome == 'success' && format('{0}\\test-map-selection\\selection.json', github.workspace) || '' }}", job, StringComparison.Ordinal);
+        }
+
+        // No other job lists the selection job in `needs`.
+        foreach (var name in jobNames.Where(n => n is not "shadow-check" && !s_selectionConsumers.Contains(n)))
         {
             var needs = Regex.Match(Job(yml, name), @"\n    needs: (\[[^\]]*\]|[^\n]*)");
+            Assert.DoesNotContain("test-map", needs.Value, StringComparison.Ordinal);
             Assert.DoesNotContain("shadow", needs.Value, StringComparison.Ordinal);
         }
+
+        // Only a pull request narrows: the nightly calls the same scripts without a selection.
+        var nightly = File.ReadAllText(Path.Combine(ParitySource.RepoRoot(), ".github", "workflows", "nightly.yml"));
+        Assert.DoesNotContain("SelectionFile", nightly, StringComparison.Ordinal);
+        Assert.DoesNotContain("test-map-selection", nightly, StringComparison.Ordinal);
+        Assert.Contains("-SelectionFile $env:TEST_MAP_SELECTION", Job(yml, "darling-pg"), StringComparison.Ordinal);
+        Assert.Contains("-SelectionFile $env:TEST_MAP_SELECTION", Job(yml, "lite-tests"), StringComparison.Ordinal);
     }
 
     [Fact]
     public void ThePin_IsPullRequestOnly_AndCannotFailTheGate()
     {
         var gate = Job(BuildYml(), "gate");
-        var step = gate[gate.IndexOf("- name: Pin the test map (shadow mode)", StringComparison.Ordinal)..];
+        var step = gate[gate.IndexOf("- name: Pin the test map\n", StringComparison.Ordinal)..];
         Assert.Contains("id: testmap", step, StringComparison.Ordinal);
         Assert.Contains("if: github.event_name == 'pull_request' && steps.decide.outputs.run == 'true'", step, StringComparison.Ordinal);
         Assert.Contains("continue-on-error: true", step[..step.IndexOf("run: |", StringComparison.Ordinal)], StringComparison.Ordinal);
@@ -477,9 +525,9 @@ public sealed class TestMapShadowGuardTests : IDisposable
     }
 
     [Fact]
-    public void TheShadowSteps_TurnEveryFailureIntoAFullNotice_NeverAnErrorOrASkip()
+    public void TheSelectionSteps_TurnEveryFailureIntoAFullNotice_NeverAnErrorOrASkip()
     {
-        var job = Job(BuildYml(), "test-map-shadow");
+        var job = Job(BuildYml(), "test-map-select");
         foreach (var why in new[] { "no test map is pinned for this run", "the pinned map could not be downloaded",
                      "the changed files could not be listed", "the selection script failed" })
         {
@@ -502,5 +550,177 @@ public sealed class TestMapShadowGuardTests : IDisposable
         step = step[..step.IndexOf("\n\n", StringComparison.Ordinal)];
         Assert.Contains("if: always() && steps.filter.outputs.darling == 'true'", step, StringComparison.Ordinal);
         Assert.Contains("name: darling-tests-timing-${{ matrix.shard }}", step, StringComparison.Ordinal);
+    }
+
+    private (int ExitCode, string Output) MapKeep(string? selectionJson, string suite)
+    {
+        var path = Path.Combine(_dir, "keep-selection.json");
+        File.Delete(path);
+        if (selectionJson is not null)
+        {
+            File.WriteAllText(path, selectionJson);
+        }
+
+        return Python("ci-select.py", "map-keep", "--selection", path, "--suite", suite);
+    }
+
+    [Fact]
+    public void MapKeep_NamesTheSelectedClassesOfOneSuite_AndAnswersFullWheneverTheSelectionCannotBeTrusted()
+    {
+        var ok = MapKeep("""{"full": false, "reason": "", "selected": {"darling": ["BTests", "ATests"], "lite": ["CTests"]}}""", "darling");
+        Assert.Equal(0, ok.ExitCode);
+        Assert.Equal(new[] { "SELECTED 2", "ATests", "BTests" }, ok.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        Assert.Equal("SELECTED 1", MapKeep("""{"full": false, "selected": {"darling": ["BTests"], "lite": ["CTests"]}}""", "lite").Output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)[0]);
+
+        // Anything else is FULL on the first line, with exit code 0, so the shard runs every class it was cut.
+        foreach (var (label, json) in new (string, string?)[]
+                 {
+                     ("a missing file", null),
+                     ("not JSON", "{not json"),
+                     ("a JSON array", "[1, 2]"),
+                     ("a FULL selection", """{"full": true, "reason": "no test map", "selected": {"darling": ["ATests"]}}"""),
+                     ("no full flag", """{"selected": {"darling": ["ATests"]}}"""),
+                     ("a string full flag", """{"full": "false", "selected": {"darling": ["ATests"]}}"""),
+                     ("no selected object", """{"full": false}"""),
+                     ("no list for the suite", """{"full": false, "selected": {"lite": ["CTests"]}}"""),
+                     ("an empty list for the suite", """{"full": false, "selected": {"darling": []}}"""),
+                     ("a name that is not text", """{"full": false, "selected": {"darling": ["ATests", 7]}}"""),
+                     ("an empty name", """{"full": false, "selected": {"darling": ["ATests", ""]}}"""),
+                 })
+        {
+            var answer = MapKeep(json, "darling");
+            Assert.True(answer.ExitCode == 0, label + ": " + answer.Output);
+            Assert.True(answer.Output.StartsWith("FULL ", StringComparison.Ordinal), label + ": " + answer.Output);
+            Assert.DoesNotContain("SELECTED", answer.Output, StringComparison.Ordinal);
+        }
+    }
+
+    private static string? FindPwsh()
+    {
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            foreach (var name in new[] { "pwsh.exe", "pwsh" })
+            {
+                try
+                {
+                    var candidate = Path.Combine(dir, name);
+                    if (File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // A PATH entry that is not a valid path is skipped.
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Runs one shard script in a scratch folder with a fake `dotnet` that answers the class listing from
+    /// <paramref name="classes"/> and prints each chunk's -class arguments. Returns the classes the chunks ran, and the output.</summary>
+    private (int ExitCode, List<string> Ran, string Output) RunShardScript(string script, string suite, string[] classes, string? selectionJson,
+        string eventName = "pull_request")
+    {
+        var pwsh = FindPwsh();
+        Assert.SkipWhen(pwsh is null, "PowerShell 7 (pwsh) is not on PATH, so the shard scripts cannot be run here.");
+        var work = Path.Combine(_dir, "shard-" + suite);
+        Directory.CreateDirectory(Path.Combine(work, ".github", "scripts"));
+        File.Copy(Script("ci-select.py"), Path.Combine(work, ".github", "scripts", "ci-select.py"), overwrite: true);
+        File.WriteAllLines(Path.Combine(work, "classes.txt"), classes);
+        var selection = Path.Combine(work, "selection.json");
+        File.Delete(selection);
+        if (selectionJson is not null)
+        {
+            File.WriteAllText(selection, selectionJson);
+        }
+
+        var harness = Path.Combine(work, "harness.ps1");
+        File.WriteAllText(harness, """
+            param([string] $Script, [string] $Suite, [string] $Selection, [string] $EventName)
+            $global:ListFile = Join-Path $PWD 'classes.txt'
+            function dotnet {
+                if ($args -contains '-list') {
+                    Write-Output 'a dotnet notice line that is not JSON'
+                    Write-Output (ConvertTo-Json -Compress -InputObject @(Get-Content -Path $global:ListFile | Where-Object { $_ }))
+                    $global:LASTEXITCODE = 0
+                    return
+                }
+                $ran = @(for ($i = 0; $i -lt $args.Count; $i++) { if ($args[$i] -eq '-class') { $args[$i + 1] } })
+                Write-Output ('RAN ' + ($ran -join ','))
+                $global:LASTEXITCODE = 0
+            }
+            $env:SLOW_REPO = ''
+            $env:SLOW_PR = ''
+            if ($Suite -eq 'darling') { & $Script -Shard 0 -ShardCount 1 -EventName $EventName -SelectionFile $Selection }
+            else { & $Script -Shard 0 -ShardCount 1 -JobIndex 0 -EventName $EventName -SelectionFile $Selection }
+            exit $LASTEXITCODE
+            """);
+        var psi = new ProcessStartInfo(pwsh!)
+        {
+            WorkingDirectory = work,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", harness, "-Script", Script(script), "-Suite", suite,
+                     "-Selection", selectionJson is null ? "" : selection, "-EventName", eventName })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEndAsync();
+        var stderr = p.StandardError.ReadToEndAsync();
+        p.WaitForExit();
+        var output = stdout.Result + stderr.Result;
+        var ran = output.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.StartsWith("RAN ", StringComparison.Ordinal))
+            .SelectMany(l => l[4..].Split(',', StringSplitOptions.RemoveEmptyEntries)).ToList();
+        return (p.ExitCode, ran, output);
+    }
+
+    [Theory]
+    [InlineData("run-darling-pg-shard.ps1", "darling", "Darling.Tests")]
+    [InlineData("run-lite-shard.ps1", "lite", "Lite.Tests")]
+    public void TheShardScripts_KeepOnlyTheSelectedClasses_AndRunEverythingWhenThereIsNoUsableSelection(string script, string suite, string ns)
+    {
+        string[] all = [.. Enumerable.Range(1, 40).Select(i => $"{ns}.Class{i:00}Tests")];
+        var selected = new[] { "Class03Tests", "Class17Tests", "Class40Tests", "NotInThisShardTests" };
+        var selection = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["full"] = false,
+            ["reason"] = "",
+            ["selected"] = new Dictionary<string, string[]> { [suite] = selected, [suite == "darling" ? "lite" : "darling"] = ["OtherSuiteTests"] },
+        });
+
+        var narrowed = RunShardScript(script, suite, all, selection);
+        Assert.True(narrowed.ExitCode == 0, narrowed.Output);
+        Assert.Equal([$"{ns}.Class03Tests", $"{ns}.Class17Tests", $"{ns}.Class40Tests"], narrowed.Ran.OrderBy(c => c, StringComparer.Ordinal));
+        Assert.Contains("3 to run", narrowed.Output, StringComparison.Ordinal);
+
+        // Fail open: a FULL, missing, unreadable or empty selection, and any event but a pull request, run every class.
+        var everything = new (string Label, string? Json, string Event)[]
+        {
+            ("FULL", """{"full": true, "reason": "a keep-full file", "selected": {}}""", "pull_request"),
+            ("no file", null, "pull_request"),
+            ("unreadable", "{broken", "pull_request"),
+            ("an empty list", "{\"full\": false, \"selected\": {\"" + suite + "\": []}}", "pull_request"),
+            ("a push", selection, "push"),
+        };
+        foreach (var (label, json, eventName) in everything)
+        {
+            var run = RunShardScript(script, suite, all, json, eventName);
+            Assert.True(run.ExitCode == 0, label + ": " + run.Output);
+            Assert.True(run.Ran.Count == all.Length, label + ": ran " + run.Ran.Count + " of " + all.Length + "\n" + run.Output);
+        }
+
+        // A shard none of whose classes is selected ends cleanly without reaching a runner with no -class arguments.
+        var none = RunShardScript(script, suite, all, "{\"full\": false, \"selected\": {\"" + suite + "\": [\"SomewhereElseTests\"]}}");
+        Assert.Equal(0, none.ExitCode);
+        Assert.Empty(none.Ran);
+        Assert.Contains("nothing runs", none.Output, StringComparison.Ordinal);
     }
 }

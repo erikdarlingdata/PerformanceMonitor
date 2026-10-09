@@ -7,8 +7,10 @@ These readers use the same code:
 
 * build.yml's jobs call `lite-scope`, `darling-scope` and `tree-scope` with the area answers
   dorny/paths-filter already computed, and get the decision back as `key=value` lines for $GITHUB_OUTPUT.
-* `map-select` (slice 1 of change 4; nothing in the workflow calls it yet) answers, from a class-to-file map, which
-  test classes a pull request needs. See map_select() for the map's schema. `--replay --map FILE` also replays the
+* `map-select` answers, from a class-to-file map, which test classes a pull request needs (build.yml's
+  test-map-select job writes it as an artifact), and `map-keep` reads that artifact for one suite: the Darling PG,
+  Lite and no-store Darling passes of a pull request keep only those classes, and run everything when the answer
+  is FULL, missing or unreadable. See map_select() for the map's schema. `--replay --map FILE` also replays the
   corpus against such a map and reports what it would miss (it does not fail on that yet).
 * `--replay` reads .github/ci-history/failures.jsonl (a trimmed record of every run with a real test failure)
   and checks that each failing class would have been selected for that run's changed files. A cut to the rules
@@ -863,11 +865,29 @@ def map_replay(test_map: "dict | None", corpus: str = CORPUS, root: str = ROOT, 
     return misses
 
 
+def map_keep(selection: object, suite: str) -> "tuple[set[str] | None, str]":
+    """The class names a shard of `suite` keeps, from the selection `map-select --out` wrote (#5459, live selection).
+
+    Returns (names, reason). `names` is None, meaning the shard runs everything it was cut, whenever the selection
+    cannot be trusted: it is missing, not a JSON object, FULL, has no list of names for the suite, a name that is not
+    text, or an empty list. Empty is distrusted on purpose: the Guard classes are always selected, so a selection with
+    no class in it for a suite means the selection broke, not that nothing needs to run."""
+    if not isinstance(selection, dict):
+        return None, "the selection is missing or unreadable"
+    if selection.get("full") is not False:
+        return None, f"the selection is FULL ({selection.get('reason') or 'no reason given'})"
+    chosen = selection.get("selected")
+    names = chosen.get(suite) if isinstance(chosen, dict) else None
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) and n for n in names):
+        return None, f"the selection holds no usable class list for the {suite} suite"
+    return set(names), ""
+
+
 def shadow_summary(result: dict) -> str:
-    """The step-summary text of a shadow run: how many classes the map would have run, and the estimated seconds."""
-    lines = ["### Test map shadow (#5459): nothing was skipped, every shard ran everything", ""]
+    """The step-summary text of the selection job: how many classes the map picked, and the estimated seconds."""
+    lines = ["### Test map selection (#5459): the Darling PG, Lite and no-store Darling passes run only the classes below", ""]
     if result.get("full"):
-        lines.append(f"Selection: FULL ({result.get('reason') or 'no reason given'}).")
+        lines.append(f"Selection: FULL ({result.get('reason') or 'no reason given'}), so every shard ran everything.")
         return "\n".join(lines) + "\n"
     lines += ["Estimated seconds are the nightly's instrumented times, so they read high.", "",
               "| suite | selected classes | of | estimated seconds |", "|---|---|---|---|"]
@@ -1033,7 +1053,7 @@ def main(argv: list[str]) -> int:
     dc.add_argument("--event", default="pull_request")
     dc.add_argument("files", nargs="*")
 
-    ms = sub.add_parser("map-select", help="which classes a pull request runs, from a class-to-file map (not wired in yet)")
+    ms = sub.add_parser("map-select", help="which classes a pull request runs, from a class-to-file map (workflow step)")
     ms.add_argument("--map", required=True, help="the test map (JSON, or .gz)")
     ms.add_argument("--event", default="pull_request")
     ms.add_argument("--base", help="the merge base; the drift is `git diff --no-renames <map sha>..<base>`")
@@ -1043,6 +1063,10 @@ def main(argv: list[str]) -> int:
     ms.add_argument("--out", help="also write the selection JSON to this file (stdout keeps the notice and the JSON)")
     ms.add_argument("--summary", help="also write the shadow step-summary markdown to this file")
     ms.add_argument("files", nargs="*")
+
+    mk = sub.add_parser("map-keep", help="the classes a shard keeps from a selection; FULL when it cannot be trusted (workflow step)")
+    mk.add_argument("--selection", required=True, help="the JSON map-select --out wrote; missing or unreadable counts as FULL")
+    mk.add_argument("--suite", required=True, choices=("darling", "lite"))
 
     sc = sub.add_parser("shadow-check", help="classes that failed but a map selection would not have run (workflow step)")
     sc.add_argument("--selection", help="the JSON map-select --out wrote; missing or unreadable counts as FULL")
@@ -1090,6 +1114,21 @@ def main(argv: list[str]) -> int:
         if args.summary:
             with open(args.summary, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(shadow_summary(result))
+        return 0
+    if args.cmd == "map-keep":
+        # Line 1 is `SELECTED <n>` (then one class name per line) or `FULL <reason>`; the exit code is always 0, so a
+        # caller that cannot read the answer runs everything.
+        try:
+            with open(args.selection, encoding="utf-8") as fh:
+                chosen = json.load(fh)
+        except (OSError, ValueError):
+            chosen = None
+        names, why = map_keep(chosen, args.suite)
+        if names is None:
+            print(f"FULL {why}")
+        else:
+            print(f"SELECTED {len(names)}")
+            print("\n".join(sorted(names)))
         return 0
     if args.cmd == "shadow-check":
         selection = None

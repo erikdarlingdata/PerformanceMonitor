@@ -41,10 +41,11 @@ permissions:
 # cancelled push run is never read. With no such run the cut is the plain class-name hash, and
 # timings the packer cannot use (none readable, all zero, or covering under 80% of this commit's
 # classes) send every shard to that same hash. So cancelling can cost shard balance but never a
-# test class or a verdict. The one other reader of another run's artifacts is the shadow-mode
-# test map (#5459): it reads the NIGHTLY's `test-map` artifact (nightly.yml runs are never in this
-# workflow's concurrency group, so nothing here cancels them), selects nothing from it, and a
-# missing map only means the shadow selection is FULL. No other cross-run consumer (a
+# test class or a verdict. The one other reader of another run's artifacts is the test map
+# (#5459): it reads the NIGHTLY's `test-map` artifact (nightly.yml runs are never in this
+# workflow's concurrency group, so nothing here cancels them), and a missing map only means
+# the selection is FULL, which runs every class. The selection it yields reaches the shards
+# through this run's own artifact (same run, so nothing here is read across runs). No other cross-run consumer (a
 # download-artifact with run-id, a gh run download, or a workflow_run trigger) exists
 # (CrossAppGuardCiGateTests pins both halves),
 # nightly.yml builds its own tree from its own checkout, and a release compiles fresh on the
@@ -215,14 +216,14 @@ jobs:
             echo "::notice title=Lite timing source::No successful dev push run has unexpired Lite timings (or the lookup failed), so every Lite shard cuts by class-name hash."
           fi
 
-      # #5459 change 4, shadow mode: the ONE test map this run's shadow job reads, picked here once for the
+      # #5459 change 4: the ONE test map this run's selection job reads, picked here once for the
       # same reason as the Lite timing source above (two readers must not see two maps). It is the newest
       # successful nightly run whose `test-map` artifact has not expired (two days of margin) and whose
       # commit is an ancestor of the pull request's base, so a map built from code the base does not contain
       # is never used. Pull requests only; a push, a merge group and a release never read a map. Every failure
-      # here means "no map", which the shadow job reads as FULL. The step cannot fail the gate, and the shadow
-      # work never skips or narrows anything: every shard still runs every class.
-      - name: Pin the test map (shadow mode)
+      # here means "no map", which the selection job reads as FULL, and a FULL selection narrows nothing: every
+      # shard runs every class. The step cannot fail the gate.
+      - name: Pin the test map
         id: testmap
         if: github.event_name == 'pull_request' && steps.decide.outputs.run == 'true'
         continue-on-error: true
@@ -263,9 +264,9 @@ jobs:
           echo "run_id=${map_run}" >> "$GITHUB_OUTPUT"
           echo "sha=${map_sha}" >> "$GITHUB_OUTPUT"
           if [ -n "${map_run}" ]; then
-            echo "::notice title=Test map::Shadow mode reads the map of nightly run ${map_run} (commit ${map_sha:0:10}), the newest one built from an ancestor of this base."
+            echo "::notice title=Test map::The test map selection reads the map of nightly run ${map_run} (commit ${map_sha:0:10}), the newest one built from an ancestor of this base."
           else
-            echo "::notice title=Test map::No successful nightly has an unexpired test map built from an ancestor of this base (${seen} runs looked at), so the shadow selection is FULL."
+            echo "::notice title=Test map::No successful nightly has an unexpired test map built from an ancestor of this base (${seen} runs looked at), so the selection is FULL."
           fi
 
   # #5459: the guard classes of BOTH test suites, first, so a source pin, a census or a hygiene scan that a
@@ -513,7 +514,9 @@ jobs:
           if-no-files-found: ignore
 
   build:
-    needs: [gate, guard-tests]
+    # test-map-select (#5459): the no-store Darling pass narrows to the map's selection on a pull request; the job still
+    # runs, whatever that job did (`!cancelled()` below), and runs everything when there is no usable selection.
+    needs: [gate, guard-tests, test-map-select]
     # `build` is a required check, so it has to run to report anything but "skipped" (which counts as
     # passing). When the gate declines the run the job still starts, on a cheap Linux runner, and its
     # first step fails; no later step has an `always()`/`failure()` condition, so the rest are skipped.
@@ -999,11 +1002,26 @@ jobs:
           set -euo pipefail
           python .github/scripts/ci-select.py darling-scope --event "${EVENT_NAME}" --gate "${GATE:-false}"             --full "${FULL:-false}" --core "${CORE:-false}" --root "${ROOT:-false}" | tee -a "$GITHUB_OUTPUT"
 
+      # #5459 live selection: this run's test map selection, from the test-map-select job (pull requests only). Same
+      # run, never another run's artifact. Every way it can be missing (not a pull request, the job failed or was skipped, no artifact, a
+      # failed download) leaves TEST_MAP_SELECTION empty in the test step below, and an empty one means every class runs.
+      - name: Download the test map selection
+        id: map-selection
+        if: github.event_name == 'pull_request' && needs.test-map-select.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: test-map-selection
+          path: test-map-selection
+
       - name: Run Darling tests
         id: darling-tests
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         env:
           DARLING_SCOPE_FILTER: ${{ steps.darling-scope.outputs.filter }}
+          DARLING_SCOPE: ${{ steps.darling-scope.outputs.scope }}
+          # #5459 live selection: empty unless this pull request run downloaded a selection (see the step above).
+          TEST_MAP_SELECTION: ${{ steps.map-selection.outcome == 'success' && format('{0}\test-map-selection\selection.json', github.workspace) || '' }}
           # #5459 change 5: the slow-skip lookup reads the pull request's file list through the API.
           GH_TOKEN: ${{ github.token }}
           SLOW_EVENT: ${{ github.event_name }}
@@ -1013,6 +1031,17 @@ jobs:
         run: |
           # An empty filter is the whole suite; `-trait Stage=Guard` is the Guard stage alone.
           $scopeArgs = @($env:DARLING_SCOPE_FILTER -split ' ' | Where-Object { $_ })
+          # #5459 live selection: a pull request pass that is not the Guard stage alone (the whole suite, or the Guard and
+          # Reads=Lite classes) runs only the classes the test map selected, through the one copy of the Darling shard
+          # logic as a single leg (no hash cut to speak of, one chunk set). The Guard pass is already the narrowest; a
+          # selection that is FULL, missing or unreadable falls through to the unchanged runs below.
+          if ($env:SLOW_EVENT -eq 'pull_request' -and $env:TEST_MAP_SELECTION -and $env:DARLING_SCOPE -ne 'guard') {
+              $keep = @(python .github/scripts/ci-select.py map-keep --selection $env:TEST_MAP_SELECTION --suite darling | Where-Object { $_ })
+              if ($LASTEXITCODE -eq 0 -and $keep.Count -gt 1 -and $keep[0] -match '^SELECTED \d+$') {
+                  ./.github/scripts/run-darling-pg-shard.ps1 -Shard 0 -ShardCount 1 -EventName $env:SLOW_EVENT -ScopeFilter $env:DARLING_SCOPE_FILTER -SelectionFile $env:TEST_MAP_SELECTION -ResultPrefix darling-build -RunAttempt ${{ github.run_attempt }}
+                  exit $LASTEXITCODE
+              }
+          }
           # #5459 change 5: the whole-suite pass on a pull request leaves out the Cost=Slow classes the change does
           # not reach (ci-select.py slow_skip). The Guard-only pass has none of them (a Guard class is never Slow).
           $slowArgs = @()
@@ -1442,7 +1471,9 @@ jobs:
     # Fail fast (#5459): on a pull request the shards start only after the Guard tests job succeeded; every
     # other event runs them whatever the guards said. `!cancelled()` is what lets a job whose `needs` includes
     # a failed one decide for itself, and the result job below turns the skip into the failure it should be.
-    needs: [gate, guard-tests]
+    # test-map-select (#5459) is a need so the selection exists before the shard starts; it never blocks the shard
+    # (`!cancelled()`): a selection that did not arrive means the shard runs every class.
+    needs: [gate, guard-tests, test-map-select]
     if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: windows-latest
     # Max observed on a warm cache is ~3m40s; a cold pg-runtime cache adds a ~340MB fetch.
@@ -1566,6 +1597,18 @@ jobs:
         with:
           name: ${{ needs.guard-tests.outputs.darling_build_artifact }}
           path: .
+
+      # #5459 live selection: this run's test map selection, from the test-map-select job (pull requests only). Same
+      # run, never another run's artifact. Every way it can be missing (not a pull request, the job failed or was skipped, no artifact, a
+      # failed download) leaves TEST_MAP_SELECTION empty in the test step below, and an empty one means every class runs.
+      - name: Download the test map selection
+        id: map-selection
+        if: github.event_name == 'pull_request' && needs.test-map-select.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: test-map-selection
+          path: test-map-selection
 
       # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
       # find the repo root through [CallerFilePath], so a binary built in another path would read another tree.
@@ -1907,15 +1950,17 @@ jobs:
           DARLING_TEST_PG_LOGROTATE_JSON: "Host=127.0.0.1;Port=5548;Username=darling;Database=darling"
           # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
           GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
+          # #5459 live selection: empty unless this pull request run downloaded a selection (see the step above).
+          TEST_MAP_SELECTION: ${{ steps.map-selection.outcome == 'success' && format('{0}\test-map-selection\selection.json', github.workspace) || '' }}
           # #5459 change 5: the slow-skip lookup below reads the pull request's file list through the API.
           GH_TOKEN: ${{ github.token }}
           SLOW_EVENT: ${{ github.event_name }}
           SLOW_PR: ${{ github.event.pull_request.number }}
           SLOW_REPO: ${{ github.repository }}
-        # #5616: the cut, the Cost=Slow skip, the chunking and the per-chunk runs live in .github/scripts/run-darling-pg-shard.ps1,
+        # #5616: the cut, the test map selection (#5459, else the Cost=Slow skip), the chunking and the per-chunk runs live in .github/scripts/run-darling-pg-shard.ps1,
         # the ONE copy that nightly.yml's darling-pg job calls too.
         run: |
-          ./.github/scripts/run-darling-pg-shard.ps1 -Shard ${{ matrix.shard }} -ShardCount ${{ strategy.job-total }} -EventName $env:SLOW_EVENT -GuardBuildUsed $env:GUARD_BUILD_USED -ResultPrefix darling-pr -RunAttempt ${{ github.run_attempt }}
+          ./.github/scripts/run-darling-pg-shard.ps1 -Shard ${{ matrix.shard }} -ShardCount ${{ strategy.job-total }} -EventName $env:SLOW_EVENT -GuardBuildUsed $env:GUARD_BUILD_USED -ResultPrefix darling-pr -RunAttempt ${{ github.run_attempt }} -SelectionFile $env:TEST_MAP_SELECTION
 
       # PR #5480: a TimescaleDB job worker died with 0xC0000005 in two CI runs and both runs read "success",
       # because the postmaster restarts and the tests retry. The crash shows only in the PostgreSQL log, as
@@ -2526,8 +2571,9 @@ jobs:
   # CrossAppGuardCiGateTests pins the copies equal, so they cannot drift apart silently.
   lite-tests:
     name: Lite tests
-    # Fail fast on a pull request (#5459), exactly as the Darling PG shards: see the comment on that job.
-    needs: [gate, guard-tests]
+    # Fail fast on a pull request (#5459), exactly as the Darling PG shards: see the comment on that job. The same
+    # goes for test-map-select: see there.
+    needs: [gate, guard-tests, test-map-select]
     if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}
     runs-on: windows-latest
     strategy:
@@ -2667,6 +2713,18 @@ jobs:
           name: ${{ needs.guard-tests.outputs.lite_build_artifact }}
           path: .
 
+      # #5459 live selection: this run's test map selection, from the test-map-select job (pull requests only). Same
+      # run, never another run's artifact. Every way it can be missing (not a pull request, the job failed or was skipped, no artifact, a
+      # failed download) leaves TEST_MAP_SELECTION empty in the test step below, and an empty one means every class runs.
+      - name: Download the test map selection
+        id: map-selection
+        if: github.event_name == 'pull_request' && needs.test-map-select.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: test-map-selection
+          path: test-map-selection
+
       # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
       # find the repo root through [CallerFilePath], so a binary built in another path would read another tree.
       - name: Check the fetched build is for this workspace and commit
@@ -2755,10 +2813,12 @@ jobs:
           SLOW_REPO: ${{ github.repository }}
           # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
           GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
-        # #5616: the cut (timing-packed or hash), the Cost=Slow skip, the chunking and the per-chunk runs live in
+          # #5459 live selection: empty unless this pull request run downloaded a selection (see the step above).
+          TEST_MAP_SELECTION: ${{ steps.map-selection.outcome == 'success' && format('{0}\test-map-selection\selection.json', github.workspace) || '' }}
+        # #5616: the cut (timing-packed or hash), the test map selection (#5459, else the Cost=Slow skip), the chunking and the per-chunk runs live in
         # .github/scripts/run-lite-shard.ps1, the ONE copy that nightly.yml's lite-tests job calls too.
         run: |
-          ./.github/scripts/run-lite-shard.ps1 -Shard ${{ matrix.shard }} -ShardCount ${{ strategy.job-total }} -JobIndex ${{ strategy.job-index }} -EventName $env:SLOW_EVENT -GuardBuildUsed $env:GUARD_BUILD_USED -ScopeMode $env:LITE_SCOPE_MODE -TimingRun $env:LITE_TIMING_RUN -TimingArtifacts $env:LITE_TIMING_ARTIFACTS -RunAttempt ${{ github.run_attempt }}
+          ./.github/scripts/run-lite-shard.ps1 -Shard ${{ matrix.shard }} -ShardCount ${{ strategy.job-total }} -JobIndex ${{ strategy.job-index }} -EventName $env:SLOW_EVENT -GuardBuildUsed $env:GUARD_BUILD_USED -ScopeMode $env:LITE_SCOPE_MODE -TimingRun $env:LITE_TIMING_RUN -TimingArtifacts $env:LITE_TIMING_ARTIFACTS -RunAttempt ${{ github.run_attempt }} -SelectionFile $env:TEST_MAP_SELECTION
 
       # #5208: where the time goes. Informational; a parse problem must never turn the shard red.
       - name: Lite test timing summary
@@ -2791,18 +2851,21 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # #5459 change 4, shadow mode (slice 4). Computes which classes the test map WOULD run for this pull request and
-  # prints them in the step summary. It narrows nothing: every shard above and below still runs every class, so the
-  # classes run on a pull request are the ones that ran before this job existed. NOT a required check, and nothing
-  # lists it in `needs` but the shadow-check job below, which is also optional: both are continue-on-error, so their
-  # own failure is a notice at most. A missing, unreadable, old or wrong-schema map, a failed download and a failed
-  # diff all mean FULL (never an error, never a skip). Pull requests only.
-  test-map-shadow:
-    name: Test map shadow
+  # #5459 change 4, live. Computes which classes the test map picks for this pull request, prints them in the step
+  # summary and uploads them as the `test-map-selection` artifact. `build`, `darling-pg` and `lite-tests` wait for it
+  # (it starts with the Guard tests job, which they wait for anyway), download the artifact and run only the classes it
+  # names, after their own hash cut (ci-select.py `map-keep`, run-darling-pg-shard.ps1, run-lite-shard.ps1). They keep
+  # the Guard stage. A FULL, missing, unreadable, empty or late selection (this job is capped at 5 minutes, and a job
+  # that failed or was cancelled leaves nothing to download) means the shard runs every class it was cut: the selection
+  # only ever narrows. NOT a required check, and continue-on-error: its own failure is a notice at most. A missing,
+  # unreadable, old or wrong-schema map, a failed download and a failed diff all mean FULL. Pull requests only; a push,
+  # a merge group and the nightly never get a selection, so they run everything.
+  test-map-select:
+    name: Test map selection
     needs: [gate]
     if: github.event_name == 'pull_request' && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     continue-on-error: true
     permissions:
       contents: read
@@ -2826,8 +2889,8 @@ jobs:
 
           mkdir -p shadow
           full() {
-            echo "::notice title=Test map shadow::The selection is FULL: $1"
-            printf '### Test map shadow (#5459): nothing was skipped, every shard ran everything\n\nSelection: FULL (%s).\n' "$1" > shadow/summary.md
+            echo "::notice title=Test map selection::The selection is FULL: $1"
+            printf '### Test map selection (#5459): every shard runs every class\n\nSelection: FULL (%s).\n' "$1" > shadow/summary.md
           }
           if [ -z "${MAP_RUN}" ]; then
             full "no test map is pinned for this run"
@@ -2852,24 +2915,25 @@ jobs:
           cat shadow/summary.md >> "$GITHUB_STEP_SUMMARY" || true
           exit 0
 
-      - name: Upload the shadow selection
+      - name: Upload the selection
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
-          name: test-map-shadow-selection
+          name: test-map-selection
           path: shadow/selection.json
           retention-days: 7
           overwrite: true
           if-no-files-found: ignore
 
-  # The second half of shadow mode: after every shard has finished, list each class that FAILED although the map
-  # would not have run it (a shadow miss), and keep one JSONL row per run (artifact test-map-shadow-row, 30 days).
+  # The check kept from shadow mode: after every shard has finished, list each class that FAILED although the map
+  # did not pick it (a shadow miss: now only a class that ran anyway, in the Guard job or in a shard that ran
+  # everything), and keep one JSONL row per run (artifact test-map-shadow-row, 30 days).
   # Failed classes come from the shards' xunit reports (darling-tests-timing-N, lite-tests-timing-N). A shard that
   # wrote no readable report shows up as a lower report count in the row, never as an error. Optional and
   # continue-on-error like the job above: it can lengthen the run by its own thirty seconds and cannot redden it.
   shadow-check:
     name: Test map shadow check
-    needs: [gate, guard-tests, test-map-shadow, darling-pg, lite-tests]
+    needs: [gate, guard-tests, test-map-select, darling-pg, lite-tests]
     if: always() && github.event_name == 'pull_request' && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -2883,11 +2947,11 @@ jobs:
         with:
           sparse-checkout: .github/scripts
 
-      - name: Download the shadow selection
+      - name: Download the selection
         continue-on-error: true
         uses: actions/download-artifact@v6
         with:
-          name: test-map-shadow-selection
+          name: test-map-selection
           path: shadow/selection
 
       - name: Download the shard reports
@@ -2905,7 +2969,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           MAP_SHA: ${{ needs.gate.outputs.test_map_sha }}
-          SELECTION_JOB: ${{ needs.test-map-shadow.result }}
+          SELECTION_JOB: ${{ needs.test-map-select.result }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
