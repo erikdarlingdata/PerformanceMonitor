@@ -376,13 +376,13 @@ This folder already holds an install, so the installed folder itself needs repla
 darling.json and your store are kept. To move to a new folder:
 
   1. Stop the '$serviceName' service and leave it stopped until step 5.
-  2. In an elevated session, extract the new zip into a new, empty folder:
+  2. In an elevated session, extract the new zip into a new, empty folder named
        C:\Program Files\PerformanceMonitorDarling
-     (if this folder is that one, use another new name under C:\Program Files).
+     If this folder already has that name, use another new name under C:\Program Files.
   3. Copy darling.json from $oldFolder into the new folder before anything else. Without it,
-     install-darling.ps1 copies the SAMPLE config in. Also copy any other file from $oldFolder that
-     darling.json points at: a certificate or key (a tls pfxPath, certPath or keyPath), and the darling-keys
-     folder if postgres.managed is false. A darling.json.bak-* backup is optional.
+     install-darling.ps1 copies the SAMPLE config in. Then copy the files darling.json points at in the old
+     folder. Those are a certificate or key (a tls pfxPath, certPath or keyPath) and, if postgres.managed
+     is false, the darling-keys folder. A darling.json.bak-* backup is optional.
   4. In an elevated session, run install-darling.ps1 from the new folder. It points the existing service at the
      new folder. Only the service's program path changes: its logon account, its credentials and the store
      under C:\ProgramData\PerformanceMonitorDarling are not touched.

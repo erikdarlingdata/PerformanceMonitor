@@ -639,7 +639,7 @@ function Get-CimInstance {
         var rendered = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
 
         Assert.Contains("1. Stop the 'PerformanceMonitor Darling' service and leave it stopped until step 5.", rendered, StringComparison.Ordinal);
-        Assert.Contains("2. In an elevated session, extract the new zip into a new, empty folder:", rendered, StringComparison.Ordinal);
+        Assert.Contains("2. In an elevated session, extract the new zip into a new, empty folder named", rendered, StringComparison.Ordinal);
         Assert.Contains("C:\\Program Files\\PerformanceMonitorDarling", rendered, StringComparison.Ordinal);
         Assert.Contains("3. Copy darling.json from C:\\PerformanceMonitorDarling into the new folder before anything else.", rendered, StringComparison.Ordinal);
         Assert.Contains("copies the SAMPLE config in", rendered, StringComparison.Ordinal);
