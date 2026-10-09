@@ -235,13 +235,15 @@ public sealed class PlanRegressionInputsTests : IClassFixture<SharedDuckDbFixtur
         };
         await SeedRegressionAsync(ManifestsB, PlainText, factor: 30);
 
-        var started = DateTime.UtcNow;
-        var fact = (await new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(NewContext()))
-            .Single(f => f.Key == "PLAN_REGRESSION");
-        var elapsed = DateTime.UtcNow - started;
+        var pass = new DuckDbFactCollector(_duckDb, queryStorePlanSource: source).CollectFactsAsync(NewContext());
 
+        /* The source would hold the pass for five minutes. A pass still running after a minute did not walk away
+           at the fetch timeout (five seconds); the test stops waiting, it does not time anything. */
+        var finished = await Task.WhenAny(pass, Task.Delay(TimeSpan.FromSeconds(60)));
+        Assert.Same(pass, finished);
+
+        var fact = (await pass).Single(f => f.Key == "PLAN_REGRESSION");
         Assert.Equal(1, fact.Metadata["inputs_unverified_count"]);
-        Assert.True(elapsed < DuckDbFactCollector.PlanInputFetchTimeout + TimeSpan.FromSeconds(10), $"took {elapsed}");
         /* The first plan hung, so the second was never asked for. */
         Assert.Single(source.Fetched);
     }

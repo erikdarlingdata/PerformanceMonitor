@@ -299,6 +299,8 @@ ORDER BY worker_ratio DESC";
     /// no fact when Query Store is not enabled on the monitored databases.
     /// Unlike other collectors this windows on last_execution_time (14-day comparison
     /// window), NOT collection_time — see plan note.
+    /// #5630: a candidate whose statement carries OPTION (RECOMPILE), or whose two plans were compiled for
+    /// different parameter values, is dropped before the fact (<see cref="VerifyPlanRegressionInputsAsync"/>).
     /// </summary>
     private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -545,7 +547,7 @@ LIMIT 100";
                     worstLatestCpu = row.LatestCpu;
                     worstBestCpu = row.BestCpu;
                     worstBestLastExec = row.BestLastExec;
-                    // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
+                    // Which CASE branch fired, not which raw ratio is larger (#2138):
                     // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
                     // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
                     var cpuRatio = row.BestCpu > 0 ? row.LatestCpu / row.BestCpu : 0.0;
