@@ -672,7 +672,7 @@ function Get-CimInstance {
             }
             """);
 
-        var answers = RunWindowsPowerShell(probe.ToString());
+        var answers = RunServiceOwnedTreeProbe(probe);
 
         Assert.DoesNotContain("source.count=0", answers);
         Assert.Contains("source.owned=True", answers);
@@ -863,7 +863,7 @@ function Get-CimInstance {
             }
             """);
 
-        var answers = RunWindowsPowerShell(probe.ToString());
+        var answers = RunServiceOwnedTreeProbe(probe);
 
         foreach (var label in new[] { "rootModifyDeleted", "rootModifyOtherLogon", "rootModifyVirtual" })
         {
@@ -1071,6 +1071,49 @@ function Get-CimInstance {
     /// class already does for owners, so a service SID can own files without an elevated token. Each scenario
     /// prints <c>label.count=N</c> and <c>label.text=...</c>.
     /// </summary>
+    /// <summary>
+    /// #5628: runs a probe built from <see cref="ServiceOwnedTreeProbe"/> and fails the test first, by name, if the
+    /// probe's own setup did not take (a <c>setup.*=False</c> line, or no setup line at all), so that can never
+    /// pass or read as a product result.
+    /// </summary>
+    private static List<string> RunServiceOwnedTreeProbe(StringBuilder probe)
+    {
+        var answers = RunWindowsPowerShell(probe.ToString());
+        AssertProbeSetupTook(answers);
+        return answers;
+    }
+
+    /// <summary>#5628: every <c>setup.*</c> marker a probe printed must be True, and there must be at least one.</summary>
+    private static void AssertProbeSetupTook(IReadOnlyCollection<string> answers)
+    {
+        var setup = answers.Where(l => l.StartsWith("setup.", StringComparison.Ordinal)).ToList();
+        Assert.True(setup.Count > 0, "the probe printed no setup.* marker, so nothing shows its owner or ACE setup took:\n" + string.Join("\n", answers));
+        var failed = setup.Where(l => !l.EndsWith("=True", StringComparison.Ordinal)).ToList();
+        Assert.True(failed.Count == 0, "the probe's own setup did not take (a test-environment problem, not a product result): " + string.Join(", ", failed));
+    }
+
+    /// <summary>
+    /// #5628: the PowerShell half of the same check, for the probes that set an owner or an ACE on a real file or
+    /// folder. <c>Confirm-ProbeAcl</c> reads the object back and prints <c>setup.LABEL=True</c> only when the owner
+    /// (when given) and every listed SID (as an explicit allow ACE) are there. Setting an owner other than the
+    /// caller needs SeRestorePrivilege, and a failed <c>Set-Acl</c> is non-terminating, so without the read-back a
+    /// setup that did not take looks like a product result.
+    /// </summary>
+    private const string ConfirmProbeAclFunction = """
+        function Confirm-ProbeAcl([string]$label, [string]$path, $ownerSid, [array]$aceSids = @()) {
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            $took = $true
+            try {
+                $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+                if ($ownerSid) { $took = $took -and ($acl.GetOwner($sidType) -eq $ownerSid) }
+                $explicit = @($acl.GetAccessRules($true, $false, $sidType))
+                foreach ($sid in $aceSids) { $took = $took -and (@($explicit | Where-Object { $_.IdentityReference -eq $sid }).Count -gt 0) }
+            }
+            catch { $took = $false }
+            'setup.' + $label + '=' + $took
+        }
+        """;
+
     private static StringBuilder ServiceOwnedTreeProbe()
     {
         var probe = new StringBuilder();
@@ -1142,6 +1185,21 @@ function Get-CimInstance {
             Set-Content -LiteralPath "$($script:root)\darling-keys\log-hash.key" -Value 'x'
             Set-Content -LiteralPath "$($script:root)\other\tool.dll" -Value 'x'
 
+            # #5628: the root is named in the tree's long form. $env:TEMP is the 8.3 short form on a CI runner
+            # (C:\Users\RUNNER~1\...), and Windows PowerShell 5.1 hands back the LONG form for every child
+            # Get-ChildItem walks, so the shadowed Get-Acl's "$root\pg-runtime*" comparison matched nothing, every
+            # owner fell back to Administrators (trusted) and every probe reported zero findings.
+            $script:root = [System.IO.Path]::GetFullPath($script:root)
+
+            # The setup check: ask the shadowed Get-Acl about a path the way the script's walk reaches it (a child
+            # from Get-ChildItem) and print whether it answered with the owner this probe set. The C# side fails
+            # the test on any setup.*=False, so a probe whose setup did not take can never pass or read as a
+            # product result.
+            $walked = @(Get-ChildItem -LiteralPath $script:root -Recurse -Force -Filter postgres.exe)
+            'setup.walkFindsTheRuntimeFile=' + ($walked.Count -eq 1)
+            'setup.walkPathIsUnderTheRoot=' + ($walked.Count -eq 1 -and $walked[0].FullName.StartsWith($script:root + '\', [StringComparison]::OrdinalIgnoreCase))
+            'setup.shadowOwnerReachesTheWalkedFile=' + ($walked.Count -eq 1 -and ((Get-Acl -LiteralPath $walked[0].FullName).GetOwner($sidType) -eq $script:serviceSid))
+
             # service = $null (not registered) or a stand-in service object; logon = what Get-DarlingServiceLogonName says.
             function Get-DarlingServiceLogonName([string]$name) { return $script:logon }
             function Show([string]$label, $service, $logon) {
@@ -1194,7 +1252,7 @@ function Get-CimInstance {
             }
             """);
 
-        var answers = RunWindowsPowerShell(probe.ToString());
+        var answers = RunServiceOwnedTreeProbe(probe);
 
         Assert.Contains("deleted.count=0", answers);
         Assert.Contains("otherLogon.count=0", answers);
@@ -1234,7 +1292,7 @@ function Get-CimInstance {
             }
             """);
 
-        var answers = RunWindowsPowerShell(probe.ToString());
+        var answers = RunServiceOwnedTreeProbe(probe);
 
         Assert.Contains("virtual.count=0", answers);
         Assert.Contains("otherLogon.count=0", answers);
@@ -1262,7 +1320,7 @@ function Get-CimInstance {
             }
             """);
 
-        var answers = RunWindowsPowerShell(probe.ToString());
+        var answers = RunServiceOwnedTreeProbe(probe);
 
         foreach (var label in new[] { "otherOwnerDeleted", "otherOwnerRegistered" })
         {
@@ -1314,7 +1372,7 @@ function Get-CimInstance {
             }
             """);
 
-        var answers = RunWindowsPowerShell(probe.ToString());
+        var answers = RunServiceOwnedTreeProbe(probe);
 
         foreach (var label in new[] { "listedDeleted", "listedOtherLogon", "listedVirtual" })
         {
