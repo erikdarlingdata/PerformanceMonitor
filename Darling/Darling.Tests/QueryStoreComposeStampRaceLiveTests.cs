@@ -55,6 +55,14 @@ public sealed class QueryStoreComposeStampRaceLiveTests
     private static Task<long> HourRowsAsync(NpgsqlConnection connection, DateTime hour, CancellationToken ct) => CountAsync(connection,
         $"SELECT count(*) FROM collect.query_store_compose_stamp_hours WHERE hour = TIMESTAMP '{At(hour)}'", ct);
 
+    /// <summary>Gives a build connection a lock wait limit, so a build that waits where an old shape would wait forever (a row lock the
+    /// writer never releases, an advisory lock nobody has a reason to release) fails with an error instead of blocking the test host.</summary>
+    private static async Task BoundLockWaitsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SET lock_timeout = '10s'", connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private const string WritersSql = "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_xid IS NOT NULL AND pid <> pg_backend_pid()";
 
     [Fact]
@@ -171,6 +179,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             var hour = hourNow.AddHours(-3);
             await using var writer = await OpenAsync(scratch, ct);
             await using var builder = await source.OpenConnectionAsync(ct);
+            await BoundLockWaitsAsync(builder, ct);
             await using var open = await writer.BeginTransactionAsync(ct);
 
             /* The writer bumps server 1's pair (a late row) and holds the bump uncommitted. Step 1, a plain read, sees the committed value;
@@ -271,6 +280,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             var hour = hourNow.AddHours(-3);
             await using var first = await source.OpenConnectionAsync(ct);
             await using var second = await source.OpenConnectionAsync(ct);
+            await BoundLockWaitsAsync(second, ct);
             Task<long?>? secondBuild = null;
 
             /* The first build holds the hour's advisory lock and has not committed. The second must wait for it, and then redo the hour
@@ -291,6 +301,40 @@ public sealed class QueryStoreComposeStampRaceLiveTests
                 GROUP BY collection_time, server_id, database_name, module_name, query_hash HAVING count(*) > 1) AS d", ct));
             Assert.Equal(0, await MismatchesAsync(connection, hour, hour.AddHours(1), ct));
             Assert.Equal(1, await HourRowsAsync(connection, hour, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    /// <summary>S1: the builder's <c>first_execution_time</c> floor is the hour start less 26 h, so a row whose first execution is 25 h
+    /// before its collection time is still built into its hour. Run against the wide table's own read (the mismatch count is the
+    /// rollup against a fresh aggregate of the same hour), so a floor that drops the row shows as a mismatch.</summary>
+    [Fact]
+    public async Task ARowWhoseFirstExecutionIs25HoursBeforeItsCollectionTime_IsBuiltIntoItsHour()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct, build: false);
+        var bodySucceeded = false;
+        try
+        {
+            var hour = hourNow.AddHours(-3);
+            var collected = hour.AddMinutes(5);
+            await ExecAsync(connection, $@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
+VALUES (TIMESTAMP '{At(collected)}', 1, 'dbOld', 98, 98, 'Regular', TIMESTAMP '{At(collected.AddHours(-25))}', TIMESTAMP '{At(collected)}',
+        'modOld', 'hashOld', 7, 1000, 500, 2000, 900, 9300001)", ct);
+
+            await using var builder = await source.OpenConnectionAsync(ct);
+            Assert.NotNull(await QueryStoreComposeStamp.BuildHourAsync(builder, hour, DateTime.UtcNow, ct));
+            Assert.Equal(1, await CountAsync(connection,
+                $"SELECT coalesce(sum(wide_rows), 0) FROM collect.query_store_compose_stamp WHERE collection_time = TIMESTAMP '{At(collected)}' AND database_name = 'dbOld'", ct));
+            Assert.Equal(0, await MismatchesAsync(connection, hour, hour.AddHours(1), ct));
             bodySucceeded = true;
         }
         finally
