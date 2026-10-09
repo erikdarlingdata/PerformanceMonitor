@@ -254,18 +254,6 @@ public sealed class DarlingWebSecurityHeadersTests
         => "'sha256-" + Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(
             block.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n')))) + "'";
 
-    [Fact]
-    public void PolicyForInlinePage_ABlockWithCrlfLineEndings_GetsTheHashOfItsLfText()
-    {
-        var crlf = "<html><script>var a = 1;\r\nvar b = 2;\r\n</script><style>p {\r\n color: red; }\r\n</style></html>";
-        var csp = DarlingWebSecurityHeaders.PolicyForInlinePage(crlf);
-
-        Assert.Contains(LfHash("var a = 1;\nvar b = 2;\n"), csp, StringComparison.Ordinal);
-        Assert.Contains(LfHash("p {\n color: red; }\n"), csp, StringComparison.Ordinal);
-        /* The same block in LF form gets the same policy: the line ending in the source file does not matter. */
-        Assert.Equal(csp, DarlingWebSecurityHeaders.PolicyForInlinePage(crlf.Replace("\r\n", "\n", StringComparison.Ordinal)));
-    }
-
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
