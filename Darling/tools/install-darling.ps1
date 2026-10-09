@@ -251,7 +251,15 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
 # Resolve-DarlingServiceAccountSid; a name that will not translate is left out rather than thrown on here -
 # see Get-DarlingPreLockTrustedSidsForRerun for the caller that refuses instead of silently dropping it
 # (L4). The base set still applies either way.
-function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount) {
+#
+# $serviceName adds this product's OWN service SID, 'NT SERVICE\<serviceName>', whether or not that service is
+# registered right now and whatever account it logs on as today (#5627). The service extracted pg-runtime and
+# owns it by design, and that owner stays whoever ran the service WHEN it extracted - which is not the current
+# logon account once the service has been deleted, renamed or pointed at another account since. Only OUR
+# service name is derived: no other NT SERVICE\* SID, and not the NT SERVICE authority as a whole, so a tree
+# owned by a different service's SID is still a finding. If the SID cannot be computed it is left out
+# and the walk names what it finds, as before.
+function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount, [string]$serviceName) {
     $wk = [System.Security.Principal.WellKnownSidType]
     $sidType = [System.Security.Principal.SecurityIdentifier]
     $trusted = @(
@@ -262,6 +270,18 @@ function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount) {
     if ($existingServiceAccount) {
         $serviceSid = Resolve-DarlingServiceAccountSid $existingServiceAccount
         if ($serviceSid) { $trusted += $serviceSid }
+    }
+    if ($serviceName) {
+        # Computed, not looked up: Windows answers 'NT SERVICE\<name>' only while a service of that name is
+        # registered, and the SID that owns pg-runtime outlives the registration. The SID is the one Windows
+        # derives from the name (what sc.exe showsid prints): SHA-1 of the upper-cased name in UTF-16LE, its first
+        # 20 bytes read as five little-endian integers under S-1-5-80.
+        try {
+            $nameHash = [System.Security.Cryptography.SHA1]::Create().ComputeHash([System.Text.Encoding]::Unicode.GetBytes($serviceName.ToUpperInvariant()))
+            $nameParts = 0..4 | ForEach-Object { [BitConverter]::ToUInt32($nameHash, $_ * 4) }
+            $trusted += New-Object System.Security.Principal.SecurityIdentifier("S-1-5-80-$($nameParts -join '-')")
+        }
+        catch { }
     }
     $adminMembers = Get-LocalAdministratorsDirectMemberSids
     if ($adminMembers) { $trusted += $adminMembers }
@@ -283,7 +303,7 @@ function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount) {
 # caller that already asked does not ask Windows the same question again on every call. Kept byte-identical
 # in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingService) {
-    if (-not $existingService) { return Get-DarlingPreLockTrustedSids $null }
+    if (-not $existingService) { return Get-DarlingPreLockTrustedSids $null $serviceName }
 
     $existingAccount = Get-DarlingServiceLogonName $serviceName
     if (-not $existingAccount) {
@@ -292,7 +312,38 @@ function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingSe
     if (-not (Resolve-DarlingServiceAccountSid $existingAccount)) {
         Fail "The existing '$serviceName' service logs on as '$existingAccount', which could not be resolved to a SID right now (its domain may be unreachable, or the account may no longer exist). The install folder cannot be safely checked or locked without knowing whether its own grant belongs to that account. Verify the account is reachable, then re-run this script."
     }
-    return Get-DarlingPreLockTrustedSids $existingAccount
+    return Get-DarlingPreLockTrustedSids $existingAccount $serviceName
+}
+
+# The numbered steps for replacing the folder of an EXISTING install whose pre-lock check refused (#5627): the
+# registered service, its darling.json and its store are kept and only the program folder is replaced.
+# Everything the steps rely on was read from install-darling.ps1: the service is re-pointed in place (only its
+# binary path changes, its logon account and credentials are left alone), darling.json is the one file the zip does
+# not ship that an install needs (without it the sample config is copied in), pg-runtime comes back from the new
+# zip's pg-runtime.zip, and the store lives under %ProgramData%\PerformanceMonitorDarling. The two other things
+# an install can keep in its root are a certificate or key that darling.json points at, and the darling-keys
+# folder beside it (postgres.managed = false). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingExistingInstallSteps([string]$oldFolder, [string]$serviceName) {
+    return @"
+This folder already holds an install, so the installed folder itself needs replacing. Your service, your
+darling.json and your store are kept. To move to a new folder:
+
+  1. Stop the '$serviceName' service and leave it stopped until step 5.
+  2. In an elevated session, extract the new zip into a new, empty folder named
+       C:\Program Files\PerformanceMonitorDarling
+     If this folder already has that name, use another new name under C:\Program Files.
+  3. Copy darling.json from $oldFolder into the new folder before anything else. Without it,
+     install-darling.ps1 copies the SAMPLE config in. Then copy the files darling.json points at in the old
+     folder. Those are a certificate or key (a tls pfxPath, certPath or keyPath) and, if postgres.managed
+     is false, the darling-keys folder. A darling.json.bak-* backup is optional.
+  4. In an elevated session, run install-darling.ps1 from the new folder. It points the existing service at the
+     new folder. Only the service's program path changes: its logon account, its credentials and the store
+     under C:\ProgramData\PerformanceMonitorDarling are not touched.
+  5. Start the service and check that it collects.
+  6. Delete $oldFolder once the service is collecting.
+
+Do NOT try to repair this folder's permissions in place: fixing the ACL cannot show what is already in it.
+"@
 }
 
 # True when $candidate IS $parent or sits underneath it.
@@ -809,6 +860,14 @@ if (-not $AcceptWritableExtraction) {
     if ($writable.Count -gt 0) {
         $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
         $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }
+        # An EXISTING install (#5627): the service is registered, or darling.json or pg-runtime is already here.
+        # Its folder is what needs replacing, so the refusal spells out how, instead of the fresh-extraction advice.
+        $existingInstall = $existing -or (Test-Path -LiteralPath (Join-Path $root 'darling.json')) -or (Test-Path -LiteralPath (Join-Path $root 'pg-runtime'))
+        $advice = if ($existingInstall) { Get-DarlingExistingInstallSteps $root $serviceName } else { @"
+Do NOT try to repair this folder's permissions in place: fixing the ACL cannot undo a file that was already
+replaced, and cannot prove none was. Extract the zip fresh under C:\Program Files\<something>, or another
+folder only an administrator can write to, and run this script from there instead.
+"@ }
         Fail @"
 Ordinary users can already write to this install folder, before this script has locked anything down:
 
@@ -819,10 +878,10 @@ script applies next (1b2) only stops FURTHER writes, it does not check what is a
 the usual shape of a folder made directly under C:\, which inherits Authenticated Users: Modify from the
 volume root.
 
-Do NOT try to repair this folder's permissions in place: fixing the ACL cannot undo a file that was already
-replaced, and cannot prove none was. Extract the zip fresh under C:\Program Files\<something>, or another
-folder only an administrator can write to, and run this script from there instead. If this folder is
-deliberately writable (a dev loop) and you accept the risk, re-run with -AcceptWritableExtraction.
+$advice
+
+If this folder is deliberately writable (a dev loop) and you accept the risk, re-run with
+-AcceptWritableExtraction.
 
 Nothing was installed or changed.
 "@
