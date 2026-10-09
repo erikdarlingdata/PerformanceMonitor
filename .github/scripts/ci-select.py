@@ -443,11 +443,11 @@ class SlowIndex:
             self._words[key] = set(re.findall(r"[\w-]+", self.text(suite, name)))
         return self._words[key]
 
-    def skip(self, files: list[str], event: str) -> dict[str, list[str]]:
+    def skip(self, files: list[str], event: str, base_ref: str = "") -> dict[str, list[str]]:
         """{suite: [simple class names a leg leaves out]} for one change. Empty for every event but pull_request,
-        and when the changed file list is unknown."""
+        for a pull request into main (narrows), and when the changed file list is unknown."""
         out: dict[str, list[str]] = {suite: [] for suite in SUITE_DIRS}
-        if event != "pull_request" or not files:
+        if not narrows(event, base_ref) or not files:
             return out
         changed = set(files)
         # Everything about the change is computed once; a class is then a few set lookups.
@@ -603,6 +603,21 @@ DOC_PATTERNS = (
 _TEST_PROJECT_FILE = re.compile(r"(^|/)[^/]*Tests/")
 
 
+MAIN_BRANCH = "main"
+
+
+def narrows(event: str, base_ref: str = "") -> bool:
+    """Whether a run may run less than everything: only a pull_request whose base branch is not `main` (#5459).
+    A pull request into main is the release gate (dev to main), so it runs every class, Cost=Slow ones included.
+    An empty or absent base ref keeps the old behaviour: the replay corpus rows carry none."""
+    if event != "pull_request":
+        return False
+    ref = (base_ref or "").strip()
+    if ref.startswith("refs/heads/"):
+        ref = ref[len("refs/heads/"):]
+    return ref != MAIN_BRANCH
+
+
 def _full(reason: str) -> dict:
     return {"full": True, "reason": reason, "selected": {}, "why": {}, "seconds": {}, "total": {}}
 
@@ -644,7 +659,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                *, event: str = "pull_request", keep_full: "tuple[str, ...] | list[str]" = KEEP_FULL,
                doc_patterns: "tuple[str, ...] | list[str]" = DOC_PATTERNS,
                now: "datetime.datetime | None" = None, max_age_days: "float | None" = MAP_MAX_AGE_DAYS,
-               max_drift: int = MAP_MAX_DRIFT) -> dict:
+               max_drift: int = MAP_MAX_DRIFT, base_ref: str = "") -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -676,6 +691,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     map has never seen; that class runs as a "new class"."""
     if event != "pull_request":
         return _full(f"event {event or '(none)'} always runs everything")
+    if not narrows(event, base_ref):
+        return _full("a pull request into main always runs everything")
     if test_map is None:
         return _full("no test map")
     if not isinstance(test_map, dict):
@@ -1044,6 +1061,7 @@ def main(argv: list[str]) -> int:
     sk = sub.add_parser("slow-skip", help="the Cost=Slow classes a pull request run leaves out (workflow step)")
     sk.add_argument("--suite", required=True, choices=sorted(SUITE_DIRS))
     sk.add_argument("--event", required=True)
+    sk.add_argument("--base-ref", default="", help="the pull request's base branch (github.base_ref); main skips nothing")
     sk.add_argument("--repo", default="")
     sk.add_argument("--pr", default="")
     sk.add_argument("--list", action="store_true", help="print every Cost=Slow class of the suite instead")
@@ -1056,6 +1074,7 @@ def main(argv: list[str]) -> int:
     ms = sub.add_parser("map-select", help="which classes a pull request runs, from a class-to-file map (workflow step)")
     ms.add_argument("--map", required=True, help="the test map (JSON, or .gz)")
     ms.add_argument("--event", default="pull_request")
+    ms.add_argument("--base-ref", default="", help="the pull request's base branch (github.base_ref); main runs everything")
     ms.add_argument("--base", help="the merge base; the drift is `git diff --no-renames <map sha>..<base>`")
     ms.add_argument("--drift-file", help="the drift as one path per line, instead of --base (`-` for none)")
     ms.add_argument("--root", default=ROOT, help="the tree whose test classes are listed (default: this repository)")
@@ -1104,7 +1123,8 @@ def main(argv: list[str]) -> int:
             # The map holds the suites the nightly instruments (darling, lite). The deprecated suites in the tree
             # are not in it and no shard runs them as a test-map class, so they are not "new classes".
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
-        result = map_select(test_map, files, drift, discovered, event=args.event, **selection_args(Rules()))
+        result = map_select(test_map, files, drift, discovered, event=args.event, base_ref=args.base_ref,
+                            **selection_args(Rules()))
         if result["full"]:
             print(f"::notice::test map: running everything ({result['reason']})")
         print(json.dumps(result, indent=1))
@@ -1177,7 +1197,7 @@ def main(argv: list[str]) -> int:
         files = args.files
         if not files and args.repo and args.pr.isdigit() and args.event == "pull_request":
             files = changed_files_of_pr(args.repo, args.pr)
-        print("\n".join(index.skip(files, args.event)[args.suite]))
+        print("\n".join(index.skip(files, args.event, args.base_ref)[args.suite]))
         return 0
     if args.cmd == "decide":
         print(json.dumps(decide(args.files, args.event, Rules()), indent=1))

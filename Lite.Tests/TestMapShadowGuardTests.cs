@@ -536,6 +536,9 @@ public sealed class TestMapShadowGuardTests : IDisposable
 
         Assert.Contains("exit 0", job, StringComparison.Ordinal);
         Assert.Contains("timeout 120 python .github/scripts/ci-select.py map-select", job, StringComparison.Ordinal);
+        // #5459: a pull request into main always runs everything, so the step hands the base branch to map-select.
+        Assert.Contains("BASE_REF: ${{ github.base_ref }}", job, StringComparison.Ordinal);
+        Assert.Contains("--event pull_request --base-ref \"${BASE_REF}\" --base \"${BASE_SHA}\"", job, StringComparison.Ordinal);
         var check = Job(BuildYml(), "shadow-check");
         Assert.Contains("exit 0", check, StringComparison.Ordinal);
         Assert.Contains("name: test-map-shadow-row", check, StringComparison.Ordinal);
@@ -655,6 +658,7 @@ public sealed class TestMapShadowGuardTests : IDisposable
             }
             $env:SLOW_REPO = ''
             $env:SLOW_PR = ''
+            $env:SLOW_BASE_REF = ''
             if ($Suite -eq 'darling') { & $Script -Shard 0 -ShardCount 1 -EventName $EventName -SelectionFile $Selection }
             else { & $Script -Shard 0 -ShardCount 1 -JobIndex 0 -EventName $EventName -SelectionFile $Selection }
             exit $LASTEXITCODE

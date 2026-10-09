@@ -13,7 +13,8 @@
   -Shard / -ShardCount   this leg's index and the matrix's leg count (strategy.job-total).
   -JobIndex              strategy.job-index; equal to -Shard only while `shard` is the matrix's one axis.
   -EventName             the workflow event. Only 'pull_request' leaves out Cost=Slow classes (#5459 change 5);
-                         the SLOW_PR and SLOW_REPO environment variables carry the rest of that lookup.
+                         the SLOW_PR, SLOW_REPO and SLOW_BASE_REF environment variables carry the rest of that lookup
+                         (a pull request into main, SLOW_BASE_REF=main, skips nothing).
   -GuardBuildUsed        'true' only when this leg used the Guard job's build (see the Darling script).
   -ScopeMode             'reads' runs only the classes that read a Darling tree; anything else cuts the whole suite.
   -TimingRun / -TimingArtifacts
@@ -164,7 +165,7 @@ elseif ($EventName -eq 'pull_request') {
     # every class). A shard that cannot list the pull request's files skips nothing. Like the selection above it
     # happens AFTER the cut and the zero check, and an emptied shard ends here rather than reaching a runner with
     # no -class arguments.
-    $skip = @(python .github/scripts/ci-select.py slow-skip --suite lite --event $EventName --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ })
+    $skip = @(python .github/scripts/ci-select.py slow-skip --suite lite --event $EventName "--base-ref=$env:SLOW_BASE_REF" --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ })
     $kept = @($mine | Where-Object { $skip -notcontains ($_ -split '\.')[-1] })
     Write-Host "shard ${Shard}: $($mine.Count - $kept.Count) Cost=Slow classes left out on this pull request, $($kept.Count) to run"
     $mine = $kept

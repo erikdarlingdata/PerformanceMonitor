@@ -78,7 +78,7 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     }
 
     private (int ExitCode, JsonElement Result) MapSelect(string map, string[] files, string[]? drift = null,
-        string eventName = "pull_request", string? root = null)
+        string eventName = "pull_request", string? root = null, string? baseRef = null)
     {
         var psi = new ProcessStartInfo("python")
         {
@@ -96,6 +96,12 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
         psi.ArgumentList.Add(root ?? Path.Combine(_dir, "tree"));
         psi.ArgumentList.Add("--event");
         psi.ArgumentList.Add(eventName);
+        if (baseRef is not null)
+        {
+            psi.ArgumentList.Add("--base-ref");
+            psi.ArgumentList.Add(baseRef);
+        }
+
         psi.ArgumentList.Add("--drift-file");
         if (drift is null || drift.Length == 0)
         {
@@ -369,5 +375,26 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
         var (_, r) = MapSelect(WriteMap(), new[] { "Lite.Tests/Own.cs" }, eventName: eventName);
 
         AssertFull(r, "always runs everything");
+    }
+
+    [Fact]
+    public void PullRequestIntoMain_IsFull_WhereTheSameOneIntoDevIsNarrowed()
+    {
+        // #5459: a good fresh map, zero drift and a one-file diff the map knows. Into dev it narrows; into main (the
+        // release gate) it always runs everything.
+        var map = WriteMap();
+        var files = new[] { "Lite.Tests/Own.cs" };
+
+        var (_, intoMain) = MapSelect(map, files, baseRef: "main");
+        AssertFull(intoMain, "a pull request into main always runs everything");
+        Assert.Equal("a pull request into main always runs everything", intoMain.GetProperty("reason").GetString());
+
+        var (_, intoDev) = MapSelect(map, files, baseRef: "dev");
+        Assert.False(intoDev.GetProperty("full").GetBoolean(), "a pull request into dev must still narrow:\n" + intoDev);
+        Assert.Equal("own file changed", Why(intoDev)["OwnTests"]);
+
+        // No base branch at all (the replay corpus has none) narrows as before.
+        var (_, noBase) = MapSelect(map, files);
+        Assert.False(noBase.GetProperty("full").GetBoolean(), "an absent base branch keeps today's behaviour:\n" + noBase);
     }
 }

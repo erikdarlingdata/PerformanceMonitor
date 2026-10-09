@@ -1027,6 +1027,8 @@ jobs:
           SLOW_EVENT: ${{ github.event_name }}
           SLOW_PR: ${{ github.event.pull_request.number }}
           SLOW_REPO: ${{ github.repository }}
+          # #5459: a pull request into main runs everything, Cost=Slow classes too (ci-select.py narrows).
+          SLOW_BASE_REF: ${{ github.base_ref }}
         shell: pwsh
         run: |
           # An empty filter is the whole suite; `-trait Stage=Guard` is the Guard stage alone.
@@ -1046,7 +1048,7 @@ jobs:
           # not reach (ci-select.py slow_skip). The Guard-only pass has none of them (a Guard class is never Slow).
           $slowArgs = @()
           if ($env:SLOW_EVENT -eq 'pull_request' -and $scopeArgs.Count -eq 0) {
-              $slowArgs = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ } | ForEach-Object { '-class-'; "*.$_" })
+              $slowArgs = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT "--base-ref=$env:SLOW_BASE_REF" --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ } | ForEach-Object { '-class-'; "*.$_" })
           }
           dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @scopeArgs @slowArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1957,6 +1959,8 @@ jobs:
           SLOW_EVENT: ${{ github.event_name }}
           SLOW_PR: ${{ github.event.pull_request.number }}
           SLOW_REPO: ${{ github.repository }}
+          # #5459: a pull request into main runs everything, Cost=Slow classes too (ci-select.py narrows).
+          SLOW_BASE_REF: ${{ github.base_ref }}
         # #5616: the cut, the test map selection (#5459, else the Cost=Slow skip), the chunking and the per-chunk runs live in .github/scripts/run-darling-pg-shard.ps1,
         # the ONE copy that nightly.yml's darling-pg job calls too.
         run: |
@@ -2811,6 +2815,8 @@ jobs:
           SLOW_EVENT: ${{ github.event_name }}
           SLOW_PR: ${{ github.event.pull_request.number }}
           SLOW_REPO: ${{ github.repository }}
+          # #5459: a pull request into main runs everything, Cost=Slow classes too (ci-select.py narrows).
+          SLOW_BASE_REF: ${{ github.base_ref }}
           # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
           GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
           # #5459 live selection: empty unless this pull request run downloaded a selection (see the step above).
@@ -2884,6 +2890,8 @@ jobs:
           MAP_RUN: ${{ needs.gate.outputs.test_map_run }}
           MAP_SHA: ${{ needs.gate.outputs.test_map_sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # #5459: a pull request into main (the release gate) always runs everything; map-select answers FULL for it.
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -uo pipefail
 
@@ -2905,7 +2913,7 @@ jobs:
               full "the pinned map could not be downloaded"
             elif ! git diff --no-renames --name-only "${BASE_SHA}" HEAD > shadow/changed.txt; then
               full "the changed files could not be listed"
-            elif ! timeout 120 python .github/scripts/ci-select.py map-select --map shadow/map/test-map.json.gz --event pull_request --base "${BASE_SHA}" --files-from shadow/changed.txt --out shadow/selection.json --summary shadow/summary.md; then
+            elif ! timeout 120 python .github/scripts/ci-select.py map-select --map shadow/map/test-map.json.gz --event pull_request --base-ref "${BASE_REF}" --base "${BASE_SHA}" --files-from shadow/changed.txt --out shadow/selection.json --summary shadow/summary.md; then
               rm -f shadow/selection.json
               full "the selection script failed"
             else
