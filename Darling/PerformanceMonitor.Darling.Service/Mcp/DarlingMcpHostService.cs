@@ -1678,6 +1678,14 @@ public sealed class DarlingMcpHostService : BackgroundService
             if (HttpMethods.IsPost(context.Request.Method)
                 && !DarlingWebEndpoints.IsJsonContentType(context.Request.ContentType))
             {
+                var presentedType = context.Request.ContentType;
+                refusals.Report(
+                    _logger, "MCP", DarlingRefusalGate.JsonContentType, StatusCodes.Status415UnsupportedMediaType,
+                    context.Connection.RemoteIpAddress,
+                    string.IsNullOrEmpty(presentedType)
+                        ? "a POST with no Content-Type; this endpoint reads a JSON body"
+                        : $"a POST with the media type '{DarlingHttpRefusalLog.Sanitize(presentedType)}'; this endpoint reads a JSON body",
+                    DateTime.UtcNow);
                 context.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
                 return;
             }

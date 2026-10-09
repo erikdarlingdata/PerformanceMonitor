@@ -22,6 +22,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -682,6 +683,32 @@ public sealed class DarlingMcpHostGateLiveTests
             Assert.True(statusCode == StatusCodes.Status415UnsupportedMediaType, $"{path} {contentType}: got {statusCode}: {body}");
             Assert.DoesNotContain("\"result\"", body, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The 415 refusal is reported like the other refusal sites: one log line naming the gate and the media type
+    /// (or saying there was none), read from the host's own logger through the real pipeline.
+    /// </summary>
+    [Theory]
+    [InlineData(false, "text/plain", "the media type 'text/plain'")]
+    [InlineData(true, "text/plain", "the media type 'text/plain'")]
+    [InlineData(false, "", "no Content-Type")]
+    public async Task NonJsonPost_LogsOneRefusalLine_NamingTheJsonContentTypeGate(bool networkMode, string contentType, string expectedDetail)
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode, hostLogger: hostLogger);
+        var host = networkMode ? ListenIp : "localhost";
+        var remote = networkMode ? InCidrRemote : IPAddress.Loopback;
+
+        var (statusCode, _) = await SendJsonRpcCoreAsync(server, "/", host, remote, "{}", networkMode ? Token : null, contentType);
+        Assert.Equal(StatusCodes.Status415UnsupportedMediaType, statusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.StartsWith("Warning: MCP ", line, StringComparison.Ordinal);
+        Assert.Contains(DarlingHttpRefusalLog.Describe(DarlingRefusalGate.JsonContentType), line, StringComparison.Ordinal);
+        Assert.Contains("refused", line, StringComparison.Ordinal);
+        Assert.Contains("415", line, StringComparison.Ordinal);
+        Assert.Contains(expectedDetail, line, StringComparison.Ordinal);
     }
 
     /// <summary>
