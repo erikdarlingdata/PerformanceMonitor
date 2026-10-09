@@ -91,7 +91,7 @@ public partial class DuckDbFactCollector
                 if (!verdicts.TryGetValue(key, out verdict))
                 {
                     verdict = await CompareFetchedPlansAsync(
-                        context, overall.Token, budget, candidate.DatabaseName, latestPlanId, bestPlanId);
+                        context, budget, candidate.DatabaseName, latestPlanId, bestPlanId, overall.Token);
                     verdicts[key] = verdict;
                 }
             }
@@ -111,13 +111,13 @@ public partial class DuckDbFactCollector
 
     /// <summary>The verdict for one candidate's two plans; Unknown when either cannot be had or compared.</summary>
     private async Task<PlanInputVerdict> CompareFetchedPlansAsync(
-        AnalysisContext context, CancellationToken overallToken, PlanFetchBudget budget,
-        string databaseName, long latestPlanId, long bestPlanId)
+        AnalysisContext context, PlanFetchBudget budget,
+        string databaseName, long latestPlanId, long bestPlanId, CancellationToken overallToken)
     {
-        var latestXml = await FetchPlanForInputsAsync(context, overallToken, budget, databaseName, latestPlanId);
+        var latestXml = await FetchPlanForInputsAsync(context, budget, databaseName, latestPlanId, overallToken);
         if (latestXml is null) return PlanInputVerdict.Unknown;
 
-        var bestXml = await FetchPlanForInputsAsync(context, overallToken, budget, databaseName, bestPlanId);
+        var bestXml = await FetchPlanForInputsAsync(context, budget, databaseName, bestPlanId, overallToken);
         if (bestXml is null) return PlanInputVerdict.Unknown;
 
         try
@@ -136,8 +136,8 @@ public partial class DuckDbFactCollector
     /// plan or the failure is logged.
     /// </summary>
     private async Task<string?> FetchPlanForInputsAsync(
-        AnalysisContext context, CancellationToken overallToken, PlanFetchBudget budget,
-        string databaseName, long planId)
+        AnalysisContext context, PlanFetchBudget budget,
+        string databaseName, long planId, CancellationToken overallToken)
     {
         if (budget.Left <= 0 || overallToken.IsCancellationRequested) return null;
         budget.Left--;
