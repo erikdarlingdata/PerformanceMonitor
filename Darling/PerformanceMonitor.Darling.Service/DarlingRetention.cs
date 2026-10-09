@@ -190,7 +190,7 @@ public static class DarlingRetention
     /// the oldest <c>first_execution_time</c> the purge has left. Like <see cref="QueryStoreIntervalLatestRetentionDays"/>
     /// this is a named constant, not a knob, and in no collector schedule.
     /// </summary>
-    internal const int QueryStoreIntervalWideRetentionDays = 9;
+    internal const int QueryStoreIntervalWideRetentionDays = QueryStoreIntervalPartitions.WideHorizonDays;
 
     /// <summary>
     /// #3466 (lane 2): the fleet-sweep tables' horizon — the base data horizon, deliberately, because a

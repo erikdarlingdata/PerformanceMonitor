@@ -165,7 +165,9 @@ public sealed class QueryStoreComposeStampTests
     {
         var plan = QueryStoreComposeStamp.PlanSql;
         Assert.Contains("ORDER BY p.stale DESC, p.hour DESC", plan, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $2", plan, StringComparison.Ordinal);
+        /* The cap is per kind (stale, never built); ChooseBuilds splits one tick's builds between the two. */
+        Assert.Contains("row_number() OVER (PARTITION BY u.stale ORDER BY u.hour DESC)", plan, StringComparison.Ordinal);
+        Assert.Contains("WHERE p.rn <= $2", plan, StringComparison.Ordinal);
         Assert.Contains("b.built_seq IS DISTINCT FROM b.late_seq", plan, StringComparison.Ordinal);
         /* The build lag is read off the STORE's clock, the one the row trigger's WHEN uses; the service's clock is only the retention floor. */
         Assert.Contains("date_trunc('hour', (now() AT TIME ZONE 'UTC') - interval '3 hours')", plan, StringComparison.Ordinal);
@@ -213,6 +215,57 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains("(xact_start AT TIME ZONE 'UTC') < $1 + interval '2 hours'", sql, StringComparison.Ordinal);
         /* The 2 hours are the build lag less the trigger's offset: a row of hour H is unmarked only before H + 3 h - 1 h. */
         Assert.Equal(TimeSpan.FromHours(2), QueryStoreComposeStamp.BuildLag - QueryStoreComposeStamp.WhenOffset);
+    }
+
+    private static QueryStoreComposeStamp.Build B(int hoursAgo, bool stale) => new(new DateTime(2026, 10, 8, 12, 0, 0).AddHours(-hoursAgo), stale);
+
+    [Fact]
+    public void ChooseBuilds_WithNeverBuiltHoursWaiting_GivesStaleHoursAtMostHalfTheTick_AndTheRestToTheNeverBuiltOnes()
+    {
+        var stale = Enumerable.Range(3, 10).Select(h => B(h, true));
+        var missing = Enumerable.Range(20, 10).Select(h => B(h, false));
+        var chosen = QueryStoreComposeStamp.ChooseBuilds(stale.Concat(missing).Reverse().ToList(), QueryStoreComposeStamp.MaxBuildsPerTick);
+
+        Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, chosen.Count);
+        Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick / 2, chosen.Count(b => b.Stale));
+        /* Stale first, newest first; then the never-built hours, newest first. */
+        Assert.Equal(new[] { B(3, true), B(4, true), B(5, true), B(20, false), B(21, false), B(22, false) }, chosen);
+    }
+
+    [Fact]
+    public void ChooseBuilds_WithFewNeverBuiltHours_TakesThemAll_AndWithNoneWaiting_LetsStaleHoursTakeTheWholeTick()
+    {
+        var stale = Enumerable.Range(3, 10).Select(h => B(h, true)).ToList();
+
+        var one = QueryStoreComposeStamp.ChooseBuilds(stale.Append(B(30, false)).ToList(), 6);
+        Assert.Equal(new[] { B(3, true), B(4, true), B(5, true), B(30, false) }, one);
+
+        var none = QueryStoreComposeStamp.ChooseBuilds(stale, 6);
+        Assert.Equal(6, none.Count);
+        Assert.All(none, b => Assert.True(b.Stale));
+        Assert.Equal(B(3, true), none[0]);
+
+        /* Only never-built hours: all the slots, newest first. */
+        var onlyMissing = QueryStoreComposeStamp.ChooseBuilds(Enumerable.Range(10, 9).Select(h => B(h, false)).ToList(), 6);
+        Assert.Equal(Enumerable.Range(10, 6).Select(h => B(h, false)), onlyMissing);
+        Assert.Empty(QueryStoreComposeStamp.ChooseBuilds(Array.Empty<QueryStoreComposeStamp.Build>(), 6));
+    }
+
+    [Fact]
+    public void TheNineDayHorizon_IsOneConstant_SharedByThePartitionsThePurgeTheWideReadAndTheRollupFloor()
+    {
+        Assert.Equal(9, QueryStoreIntervalPartitions.WideHorizonDays);
+        Assert.Equal(QueryStoreIntervalPartitions.WideHorizonDays, QueryStoreIntervalPartitions.Wide.HorizonDays);
+        Assert.Equal(QueryStoreIntervalPartitions.WideHorizonDays, DarlingRetention.QueryStoreIntervalWideRetentionDays);
+
+        /* Defined once: the retention constant is the storage one, not a second literal; and the rollup tick is handed that constant. */
+        var retention = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs");
+        Assert.Contains("QueryStoreIntervalWideRetentionDays = QueryStoreIntervalPartitions.WideHorizonDays;", retention, StringComparison.Ordinal);
+        var partitions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalPartitions.cs");
+        Assert.Contains("new(\"query_store_interval_wide\", WideHorizonDays)", partitions, StringComparison.Ordinal);
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var tick = worker[worker.IndexOf("await QueryStoreComposeStamp.RunTickAsync(", StringComparison.Ordinal)..];
+        Assert.Contains("DarlingRetention.QueryStoreIntervalWideRetentionDays", tick[..300], StringComparison.Ordinal);
     }
 
     [Fact]

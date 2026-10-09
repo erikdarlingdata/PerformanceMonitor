@@ -416,9 +416,10 @@ VALUES ($1, $2)
 ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
 
     /// <summary>
-    /// The hours to build, as (hour, stale): $1 the floor (<see cref="FloorHour"/>), $2 the cap. First the stale
-    /// hours (an hour the builder has done that has a pair with <c>built_seq IS DISTINCT FROM late_seq</c>), newest first;
-    /// then the hours the builder has never done that are at least <see cref="BuildLag"/> old, newest first. Neither goes
+    /// The hours to build, as (hour, stale): $1 the floor (<see cref="FloorHour"/>), $2 the cap PER KIND, so at most that many
+    /// stale hours and at most that many never-built hours; <see cref="ChooseBuilds"/> splits one tick's builds between the two.
+    /// First the stale hours (an hour the builder has done that has a pair with <c>built_seq IS DISTINCT FROM late_seq</c>),
+    /// newest first; then the hours the builder has never done that are at least <see cref="BuildLag"/> old, newest first. Neither goes
     /// below the floor or below the hour of the earliest wide-table coverage claim (<c>filled_since</c>) of an enabled
     /// server, since the rollup cannot speak for earlier hours. A pair of an hour that is not in the hours table is not
     /// stale: it was created by a late writer before the builder reached the hour, and the hour's first build covers it.
@@ -453,9 +454,13 @@ missing AS
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
 SELECT p.hour, p.stale
-FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS p
-ORDER BY p.stale DESC, p.hour DESC
-LIMIT $2;";
+FROM
+(
+    SELECT u.hour, u.stale, row_number() OVER (PARTITION BY u.stale ORDER BY u.hour DESC) AS rn
+    FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS u
+) AS p
+WHERE p.rn <= $2
+ORDER BY p.stale DESC, p.hour DESC;";
 
     /// <summary>
     /// The first step of the cleanup: removes the hours below the floor from the hours table and returns them: $1 the floor.
@@ -506,7 +511,26 @@ WHERE hour < $1;";
         return hour < edge ? hour.AddHours(1) : hour;
     }
 
-    /// <summary>The hours to build at <paramref name="nowUtc"/>, stale first, then missing hours newest first, at most <see cref="MaxBuildsPerTick"/>.</summary>
+    /// <summary>
+    /// One tick's builds out of the planned candidates (<see cref="PlanSql"/>): stale hours first, newest first, then never-built hours
+    /// newest first, at most <paramref name="max"/> in all. While never-built hours are waiting, stale hours take at most half of the
+    /// tick's builds, so a storm of late writes (a backfill, a pending replay) that keeps marking built hours stale cannot starve the
+    /// never-built backlog (a new store's first ~190 hours); with none waiting, stale hours may take every build. The reserved
+    /// half goes to the never-built hours and no further (#5582 review round 1).
+    /// </summary>
+    public static IReadOnlyList<Build> ChooseBuilds(IReadOnlyList<Build> candidates, int max)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+
+        var stale = candidates.Where(b => b.Stale).OrderByDescending(b => b.Hour).ToList();
+        var missing = candidates.Where(b => !b.Stale).OrderByDescending(b => b.Hour).ToList();
+        var staleCap = missing.Count > 0 ? max / 2 : max;
+        var chosen = stale.Take(staleCap).ToList();
+        chosen.AddRange(missing.Take(Math.Max(0, max - chosen.Count)));
+        return chosen;
+    }
+
+    /// <summary>The hours to build at <paramref name="nowUtc"/>: <see cref="ChooseBuilds"/> over <see cref="PlanSql"/>, at most <see cref="MaxBuildsPerTick"/>.</summary>
     public static async Task<IReadOnlyList<Build>> PlanBuildsAsync(
         NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
     {
@@ -523,7 +547,7 @@ WHERE hour < $1;";
             builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1)));
         }
 
-        return builds;
+        return ChooseBuilds(builds, MaxBuildsPerTick);
     }
 
     /// <summary>
