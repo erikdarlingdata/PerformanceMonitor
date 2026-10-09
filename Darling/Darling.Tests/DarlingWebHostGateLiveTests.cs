@@ -450,6 +450,69 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
     }
 
+    private static int FreeTcpPort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Network mode with a token that is configured but cannot be used (a blob this host cannot decrypt, a variable
+    /// that is not set) does not start the dashboard at all, exactly as a loopback-only start does: the real start
+    /// returns false, logs one Critical line, and nothing answers on the loopback port.
+    /// </summary>
+    [Theory]
+    [InlineData("\"encryptedToken\": \"not-a-protected-blob\"")]
+    [InlineData("\"token\": \"env:DARLING_TEST_WEB_TOKEN_THAT_IS_NOT_SET\"")]
+    public async Task NetworkMode_ConfiguredTokenThatCannotBeUsed_DoesNotStart_AndNothingAnswersOnTheLoopbackPort(string tokenJson)
+    {
+        var port = FreeTcpPort();
+        var config = DarlingConfig.Parse(
+            ("{ 'postgres': { 'managed': true }, 'servers': [ { 'host': 'SQL2022' } ], 'web': { 'enabled': true, 'port': "
+            + port + ", 'network': { 'listen': '" + ListenIp + "', 'allowFrom': '" + AllowedCidr + "', " + tokenJson + " } } }")
+            .Replace('\'', '"'));
+        var log = new CapturingTestLogger();
+        var host = new DarlingWebHostService(
+            new CapturingHostLogger(log), new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        var toggle = new DarlingHostBinding.EndpointToggle(true, port, DarlingHostBinding.EndpointToggleOrigin.File, false, false);
+        var tryStart = typeof(DarlingWebHostService).GetMethod(
+            "TryStartServerAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var started = true;
+        var answered = false;
+        try
+        {
+            started = await (Task<bool>)tryStart.Invoke(host, [config, toggle, System.Threading.CancellationToken.None])!;
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
+                answered = true;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+            }
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+
+        Assert.False(started, "a configured token that cannot be used must stop the start in network mode");
+        Assert.False(answered, "nothing may answer on the loopback port");
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
+            && l.Contains("web dashboard not started", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
+    }
+
     /// <summary>The start itself calls the resolver on a loopback-only bind and stops on a refusal, so the pipeline
     /// tests above describe what production serves.</summary>
     [Fact]

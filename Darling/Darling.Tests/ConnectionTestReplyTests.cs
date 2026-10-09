@@ -132,6 +132,49 @@ public sealed class ConnectionTestReplyTests : IDisposable
         AssertDriverTextLoggedWithoutThePassword(log);
     }
 
+    /// <summary>The add path redacts the AWS external ID from the logged driver text, as the edit path does.</summary>
+    [Fact]
+    public async Task McpAdd_FailedProbe_LogHoldsNeitherThePassword_NorTheAwsExternalId()
+    {
+        const string externalId = "ext-id-Synth-7f3a9c";
+        const string role = "arn:aws:iam::123456789012:role/darling-monitor";
+        var log = new CapturingLogger();
+        var body = JsonSerializer.Serialize(new[]
+        {
+            new { host = "sql-test-01", port = 1444, engine = "postgres", auth = "SQL", username = "monitor", password = Password, aws_role_arn = role, aws_external_id = externalId },
+        });
+        Core.ServerProbe probe = (_, _) => Task.FromResult(
+            new ConnectionProbeResult(false, 0, 0, null, false, false, false, false, DriverText + " password=" + Password + " externalId=" + externalId));
+
+        var answer = await Core.AddServersAsync(
+            new EmptyDefinitions(), body, probe, CancellationToken.None, ring: TestKeyRings.Healthy, logger: log,
+            awsRoleAllowlist: PerformanceMonitor.Darling.Service.Targets.AwsRoleAllowlist.From(["123456789012"]));
+
+        Assert.Equal("connection_failed", JsonNode.Parse(answer)!["results"]![0]!["status"]!.GetValue<string>());
+        Assert.Contains("Distinctive-Driver-Text", log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain(Password, log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain(externalId, log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain(externalId, answer, StringComparison.Ordinal);
+    }
+
+    /// <summary>The driver text and the target come from the server the caller named: a line break in either logs as
+    /// one line, and a long text is cut.</summary>
+    [Fact]
+    public async Task McpAdd_FailedProbe_LogsDriverTextWithLineBreaks_AsOneBoundedLine()
+    {
+        var log = new CapturingLogger();
+        var probe = (Core.ServerProbe)((_, _) => Task.FromResult(new ConnectionProbeResult(
+            false, 0, 0, null, false, false, false, false, "first line\r\n2026-10-09 12:00:00 CRIT forged entry\n" + new string('x', 5000))));
+
+        await Core.AddServersAsync(new EmptyDefinitions(), AddBody(), probe, CancellationToken.None, ring: TestKeyRings.Healthy, logger: log);
+
+        var line = Assert.Single(log.Lines, l => l.Contains("first line", StringComparison.Ordinal));
+        Assert.DoesNotContain('\r', line);
+        Assert.DoesNotContain('\n', line);
+        Assert.Contains("sql-test-01,1444", line, StringComparison.Ordinal);
+        Assert.True(line.Length < 700, $"the logged line should be bounded, was {line.Length} characters");
+    }
+
     [Fact]
     public async Task McpAdd_FailedProbe_WithNoDriverText_StillNamesTheHostAndPort()
     {

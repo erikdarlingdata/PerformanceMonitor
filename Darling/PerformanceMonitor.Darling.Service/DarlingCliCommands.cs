@@ -1165,7 +1165,7 @@ public static class DarlingCliCommands
             "mcp",
             "MCP bearer",
             "--print-mcp-token",
-            "Remote MCP clients send it as the header:  Authorization: Bearer <token>",
+            "Every MCP client sends it as the header:  Authorization: Bearer <token>",
             IsElevated(),
             network is not null && network.IsConfigured,
             () => network!.ResolveToken(out _),
@@ -1287,8 +1287,8 @@ public static class DarlingCliCommands
            the warning. */
         error.WriteLine();
         error.WriteLine(
-            $"WARNING: the {tokenName} token below is written to STDOUT as PLAINTEXT. It gates ALL network access to "
-            + $"this endpoint. Redirect it to an ACL'd file or pipe it to the clipboard; do not leave it in shell "
+            $"WARNING: the {tokenName} token below is written to STDOUT as PLAINTEXT. It gates ALL access to "
+            + $"this endpoint, local clients included. Redirect it to an ACL'd file or pipe it to the clipboard; do not leave it in shell "
             + "scrollback, CI logs, or a screenshare.");
         error.WriteLine($"  Example (file):      PerformanceMonitor.Darling.Service.exe {verb} > token.txt");
         error.WriteLine($"  Example (clipboard): PerformanceMonitor.Darling.Service.exe {verb} | clip");
@@ -2508,7 +2508,7 @@ public static class DarlingCliCommands
         {
             error.WriteLine();
             error.WriteLine("SAVE THIS NOW — your new MCP bearer token is shown ONCE (darling.json stores only its DPAPI blob).");
-            error.WriteLine("Remote MCP clients send it as the header:  Authorization: Bearer <token>");
+            error.WriteLine("Every MCP client sends it as the header:  Authorization: Bearer <token>");
             output.WriteLine(mcp.Value.GeneratedPlain);
         }
 

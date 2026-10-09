@@ -76,8 +76,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <see cref="Hosting.DarlingWebTls"/> for the certificate rules and the Kestrel bind below for why the
 /// loopback listeners stay plain HTTP. Without it the exposed listener is plain HTTP and every start warns
 /// that the token and its cookie cross the segment in the clear. A certificate that is missing, unreadable,
-/// ambiguous or expired fail-closes to loopback-only exactly as an undecryptable token does; it never
-/// downgrades to serving the LAN over HTTP.</para>
+/// ambiguous or expired falls back to loopback-only (the token stays resolved and keeps gating it); it never
+/// downgrades to serving the LAN over HTTP. A token that is blank or cannot be decrypted stops the start in every mode.</para>
 ///
 /// <para>The dashboard connects to the store as the least-privilege VIEWER role (not owner, not mcp) — a
 /// read-only pool — on a managed store and on the compose distribution's own store; on any other store as
@@ -484,9 +484,9 @@ public sealed class DarlingWebHostService : BackgroundService
 
             /* In network mode ResolveBind has already validated the listen IP, the allowFrom CIDR list (#5288),
                AND every entry's address-family agreement with the listen, so these two parses cannot throw; only
-               resolving the token can still fail (a corrupt DPAPI blob), which fail-closes to loopback-only
-               rather than exposing tokenless. The list type's default admits nobody, so the value the loopback
-               mode never reads fails closed too. */
+               resolving the token can still fail (a corrupt DPAPI blob), and a token that is blank or cannot be
+               decrypted stops the start, as it does in loopback-only mode. The list type's default admits nobody,
+               so the value the loopback mode never reads fails closed too. */
             IPAddress? networkListenIp = null;
             CidrAllowList allowedCidr = default;
             string accessToken = "";
@@ -501,8 +501,9 @@ public sealed class DarlingWebHostService : BackgroundService
                     if (string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
-                            "Web dashboard token resolved to empty after decryption — refusing to expose; binding loopback-only.");
-                        networkMode = false;
+                            "Web dashboard token resolved to empty after decryption; web dashboard not started.");
+                        await DisposeFailedStartAsync();
+                        return false;
                     }
                     else
                     {
@@ -518,16 +519,17 @@ public sealed class DarlingWebHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogCritical(
-                        "Web dashboard token could not be decrypted ({Message}) — refusing to expose; binding loopback-only.",
+                        "Web dashboard token could not be decrypted ({Message}); web dashboard not started.",
                         ex.Message);
-                    networkMode = false;
+                    await DisposeFailedStartAsync();
+                    return false;
                 }
             }
             else
             {
                 /* A loopback-only start (no web.network.listen, or one the ladder refused) resolves a token the
                    operator configured too, and the pipeline then gates the loopback dashboard on it through the
-                   token-to-cookie gate, as it gates a degraded one. No token configured leaves accessToken empty and
+                   token-to-cookie gate, as it gates one that network mode fell back to. No token configured leaves accessToken empty and
                    the dashboard open to local browsers, as it has always been. A configured token that cannot be used
                    stops this start, because serving the dashboard open would drop the credential the operator asked
                    every client to present. */
@@ -615,8 +617,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
             /* TLS for the network listener (#2562). Resolved HERE rather than in the pure ResolveBind ladder for
                the same reason the token is: loading a certificate reads files and a clock, and the ladder is
-               kept free of both. It also means a certificate failure degrades exactly the way a token failure
-               does — Critical, then loopback-only — instead of needing its own BindReason, which the MCP host's
+               kept free of both. It also means a certificate failure degrades to loopback-only after a Critical line
+               (the token stays resolved and keeps gating it) instead of needing its own BindReason, which the MCP host's
                parallel enum would have had to grow a member it can never use.
 
                #5288: the block itself lives in DarlingListenerTls.Resolve now, shared with the MCP host, so
@@ -815,11 +817,11 @@ public sealed class DarlingWebHostService : BackgroundService
 
             /* #5288: a start that was asked to expose and fell back to loopback-only AFTER its token resolved (the
                TLS block above refused) keeps the token-to-cookie gate on the loopback server, because the operator's
-               config said every client presents the token. accessToken is only ever assigned inside the network
-               branch, once the token resolved, so "not network mode, token set" is exactly that state. The same holds
-               for a loopback-only start whose configured token resolved (ResolveLoopbackOnlyToken, above). A start
+               config said every client presents the token. accessToken holds the resolved token in both branches above
+               (the network branch, and the loopback-only branch via ResolveLoopbackOnlyToken), so "not network mode,
+               token set" covers that state and a loopback-only start whose configured token resolved. A start
                with no token configured leaves it empty and stays tokenless; a configured token that cannot be used
-               never gets here, the start stops. */
+               never gets here, the start stops in every mode. */
             var requireTokenWhenLoopbackOnly = !networkMode && accessToken.Length > 0;
 
             /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
@@ -853,12 +855,12 @@ public sealed class DarlingWebHostService : BackgroundService
             else
             {
                 _logger.LogInformation(
-                    "Starting web dashboard on http://localhost:{Port} (loopback only) — enabled/port from {Origin}",
-                    effectivePort, origin);
+                    "Starting web dashboard on http://localhost:{Port} (loopback only){TokenNote} — enabled/port from {Origin}",
+                    effectivePort, requireTokenWhenLoopbackOnly ? ", token required" : "", origin);
                 if (requireTokenWhenLoopbackOnly)
                 {
                     _logger.LogInformation(
-                        "The web dashboard loopback listener still requires the web.network token: the network block is configured, so local browsers and clients present it too.");
+                        "The web dashboard loopback listener requires the web.network token: local browsers and clients present it too.");
                 }
             }
 
@@ -923,10 +925,9 @@ public sealed class DarlingWebHostService : BackgroundService
         => DarlingHostBinding.IsAllowedHost(host, networkListenIp, extraAllowedHost);
 
     /// <summary>
-    /// PURE route-auth decision. This method is only ever reached in NETWORK mode, or on the loopback-only server
-    /// that network mode fell back to after its token resolved (#5288) — the caller registers the auth middleware
-    /// only for those — so a loopback-only dashboard with no network block is unaffected by every rule here and
-    /// stays tokenless.
+    /// PURE route-auth decision. This method is only ever reached in NETWORK mode, or on a loopback-only server
+    /// that has a configured token (#5288) — the caller registers the auth middleware only for those — so a
+    /// loopback-only dashboard with no token configured is unaffected by every rule here and stays tokenless.
     ///
     /// <para>Loopback skips the CIDR check (127.0.0.1 is not in a LAN CIDR, so testing it there would 403 the
     /// operator's own browser) but still needs a session cookie or a valid <c>?token=</c>, exactly like any
@@ -1067,7 +1068,7 @@ public sealed class DarlingWebHostService : BackgroundService
         var refusals = new DarlingHttpRefusalLog();
 
         /* Pipeline order: the failure observer (W12, which folded in the #4276 backstop), then response compression (#4188), then the
-           Host-allowlist/DNS-rebinding guard (both modes), then (network mode, or the token-keeping degraded loopback-only server,
+           Host-allowlist/DNS-rebinding guard (both modes), then (network mode, or a loopback-only server that keeps a configured token,
            see requireTokenWhenLoopbackOnly) the auth middleware, then a marker that the request has passed the gate, then the
            no-store stamp on /api/* responses, then DarlingWebEndpoints.MapAll -> UseDefaultFiles -> UseStaticFiles.
            WebApplication auto-inserts UseRouting at the head and UseEndpoints at the tail, so the static-file middleware sits
@@ -1139,10 +1140,10 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
-        /* The auth gate installs in network mode and, on a loopback-only server that network mode fell back to
-           after its token resolved (requireTokenWhenLoopbackOnly, #5288), too: the token-to-cookie gate is the
+        /* The auth gate installs in network mode and, on a loopback-only server that has a configured token
+           (requireTokenWhenLoopbackOnly, #5288), too: the token-to-cookie gate is the
            one credential check this host has, and the CIDR test inside it exempts loopback, so on a server that
-           only binds loopback it is the token that gates. A loopback-only server with no network block still
+           only binds loopback it is the token that gates. A loopback-only server with no token configured still
            registers nothing here. */
         if (networkMode || requireTokenWhenLoopbackOnly)
         {
@@ -2142,7 +2143,8 @@ document.getElementById('return').value = location.pathname + location.search + 
             case DarlingHostBinding.BindReason.ManagedModeRequired:
                 _logger.Log(level.Value,
                     "web.network.* is set but postgres.managed = false — web dashboard network exposure is managed-mode (or container, " +
-                    "#1804) only and is ignored; your own reverse proxy governs uncontained BYO exposure. Binding loopback-only.");
+                    "#1804) only, so listen and allowFrom are ignored; your own reverse proxy governs uncontained BYO exposure. " +
+                    "Binding loopback-only. A token in the block (web.network.encryptedToken / token) still gates the loopback dashboard.");
                 break;
 
             default:

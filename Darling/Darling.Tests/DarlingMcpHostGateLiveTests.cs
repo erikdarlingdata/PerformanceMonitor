@@ -573,6 +573,69 @@ public sealed class DarlingMcpHostGateLiveTests
         Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
     }
 
+    private static int FreeTcpPort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Network mode with a token that is configured but cannot be used (a blob this host cannot decrypt, a variable
+    /// that is not set) does not start the listener at all, exactly as a loopback-only start does: the real start
+    /// returns false, logs one Critical line, and nothing answers on the loopback port.
+    /// </summary>
+    [Theory]
+    [InlineData("\"encryptedToken\": \"not-a-protected-blob\"")]
+    [InlineData("\"token\": \"env:DARLING_TEST_MCP_TOKEN_THAT_IS_NOT_SET\"")]
+    public async Task NetworkMode_ConfiguredTokenThatCannotBeUsed_DoesNotStart_AndNothingAnswersOnTheLoopbackPort(string tokenJson)
+    {
+        var port = FreeTcpPort();
+        var config = DarlingConfig.Parse(
+            ("{ 'postgres': { 'managed': true }, 'servers': [ { 'host': 'SQL2022' } ], 'mcp': { 'enabled': true, 'port': "
+            + port + ", 'network': { 'listen': '" + ListenIp + "', 'allowFrom': '" + AllowedCidr + "', " + tokenJson + " } } }")
+            .Replace('\'', '"'));
+        var log = new CapturingTestLogger();
+        var host = new DarlingMcpHostService(new CapturingHostLogger(log), new McpRuntimeState(), new MonitoredServerRegistryState());
+        var toggle = new PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.EndpointToggle(
+            true, port, PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.EndpointToggleOrigin.File, false, false);
+        var tryStart = typeof(DarlingMcpHostService).GetMethod(
+            "TryStartServerAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var started = true;
+        var answered = false;
+        try
+        {
+            started = await (Task<bool>)tryStart.Invoke(host, [config, toggle, System.Threading.CancellationToken.None])!;
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
+                answered = true;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+            }
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+
+        Assert.False(started, "a configured token that cannot be used must stop the start in network mode");
+        Assert.False(answered, "nothing may answer on the loopback port");
+        Assert.Contains(log.Lines, l => l.Contains("MCP network token", StringComparison.Ordinal)
+            && l.Contains("MCP server not started", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
+    }
+
     /// <summary>The start itself calls the resolver on a loopback-only bind and stops on a refusal, so the pipeline
     /// tests above describe what production serves.</summary>
     [Fact]
@@ -590,8 +653,8 @@ public sealed class DarlingMcpHostGateLiveTests
     }
 
     /// <summary>
-    /// A POST whose Content-Type is not JSON gets 415 in both modes and the tool does not run: the three types a page
-    /// can send cross-origin without a preflight, carrying a valid <c>tools/call</c> for a write tool.
+    /// A POST must carry a JSON Content-Type; any other type is answered 415 in both modes and the tool does not run,
+    /// whatever the body holds (here a valid <c>tools/call</c> for a write tool).
     /// </summary>
     [Theory]
     [InlineData(false, "text/plain")]
@@ -619,6 +682,44 @@ public sealed class DarlingMcpHostGateLiveTests
             Assert.True(statusCode == StatusCodes.Status415UnsupportedMediaType, $"{path} {contentType}: got {statusCode}: {body}");
             Assert.DoesNotContain("\"result\"", body, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The 415 check sits below the CIDR and token gates: a caller that fails a gate is answered 401 or 403 first,
+    /// whatever Content-Type it sends, and only a caller that passes them reaches the 415.
+    /// </summary>
+    [Theory]
+    [InlineData("/", "text/plain")]
+    [InlineData("/", "")]
+    [InlineData("/core", "application/x-www-form-urlencoded")]
+    public async Task NonJsonPost_OnATokenGatedLoopbackListener_Gets401UntilTheTokenIsRight(string path, string contentType)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (noToken, _) = await SendJsonRpcCoreAsync(server, path, "localhost", IPAddress.Loopback, "{}", null, contentType);
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        var (wrongToken, _) = await SendJsonRpcCoreAsync(server, path, "localhost", IPAddress.Loopback, "{}", "not-the-token", contentType);
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrongToken);
+
+        var (rightToken, _) = await SendJsonRpcCoreAsync(server, path, "localhost", IPAddress.Loopback, "{}", Token, contentType);
+        Assert.Equal(StatusCodes.Status415UnsupportedMediaType, rightToken);
+    }
+
+    [Fact]
+    public async Task NonJsonPost_InNetworkMode_Gets403OutsideTheCidr_And401WithoutTheToken()
+    {
+        using var server = await BuildServer(networkMode: true);
+        var outside = IPAddress.Parse("203.0.113.9");
+
+        var (outsideStatus, _) = await SendJsonRpcCoreAsync(server, "/", ListenIp, outside, "{}", Token, "text/plain");
+        Assert.Equal(StatusCodes.Status403Forbidden, outsideStatus);
+
+        var (noToken, _) = await SendJsonRpcCoreAsync(server, "/", ListenIp, InCidrRemote, "{}", null, "text/plain");
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        var (rightToken, _) = await SendJsonRpcCoreAsync(server, "/", ListenIp, InCidrRemote, "{}", Token, "text/plain");
+        Assert.Equal(StatusCodes.Status415UnsupportedMediaType, rightToken);
     }
 
     /// <summary>The JSON POST path is untouched: <c>application/json</c> (with or without a charset) still reaches the
