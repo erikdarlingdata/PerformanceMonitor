@@ -320,7 +320,7 @@ public sealed class TopTextLookupPlanLiveTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
-            var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+            var now = DarlingMcpTestData.Naive(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             if (bulk)
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct,
