@@ -808,11 +808,27 @@ AND   xmin = $4::xid";
         return (next, page.Count, rewritten, raced);
     }
 
-    /// <summary>How many stored analysis findings one slice examines.</summary>
-    public const int MaxFindingRowsPerPass = 500;
+    /// <summary>How many heap blocks of <c>analysis_findings</c> one slice reads (#5625): 2048 blocks of 8 KiB, 16 MiB.
+    /// The slice is bounded by the table's physical size, not by how many findings match, so a store with none to
+    /// rewrite still costs one slice a fixed read. On a 600,000-finding store (1,514 MB, none matching) the old page
+    /// read all 132,357 buffers (about 1 GB) and failed twice under the 15 s <see cref="StatementTimeoutSeconds"/>
+    /// on a cold or busy disk; 16 MiB is 1/64 of that, so a disk has to fall below about 1 MiB/s to time a slice
+    /// out, and a walk is about 65 slices on that store.</summary>
+    public const int FindingBlocksPerPass = 2048;
 
-    /// <summary>One page of stored analysis findings that carry a deadlock exemplar section, in physical order after
-    /// <c>$1</c> (null for the start). Only a finding whose chain holds a key the section is attached for (the deadlock
+    /// <summary>The block count of <c>analysis_findings</c> now (#5625): where a block-range walk ends. Read for each
+    /// slice, so a table that grew during the walk is walked to its new end (rows this build writes are already
+    /// stamped; the ones the walk rewrites are found again by the next walk).</summary>
+    public const string FindingBlockCountSql = @"
+SELECT pg_catalog.pg_relation_size('analysis_findings'::regclass) / pg_catalog.current_setting('block_size')::bigint";
+
+    /// <summary>One page of stored analysis findings that carry a deadlock exemplar section, from one physical block
+    /// range of the table (#5625): <c>$1</c> is the first block's <c>(block,0)</c> and <c>$2</c> the end of the range,
+    /// exclusive, so the read is a TID Range Scan of <see cref="FindingBlocksPerPass"/> blocks whatever matches. It was
+    /// <c>finding_id &gt; $1 ORDER BY finding_id</c>, and the table has no index on <c>finding_id</c> (the bulk ingest
+    /// goes without it), so every page was a Seq Scan and Sort of the whole table, 1 GB on a 600,000-finding store,
+    /// and a page with nothing to find still read all of it. Only a finding whose chain holds a key the section is
+    /// attached for (the deadlock
     /// rate fact or its anomaly, anywhere on the path, as <see cref="PgTargetDrillDownCollector"/> attaches it: #4012's
     /// review, finding 4) is looked into, by its <c>story_path</c>, a plain column holding the chain's keys joined
     /// with <c>" → "</c> (<c>InferenceEngine.BuildStory</c>), so every other finding's drill-down is never detoasted
@@ -825,18 +841,17 @@ SELECT
     f.ctid::text,
     f.drill_down_json,
     f.story_text,
-    f.xmin,
-    f.finding_id
+    f.xmin
 FROM analysis_findings AS f
-WHERE ($1::bigint IS NULL OR f.finding_id > $1::bigint)
+WHERE f.ctid >= $1::tid
+AND   f.ctid <  $2::tid
 AND   CASE
           WHEN string_to_array(f.story_path, ' → ') && ARRAY['" + PgTargetFactKeys.DeadlockRate + "', '" + PgTargetFactKeys.AnomalyDeadlockRate + @"']
           THEN strpos(f.drill_down_json, '""" + PgTargetDrillDownCollector.DeadlockExemplarsSection + @"""') > 0
                AND strpos(f.drill_down_json, '""sql_normalized"":true') = 0
           ELSE false
       END
-ORDER BY f.finding_id
-FETCH FIRST $2 ROWS WITH TIES";
+ORDER BY f.ctid";
 
     /// <summary>Writes one finding's normalized drill-down and prose back, only while the row is still the version
     /// the page read (<c>ctid</c> and <c>xmin</c>), never by sending its raw text back (#4012's review).</summary>
@@ -865,9 +880,14 @@ AND   xmin = $4::xid";
     }
 
     /// <summary>
-    /// Examines one slice of stored analysis findings and rewrites the ones whose deadlock exemplars predate #4005
-    /// (#4012). Returns the cursor to resume from, null once the table's end is reached, and how many rows changed
-    /// between the read and the write, which were left as they were and need the table read again.
+    /// Examines one block range of stored analysis findings and rewrites the ones whose deadlock exemplars predate
+    /// #4005 (#4012, #5625). <paramref name="afterCursor"/> is the first block to read (null for the start) and the
+    /// returned cursor the next one, or null once the table's last block is behind it; it moves by
+    /// <see cref="FindingBlocksPerPass"/> blocks whether or not anything matched. Returns how many matching findings
+    /// were read, how many were rewritten, and how many changed between the read and the write, which were left as
+    /// they were and need the table read again. A cancel inside a slice leaves the cursor at the slice's start: the
+    /// rows it rewrote are stamped, so the next tick reads them no more. <paramref name="rowDone"/> is called with a
+    /// null cursor, for the same reason.
     /// </summary>
     public static async Task<(long? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsAsync(
         NpgsqlConnection connection, long? afterCursor, Action<long?, RowOutcome>? rowDone,
@@ -875,17 +895,25 @@ AND   xmin = $4::xid";
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        var page = new List<(string Ctid, string DrillDown, string Story, uint Xmin, long FindingId)>();
+        var from = afterCursor ?? 0L;
+        long blocks;
+        var page = new List<(string Ctid, string DrillDown, string Story, uint Xmin)>();
         await using (var transaction = await BeginBoundedAsync(connection, cancellationToken))
         {
-            await using (var select = new NpgsqlCommand(FindingPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+            await using (var size = new NpgsqlCommand(FindingBlockCountSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
             {
-                select.Parameters.Add(new NpgsqlParameter { Value = (object?)afterCursor ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Bigint });
-                select.Parameters.Add(new NpgsqlParameter { Value = (long)MaxFindingRowsPerPass, NpgsqlDbType = NpgsqlDbType.Bigint });
+                blocks = Convert.ToInt64(await size.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (from < blocks)
+            {
+                await using var select = new NpgsqlCommand(FindingPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds };
+                select.Parameters.Add(new NpgsqlParameter { Value = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({from},0)"), NpgsqlDbType = NpgsqlDbType.Text });
+                select.Parameters.Add(new NpgsqlParameter { Value = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({from + FindingBlocksPerPass},0)"), NpgsqlDbType = NpgsqlDbType.Text });
                 await using var reader = await select.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    page.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetFieldValue<uint>(3), reader.GetInt64(4)));
+                    page.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetFieldValue<uint>(3)));
                 }
             }
 
@@ -893,9 +921,8 @@ AND   xmin = $4::xid";
         }
 
         int rewritten = 0, raced = 0;
-        for (var i = 0; i < page.Count; i++)
+        foreach (var row in page)
         {
-            var row = page[i];
             var outcome = RowOutcome.Unchanged;
             if (RemaskFinding(row.DrillDown, row.Story) is { } finding)
             {
@@ -915,10 +942,10 @@ AND   xmin = $4::xid";
                 await transaction.CommitAsync(cancellationToken);
             }
 
-            rowDone?.Invoke(i == page.Count - 1 || page[i + 1].FindingId != row.FindingId ? row.FindingId : null, outcome);
+            rowDone?.Invoke(null, outcome);
         }
 
-        var next = page.Count < MaxFindingRowsPerPass ? (long?)null : page[^1].FindingId;
+        var next = from + FindingBlocksPerPass >= blocks ? (long?)null : from + FindingBlocksPerPass;
         return (next, page.Count, rewritten, raced);
     }
 
@@ -1348,7 +1375,7 @@ AND   xmin = $3::xid";
         /// <summary>The report walk's cursor: the last batch it finished.</summary>
         public ReportCursor? ReportCursor { get; set; }
 
-        /// <summary>The finding walk's cursor: the last row it finished.</summary>
+        /// <summary>The finding walk's cursor (#5625): the next heap block to read.</summary>
         public long? FindingCursor { get; set; }
 
         /// <summary>The finding-alert walk's cursor: the last row it finished.</summary>

@@ -1639,7 +1639,7 @@ FROM generate_series(1, $6) AS g", connection);
 
     /* A finding as the analysis stored it before #4005: the exemplar's statement, fingerprint and graph raw, the
        fingerprint in its prose, and a hash over the raw graph (PgTargetDeadlockDrillDownTests' shape). */
-    private static (string DrillDown, string Story) LegacyFinding()
+    internal static (string DrillDown, string Story) LegacyFinding()
     {
         var lastSeen = new DateTime(2026, 9, 1, 12, 30, 15, 250);
         var sentence = $"Exemplars: 1 report captured. The most frequent 2-participant shape involves ShareLock on transaction with the victim `{LegacyVictimStatement}`, seen 1 time.";
@@ -1672,7 +1672,7 @@ FROM generate_series(1, $6) AS g", connection);
         return section.GetProperty("exemplars").GetRawText() + "\n" + section.GetProperty("note").GetString();
     }
 
-    private static async Task PlantFindingAsync(
+    internal static async Task PlantFindingAsync(
         NpgsqlConnection connection, long findingId, DateTime analysisTime, string drillDown, string story, CancellationToken ct,
         string storyPath = PgTargetFactKeys.DeadlockRate, string storyPathHash = "h", double severity = 0.9,
         DateTime? windowStart = null, DateTime? windowEnd = null)
