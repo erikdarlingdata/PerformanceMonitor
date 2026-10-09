@@ -160,6 +160,38 @@ public sealed class DarlingUpgradeShapesWorkflowTests
     }
 
     /// <summary>
+    /// A release zip the legs download is run elevated, so its SHA-256 is compared with the release's own SHA256SUMS.txt
+    /// before it is extracted: the zip function hashes it on every call, a missing or repeated listing fails the
+    /// leg, and the only extraction of a downloaded zip comes after that function.
+    /// </summary>
+    [Fact]
+    public void TheDownloadedReleaseZips_AreCheckedAgainstTheReleasesChecksumFile_BeforeTheyAreExtracted()
+    {
+        var script = ReadRepoFileLf(ScriptPath);
+
+        var zipFunction = script[script.IndexOf("function Get-Zip(", StringComparison.Ordinal)..];
+        zipFunction = zipFunction[..zipFunction.IndexOf("\n}\n", StringComparison.Ordinal)];
+        Assert.True(zipFunction.IndexOf("gh release download", StringComparison.Ordinal) < zipFunction.IndexOf("Assert-ZipChecksum $version $zip", StringComparison.Ordinal));
+        Assert.True(zipFunction.IndexOf("Assert-ZipChecksum $version $zip", StringComparison.Ordinal) < zipFunction.IndexOf("return $zip", StringComparison.Ordinal));
+
+        var check = script[script.IndexOf("function Assert-ZipChecksum(", StringComparison.Ordinal)..];
+        check = check[..check.IndexOf("\n}\n", StringComparison.Ordinal)];
+        Assert.Contains("-p 'SHA256SUMS.txt'", check, StringComparison.Ordinal);
+        Assert.Contains("Get-FileHash -LiteralPath $zip -Algorithm SHA256", check, StringComparison.Ordinal);
+        Assert.Contains("$expected.Count -ne 1", check, StringComparison.Ordinal);
+        Assert.Contains("$actual -ne $expected[0]", check, StringComparison.Ordinal);
+        Assert.Contains("Fail-Leg", check, StringComparison.Ordinal);
+
+        // Every extraction takes a zip that came out of Get-Zip.
+        var extractions = Regex.Matches(script, @"tar -xf (\$\w+)");
+        Assert.NotEmpty(extractions);
+        foreach (Match extraction in extractions)
+        {
+            Assert.Matches(@"\$zip = Get-Zip \$\w+", script[..extraction.Index][^400..]);
+        }
+    }
+
+    /// <summary>
     /// The upgrade-shape check found that Windows PowerShell 5.1 leaves <c>$PSScriptRoot</c> empty inside the
     /// param() default of a <c>[CmdletBinding()]</c> script started with <c>-File</c>, so <c>-Source</c> resolved to
     /// nothing and an upgrade run from its staging folder stopped at "No -Source given" (#5627). The body applies the

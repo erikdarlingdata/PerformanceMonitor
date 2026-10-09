@@ -43,12 +43,36 @@ function Fail-Leg([string]$reason) {
     exit 1
 }
 
+# A release zip is run elevated, so its SHA-256 is compared with the release's own SHA256SUMS.txt (a release asset
+# that lists every zip the release ships) before anything is extracted. A release with no checksum file, one that does
+# not list the zip exactly once, or a hash that differs fails the leg, and the zip is deleted.
+function Assert-ZipChecksum([string]$version, [string]$zip) {
+    $sums = Join-Path $work "SHA256SUMS-$version.txt"
+    if (-not (Test-Path $sums)) {
+        gh release download "v$version" -R $repo -p 'SHA256SUMS.txt' -O $sums --clobber
+        if ($LASTEXITCODE -ne 0) { Fail-Leg "the $version release ships no SHA256SUMS.txt to check its zip against" }
+    }
+    $name = Split-Path -Leaf $zip
+    $expected = @()
+    foreach ($line in (Get-Content -LiteralPath $sums)) {
+        if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(\S+)\s*$' -and $Matches[2] -eq $name) { $expected += $Matches[1] }
+    }
+    if ($expected.Count -ne 1) { Fail-Leg "SHA256SUMS.txt of the $version release lists $name $($expected.Count) times, expected once" }
+    $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+    if ($actual -ne $expected[0]) {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        Fail-Leg "$name does not match the SHA-256 in the $version release's SHA256SUMS.txt"
+    }
+    Write-Host "checksum ok: $name $actual"
+}
+
 function Get-Zip([string]$version) {
     $zip = Join-Path $work "PerformanceMonitorDarling-$version.zip"
     if (-not (Test-Path $zip)) {
         gh release download "v$version" -R $repo -p "PerformanceMonitorDarling-$version.zip" -D $work --clobber
         if ($LASTEXITCODE -ne 0) { Fail-Leg "could not download the $version release zip" }
     }
+    Assert-ZipChecksum $version $zip
     return $zip
 }
 

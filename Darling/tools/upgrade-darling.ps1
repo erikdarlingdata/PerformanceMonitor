@@ -498,11 +498,11 @@ function Get-DarlingExistingInstallSteps([string]$oldFolder, [string]$serviceNam
     $inside = @($configured.Lines)
     $last = if ($inside.Count -gt 0) {
         $list = ($inside | ForEach-Object { "       $_." }) -join "`n"
-        $unlisted = if ($configured.Incomplete) { "`n     Not every value in darling.json could be listed here, so check it for other paths inside $oldFolder." } else { '' }
+        $unlisted = if ($configured.Incomplete) { "`n     Not every value in darling.json was listed here. Check it for other paths inside $oldFolder." } else { '' }
         "  6. Do not delete $oldFolder yet. darling.json names these paths inside it:`n$list$unlisted`n     Move each one to a folder outside it, and update darling.json to the new place.`n     Then, once the service is collecting, delete $oldFolder."
     }
     elseif ($configured.Incomplete) {
-        "  6. Do not delete $oldFolder yet. Not every value in darling.json could be listed here, so check it for paths`n     inside $oldFolder. Move each one to a folder outside it, and update darling.json to the new place.`n     Then, once the service is collecting, delete $oldFolder."
+        "  6. Do not delete $oldFolder yet. Not every value in darling.json was listed here. Check it for paths`n     inside $oldFolder. Move each one to a folder outside it, and update darling.json to the new place.`n     Then, once the service is collecting, delete $oldFolder."
     }
     else {
         "  6. Delete $oldFolder once the service is collecting."
@@ -517,8 +517,8 @@ darling.json and your store are kept. To move to a new folder:
   3. Open darling.json in $oldFolder
      and check that every setting in it is yours. Then copy it into the new folder before anything else,
      and go straight on to step 4. Without it, install-darling.ps1 copies the SAMPLE config in.
-     If darling.json names a certificate or key file in this folder (a tls pfxPath, certPath or keyPath),
-     make a new one, keep it outside the install folder, and point darling.json at it.
+     If darling.json names a certificate or key file in this folder, make a new one. Keep it outside the
+     install folder, and point darling.json at it. These are the tls pfxPath, certPath and keyPath settings.
      Do not copy a darling-keys folder: the service makes its own.
      A darling.json.bak-* backup is optional.
   4. In an elevated session, run install-darling.ps1 from the new folder. It points the existing service

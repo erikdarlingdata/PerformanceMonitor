@@ -710,8 +710,8 @@ function Get-CimInstance {
         Assert.Contains("3. Open darling.json in C:\\PerformanceMonitorDarling", rendered, StringComparison.Ordinal);
         Assert.Contains("check that every setting in it is yours", rendered, StringComparison.Ordinal);
         Assert.Contains("copies the SAMPLE config in", rendered, StringComparison.Ordinal);
-        Assert.Contains("If darling.json names a certificate or key file in this folder (a tls pfxPath, certPath or keyPath),", rendered, StringComparison.Ordinal);
-        Assert.Contains("make a new one, keep it outside the install folder, and point darling.json at it.", rendered, StringComparison.Ordinal);
+        Assert.Contains("If darling.json names a certificate or key file in this folder, make a new one. Keep it outside the", rendered, StringComparison.Ordinal);
+        Assert.Contains("install folder, and point darling.json at it. These are the tls pfxPath, certPath and keyPath settings.", rendered, StringComparison.Ordinal);
         Assert.DoesNotContain("copy that file", rendered, StringComparison.Ordinal);
         Assert.Contains("4. In an elevated session, run install-darling.ps1 from the new folder.", rendered, StringComparison.Ordinal);
         Assert.Contains("C:\\ProgramData\\PerformanceMonitorDarling", rendered, StringComparison.Ordinal);
@@ -979,7 +979,7 @@ function Get-CimInstance {
         Assert.Contains("1. Stop the 'PerformanceMonitor Darling' service", mixed, StringComparison.Ordinal);
         Assert.Contains("good\\smtp.txt\" (a file: reference).", mixed, StringComparison.Ordinal);
         Assert.Contains("6. Do not delete ", mixed, StringComparison.Ordinal);
-        Assert.Contains("Not every value in darling.json could be listed here, so check it for other paths inside", mixed, StringComparison.Ordinal);
+        Assert.Contains("Not every value in darling.json was listed here. Check it for other paths inside", mixed, StringComparison.Ordinal);
         Assert.DoesNotContain(new string('a', 30), mixed, StringComparison.Ordinal);
         Assert.DoesNotContain("(postgres.dataDirectory)", mixed, StringComparison.Ordinal);
         foreach (var raw in new[] { "bad<", "name.pfx", "line1", "line2", "red.pem", "[31m", "\u001b" })
@@ -992,7 +992,7 @@ function Get-CimInstance {
         Assert.Contains("incomplete=True", onlyOdd, StringComparison.Ordinal);
         Assert.Contains("1. Stop the 'PerformanceMonitor Darling' service", onlyOdd, StringComparison.Ordinal);
         Assert.Contains("6. Do not delete ", onlyOdd, StringComparison.Ordinal);
-        Assert.Contains("Not every value in darling.json could be listed here, so check it for paths", onlyOdd, StringComparison.Ordinal);
+        Assert.Contains("Not every value in darling.json was listed here. Check it for paths", onlyOdd, StringComparison.Ordinal);
         Assert.DoesNotContain("bad<", onlyOdd, StringComparison.Ordinal);
         Assert.DoesNotContain("6. Delete ", onlyOdd, StringComparison.Ordinal);
 
