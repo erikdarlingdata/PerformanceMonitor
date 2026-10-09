@@ -291,7 +291,7 @@ _TRAIT = re.compile(r'Trait\(\s*"(\w+)"\s*,\s*"(\w+)"\s*\)')
 # shard's classes" step; a test pins that env block to MAP_SHARD_ENV). A class that gates its tests on any OTHER
 # DARLING_TEST_PG_* or DARLING_TEST_PGRUNTIME_* variable (the log-format targets, the log-rotation targets, the
 # store-upgrade fixtures) skips at map build, so the map has no coverage edges for what its tests would run and a
-# change to the code under them would never select it (#5459 review; measured on the 2026-10-09 map: 16 files, 19
+# change to the code under them would never select it (#5459; measured on the 2026-10-09 map: 16 files, 19
 # mapped classes, 12 to 44 coverage files each against 100 and more for a fully covered class). The map cannot tell
 # us, so the SOURCE does: every class in a file that names such a variable in a quoted literal carries the Gate=Env
 # trait and map_select always selects it. It is found from the source at selection time, so a new gated class needs

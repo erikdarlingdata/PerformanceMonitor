@@ -735,7 +735,7 @@ public sealed class TestMapShadowGuardTests : IDisposable
     {
         // The runner lists a nested class as Namespace.Outer+Inner. test-map.py's simple_name and ci-select.py's scan_classes
         // split on [.+/], so the selection holds `Inner`; a shard script that split on '.' alone keyed it `Outer+Inner` and
-        // dropped it from every narrowed pull request (#5459 review).
+        // dropped it from every narrowed pull request (#5459).
         string[] all = [$"{ns}.OuterTests", $"{ns}.OuterTests+InnerLive", $"{ns}.OtherTests", $"{ns}.OtherTests+NotSelected"];
         var selection = JsonSerializer.Serialize(new Dictionary<string, object>
         {

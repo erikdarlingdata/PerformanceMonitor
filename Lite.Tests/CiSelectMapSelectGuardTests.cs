@@ -401,7 +401,7 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     [Fact]
     public void AClassGatedOnAnEnvironmentTheMapShardsLack_IsAlwaysSelected_ForAnUnrelatedChange()
     {
-        // #5459 review: the map shards set only DARLING_TEST_PG and DARLING_TEST_PGRUNTIME, so a class gated on any other
+        // #5459: the map shards set only DARLING_TEST_PG and DARLING_TEST_PGRUNTIME, so a class gated on any other
         // DARLING_TEST_PG_* / DARLING_TEST_PGRUNTIME_* variable skips at map build and the map has no coverage edge for what
         // its tests would run. The tree scan finds those classes from the source, so a change to code under one still runs it.
         var tree = Path.Combine(_dir, "gated-tree");

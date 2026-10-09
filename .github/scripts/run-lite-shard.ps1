@@ -139,7 +139,7 @@ if ($mine.Count -eq 0) { throw "shard ${Shard} selected zero of $($classes.Count
 # The key a class is selected by: its own simple name, split on the same [.+/] as test-map.py's simple_name and
 # ci-select.py's scan_classes. The runner lists a nested class as Namespace.Outer+Inner, and the selection holds
 # `Inner`; splitting on '.' alone would key it `Outer+Inner`, so a nested class (a live PostgreSQL one included) would
-# be left out of every narrowed pull request (#5459 review).
+# be left out of every narrowed pull request (#5459).
 function Get-ClassKey([string] $FullName) { return ($FullName -split '[.+/]')[-1] }
 
 # #5459 live selection: a pull request run whose gate pinned a test map keeps only the classes the map picked for its
