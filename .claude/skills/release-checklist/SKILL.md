@@ -166,15 +166,15 @@ Run the Windows items on a disposable machine or VM, and point them at a throwaw
 
 #### (a) The Windows upgrade-shape CI job
 
-The workflow is `.github/workflows/darling-upgrade-shapes.yml`. Open the release commit's checks, or the Actions page filtered to that workflow. Confirm its jobs ran on that exact commit and are green, by name. A skipped job is not a pass.
+The workflow is `.github/workflows/darling-upgrade-shapes.yml`. It runs 14 legs: seven on `windows-2022` and seven on `windows-2025`. Each leg installs a real released build with that build's own scripts, then runs this commit's install or upgrade script over it. The legs cover four shapes:
+- U1: an install on the default virtual account.
+- U2: an install whose service logon was changed to a non-default local account.
+- U3: an install whose service was deleted.
+- U4: a pre-3.9 folder directly under `C:\` that must still refuse and print the move steps.
 
-It covers four shapes:
-- an install on the default virtual account.
-- an install on a non-default logon account.
-- an install whose service was deleted.
-- a pre-3.9 folder directly under `C:\` that must still refuse and print the move steps.
+The workflow runs on pull requests that touch `Darling/tools/*.ps1`, as the `Darling upgrade shapes` job in the nightly, and by manual dispatch. The release commit often carries no such check, so look for the run at its sha. In the release commit's checks or the nightly, confirm all 14 legs ran at that sha and are green, by name. A skipped leg is not a pass. If there is no run at that sha, start one with `gh workflow run darling-upgrade-shapes.yml --ref <release branch>` and wait for it.
 
-Record the run URL. If any shape is red or skipped, stop. A red job here blocks the release, and re-running it until it passes is not a fix.
+Also read the two pins at the top of the workflow, `DARLING_CURRENT_RELEASE` and `DARLING_OLD_RELEASE`. The first must name the last shipped release, and the second a release from before 3.9 that is still downloadable. Record the run URL. If any leg is red or skipped, stop. A red leg blocks the release, and re-running it until it passes is not a fix.
 
 #### (b) `upgrade-darling.ps1` over a real existing install
 
