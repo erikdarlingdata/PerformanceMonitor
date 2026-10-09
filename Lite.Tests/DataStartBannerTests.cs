@@ -138,7 +138,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task EveryRelation_NamesARealArchiveView_WithServerIdAndItsProbeTimeColumn()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         foreach (var relation in Enum.GetValues<QueryWindowRelation>())
         {
             var view = LocalDataService.QueryWindowRelationView(relation);
@@ -166,7 +166,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task ActiveQueries_RangeStartsBeforeTheOldestStoredSnapshot_ShowsTheBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var oldest = end.AddDays(-2);
         await SeedSnapshotAsync(oldest);
@@ -183,7 +183,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task CurrentWaits_RangeStartsBeforeTheOldestStoredRow_ShowsTheBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedWaitingTaskAsync(end.AddDays(-2));
         await SeedWaitingTaskAsync(end.AddHours(-1));
@@ -198,7 +198,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task ActiveQueries_WindowInsideTheStoredRows_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         for (var day = 10; day >= 0; day--)
         {
@@ -218,7 +218,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task CurrentWaits_QuietStartInsideTheWindow_WithOlderRowsBeforeIt_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedWaitingTaskAsync(end.AddDays(-27));
         await SeedWaitingTaskAsync(end.AddHours(-2));
@@ -237,7 +237,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task CurrentWaits_IdleStart_WithNoOlderRow_OnAServerMonitoredForMonths_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", end.AddDays(-9), end, 30);
         await SeedWaitingTaskAsync(end.AddDays(-7).AddHours(5));
@@ -256,7 +256,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task FirstRowThreeDaysAgo_OnAServerCollectedForThirtyDays_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", end.AddDays(-30), end, 360);
         await SeedLogRunsAsync("query_snapshots", end.AddDays(-30), end, 360);
@@ -274,7 +274,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task CurrentWaits_ServerAddedTwoDaysAgo_SaysSinceItsFirstCollection_NotItsFirstRow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddDays(-2);
         await SeedLogRunsAsync("waiting_tasks", added, end, 30);
@@ -290,7 +290,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task ActiveQueries_NoSnapshotInTheWindow_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedSnapshotAsync(end.AddDays(-20));
 

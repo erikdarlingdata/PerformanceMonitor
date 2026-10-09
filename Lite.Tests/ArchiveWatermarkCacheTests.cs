@@ -81,7 +81,7 @@ public sealed class ArchiveWatermarkCacheTests : IDisposable
         var archivePath = Path.Combine(_tempDir, "archive");
         Directory.CreateDirectory(archivePath);
         using var initializer = new DuckDbInitializer(dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
         {

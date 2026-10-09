@@ -314,7 +314,7 @@ public sealed class ArchiveQuerySnapshotsDailyCompactionTests : IDisposable
     public async Task TheViewReadsTheDayFile_AndAWindowedReadStillFindsItsRows()
     {
         var initializer = NewInitializer();
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
 
         for (var hour = 14; hour < 17; hour++)

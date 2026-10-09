@@ -80,7 +80,7 @@ public sealed class LongQueryTracePermissionDenialLiteTests : IDisposable
 
         var duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
 
         var servers = new ServerManager(_configDir);
         servers.AddServer(server);

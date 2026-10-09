@@ -83,7 +83,7 @@ public sealed class ArchivedHistoryReadersTests : IDisposable
     {
         var initializer = new DuckDbInitializer(_dbPath);
         _initializers.Add(initializer);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         await seed(initializer);
         Assert.True(await HotRowsAsync(table) > 0, $"the seed wrote no {table} row");
 

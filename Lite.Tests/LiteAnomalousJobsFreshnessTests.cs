@@ -63,7 +63,7 @@ public sealed class LiteAnomalousJobsFreshnessTests : IDisposable
     {
         var initializer = new DuckDbInitializer(_dbPath);
         _initializers.Add(initializer);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
         {
@@ -151,7 +151,7 @@ VALUES (1, $1, $2, 'S1', 'Developer Edition', '16.0.4150.1', 'RTM', 3, -240)";
     public async Task EmptyStore_IsNoEvidence()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         await initializer.CreateArchiveViewsAsync();
         var adapter = new LiteAlertReadAdapter(new LocalDataService(initializer));
 

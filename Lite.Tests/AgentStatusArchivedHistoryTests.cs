@@ -49,7 +49,7 @@ public sealed class AgentStatusArchivedHistoryTests : IDisposable
     {
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
         using var initializer = new DuckDbInitializer(dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         const string columns = "(collection_id, collection_time, server_id, server_name, agent_running, agent_status_desc, agent_startup_desc, next_scheduled_run)";
         var now = DateTime.UtcNow;
 

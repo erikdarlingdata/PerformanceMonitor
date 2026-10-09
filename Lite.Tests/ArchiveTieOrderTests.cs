@@ -76,7 +76,7 @@ public sealed class ArchiveTieOrderTests : IDisposable
     {
         var initializer = new DuckDbInitializer(_dbPath);
         _initializers.Add(initializer);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         var at = TestDataSeeder.TestPeriodStart.AddMinutes(30);
         var created = TestDataSeeder.TestPeriodStart.AddDays(-3);

@@ -198,7 +198,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.MemoryPressure)]
     public async Task DataAndRunsStartInsideTheWindow_ReportTheFloor_AndTheNote(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedCoverageAsync(tool, floor, Anchor);
         await SeedFirstAndLaterAsync(tool, floor);
@@ -217,7 +217,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.MemoryPressure)]
     public async Task AQuietStart_CollectedFromBeforeTheWindow_FirstDataTwoDaysIn_IsCovered(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         /* The store holds this tool's data from before the window began, and nothing was stored until two days in: a server that
            is quiet for days looks exactly like this, and a probe that read only the window's rows would call it truncated. A config
            tool's older evidence is its baseline snapshot; the collection log's is an older run. */
@@ -244,7 +244,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.MemoryPressure)]
     public async Task ADataAnswer_CarriesTheKeysRightAfterHoursBack(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedCoverageAsync(tool, Anchor.AddDays(-2), Anchor);
         await SeedFirstAndLaterAsync(tool, Anchor.AddDays(-2));
 
@@ -269,7 +269,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.MemoryPressure)]
     public async Task AShortWindowWithRows_StartsNoProbe_AndIsCoveredAtTheRequestedStart(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedDataAsync(tool, Anchor.AddMinutes(-30), baselineAt: Anchor.AddMinutes(-50));
 
         var root = Root(await CallAsync(tool, hoursBack: 1));
@@ -283,7 +283,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.PlanCorrections)]
     public async Task ACappedPage_NextToAWindowFloor_LeavesTheNoticeUnchanged(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedCoverageAsync(tool, floor, Anchor);
         await SeedFirstAndLaterAsync(tool, floor);
@@ -308,7 +308,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.TraceFlags)]
     public async Task AConfigWindow_HoldsNoSnapshotButOneBeforeIt_IsCoveredAndEmpty(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedDataAsync(tool, WindowStart.AddDays(-9), baselineAt: WindowStart.AddDays(-10));
         await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-3), Anchor, everyMinutes: 60);
 
@@ -327,7 +327,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task MemoryPressure_AnEventOlderThanItsRun_FirstRunBackfill_NamesTheEvent_AndIsNotACut()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var firstRun = WindowStart.AddMinutes(100);
         var backfilled = WindowStart.AddMinutes(30);
         await SeedLogRunsAsync("memory_pressure_events", firstRun, Anchor, everyMinutes: 30);
@@ -351,7 +351,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task PlanCorrections_AnAutomaticTuningOnlyAnswer_CarriesTheKeysAtTheTopLevel_AndIsProbed()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync("plan_correction", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedPlanCorrectionAsync(Anchor.AddDays(-1), recommendation: null);
 
@@ -366,7 +366,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task PlanCorrections_ATuningOnlyAnswer_TheStoreHoldsNothingInTheWindow_SaysNoWindowedRowsWereRead()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedPlanCorrectionAsync(Anchor.AddDays(-30), recommendation: null);
 
         var root = Root(await CallAsync(Tool.PlanCorrections));
@@ -380,7 +380,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task PlanCorrections_AOneHourTuningOnlyAnswer_NamesTheProbesFloor_NotTheAskedStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddMinutes(-20);
         await SeedLogRunsAsync("plan_correction", floor, Anchor, everyMinutes: 5);
         await SeedPlanCorrectionAsync(floor, recommendation: null);
@@ -397,7 +397,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task CollectionLog_AStatusFilterThatMatchesNothing_TakesTheFilteredEmptyBranch()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync("wait_stats", Anchor.AddHours(-20), Anchor, everyMinutes: 30);
 
         var root = Root(await McpHealthTools.GetCollectionLog(
@@ -416,7 +416,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task CollectionLog_AnEmptyWindow_NothingHeld_SaysNothingWasRead_AndTheFilteredEmptyKeepsItsWords()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         /* Runs exist, all older than the window: the server HAS collected, and the window holds none. */
         await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-30), Anchor.AddDays(-20), everyMinutes: 60);
 
@@ -451,7 +451,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.TraceFlags)]
     public async Task AConfigWindow_OneSnapshotBeforeIt_ButNoRunInIt_SaysNothingWasRead(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedDataAsync(tool, WindowStart.AddDays(-9), baselineAt: WindowStart.AddDays(-10));
         await SeedLogRunsAsync("wait_stats", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
 
@@ -465,7 +465,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task CollectionLog_AFilterThatMatchesNothing_StillSaysWhereTheLogStarts_UnderHints()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
 
         var root = Root(await McpHealthTools.GetCollectionLog(
@@ -479,7 +479,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task CollectionLog_ANeverCollectedServer_IsUnavailable_AndStaysBare()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
 
         var root = Root(await CallAsync(Tool.CollectionLog));
 
@@ -492,7 +492,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task CollectionLog_TheFleetForm_CarriesNoWindowFloorKeys()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
 
         var json = await McpHealthTools.GetCollectionLog(Service(), _serverManager, server_name: null, hours_back: HoursBack, as_of: AsOf);
@@ -514,7 +514,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.MemoryPressure)]
     public async Task AnEmptyWindow_PastCoverage_CarriesTheFloorAndTheNote_UnderHints(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         /* The collector ran for two days of a 7-day ask and stored nothing a change or a row would show: only the keys say the
            older five were never read. A config tool holds one snapshot, which is no change. */
         await SeedCoverageAsync(tool, Anchor.AddDays(-2), Anchor);
@@ -545,7 +545,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.MemoryPressure)]
     public async Task AnEmptyWindow_TheStoreHoldsNothingIn_SaysNothingWasRead(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
 
         var root = Root(await CallAsync(tool));
 
@@ -558,7 +558,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [InlineData(Tool.MemoryPressure)]
     public async Task AnEmptyWindow_TheCollectorCoveredFromBeforeIt_SaysCovered(Tool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedCoverageAsync(tool, Anchor.AddDays(-9), Anchor);
 
         var root = Root(await CallAsync(tool));
@@ -571,7 +571,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
     [Fact]
     public async Task CollectionLog_AQuietWindowWithOlderRuns_SaysNothingInTheWindowWasRead()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-20), Anchor.AddDays(-19), everyMinutes: 30);
 
         var root = Root(await CallAsync(Tool.CollectionLog, hoursBack: 24));

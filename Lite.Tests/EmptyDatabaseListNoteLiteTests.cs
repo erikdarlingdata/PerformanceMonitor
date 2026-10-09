@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Tests;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -286,7 +287,7 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
 
         var serverManager = new ServerManager(_configDir);
         var server = new ServerConnection

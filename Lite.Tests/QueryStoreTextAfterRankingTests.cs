@@ -16,6 +16,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Tests;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -60,7 +61,7 @@ public sealed class QueryStoreTextAfterRankingTests : IDisposable
         /* Assigned straight to the field, which Dispose() releases: DuckDbInitializerDisposalGuardTests (#5208) accepts a field only when it is written this way. */
         _duckDb = new DuckDbInitializer(Path.Combine(_dir, "test.duckdb"));
         var duckDb = _duckDb;
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
         Directory.CreateDirectory(duckDb.ArchivePath);
 
         using (var readLock = duckDb.AcquireReadLock())
