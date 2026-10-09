@@ -28,6 +28,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 ### Important
 
 - **Upgrading from 3.9 runs the Darling store migrations V158 through V173 on the service's first start**
+- **On Windows, upgrading an install that ordinary users can write to stops once and prints steps to move it** ([#5627])
 
 ### Added
 
