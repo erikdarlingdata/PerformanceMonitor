@@ -25,8 +25,10 @@ namespace Darling.Tests;
 /// collector's redaction call sites fails this test), and asserts the secret never reaches a <c>Row</c> while
 /// host, port, user and application_name survive.
 ///
-/// <para>Cluster-wide state (<c>ALTER SYSTEM</c> is not per-database), so this is serialized with the rest of
-/// the live-postgres collection and restores the setting in a <c>finally</c> that runs even on failure.</para>
+/// <para>Cluster-wide state (<c>ALTER SYSTEM</c> is not per-database), so this runs in the <c>pg-cluster-roles</c>
+/// collection, alone, and restores the setting in a <c>finally</c> that runs even on failure. The probe role also
+/// holds its own CONNECT on the database it connects to (#5618), so it passes whether or not an earlier test has
+/// taken CONNECT away from PUBLIC.</para>
 /// </summary>
 [Collection("pg-cluster-roles")]
 public sealed class PgSettingRedactionLivePostgresTests
@@ -56,6 +58,7 @@ public sealed class PgSettingRedactionLivePostgresTests
 
         await using var owner = new NpgsqlConnection(cs);
         await owner.OpenAsync(ct);
+        var quotedDatabase = "\"" + owner.Database.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
         var bodySucceeded = false;
         try
@@ -66,6 +69,13 @@ public sealed class PgSettingRedactionLivePostgresTests
             await ExecAsync(owner, $"DROP ROLE IF EXISTS {RoleName}", ct);
             await ExecAsync(owner, $"CREATE ROLE {RoleName} LOGIN PASSWORD '{RolePassword}'", ct);
             await ExecAsync(owner, $"GRANT pg_monitor TO {RoleName}", ct);
+
+            /* #5618: the probe role holds CONNECT on this database in its own right. A fresh role gets CONNECT only
+               through PUBLIC, and the product's provisioning batch takes that away from the cluster's "darling" database
+               (REVOKE ALL ... FROM PUBLIC), so a test that relied on PUBLIC failed with 42501 whenever an earlier test
+               had run that batch. Revoked in the cleanup below, before the role is dropped: a role that still holds a
+               privilege cannot be dropped. */
+            await ExecAsync(owner, $"GRANT CONNECT ON DATABASE {quotedDatabase} TO {RoleName}", ct);
 
             var probeConnectionString = new NpgsqlConnectionStringBuilder(cs)
             {
@@ -150,6 +160,12 @@ public sealed class PgSettingRedactionLivePostgresTests
             {
                 await ExecAsync(owner, "ALTER SYSTEM SET primary_conninfo = ''", ct);
                 await ExecAsync(owner, "SELECT pg_reload_conf()", ct);
+
+                /* #5618: the grant goes before the role does. The role may not exist when the body failed before
+                   creating it, hence the existence check. */
+                await ExecAsync(owner,
+                    $"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RoleName}') THEN "
+                    + $"REVOKE CONNECT ON DATABASE {quotedDatabase} FROM {RoleName}; END IF; END $$", ct);
                 await ExecAsync(owner, $"DROP ROLE IF EXISTS {RoleName}", ct);
             });
         }
