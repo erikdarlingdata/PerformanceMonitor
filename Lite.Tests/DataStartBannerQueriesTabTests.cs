@@ -147,7 +147,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_RangeStartsBeforeTheOldestStoredRow_ShowsTheBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var oldest = end.AddDays(-2);
         await SeedPlanCorrectionAsync(oldest);
@@ -167,7 +167,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_ServerAddedTwoDaysAgo_SaysSinceItsFirstCollection_NotItsFirstRow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddDays(-2);
         await SeedLogRunsAsync("plan_correction", added, end, 30);
@@ -186,7 +186,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_QuietStart_OnAServerCollectedForThirtyDays_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("plan_correction", end.AddDays(-30), end, 360);
         await SeedPlanCorrectionAsync(end.AddDays(-3));
@@ -201,7 +201,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_QuietStartInsideTheRange_WithAnOlderRowBeforeIt_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedPlanCorrectionAsync(end.AddDays(-27));
         await SeedPlanCorrectionAsync(end.AddHours(-2));
@@ -216,7 +216,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_NoRowAndNoRunInTheRange_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedPlanCorrectionAsync(end.AddDays(-20));
 
@@ -341,7 +341,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_ServerAddedTwoDaysAgo_WhoseGridHitsItsCap_SaysSinceTheOldestRowTheGridShows()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddHours(-48);
         await SeedLogRunsAsync("plan_correction", added, end, 5);
@@ -365,7 +365,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_StoreCoversTheRange_ButTheGridHitsItsCap_StillSaysWhereTheGridStarts()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("plan_correction", end.AddDays(-30), end, 360);
         await SeedPlanCorrectionAsync(end.AddDays(-20));
@@ -385,7 +385,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_GridUnderItsCap_KeepsTheStoreFloor()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddHours(-48);
         await SeedLogRunsAsync("plan_correction", added, end, 5);
@@ -480,7 +480,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task PlanCorrections_AOneHourRange_WhoseGridHitsItsCap_ShowsTheBannerAtItsOldestRow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedPlanCorrectionEverySecondsAsync(end.AddMinutes(-40), end, 10);
 
@@ -553,7 +553,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [Fact]
     public async Task QueryHeatmap_AOneHourRange_DrawsItsColumnsFromTheRangeStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
         var end = start.AddHours(1);
         await SeedQueryStatsAsync(start.AddMinutes(32));
@@ -618,7 +618,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task MemoryPressureEvents_RangeStartsBeforeTheOldestStoredEvent_ShowsTheBanner_AtItsSampleTime()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var oldest = end.AddDays(-2);
         await SeedMemoryPressureEventAsync(oldest);
@@ -634,7 +634,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task MemoryPressureEvents_QuietStart_OnAServerCollectedForThirtyDays_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("memory_pressure_events", end.AddDays(-30), end, 360);
         await SeedMemoryPressureEventAsync(end.AddDays(-3));
@@ -649,7 +649,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task MemoryPressureEvents_QuietStartInsideTheRange_WithAnOlderEventBeforeIt_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedMemoryPressureEventAsync(end.AddDays(-27));
         await SeedMemoryPressureEventAsync(end.AddHours(-2));
@@ -664,7 +664,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_RangeStartsBeforeTheOldestStoredRow_ShowsTheBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var oldest = end.AddDays(-2);
         await SeedQueryStatsAsync(oldest);
@@ -681,7 +681,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_QuietStartInsideTheRange_WithAnOlderRowBeforeIt_ShowsNoBanner()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedQueryStatsAsync(end.AddDays(-27));
         await SeedQueryStatsAsync(end.AddHours(-2));
@@ -701,7 +701,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_DrawsOneColumnPerBucketAcrossTheAskedRange_SoAGapShowsAsEmptyColumns()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
         var end = start.AddDays(7);
         await SeedQueryStatsAsync(start.AddMinutes(30));
@@ -749,7 +749,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_AnUnalignedRange_StartsAtTheBucketHoldingItsStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 10, 2, 30, DateTimeKind.Unspecified);
         var end = new DateTime(2026, 6, 1, 10, 27, 30, DateTimeKind.Unspecified);
         await SeedQueryStatsAsync(new DateTime(2026, 6, 1, 10, 13, 10, DateTimeKind.Unspecified));
@@ -772,7 +772,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_ARangeThatStartsBeforeTheData_StartsItsColumnsAtTheTimeTheNoticeNames()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
         var end = start.AddDays(7);
         var firstRow = new DateTime(2026, 6, 4, 10, 17, 40, DateTimeKind.Unspecified);
@@ -807,7 +807,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_ACoveredRange_StillStartsItsFirstColumnAtTheRangeStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
         var end = start.AddDays(7);
         await SeedQueryStatsAsync(start.AddDays(-20));
@@ -869,7 +869,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [InlineData(10, 4, 59, 10, 0)]
     public async Task QueryHeatmap_ACoverageStartInsideTheFirstColumn_NamesTheColumnsStart(int hour, int minute, int second, int columnHour, int columnMinute)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Unspecified);
         var firstRow = new DateTime(2026, 6, 1, hour, minute, second, DateTimeKind.Unspecified);
         await SeedQueryStatsAsync(firstRow);
@@ -891,7 +891,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_ARangeTheCoverageCovers_ShowsNoNotice_WhateverColumnItStartsIn()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 0, 7, 0, DateTimeKind.Unspecified);
         await SeedQueryStatsAsync(start.AddDays(-20));
         await SeedQueryStatsAsync(start.AddDays(3).AddMinutes(17));
@@ -912,7 +912,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [InlineData(90)]
     public async Task QueryHeatmap_ARangeNoLongerThanTheSlack_ShowsNoNotice_AndMakesNoProbeCall(int rangeMinutes)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
         await SeedQueryStatsAsync(start.AddMinutes(7));
 
@@ -931,7 +931,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_AFirstRowInsideTheSlackOfALongRange_ShowsNoNotice_AndKeepsTheRangeStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
         await SeedQueryStatsAsync(start.AddMinutes(37));
 
@@ -962,7 +962,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_AFirstRowPastTheSlack_WhoseColumnStartsAtTheSlack_ShowsNoNotice_AndTrimsNoColumns()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
         await SeedQueryStatsAsync(start.AddMinutes(91));
 
@@ -982,7 +982,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_AGapInsideTheData_StillDrawsEmptyColumns_WhenTheRangeStartsBeforeTheData()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var start = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
         var end = start.AddDays(7);
         var dataStart = new DateTime(2026, 6, 3, 8, 0, 0, DateTimeKind.Unspecified);
@@ -1030,7 +1030,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [Fact]
     public async Task QueryHeatmap_ARangeWithNoRows_DrawsNoColumns()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedQueryStatsAsync(end.AddDays(-20));
 

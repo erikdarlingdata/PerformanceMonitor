@@ -178,7 +178,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetTopQueriesByCpu_ReportsTruncation_WhenRawStartsAfterTheWindow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var collected = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
         using (var connection = await OpenSeedConnectionAsync())
             await SeedQueryStatsAsync(connection, collected, "0xTRUNC");
@@ -198,7 +198,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetTopProceduresByCpu_ReportsTruncation_WhenRawStartsAfterTheWindow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var collected = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
         using (var connection = await OpenSeedConnectionAsync())
             await SeedProcedureStatsAsync(connection, collected, "usp_Trunc");
@@ -217,7 +217,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetQueryStoreTop_ReportsTruncation_WhenRawStartsAfterTheWindow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var collected = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
         using (var connection = await OpenSeedConnectionAsync())
             await SeedQueryStoreStatsAsync(connection, collected, 900001);
@@ -241,7 +241,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetTopQueriesByCpu_NoNote_WhenFloorIsInsideTheSlack()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var requestedStart = DateTime.UtcNow.AddHours(-24);
         var collected = DateTime.SpecifyKind(requestedStart.AddMinutes(60), DateTimeKind.Unspecified);
         using (var connection = await OpenSeedConnectionAsync())
@@ -265,7 +265,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task FloorHelper_ReadsTheArchivedFloor_NotJustTheHotTable()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var archivedFloor = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-6), DateTimeKind.Unspecified);
         var hotStart = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-12), DateTimeKind.Unspecified);
 
@@ -350,7 +350,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task FloorHelper_QuietStartInsideTheWindow_WithOlderRowsBeforeIt_IsNotTruncated()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var windowEnd = DateTime.UtcNow;
         var requestedStart = windowEnd.AddDays(-7);
         using (var connection = await OpenSeedConnectionAsync())
@@ -380,7 +380,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task FloorHelper_NoRowInsideTheWindow_ReturnsNull_EvenWhenOlderRowsExist()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var windowEnd = DateTime.UtcNow;
         var requestedStart = windowEnd.AddDays(-7);
         using (var connection = await OpenSeedConnectionAsync())
@@ -400,7 +400,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task FloorHelper_RangeStartsBeforeTheOldestStoredRow_IsTruncated_AtTheOldestRow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var windowEnd = DateTime.UtcNow;
         var requestedStart = windowEnd.AddDays(-7);
         var oldest = windowEnd.AddDays(-2);
@@ -426,7 +426,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task FloorHelper_WindowInsideTheStoredRows_IsNotTruncated_AndGivesTheStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var windowEnd = DateTime.UtcNow;
         var requestedStart = windowEnd.AddDays(-7);
         using (var connection = await OpenSeedConnectionAsync())
@@ -452,7 +452,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task FloorHelper_RowExactlyAtTheWindowStart_GivesTheStart_NotTruncated()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         var windowEnd = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var requestedStart = windowEnd.AddDays(-7);
@@ -479,7 +479,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task FloorHelper_OnlyAnotherServerHoldsOlderRows_ThisServerIsTruncated_AtItsFirstRow()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var windowEnd = DateTime.UtcNow;
         var requestedStart = windowEnd.AddDays(-7);
         var firstRow = windowEnd.AddDays(-2);
@@ -508,7 +508,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task GetTopQueriesByCpu_OlderRowsBeforeTheWindow_ReportsTheWholeWindow_NotTruncated()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var nowUtc = DateTime.UtcNow;
         using (var connection = await OpenSeedConnectionAsync())
         {

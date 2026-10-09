@@ -84,7 +84,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     public async Task MonthStoredOnlyAsPartFiles_IsVisibleThroughTheView()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         await ArchiveRowsAsync("202609_collection_log_pt001.parquet", 0, 100);
         await ArchiveRowsAsync("202609_collection_log_pt002.parquet", 100, 150);
@@ -98,7 +98,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     public async Task PlainMonthlyAndPartFiles_AreBothVisibleThroughTheView()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         await ArchiveRowsAsync("202608_collection_log.parquet", 0, 40);
         await ArchiveRowsAsync("202609_collection_log_pt001.parquet", 40, 100);
@@ -118,7 +118,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
     public async Task ATableWithoutPartFiles_KeepsASingleGlob()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         await ArchiveRowsAsync("202609_collection_log.parquet", 0, 10);
 

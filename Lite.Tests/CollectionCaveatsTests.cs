@@ -215,7 +215,7 @@ public sealed class CollectionCaveatsTests : IDisposable
     private async Task<DuckDbInitializer> InitializeAsync()
     {
         _duckDb = new DuckDbInitializer(_dbPath);
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         return _duckDb;
     }
 

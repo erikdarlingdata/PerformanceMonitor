@@ -111,7 +111,7 @@ public class StoredEventCopiesTests : IDisposable
     {
         var shape = Shapes[table];
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         using (var connection = await OpenAsync())
         {
             await ExecuteAsync(connection, $"INSERT INTO {table} {shape.Columns} VALUES {string.Join(", ", archived)}");

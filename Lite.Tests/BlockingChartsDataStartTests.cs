@@ -141,7 +141,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
     [MemberData(nameof(Surfaces))]
     public async Task DataStartsInsideTheWindow_ShowsTheNote_AtTheCoverageStart(string surface, QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddDays(-2);
         await SeedRunsAsync(relation, added, end);
@@ -158,7 +158,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
     [MemberData(nameof(Surfaces))]
     public async Task QuietStart_WindowCovered_FirstPointComesLate_ShowsNoNote(string surface, QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedRunsAsync(relation, end.AddDays(-9), end);
         await SeedRowAsync(relation, end.AddDays(-7).AddHours(5));
@@ -173,7 +173,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
     [Fact]
     public async Task APointDrawnBeforeTheCoverageStart_IsWhatTheNoteNames()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var pointAt = end.AddDays(-3);
         await SeedRunsAsync(QueryWindowRelation.Deadlocks, end.AddDays(-2), end);
@@ -215,7 +215,7 @@ VALUES ($1, $2, $2, $3, $4, 'db1', 1, 100)", _nextId++, Naive(at), ServerId, Ser
     [InlineData("BlockingStats")]
     public async Task DmvCoversTheWindow_XeStartsMidway_NamesTheXeStart(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var xeFrom = FixedEnd.AddDays(-3);
         await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
         await ExecAsync(@"
@@ -239,7 +239,7 @@ FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
     [InlineData("BlockingStats")]
     public async Task DmvOnly_NoteIsAsBefore(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await ExecAsync(@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 SELECT $1 + row_number() OVER (), $2, $3, 'dmv_blocking_snapshot', g.t, 12, 'SUCCESS', 0
@@ -260,7 +260,7 @@ FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
     [InlineData("BlockingStats")]
     public async Task XeCoversTheWindow_ShowsNoNote(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
         await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-7).AddHours(5));
 
@@ -281,7 +281,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _
     [InlineData("BlockingStats")]
     public async Task ThresholdWentOnMidway_NamesTheFirstNonzeroSnapshot(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
         await SeedThresholdAsync(FixedEnd.AddDays(-8), 0);
         await SeedThresholdAsync(FixedEnd.AddDays(-4), 5);
@@ -299,7 +299,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _
     [InlineData("BlockingStats")]
     public async Task AReportBeforeTheFirstNonzeroSnapshot_NamesTheReport(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
         await SeedThresholdAsync(FixedEnd.AddDays(-8), 0);
         await SeedThresholdAsync(FixedEnd.AddDays(-4), 5);
@@ -317,7 +317,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _
     [InlineData("BlockingStats")]
     public async Task ThresholdOnBeforeTheWindow_IsCovered(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
         await SeedThresholdAsync(FixedEnd.AddDays(-8), 5);
         await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-5));
@@ -334,7 +334,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _
     [InlineData("BlockingStats")]
     public async Task NonzeroSnapshotsInTheWindowAndNoZeroSeen_IsCovered(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
         await SeedThresholdAsync(FixedEnd.AddDays(-4), 5);
         await SeedThresholdAsync(FixedEnd.AddDays(-3), 5);
@@ -352,7 +352,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _
     [InlineData("BlockingStats")]
     public async Task AZeroSnapshotAfterTheFirstNonzeroOne_IsNotALateStart(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
         await SeedThresholdAsync(FixedEnd.AddDays(-6), 5);
         await SeedThresholdAsync(FixedEnd.AddDays(-3), 0);
@@ -370,7 +370,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _
     [InlineData("BlockingStats")]
     public async Task NoServerConfigRows_NamesTheCollectorStart_AsBefore(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var xeFrom = FixedEnd.AddDays(-3);
         await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, xeFrom, FixedEnd);
         await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, xeFrom.AddHours(2));
@@ -387,7 +387,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _
     [InlineData("BlockingStats")]
     public async Task DmvBranch_IgnoresTheThreshold(string surface)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await ExecAsync(@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 SELECT $1 + row_number() OVER (), $2, $3, 'dmv_blocking_snapshot', g.t, 12, 'SUCCESS', 0
@@ -437,7 +437,7 @@ FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
     [Fact]
     public async Task SourceCheck_HonorsTheDatabaseFilter()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-1));
         var service = new LocalDataService(_duckDb);
         var window = (FixedEnd.AddDays(-7), FixedEnd);

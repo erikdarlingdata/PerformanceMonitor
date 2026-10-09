@@ -89,3 +89,9 @@ d5370df470 Darling.Tests.DarlingAnomalyBaselineTests
 d6c02bf28a Darling.Tests.DarlingStoreUpgradeRevertTests
 ed114b5b17 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
 f07bfc441f PerformanceMonitorLite.Tests.TrendEmptyParityToolTests
+
+# The changelog splice (release archive) run whose failing class is a live-database class that no changelog
+# change can affect. Since #5614 the three splice files (CHANGELOG.md, docs/changelog/<version>.md and
+# tools/changelog/archive-census.txt) are documentation, so a splice takes the docs fast path and selects no
+# class; the failure on that run was not caused by the splice.
+e20c881360 Darling.Tests.MigrationUpgradeLadderLiveTests

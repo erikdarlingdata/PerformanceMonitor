@@ -343,6 +343,7 @@ jobs:
               - '.gitignore'
               - '.gitattributes'
               - 'llms.txt'
+              - 'tools/changelog/archive-census.txt'
               - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
               - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
             all:
@@ -757,6 +758,13 @@ jobs:
               # (and Lite's copy) are test INPUTS, not documentation, and a bare extension glob
               # would wave every budget-pin edit through the fast path unbuilt and untested.
               - 'llms.txt'
+              # The changelog archive census, an exact path for the same reason as llms.txt. Every
+              # changelog splice regenerates it beside CHANGELOG.md and docs/changelog/<version>.md, and
+              # without it a splice paid about 17 minutes of Guard tests and whole-tree guards. It gives up
+              # ChangelogIndexAndArchiveTests on a splice PR, which already does not run on a
+              # CHANGELOG.md-only change: the splice lane runs that class before it pushes, and the nightly
+              # runs the full suite (#5614).
+              - 'tools/changelog/archive-census.txt'
               - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
               - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
             # Catch-all COUNTER, not a boolean gate: the classify step below decides

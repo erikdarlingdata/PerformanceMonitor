@@ -40,7 +40,7 @@ public sealed class PostCollectionCheckpointBudgetTests : IDisposable
     private async Task<RemoteCollectorService> OpenAsync()
     {
         _duckDb = new DuckDbInitializer(Path.Combine(_dir, "pm.duckdb"));
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         return new RemoteCollectorService(_duckDb, new ServerManager(_dir), new ScheduleManager(_dir));
     }
 

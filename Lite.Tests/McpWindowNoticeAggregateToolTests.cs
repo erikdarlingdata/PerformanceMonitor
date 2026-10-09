@@ -98,7 +98,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DefaultTrace_CollectionStartsInsideTheWindow_ReportsTheFloorInUtc_AndTheNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         var floor = Anchor.AddDays(-2);
         await SeedRunsAsync("default_trace_events", floor, Anchor, everyMinutes: 30);
@@ -114,7 +114,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DefaultTrace_AQuietStart_CollectedFromBeforeTheWindow_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         await SeedRunsAsync("default_trace_events", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedTraceEventAsync(Anchor.AddDays(-2));
@@ -132,7 +132,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DefaultTrace_TheFloorIsConvertedFromTheServersWallClock()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         var floorUtc = WindowStart.AddDays(1);
         await SeedTraceEventAsync(floorUtc);
@@ -148,7 +148,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DefaultTrace_ADataAnswer_CarriesTheKeysRightAfterHoursBack()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         await SeedRunsAsync("default_trace_events", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedTraceEventAsync(Anchor.AddDays(-2));
@@ -159,7 +159,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DefaultTrace_AShortWindowWithRows_StartsNoProbe_AndIsCoveredAtTheRequestedStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         await SeedTraceEventAsync(Anchor.AddMinutes(-30));
 
@@ -172,7 +172,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DefaultTrace_AnEmptyWindow_PastCoverage_CarriesTheFloorAndTheNote_UnderHints()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         await SeedRunsAsync("default_trace_events", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
 
@@ -185,7 +185,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DefaultTrace_AnEmptyWindow_TheStoreHoldsNothingIn_SaysNothingWasRead()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         await SeedRunsAsync("default_trace_events", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
 
@@ -198,7 +198,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DefaultTrace_AnEmptyShortWindow_IsAlwaysProbed()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
 
         var root = Root(await TraceAsync(hoursBack: 1));
@@ -212,7 +212,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task WaitStats_CollectionStartsInsideTheWindow_ReportsTheFloor_AndTheNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedRunsAsync("wait_stats", floor, Anchor, everyMinutes: 30);
         await SeedWaitAsync(floor);
@@ -226,7 +226,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task WaitStats_AQuietStart_CollectedFromBeforeTheWindow_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("wait_stats", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedWaitAsync(Anchor.AddDays(-2));
 
@@ -236,7 +236,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task WaitStats_ADataAnswer_CarriesTheKeysRightAfterHoursBack()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("wait_stats", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedWaitAsync(Anchor.AddDays(-2));
 
@@ -246,7 +246,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task WaitStats_AShortWindowWithRows_StartsNoProbe_AndIsCoveredAtTheRequestedStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedWaitAsync(Anchor.AddMinutes(-30));
 
         AssertCovered(Root(await WaitsAsync(hoursBack: 1)), Anchor.AddHours(-1));
@@ -256,7 +256,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task WaitStats_ACappedPage_NextToAWindowFloor_LeavesTheNoticeUnchanged()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedRunsAsync("wait_stats", floor, Anchor, everyMinutes: 30);
         await SeedWaitAsync(floor, "PAGEIOLATCH_SH");
@@ -274,7 +274,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [InlineData(true)]
     public async Task WaitStats_NoRows_IsUnavailable_AndStaysBare(bool collectorRan)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         if (collectorRan)
         {
             await SeedRunsAsync("wait_stats", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
@@ -291,7 +291,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_CollectionStartsInsideTheWindow_ReportsTheFloor_AndTheNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedRunsAsync("blocked_process_report", floor, Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", floor, Anchor, everyMinutes: 30);
@@ -306,7 +306,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_AQuietStart_CollectedFromBeforeTheWindow_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedBprAsync(Anchor.AddDays(-2));
@@ -324,7 +324,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [InlineData(-2, -3)]
     public async Task BlockingStats_TheLaterOfTheTwoSeriesFloors_Wins(int blockedProcessDays, int deadlockDays)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", Anchor.AddDays(blockedProcessDays), Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", Anchor.AddDays(deadlockDays), Anchor, everyMinutes: 30);
         await SeedBprAsync(Anchor.AddDays(-1));
@@ -343,7 +343,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [InlineData(false)]
     public async Task BlockingStats_OneSeriesCoveredFromBeforeTheWindow_TheOtherStartingInside_NoticeIsAtTheLaterStart(bool deadlocksCoverFirst)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var early = deadlocksCoverFirst ? "deadlocks" : "blocked_process_report";
         var late = deadlocksCoverFirst ? "blocked_process_report" : "deadlocks";
         var lateStart = Anchor.AddDays(-2);
@@ -358,7 +358,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_DeadlockRowsOnly_IsADataAnswer_WithTheDeadlockFloor()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var deadlockStart = Anchor.AddDays(-2);
         await SeedRunsAsync("blocked_process_report", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", deadlockStart, Anchor, everyMinutes: 30);
@@ -379,7 +379,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_TheXeReportsStartingEarly_TheDmvSnapshotsLate_BlockingFloorIsTheXeStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var xeStart = Anchor.AddDays(-3);
         await SeedRunsAsync("blocked_process_report", xeStart, Anchor, everyMinutes: 30);
         await SeedRunsAsync("dmv_blocking_snapshot", Anchor.AddDays(-1), Anchor, everyMinutes: 30);
@@ -393,7 +393,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_BothSeriesCoveredFromBeforeTheWindow_HaveNoNotice()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedBprAsync(Anchor.AddDays(-1));
@@ -409,7 +409,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_TheDmvCollectorCoveringFromBeforeTheWindow_CountsAsTheBlockingCoverage()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("dmv_blocking_snapshot", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedRunsAsync("blocked_process_report", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
@@ -421,7 +421,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_ADataAnswer_CarriesTheKeysRightAfterHoursBack_AndOneNoticeOnly()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedBprAsync(Anchor.AddDays(-1));
@@ -443,7 +443,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_AShortWindowWithRows_StartsNoProbe_AndIsCoveredAtTheRequestedStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedBprAsync(Anchor.AddMinutes(-30));
 
         AssertCovered(Root(await BlockingAsync(hoursBack: 1)), Anchor.AddHours(-1));
@@ -452,7 +452,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_AnEmptyWindow_PastCoverage_CarriesTheFloorAndTheNote_UnderHints()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", Anchor.AddDays(-3), Anchor, everyMinutes: 30);
 
@@ -470,7 +470,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_AnEmptyWindow_Covered_KeepsTheGenuinelyClearClaim()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedRunsAsync("deadlocks", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
 
@@ -486,7 +486,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_AnEmptyWindow_TheStoreHoldsNothingIn_SaysNothingWasRead()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
 
         var root = Root(await BlockingAsync());
@@ -500,7 +500,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_AnEmptyShortWindow_IsAlwaysProbed()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
 
         var root = Root(await BlockingAsync(hoursBack: 1));
@@ -512,7 +512,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task BlockingStats_NeverCollected_IsUnavailable_AndStaysBare()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
 
         var root = Root(await BlockingAsync());
 
@@ -531,7 +531,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     [Fact]
     public async Task DailySummaryRange_CarriesItsOwnDataState_AndNoWindowKeys()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("wait_stats", Anchor.AddDays(-1), Anchor, everyMinutes: 60);
 
         var root = Root(await McpHealthTools.GetDailySummaryRange(Service(), _serverManager, ServerName, 7, AsOf));

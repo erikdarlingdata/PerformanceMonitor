@@ -153,7 +153,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task EventsAndRunsStartInsideTheWindow_ReportTheFloor_AndTheNote(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedLogRunsAsync(CollectorOf(tool), floor, Anchor, everyMinutes: 30);
         await SeedEventAsync(tool, floor);
@@ -172,7 +172,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task AQuietStart_TheCollectorRanFromBeforeTheWindow_FirstEventTwoDaysIn_IsCovered(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         /* The collector ran every half hour from before the window began, and nothing happened until two days in.
            A server that is quiet for days looks exactly like this, and a rows-only probe would call it truncated. */
         await SeedLogRunsAsync(CollectorOf(tool), WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
@@ -199,7 +199,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task AnEventOlderThanItsRun_FirstRunBackfill_NamesTheEvent_AndIsNotACut(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var firstRun = WindowStart.AddMinutes(100);
         var backfilled = WindowStart.AddMinutes(30);
         await SeedLogRunsAsync(CollectorOf(tool), firstRun, Anchor, everyMinutes: 30);
@@ -219,7 +219,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task ADataAnswer_CarriesTheKeysRightAfterHoursBack(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(CollectorOf(tool), Anchor.AddDays(-2), Anchor, everyMinutes: 30);
         await SeedEventAsync(tool, Anchor.AddDays(-2));
 
@@ -243,7 +243,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task AShortWindowWithRows_StartsNoProbe_AndIsCoveredAtTheRequestedStart(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedEventAsync(tool, Anchor.AddMinutes(-30));
 
         var root = Root(await CallAsync(tool, hoursBack: 1));
@@ -260,7 +260,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task ATruncatedPage_NextToAWindowFloor_LeavesTheNoticeUnchanged(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var floor = Anchor.AddDays(-2);
         await SeedLogRunsAsync(CollectorOf(tool), floor, Anchor, everyMinutes: 30);
         await SeedEventAsync(tool, floor);
@@ -285,7 +285,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [Fact]
     public async Task BlockedProcessReports_TheDmvCollectorCoveredTheWindow_IsCovered()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync("dmv_blocking_snapshot", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedEventAsync(EventTool.BlockedProcessReports, Anchor.AddDays(-2));
 
@@ -297,7 +297,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [Fact]
     public async Task BlockedProcessXml_TheDmvCollectorCoveredTheWindow_StillNamesTheXeFloor()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync("dmv_blocking_snapshot", WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
         await SeedEventAsync(EventTool.BlockedProcessXml, Anchor.AddDays(-2));
 
@@ -316,7 +316,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task AnEmptyWindow_PastCoverage_CarriesTheFloorAndTheNote_UnderHints(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         /* The collector ran for two days of a 7-day ask and nothing happened: only the keys say the older five were never read. */
         await SeedLogRunsAsync(CollectorOf(tool), Anchor.AddDays(-2), Anchor, everyMinutes: 30);
 
@@ -334,7 +334,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task AnEmptyWindow_TheStoreHoldsNothingIn_SaysNothingWasRead(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
 
         var root = Root(await CallAsync(tool));
 
@@ -350,7 +350,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     [InlineData(EventTool.LongQueryCompletions)]
     public async Task AnEmptyWindow_TheCollectorCoveredFromBeforeIt_SaysCovered(EventTool tool)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(CollectorOf(tool), Anchor.AddDays(-9), Anchor, everyMinutes: 30);
 
         var root = Root(await CallAsync(tool));
