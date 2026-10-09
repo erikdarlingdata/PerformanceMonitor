@@ -139,7 +139,13 @@ function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor 
 # holds WRITE_DAC and WRITE_OWNER implicitly and can grant itself anything regardless of what the DACL
 # currently says, the same fact Lock-DarlingInstallTree's own post-lock walk already acts on ("owned by").
 # So the owner is checked directly here too, rather than trying to read that ACE.
-function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Recurse) {
+#
+# -ServiceSids (#5627) are the service's own accounts (Get-DarlingServiceSids). They are trusted as owner and as
+# a write grantee in the folders and files the service writes (Test-DarlingServiceWrittenPath, one list shared
+# with Lock-DarlingInstallTree), and as a write grantee on $path itself, where the lock gives them their own
+# access. Everywhere else in the tree they are named like any other account, and a caller that passes none
+# (a source build, which the service never writes to) trusts them nowhere.
+function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Recurse, [array]$serviceSids = @()) {
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
     $sidType = [System.Security.Principal.SecurityIdentifier]
@@ -154,14 +160,20 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
     function Get-DarlingOneObjectWriteFindings([string]$itemPath, [bool]$includeInherited) {
         try { $acl = Get-Acl -LiteralPath $itemPath -ErrorAction Stop }
         catch { return @("$itemPath (its permissions could not be read: $($_.Exception.Message))") }
+        $ownerTrusted = $trusted
+        $granteeTrusted = $trusted
+        if (@($serviceSids).Count -gt 0) {
+            if (Test-DarlingServiceWrittenPath $path $itemPath) { $ownerTrusted = @($trusted) + @($serviceSids); $granteeTrusted = $ownerTrusted }
+            elseif ($itemPath.TrimEnd('\') -ieq $path.TrimEnd('\')) { $granteeTrusted = @($trusted) + @($serviceSids) }
+        }
         $bad = @($acl.GetAccessRules($true, $includeInherited, $sidType) | Where-Object {
-            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference -and $inheritOnlyTemplates -notcontains $_.IdentityReference })
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $granteeTrusted -notcontains $_.IdentityReference -and $inheritOnlyTemplates -notcontains $_.IdentityReference })
         $result = @($bad | ForEach-Object {
             $name = try { $_.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $_.IdentityReference.Value }
             "$name on $itemPath"
         })
         $owner = $acl.GetOwner($sidType)
-        if ($trusted -notcontains $owner) {
+        if ($ownerTrusted -notcontains $owner) {
             $name = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { $owner.Value }
             $result += "$itemPath (owned by $name)"
         }
@@ -236,30 +248,52 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
     catch { return $null }
 }
 
+# The folders and files the service itself writes inside the install root. ONE list, read by Lock-DarlingInstallTree
+# (what it creates, grants and keeps the service's ownership of) and by the pre-lock walk (where the service's own
+# account is trusted as owner and as a write grantee), so the two cannot drift apart. Directories are always
+# created and granted; KeyDirectories only on a bring-your-own PostgreSQL install (Get-DarlingExtraServiceWriteDirectories);
+# Files are matched by name, in the install root only. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingServiceWrittenNames {
+    return [pscustomobject]@{
+        Directories    = @('pg-runtime', 'pg-runtime-prev')
+        KeyDirectories = @('darling-keys')
+        Files          = @('darling.json', 'darling.json.bak-*')
+    }
+}
+
+# True when a file NAME is one of the root files on the list above.
+function Test-DarlingServiceWrittenFileName([string]$name) {
+    foreach ($pattern in @((Get-DarlingServiceWrittenNames).Files)) {
+        if ($name -like $pattern) { return $true }
+    }
+    return $false
+}
+
+# True when $candidate is, or sits under, a folder on the list above inside $root, or is one of the listed
+# files directly in $root. The install root itself and every other file or folder in it are not on the list.
+function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate) {
+    $names = Get-DarlingServiceWrittenNames
+    foreach ($directory in (@($names.Directories) + @($names.KeyDirectories))) {
+        if (Test-PathIsAtOrUnder $candidate (Join-Path $root $directory)) { return $true }
+    }
+    try {
+        $full = [IO.Path]::GetFullPath($candidate)
+        $parent = [IO.Path]::GetDirectoryName($full)
+        $rootFull = [IO.Path]::GetFullPath($root).TrimEnd('\')
+    }
+    catch { return $false }
+    return [bool]($parent -and ($parent.TrimEnd('\') -ieq $rootFull) -and (Test-DarlingServiceWrittenFileName ([IO.Path]::GetFileName($full))))
+}
+
 # The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
 # SYSTEM, Administrators, TrustedInstaller, whoever is running this script elevated right now, and every
 # direct member of BUILTIN\Administrators (round-1 review, M2) - a folder the installing admin's own account
 # owns and can write to, or one a DIFFERENT administrator's account owns, is exactly what a normal
 # extraction looks like, not a finding. Kept as its own function because install-darling.ps1 and
-# upgrade-darling.ps1 both need it and must agree on it.
-#
-# $existingServiceAccount adds one more, when the caller has one: the CURRENT logon account of an
-# ALREADY-REGISTERED Darling service (round-1 review, #4043). A re-run of install-darling.ps1 over a tree
-# #4038 already locked - a repair, or this script used as its own upgrade path - is not a fresh extraction:
-# the lock already granted that account Modify on $root, and without this, the very first re-run or repair
-# over an already-locked install would refuse itself over the grant #4038 itself made. Resolved through
-# Resolve-DarlingServiceAccountSid; a name that will not translate is left out rather than thrown on here -
-# see Get-DarlingPreLockTrustedSidsForRerun for the caller that refuses instead of silently dropping it
-# (L4). The base set still applies either way.
-#
-# $serviceName adds this product's OWN service SID, 'NT SERVICE\<serviceName>', whether or not that service is
-# registered right now and whatever account it logs on as today (#5627). The service extracted pg-runtime and
-# owns it by design, and that owner stays whoever ran the service WHEN it extracted - which is not the current
-# logon account once the service has been deleted, renamed or pointed at another account since. Only OUR
-# service name is derived: no other NT SERVICE\* SID, and not the NT SERVICE authority as a whole, so a tree
-# owned by a different service's SID is still a finding. If the SID cannot be computed it is left out
-# and the walk names what it finds, as before.
-function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount, [string]$serviceName) {
+# upgrade-darling.ps1 both need it and must agree on it. This is the whole set for a folder the service never
+# writes to (a source build), and the base set for the install folder, where Get-DarlingServiceSids adds the
+# service's own account for the folders on the Get-DarlingServiceWrittenNames list.
+function Get-DarlingPreLockTrustedSids {
     $wk = [System.Security.Principal.WellKnownSidType]
     $sidType = [System.Security.Principal.SecurityIdentifier]
     $trusted = @(
@@ -267,28 +301,49 @@ function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount, [string]
         (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)),
         (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType),
         [Security.Principal.WindowsIdentity]::GetCurrent().User)
-    if ($existingServiceAccount) {
-        $serviceSid = Resolve-DarlingServiceAccountSid $existingServiceAccount
-        if ($serviceSid) { $trusted += $serviceSid }
-    }
-    if ($serviceName) {
-        # Computed, not looked up: Windows answers 'NT SERVICE\<name>' only while a service of that name is
-        # registered, and the SID that owns pg-runtime outlives the registration. The SID is the one Windows
-        # derives from the name (what sc.exe showsid prints): SHA-1 of the upper-cased name in UTF-16LE, its first
-        # 20 bytes read as five little-endian integers under S-1-5-80.
-        try {
-            $nameHash = [System.Security.Cryptography.SHA1]::Create().ComputeHash([System.Text.Encoding]::Unicode.GetBytes($serviceName.ToUpperInvariant()))
-            $nameParts = 0..4 | ForEach-Object { [BitConverter]::ToUInt32($nameHash, $_ * 4) }
-            $trusted += New-Object System.Security.Principal.SecurityIdentifier("S-1-5-80-$($nameParts -join '-')")
-        }
-        catch { }
-    }
     $adminMembers = Get-LocalAdministratorsDirectMemberSids
     if ($adminMembers) { $trusted += $adminMembers }
     return $trusted
 }
 
-# The pre-lock trusted set for a RE-RUN over a possibly-already-registered service, failing closed with a
+# The accounts the service runs as, for Get-UntrustedWriteGrantees -ServiceSids (#5627): the SID this product's
+# own service gets, 'NT SERVICE\<serviceName>', whether or not that service is registered right now and whatever
+# account it logs on as today, plus $existingServiceAccount, the CURRENT logon account of an ALREADY-REGISTERED
+# service, when the caller has one (round-1 review, #4043). A re-run of install-darling.ps1 over a tree #4038
+# already locked - a repair, or this script used as its own upgrade path - is not a fresh extraction: the lock
+# already granted that account Modify on its folders. The service extracted pg-runtime and owns it by design, and
+# that owner stays whoever ran the service WHEN it extracted - which is not the current logon account once the
+# service has been deleted, renamed or pointed at another account since. Only OUR service name is derived: no
+# other NT SERVICE\* SID, and not the NT SERVICE authority as a whole, so a tree owned by a different service's
+# SID is still a finding. The account is resolved through Resolve-DarlingServiceAccountSid; a name that will not
+# translate is left out rather than thrown on here - see Get-DarlingPreLockTrustedSidsForRerun for the caller
+# that refuses instead of silently dropping it (L4).
+function Get-DarlingServiceSids([string]$existingServiceAccount, [string]$serviceName) {
+    $sids = @()
+    if ($existingServiceAccount) {
+        $serviceSid = Resolve-DarlingServiceAccountSid $existingServiceAccount
+        if ($serviceSid) { $sids += $serviceSid }
+    }
+    if ($serviceName) {
+        # Computed, not looked up: Windows answers 'NT SERVICE\<name>' only while a service of that name is
+        # registered, and the SID that owns pg-runtime outlives the registration. The SID is the one Windows
+        # derives from the name (what sc.exe showsid prints): SHA-1 of the upper-cased name in UTF-16LE, its first
+        # 20 bytes read as five little-endian integers under S-1-5-80. Windows folds case with its own table and
+        # .NET with the invariant culture; they agree for plain ASCII, so a name outside it is not computed.
+        try {
+            if ($serviceName -notmatch '^[\x20-\x7E]+$') { throw 'the service name is not plain ASCII' }
+            $nameHash = [System.Security.Cryptography.SHA1]::Create().ComputeHash([System.Text.Encoding]::Unicode.GetBytes($serviceName.ToUpperInvariant()))
+            $nameParts = 0..4 | ForEach-Object { [BitConverter]::ToUInt32($nameHash, $_ * 4) }
+            $sids += New-Object System.Security.Principal.SecurityIdentifier("S-1-5-80-$($nameParts -join '-')")
+        }
+        catch {
+            Write-Host "WARNING: could not work out the Windows SID of NT SERVICE\$serviceName ($($_.Exception.Message)), so files that account owns will be listed." -ForegroundColor Yellow
+        }
+    }
+    return $sids
+}
+
+# The pre-lock trusted sets for a RE-RUN over a possibly-already-registered service, failing closed with a
 # clear message instead of silently mis-trusting or mis-refusing (round-1 review, #4043, L3/L4). Two
 # distinct ways the existing service's account can defeat the pre-lock check if let through quietly:
 # Windows cannot say what it is AT ALL (L3 - Get-DarlingServiceLogonName returns nothing; this is 1b2's own
@@ -299,11 +354,14 @@ function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount, [string]
 # operator to re-extract a perfectly good install, or worse, trains them to reach for
 # -AcceptWritableExtraction on sight.
 #
+# Returns Trusted (the base set, for Get-UntrustedWriteGrantees) and ServiceSids (for its -ServiceSids).
 # $existingService is the Get-Service result (or $null) the caller already has, not re-queried here, so a
 # caller that already asked does not ask Windows the same question again on every call. Kept byte-identical
 # in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingService) {
-    if (-not $existingService) { return Get-DarlingPreLockTrustedSids $null $serviceName }
+    if (-not $existingService) {
+        return [pscustomobject]@{ Trusted = @(Get-DarlingPreLockTrustedSids); ServiceSids = @(Get-DarlingServiceSids $null $serviceName) }
+    }
 
     $existingAccount = Get-DarlingServiceLogonName $serviceName
     if (-not $existingAccount) {
@@ -312,37 +370,91 @@ function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingSe
     if (-not (Resolve-DarlingServiceAccountSid $existingAccount)) {
         Fail "The existing '$serviceName' service logs on as '$existingAccount', which could not be resolved to a SID right now (its domain may be unreachable, or the account may no longer exist). The install folder cannot be safely checked or locked without knowing whether its own grant belongs to that account. Verify the account is reachable, then re-run this script."
     }
-    return Get-DarlingPreLockTrustedSids $existingAccount $serviceName
+    return [pscustomobject]@{ Trusted = @(Get-DarlingPreLockTrustedSids); ServiceSids = @(Get-DarlingServiceSids $existingAccount $serviceName) }
 }
 
-# The numbered steps for replacing the folder of an EXISTING install whose pre-lock check refused (#5627): the
-# registered service, its darling.json and its store are kept and only the program folder is replaced.
+# The absolute paths darling.json names that sit inside $folder, as 'path (what names it)' lines: the store
+# (postgres.dataDirectory), a certificate or key (a tls pfxPath, certPath or keyPath) and any 'file:' reference.
+# A regex over the comment-stripped text, as Get-DarlingExtraServiceWriteDirectories does, because Windows
+# PowerShell 5.1's ConvertFrom-Json rejects comments and trailing commas. An unreadable or missing darling.json
+# names nothing. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingConfiguredPathsUnder([string]$folder) {
+    $config = Join-Path $folder 'darling.json'
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return @() }
+    try { $text = Get-Content -LiteralPath $config -Raw -ErrorAction Stop }
+    catch { return @() }
+    $stripped = ($text -split "`r?`n" | ForEach-Object { $_ -replace '(?<!:)//.*$', '' }) -join "`n"
+    $named = @()
+    foreach ($match in [regex]::Matches($stripped, '"(dataDirectory|pfxPath|certPath|keyPath)"\s*:\s*"((?:[^"\\]|\\.)*)"', 'IgnoreCase')) {
+        $what = if ($match.Groups[1].Value -ieq 'dataDirectory') { 'postgres.dataDirectory' } else { $match.Groups[1].Value }
+        $named += , @($what, $match.Groups[2].Value)
+    }
+    foreach ($match in [regex]::Matches($stripped, '"file:\s*((?:[^"\\]|\\.)*)"')) {
+        $named += , @('a file: reference', $match.Groups[1].Value)
+    }
+    $found = @()
+    foreach ($pair in $named) {
+        $value = ($pair[1] -replace '\\\\', '\').Trim()
+        if ($value -and [IO.Path]::IsPathRooted($value) -and (Test-PathIsAtOrUnder $value $folder)) { $found += "$value ($($pair[0]))" }
+    }
+    return @($found | Select-Object -Unique)
+}
+
+# Where the new zip goes (#5627). Under C:\Program Files already, the folder to use is a different one.
+function Get-DarlingNewFolderPhrase([string]$oldFolder) {
+    if (Test-PathIsAtOrUnder $oldFolder $env:ProgramFiles) { return 'a new, empty folder with a different name under C:\Program Files.' }
+    return 'a new, empty folder named C:\Program Files\PerformanceMonitorDarling. If that name is taken, use another new name under C:\Program Files.'
+}
+
+# The numbered steps for replacing the folder of an EXISTING install whose pre-lock check refused (#5627), for a
+# registered service: the service, its darling.json and its store are kept and only the program folder is replaced.
 # Everything the steps rely on was read from install-darling.ps1: the service is re-pointed in place (only its
 # binary path changes, its logon account and credentials are left alone), darling.json is the one file the zip does
 # not ship that an install needs (without it the sample config is copied in), pg-runtime comes back from the new
-# zip's pg-runtime.zip, and the store lives under %ProgramData%\PerformanceMonitorDarling. The two other things
-# an install can keep in its root are a certificate or key that darling.json points at, and the darling-keys
-# folder beside it (postgres.managed = false). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# zip's pg-runtime.zip, and the store lives under %ProgramData%\PerformanceMonitorDarling unless darling.json sets
+# postgres.dataDirectory. Anything darling.json names inside the old folder is listed in the last step, so the
+# folder is deleted only after it has been moved. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingExistingInstallSteps([string]$oldFolder, [string]$serviceName) {
+    $newFolder = Get-DarlingNewFolderPhrase $oldFolder
+    $inside = @(Get-DarlingConfiguredPathsUnder $oldFolder)
+    $last = if ($inside.Count -gt 0) {
+        $list = ($inside | ForEach-Object { "       $_." }) -join "`n"
+        "  6. Do not delete $oldFolder yet. darling.json names these paths inside it:`n$list`n     Move each one to a folder outside it, and update darling.json to the new place.`n     Then, once the service is collecting, delete $oldFolder."
+    }
+    else {
+        "  6. Delete $oldFolder once the service is collecting."
+    }
     return @"
 This folder already holds an install, so the installed folder itself needs replacing. Your service, your
 darling.json and your store are kept. To move to a new folder:
 
   1. Stop the '$serviceName' service and leave it stopped until step 5.
-  2. In an elevated session, extract the new zip into a new, empty folder named
-       C:\Program Files\PerformanceMonitorDarling
-     If this folder already has that name, use another new name under C:\Program Files.
-  3. Copy darling.json from $oldFolder into the new folder before anything else. Without it,
-     install-darling.ps1 copies the SAMPLE config in. Then copy the files darling.json points at in the old
-     folder. Those are a certificate or key (a tls pfxPath, certPath or keyPath) and, if postgres.managed
-     is false, the darling-keys folder. A darling.json.bak-* backup is optional.
-  4. In an elevated session, run install-darling.ps1 from the new folder. It points the existing service at the
-     new folder. Only the service's program path changes: its logon account, its credentials and the store
-     under C:\ProgramData\PerformanceMonitorDarling are not touched.
+  2. In an elevated session, extract the new zip into
+     $newFolder
+  3. Open darling.json in $oldFolder
+     and check that every setting in it is yours. Then copy it into the new folder before anything else,
+     and go straight on to step 4. Without it, install-darling.ps1 copies the SAMPLE config in.
+     If darling.json names a certificate or key file, copy that file only if you made it yourself.
+     That means a tls pfxPath, certPath or keyPath. Do not copy a darling-keys folder: the service makes its own.
+     A darling.json.bak-* backup is optional.
+  4. In an elevated session, run install-darling.ps1 from the new folder. It points the existing service
+     at the new folder. It changes only the service's program path. Its logon account, its credentials and
+     its store are not touched. The store is in C:\ProgramData\PerformanceMonitorDarling. If darling.json
+     sets postgres.dataDirectory, it is there instead.
   5. Start the service and check that it collects.
-  6. Delete $oldFolder once the service is collecting.
+$last
 
-Do NOT try to repair this folder's permissions in place: fixing the ACL cannot show what is already in it.
+Do NOT try to repair this folder's permissions in place.
+"@
+}
+
+# The refusal's advice when the service is NOT registered, so there is no install to keep (#5627): a fresh folder.
+# Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingFreshFolderAdvice([string]$folder) {
+    $where = if (Test-PathIsAtOrUnder $folder $env:ProgramFiles) { 'a new, empty folder with a different name under C:\Program Files' } else { 'a new folder under C:\Program Files, or another folder only an administrator can write to' }
+    return @"
+Do NOT try to repair this folder's permissions in place. Extract the zip into $where.
+Then run install-darling.ps1 from there.
 "@
 }
 
@@ -625,7 +737,7 @@ function Get-DarlingExtraServiceWriteDirectories([string]$root, [string]$configP
     # folder outside the tree the lock covers, so it needs no grant from here.
     $configDir = [System.IO.Path]::GetDirectoryName($configPath).TrimEnd('\')   # Split-Path -LiteralPath -Parent is ambiguous on PowerShell 5.1
     if ($configDir -ine $root.TrimEnd('\')) { return @() }
-    return @('darling-keys')
+    return @((Get-DarlingServiceWrittenNames).KeyDirectories)
 }
 
 function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string[]]$extraServiceDirectories = @()) {
@@ -679,7 +791,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     # Each is created ahead of time if missing - best-effort, since a directory this lock cannot create is a
     # directory the first extraction would have had to create itself, root-owned, which is no better - and
     # then granted Modify with its own icacls call, so a failure on one directory does not lose the others.
-    $serviceWriteDirectories = @('pg-runtime', 'pg-runtime-prev') + @($extraServiceDirectories | Where-Object { $_ })
+    $serviceWriteDirectories = @((Get-DarlingServiceWrittenNames).Directories) + @($extraServiceDirectories | Where-Object { $_ })
 
     # icacls, not Set-Acl: Set-Acl on what Get-Acl read writes the SACL too, which needs SeSecurityPrivilege, and
     # icacls is what the warnings tell an operator to run by hand, so the fix and the remediation are the same
@@ -698,7 +810,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     if ($LASTEXITCODE -ne 0) { $open += "$root (could not make Administrators the owner of everything below it; run elevated: $($output | Select-Object -First 1))" }
     $serviceWritePaths = @()
     if ($serviceSid) {
-        foreach ($secret in @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'darling.json' -or $_.Name -like 'darling.json.bak-*' })) {
+        foreach ($secret in @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object { Test-DarlingServiceWrittenFileName $_.Name })) {
             $null = & icacls.exe $secret.FullName /setowner "*$($serviceSid.Value)" /L /Q 2>&1
         }
         foreach ($dir in $serviceWriteDirectories) {
@@ -745,14 +857,14 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         # darling.json and its backups: step 4b gives the service an explicit FullControl there (#1647) and the setowner
         # above makes it the owner, so the service is trusted on those files too. Without this the walk strips the
         # service's own grant from its config (the explicit-ACE branch below) and the service cannot start.
-        $isSecretFile = $target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*'
+        $isSecretFile = Test-DarlingServiceWrittenFileName $target.Name
         if ($serviceSid -and ($path.TrimEnd('\') -ieq $root.TrimEnd('\') -or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }
         try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
         catch { $open += "$path (its permissions could not be read)"; continue }
         $explicit = @($acl.GetAccessRules($true, $false, $sidType) | Where-Object {
             $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trustedHere -notcontains $_.IdentityReference })
         if ($explicit.Count -gt 0) {
-            if ($target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*') {
+            if ($isSecretFile) {
                 foreach ($rule in $explicit) { $null = & icacls.exe $path /remove:g "*$($rule.IdentityReference.Value)" /L /Q 2>&1 }
             }
             else {
@@ -856,27 +968,21 @@ if (-not $AcceptWritableExtraction) {
     # and refuses outright, with 1b2's own message, when that account cannot be read or resolved at all
     # (round-1 review, L3/L4), rather than silently mis-judging the walk below.
     $preLockTrusted = Get-DarlingPreLockTrustedSidsForRerun $serviceName $existing
-    $writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted -Recurse)
+    $writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids)
     if ($writable.Count -gt 0) {
         $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
         $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }
-        # An EXISTING install (#5627): the service is registered, or darling.json or pg-runtime is already here.
-        # Its folder is what needs replacing, so the refusal spells out how, instead of the fresh-extraction advice.
-        $existingInstall = $existing -or (Test-Path -LiteralPath (Join-Path $root 'darling.json')) -or (Test-Path -LiteralPath (Join-Path $root 'pg-runtime'))
-        $advice = if ($existingInstall) { Get-DarlingExistingInstallSteps $root $serviceName } else { @"
-Do NOT try to repair this folder's permissions in place: fixing the ACL cannot undo a file that was already
-replaced, and cannot prove none was. Extract the zip fresh under C:\Program Files\<something>, or another
-folder only an administrator can write to, and run this script from there instead.
-"@ }
+        # A registered service means an existing install (#5627): its folder is what needs replacing, so the refusal
+        # spells out how. With no service registered there is no install to keep, and the advice is a fresh folder.
+        $advice = if ($existing) { Get-DarlingExistingInstallSteps $root $serviceName } else { Get-DarlingFreshFolderAdvice $root }
         Fail @"
-Ordinary users can already write to this install folder, before this script has locked anything down:
+Ordinary users can already write to this install folder, before this script locks anything down:
 
 $lines$more
 
-Files here may already have been replaced with something other than what the zip shipped - the lock this
-script applies next (1b2) only stops FURTHER writes, it does not check what is already on disk. This is
-the usual shape of a folder made directly under C:\, which inherits Authenticated Users: Modify from the
-volume root.
+Files here can differ from what the zip shipped. The lock this script applies next (1b2) only stops further
+writes. It does not check what is already on disk. A folder made directly under C:\ gets this access from
+the volume root, which gives Authenticated Users Modify.
 
 $advice
 
