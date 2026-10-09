@@ -351,7 +351,8 @@ public sealed class FleetGateStatsTests
     {
         var source = ServerConnectBackoffTests.ReadWorkerSource();
 
-        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan));", source, StringComparison.Ordinal);
+        /* #5597: the count also starts at the end of the server's seeding (SeedFinishedTicks), not only at the loop's floor. */
+        Assert.Contains("_fleetGateStats?.RecordSlot(_skipCreditFloor.Skipped(due, now, intervalSpan, seeded));", source, StringComparison.Ordinal);
         Assert.Contains("_fleetGateStats?.RecordQueueWait(Stopwatch.GetElapsedTime(gateWaitStarted));", source, StringComparison.Ordinal);
 
         /* Every place that advances a COLLECTOR's due time on the grid is preceded by the count. The store
