@@ -562,11 +562,12 @@ function Get-CimInstance {
         var lockText = ExtractFunction(InstallScript, "Lock-DarlingInstallTree");
         var helper = ExtractFunction(InstallScript, "Get-DarlingExtraServiceWriteDirectories");
 
-        Assert.Contains("$isSecretFile = Test-DarlingServiceWrittenFileName $target.Name", lockText, StringComparison.Ordinal);
+        Assert.Contains("$isSecretFile = (-not $target.PSIsContainer) -and ([IO.Path]::GetDirectoryName($path).TrimEnd('\\') -ieq $root.TrimEnd('\\')) -and (Test-DarlingServiceWrittenFileName $target.Name)", lockText, StringComparison.Ordinal);
         Assert.Contains("-or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }", lockText, StringComparison.Ordinal);
         Assert.Contains("return @((Get-DarlingServiceWrittenNames).KeyDirectories)", helper, StringComparison.Ordinal);
         Assert.Contains("(Get-DarlingServiceWrittenNames).Directories", lockText, StringComparison.Ordinal);
-        Assert.Contains("(Get-DarlingServiceWrittenNames).Files", ExtractFunction(InstallScript, "Test-DarlingServiceWrittenFileName"), StringComparison.Ordinal);
+        Assert.Contains("$names.Files", ExtractFunction(InstallScript, "Test-DarlingServiceWrittenFileName"), StringComparison.Ordinal);
+        Assert.Contains("$names.BackupPattern", ExtractFunction(InstallScript, "Test-DarlingServiceWrittenFileName"), StringComparison.Ordinal);
         Assert.Contains("'darling-keys'", ExtractFunction(InstallScript, "Get-DarlingServiceWrittenNames"), StringComparison.Ordinal);
         Assert.Equal(PerformanceMonitor.Darling.Service.DarlingLogHashKeyFile.BringYourOwnDirectoryName, "darling-keys");
         Assert.DoesNotContain("(Split-Path -LiteralPath $configPath -Parent)", helper, StringComparison.Ordinal);
@@ -597,6 +598,7 @@ function Get-CimInstance {
             "Get-DarlingServiceSids", "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName",
             "Test-DarlingServiceWrittenPath", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
             "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice",
+            "Get-DarlingRefusalAdvice", "Test-DarlingSamePath", "Get-DarlingInstallRootFromService",
         })
         {
             Assert.Equal(ExtractFunction(InstallScript, name), ExtractFunction(upgrade, name));
@@ -680,8 +682,9 @@ function Get-CimInstance {
     /// <summary>
     /// #5627, text pin: the refusal for an EXISTING install (the service is registered) gives the numbered steps
     /// (stop the service, a new empty folder, check darling.json and copy it first, run install-darling.ps1 from
-    /// there, start and check, delete the old folder), and both scripts choose them by the registered service only.
-    /// With no registered service the refusal keeps the fresh-folder wording, whatever the folder holds.
+    /// there, start and check, delete the old folder), and both scripts choose them by where the registered service
+    /// runs from. With no registered service, or one that runs from another folder, the refusal keeps the
+    /// fresh-folder wording, whatever the folder holds.
     /// </summary>
     [Fact]
     public void TheExistingInstallRefusal_GivesTheNumberedSteps_AndAFreshFolderKeepsTheFreshWording()
@@ -707,8 +710,9 @@ function Get-CimInstance {
         Assert.Contains("3. Open darling.json in C:\\PerformanceMonitorDarling", rendered, StringComparison.Ordinal);
         Assert.Contains("check that every setting in it is yours", rendered, StringComparison.Ordinal);
         Assert.Contains("copies the SAMPLE config in", rendered, StringComparison.Ordinal);
-        Assert.Contains("copy that file only if you made it yourself", rendered, StringComparison.Ordinal);
-        Assert.Contains("pfxPath, certPath or keyPath", rendered, StringComparison.Ordinal);
+        Assert.Contains("If darling.json names a certificate or key file in this folder (a tls pfxPath, certPath or keyPath),", rendered, StringComparison.Ordinal);
+        Assert.Contains("make a new one, keep it outside the install folder, and point darling.json at it.", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("copy that file", rendered, StringComparison.Ordinal);
         Assert.Contains("4. In an elevated session, run install-darling.ps1 from the new folder.", rendered, StringComparison.Ordinal);
         Assert.Contains("C:\\ProgramData\\PerformanceMonitorDarling", rendered, StringComparison.Ordinal);
         Assert.Contains("sets postgres.dataDirectory, it is there instead.", rendered, StringComparison.Ordinal);
@@ -719,10 +723,12 @@ function Get-CimInstance {
         Assert.Contains("run install-darling.ps1 from there", fresh, StringComparison.Ordinal);
         Assert.DoesNotContain("Stop the", fresh, StringComparison.Ordinal);
 
-        // Both scripts choose the steps by the registered service alone: no darling.json or pg-runtime test.
-        Assert.Contains("$advice = if ($existing) { Get-DarlingExistingInstallSteps $root $serviceName } else { Get-DarlingFreshFolderAdvice $root }", InstallScript, StringComparison.Ordinal);
+        // Both scripts choose the steps by where the registered service runs from: no darling.json or pg-runtime test.
+        Assert.Contains("$advice = Get-DarlingRefusalAdvice $root $serviceName (Get-DarlingInstallRootFromService $serviceName)", InstallScript, StringComparison.Ordinal);
         Assert.DoesNotContain("$existingInstall", InstallScript, StringComparison.Ordinal);
-        Assert.Contains("$(if ($existingService) { Get-DarlingExistingInstallSteps $InstallRoot $serviceName } else { Get-DarlingFreshFolderAdvice $InstallRoot })", upgrade, StringComparison.Ordinal);
+        Assert.Contains("$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName))", upgrade, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-DarlingExistingInstallSteps $InstallRoot", upgrade, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-DarlingExistingInstallSteps $root", InstallScript, StringComparison.Ordinal);
         Assert.DoesNotContain("a fresh install into a folder only an administrator can write to", upgrade, StringComparison.Ordinal);
     }
 
@@ -782,10 +788,11 @@ function Get-CimInstance {
                 'STEPS'
                 Get-DarlingExistingInstallSteps $old 'PerformanceMonitor Darling'
                 'CONFIGURED'
-                Get-DarlingConfiguredPathsUnder $old
+                (Get-DarlingConfiguredPathsUnder $old).Lines
+                'incomplete=' + (Get-DarlingConfiguredPathsUnder $old).Incomplete
                 Set-Content -LiteralPath (Join-Path $old 'darling.json') -Value '{ "postgres": { "managed": true } }'
                 'CLEAN'
-                'cleanCount=' + @(Get-DarlingConfiguredPathsUnder $old).Count
+                'cleanCount=' + @((Get-DarlingConfiguredPathsUnder $old).Lines).Count
                 Get-DarlingExistingInstallSteps $old 'PerformanceMonitor Darling'
             }
             finally {
@@ -797,9 +804,10 @@ function Get-CimInstance {
         var configured = all[all.IndexOf("CONFIGURED", StringComparison.Ordinal)..all.IndexOf("CLEAN", StringComparison.Ordinal)];
         var clean = all[all.IndexOf("CLEAN", StringComparison.Ordinal)..];
 
-        Assert.Contains("\\data (postgres.dataDirectory).", steps, StringComparison.Ordinal);
-        Assert.Contains("\\certs\\a.pfx (pfxPath).", steps, StringComparison.Ordinal);
-        Assert.Contains("\\secrets\\smtp.txt (a file: reference).", steps, StringComparison.Ordinal);
+        Assert.Contains("\\data\" (postgres.dataDirectory).", steps, StringComparison.Ordinal);
+        Assert.Contains("\\certs\\a.pfx\" (pfxPath).", steps, StringComparison.Ordinal);
+        Assert.Contains("\\secrets\\smtp.txt\" (a file: reference).", steps, StringComparison.Ordinal);
+        Assert.Contains("incomplete=False", configured, StringComparison.Ordinal);
         Assert.Contains("6. Do not delete ", steps, StringComparison.Ordinal);
         Assert.Contains("darling.json names these paths inside it:", steps, StringComparison.Ordinal);
         Assert.DoesNotContain("elsewhere", configured, StringComparison.Ordinal);
@@ -834,9 +842,224 @@ function Get-CimInstance {
         Assert.Single(answers.FindAll(a => a.StartsWith("WARNING: could not work out the Windows SID of NT SERVICE\\", StringComparison.Ordinal)));
     }
 
+    /// <summary>
+    /// #5627: a Modify grant the service's own account holds on the install folder is a finding like any other
+    /// account's. The lock gives the service read and execute there, and the walk reads the folder with inherited
+    /// grants, so it names the grant with the service deleted, on another logon, and on its virtual account.
+    /// </summary>
+    [Fact]
+    public void ThePreLockTrustedSet_NamesAModifyGrantTheServiceHoldsOnTheInstallFolder_InEveryServiceState()
+    {
+        var probe = ServiceOwnedTreeProbe();
+        probe.AppendLine("""
+            try {
+                $script:rootWriter = $script:serviceSid
+                Show 'rootModifyDeleted' $null $null
+                Show 'rootModifyOtherLogon' $registered 'NT AUTHORITY\LOCAL SERVICE'
+                Show 'rootModifyVirtual' $registered "NT SERVICE\$serviceName"
+            }
+            finally {
+                Remove-Item -LiteralPath $script:root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        foreach (var label in new[] { "rootModifyDeleted", "rootModifyOtherLogon", "rootModifyVirtual" })
+        {
+            Assert.Contains($"{label}.count=1", answers);
+            // Windows names the account only while the service is registered, so the finding may carry the raw SID.
+            Assert.Contains(answers, a => a.StartsWith($"{label}.text=", StringComparison.Ordinal)
+                && (a.Contains("PerformanceMonitor Darling", StringComparison.Ordinal) || a.Contains("944500918", StringComparison.Ordinal))
+                && a.Contains(" on <root>", StringComparison.Ordinal)
+                && !a.Contains("owned by", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// #5627: the refusal gives the numbered steps only when the registered service runs from the folder being
+    /// refused (its ImagePath folder is that folder, compared as full paths without regard to case or a trailing
+    /// separator). A service registered elsewhere, none, or a path that could not be read all get the fresh-folder
+    /// wording.
+    /// </summary>
+    [Fact]
+    public void TheRefusalAdvice_GivesTheSteps_OnlyWhenTheServiceRunsFromThisFolder()
+    {
+        var probe = new StringBuilder();
+        AppendStepFunctions(probe);
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $here = 'C:\PerformanceMonitorDarling'
+            'THIS'
+            Get-DarlingRefusalAdvice $here 'PerformanceMonitor Darling' 'c:\performancemonitordarling\'
+            'ELSEWHERE'
+            Get-DarlingRefusalAdvice $here 'PerformanceMonitor Darling' 'C:\Program Files\PerformanceMonitorDarling'
+            'SIBLING'
+            Get-DarlingRefusalAdvice $here 'PerformanceMonitor Darling' 'C:\PerformanceMonitorDarling-old'
+            'NONE'
+            Get-DarlingRefusalAdvice $here 'PerformanceMonitor Darling' ''
+            """);
+        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+        string Section(string name, string? next) => all[all.IndexOf(name + "\n", StringComparison.Ordinal)..(next == null ? all.Length : all.IndexOf(next + "\n", StringComparison.Ordinal))];
+
+        var thisFolder = Section("THIS", "ELSEWHERE");
+        Assert.Contains("1. Stop the 'PerformanceMonitor Darling' service", thisFolder, StringComparison.Ordinal);
+        Assert.Contains("6. Delete C:\\PerformanceMonitorDarling once the service is collecting.", thisFolder, StringComparison.Ordinal);
+
+        foreach (var other in new[] { Section("ELSEWHERE", "SIBLING"), Section("SIBLING", "NONE"), Section("NONE", null) })
+        {
+            Assert.Contains("Extract the zip into a new folder under C:\\Program Files", other, StringComparison.Ordinal);
+            Assert.DoesNotContain("Stop the", other, StringComparison.Ordinal);
+            Assert.DoesNotContain("darling.json", other, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #5627: a darling.json value that is not a printable path (a control character, a line break, or any of the
+    /// characters &lt; &gt; | and a quote) is left out, so is one over 260 characters, and at most 10 are listed. The
+    /// refusal and every step still print, no left-out value is printed, the printed ones are quoted, and the last
+    /// step keeps the old folder and asks for darling.json to be checked.
+    /// </summary>
+    [Fact]
+    public void TheConfiguredPaths_LeaveOutValuesThatAreNotPaths_AndTheStepsStillPrintQuoted()
+    {
+        var probe = new StringBuilder();
+        AppendStepFunctions(probe);
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $old = Join-Path $env:TEMP ('pm5627-odd-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $old -Force | Out-Null
+            $json = $old -replace '\\', '\\'
+            $esc = [string][char]27
+            $lf = "`n"
+            $long = 'a' * 300
+            function Use([string[]]$lines) {
+                Set-Content -LiteralPath (Join-Path $old 'darling.json') -Value (($lines -join "`n").Replace('@@', $json))
+            }
+            try {
+                Use @(
+                    '{',
+                    '  "tls": { "pfxPath": "@@\\bad<>|\"name.pfx",',
+                    ('            "keyPath": "@@\\line1' + $lf + 'line2.key",'),
+                    ('            "certPath": "@@\\esc' + $esc + '[31mred.pem" },'),
+                    ('  "postgres": { "dataDirectory": "@@\\' + $long + '" },'),
+                    '  "smtp": { "password": "file:@@\\good\\smtp.txt" }',
+                    '}')
+                $r = Get-DarlingConfiguredPathsUnder $old
+                'MIXED'
+                'lines=' + @($r.Lines).Count
+                'incomplete=' + $r.Incomplete
+                Get-DarlingExistingInstallSteps $old 'PerformanceMonitor Darling'
+
+                Use @('{', '  "tls": { "pfxPath": "@@\\bad<>|\"name.pfx" }', '}')
+                $r = Get-DarlingConfiguredPathsUnder $old
+                'ONLYODD'
+                'lines=' + @($r.Lines).Count
+                'incomplete=' + $r.Incomplete
+                Get-DarlingExistingInstallSteps $old 'PerformanceMonitor Darling'
+
+                Use @('{', ((1..12 | ForEach-Object { '  "postgres": { "dataDirectory": "@@\\d' + $_ + '" },' }) -join "`n"), '}')
+                $r = Get-DarlingConfiguredPathsUnder $old
+                'MANY'
+                'lines=' + @($r.Lines).Count
+                'incomplete=' + $r.Incomplete
+            }
+            finally {
+                Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+        var mixed = all[all.IndexOf("MIXED", StringComparison.Ordinal)..all.IndexOf("ONLYODD", StringComparison.Ordinal)];
+        var onlyOdd = all[all.IndexOf("ONLYODD", StringComparison.Ordinal)..all.IndexOf("MANY", StringComparison.Ordinal)];
+        var many = all[all.IndexOf("MANY", StringComparison.Ordinal)..];
+
+        // The good one is listed; the four odd ones and the 300-character one are not.
+        Assert.Contains("lines=1", mixed, StringComparison.Ordinal);
+        Assert.Contains("incomplete=True", mixed, StringComparison.Ordinal);
+        Assert.Contains("1. Stop the 'PerformanceMonitor Darling' service", mixed, StringComparison.Ordinal);
+        Assert.Contains("good\\smtp.txt\" (a file: reference).", mixed, StringComparison.Ordinal);
+        Assert.Contains("6. Do not delete ", mixed, StringComparison.Ordinal);
+        Assert.Contains("Not every value in darling.json could be listed here, so check it for other paths inside", mixed, StringComparison.Ordinal);
+        Assert.DoesNotContain(new string('a', 30), mixed, StringComparison.Ordinal);
+        Assert.DoesNotContain("(postgres.dataDirectory)", mixed, StringComparison.Ordinal);
+        foreach (var raw in new[] { "bad<", "name.pfx", "line1", "line2", "red.pem", "[31m", "\u001b" })
+        {
+            Assert.DoesNotContain(raw, mixed, StringComparison.Ordinal);
+        }
+
+        // Nothing could be listed: the old folder is still kept, and darling.json is to be checked.
+        Assert.Contains("lines=0", onlyOdd, StringComparison.Ordinal);
+        Assert.Contains("incomplete=True", onlyOdd, StringComparison.Ordinal);
+        Assert.Contains("1. Stop the 'PerformanceMonitor Darling' service", onlyOdd, StringComparison.Ordinal);
+        Assert.Contains("6. Do not delete ", onlyOdd, StringComparison.Ordinal);
+        Assert.Contains("Not every value in darling.json could be listed here, so check it for paths", onlyOdd, StringComparison.Ordinal);
+        Assert.DoesNotContain("bad<", onlyOdd, StringComparison.Ordinal);
+        Assert.DoesNotContain("6. Delete ", onlyOdd, StringComparison.Ordinal);
+
+        // The list stops at 10.
+        Assert.Contains("lines=10", many, StringComparison.Ordinal);
+        Assert.Contains("incomplete=True", many, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5627: the service-written list matches the names the service writes and nothing wider. A backup is
+    /// darling.json.bak-yyyyMMdd-HHmmss with an optional -N counter, the FIRST name below the install folder is
+    /// compared exactly (a trailing dot, a longer name or a '..' step matches nothing), the listed files count only in
+    /// the install folder itself, and the key folder counts only when it is handed in.
+    /// </summary>
+    [Fact]
+    public void TheServiceWrittenList_MatchesOnlyTheNamesTheServiceWrites()
+    {
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, InstallScript);
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = 'C:\Program Files\PerformanceMonitorDarling'
+            foreach ($name in @('darling.json', 'DARLING.JSON', 'darling.json.bak-20260101-120000', 'darling.json.bak-20260101-120000-2',
+                                'darling.json.bak-x.dll', 'darling.json.bak-20260101', 'darling.json.bak-20260101-120000.dll', 'darling.json.bak-', 'darling.json.', 'xdarling.json')) {
+                'name:' + $name + '=' + (Test-DarlingServiceWrittenFileName $name)
+            }
+            foreach ($case in @(
+                @('pg-runtime', @()), @('pg-runtime\pgsql\bin\postgres.exe', @()), @('pg-runtime-prev\a.dll', @()), @('PG-RUNTIME\a.dll', @()),
+                @('pg-runtime.\a.dll', @()), @('pg-runtime-x\a.dll', @()), @('pg-runtimeX', @()), @('pg-runtime\..\a.dll', @()), @('other\pg-runtime\a.dll', @()),
+                @('darling.json', @()), @('darling.json.bak-20260101-120000', @()), @('darling.json.bak-x.dll', @()), @('other\darling.json', @()), @('darling.json\x', @()),
+                @('darling-keys\log-hash.key', @()), @('darling-keys\log-hash.key', @('darling-keys')), @('darling-keys-x\a', @('darling-keys')), @('PerformanceMonitor.Darling.Service.exe', @()))) {
+                'path:' + $case[0] + '|' + @($case[1]).Count + '=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root $case[0]) @($case[1]))
+            }
+            'path:root=' + (Test-DarlingServiceWrittenPath $root $root @('darling-keys'))
+            'path:outside=' + (Test-DarlingServiceWrittenPath $root 'C:\Program Files\PerformanceMonitorDarling-2\pg-runtime\a.dll' @())
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        foreach (var yes in new[] { "darling.json", "DARLING.JSON", "darling.json.bak-20260101-120000", "darling.json.bak-20260101-120000-2" })
+        {
+            Assert.Contains($"name:{yes}=True", answers);
+        }
+
+        foreach (var no in new[] { "darling.json.bak-x.dll", "darling.json.bak-20260101", "darling.json.bak-20260101-120000.dll", "darling.json.bak-", "darling.json.", "xdarling.json" })
+        {
+            Assert.Contains($"name:{no}=False", answers);
+        }
+
+        foreach (var yes in new[] { "pg-runtime|0", "pg-runtime\\pgsql\\bin\\postgres.exe|0", "pg-runtime-prev\\a.dll|0", "PG-RUNTIME\\a.dll|0", "darling.json|0", "darling.json.bak-20260101-120000|0", "darling-keys\\log-hash.key|1" })
+        {
+            Assert.Contains($"path:{yes}=True", answers);
+        }
+
+        foreach (var no in new[] { "pg-runtime.\\a.dll|0", "pg-runtime-x\\a.dll|0", "pg-runtimeX|0", "pg-runtime\\..\\a.dll|0", "other\\pg-runtime\\a.dll|0", "darling.json.bak-x.dll|0",
+            "other\\darling.json|0", "darling.json\\x|0", "darling-keys\\log-hash.key|0", "darling-keys-x\\a|1", "PerformanceMonitor.Darling.Service.exe|0" })
+        {
+            Assert.Contains($"path:{no}=False", answers);
+        }
+
+        Assert.Contains("path:root=False", answers);
+        Assert.Contains("path:outside=False", answers);
+    }
+
     private static void AppendStepFunctions(StringBuilder probe)
     {
-        foreach (var name in new[] { "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder", "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice" })
+        foreach (var name in new[] { "Test-PathIsAtOrUnder", "Test-DarlingSamePath", "Get-DarlingConfiguredPathsUnder", "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice", "Get-DarlingRefusalAdvice" })
         {
             probe.AppendLine(ExtractFunction(InstallScript, name));
         }
@@ -887,6 +1110,7 @@ function Get-CimInstance {
             $script:rootWriter = $null                     # a principal with Modify on the root (an inherited grant)
             $script:serviceAce = $script:serviceSid        # the account the lock/install granted Modify on pg-runtime
             $script:serviceOwned = @()                     # extra paths (relative to the root) the service owns
+            $script:serviceDirs = @('darling-keys')        # the extra folders Get-DarlingExtraServiceWriteDirectories returns
 
             function Get-Acl {
                 [CmdletBinding()]
@@ -913,7 +1137,7 @@ function Get-CimInstance {
             Set-Content -LiteralPath "$($script:root)\darling.json" -Value '{}'
             Set-Content -LiteralPath "$($script:root)\pg-runtime\pgsql\bin\postgres.exe" -Value 'x'
             Set-Content -LiteralPath "$($script:root)\PerformanceMonitor.Darling.Service.exe" -Value 'x'
-            Set-Content -LiteralPath "$($script:root)\darling.json.bak-20260101" -Value '{}'
+            Set-Content -LiteralPath "$($script:root)\darling.json.bak-20260101-120000" -Value '{}'
             New-Item -ItemType Directory -Path "$($script:root)\darling-keys", "$($script:root)\other" -Force | Out-Null
             Set-Content -LiteralPath "$($script:root)\darling-keys\log-hash.key" -Value 'x'
             Set-Content -LiteralPath "$($script:root)\other\tool.dll" -Value 'x'
@@ -923,7 +1147,7 @@ function Get-CimInstance {
             function Show([string]$label, $service, $logon) {
                 $script:logon = $logon
                 $sets = Get-DarlingPreLockTrustedSidsForRerun $serviceName $service
-                $found = @(Get-UntrustedWriteGrantees $script:root $sets.Trusted -Recurse -ServiceSids $sets.ServiceSids | ForEach-Object { $_ -replace [regex]::Escape($script:root), '<root>' })
+                $found = @(Get-UntrustedWriteGrantees $script:root $sets.Trusted -Recurse -ServiceSids $sets.ServiceSids -ServiceDirectories $script:serviceDirs | ForEach-Object { $_ -replace [regex]::Escape($script:root), '<root>' })
                 $label + '.count=' + $found.Count
                 $label + '.text=' + ($found -join ';')
             }
@@ -1051,8 +1275,8 @@ function Get-CimInstance {
 
     /// <summary>
     /// #5627: the service's own account is trusted as owner only in the folders and files it writes (pg-runtime,
-    /// pg-runtime-prev, darling-keys, darling.json and its backups) and as a write grantee there and on the install
-    /// folder itself. A file it owns anywhere else (the install folder, beside the service exe, in another folder)
+    /// pg-runtime-prev, darling-keys when it is a listed folder, darling.json and its backups) and as a write grantee
+    /// there only. A file it owns anywhere else (the install folder, beside the service exe, in another folder)
     /// is named, with the service deleted, on another logon, or on its virtual account. One it owns inside the
     /// listed places passes.
     /// </summary>
@@ -1063,7 +1287,7 @@ function Get-CimInstance {
         probe.AppendLine("""
             try {
                 # Inside the list: the service owns the config, its backup and the key folder's file. Clean.
-                $script:serviceOwned = @('darling.json', 'darling.json.bak-20260101', 'darling-keys', 'darling-keys\log-hash.key')
+                $script:serviceOwned = @('darling.json', 'darling.json.bak-20260101-120000', 'darling-keys', 'darling-keys\log-hash.key')
                 Show 'listedDeleted' $null $null
                 Show 'listedOtherLogon' $registered 'NT AUTHORITY\LOCAL SERVICE'
                 Show 'listedVirtual' $registered "NT SERVICE\$serviceName"
@@ -1077,6 +1301,13 @@ function Get-CimInstance {
                 # The install folder itself owned by the service is named too.
                 $script:serviceOwned = @('')
                 Show 'rootOwnedVirtual' $registered "NT SERVICE\$serviceName"
+
+                # The key folder counts only when Get-DarlingExtraServiceWriteDirectories returned it (a managed install
+                # does not), the same list the lock is handed: otherwise it is named like any other folder.
+                $script:serviceDirs = @()
+                $script:serviceOwned = @('darling-keys', 'darling-keys\log-hash.key')
+                Show 'keysUnlistedDeleted' $null $null
+                Show 'keysUnlistedVirtual' $registered "NT SERVICE\$serviceName"
             }
             finally {
                 Remove-Item -LiteralPath $script:root -Recurse -Force -ErrorAction SilentlyContinue
@@ -1098,6 +1329,8 @@ function Get-CimInstance {
                 && a.Contains("<root>\\other\\tool.dll (owned by", StringComparison.Ordinal));
         }
 
+        Assert.Contains("keysUnlistedDeleted.count=2", answers);
+        Assert.Contains("keysUnlistedVirtual.count=2", answers);
         Assert.Contains("rootOwnedVirtual.count=1", answers);
         Assert.Contains(answers, a => a.StartsWith("rootOwnedVirtual.text=<root> (owned by", StringComparison.Ordinal));
     }
@@ -1781,7 +2014,7 @@ function Get-CimInstance {
         AssertRunsFirst(
             InstallScript,
             "install-darling.ps1",
-            "$writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids)",
+            "$writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories",
             new[]
             {
                 ("Invoke-InstallTreeLock $lockAccount -StopOnOpen", "the step 1b2 install-tree lock"),
@@ -1796,7 +2029,7 @@ function Get-CimInstance {
         AssertRunsFirst(
             ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1")),
             "upgrade-darling.ps1",
-            "$writable = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids)",
+            "$writable = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories",
             new[]
             {
                 ("$zipStagingFolder = New-DarlingProtectedStagingFolder", "creating the zip staging folder"),
