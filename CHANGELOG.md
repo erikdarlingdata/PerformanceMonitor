@@ -327,6 +327,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **"Collection Falling Behind" no longer fires in the first hour after every start** ([#5599])
 - **A hung test shard names its test and keeps its logs** ([#5591])
 - **One-day Custom Views panels on Query Store data read an hourly rollup, or are refused up front** ([#5588], [#5610])
+- **Darling's deadlock maintenance logs a line when a stage recovers after a failed pass** ([#5637])
 
 ## [3.9.0] - 2026-10-02
 
@@ -5189,3 +5190,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5599]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5599
 [#5610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5610
 [#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
+[#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637

@@ -87,9 +87,10 @@ services:
       retries: 12
 
   darling:
-    # The published image; substitute a version tag for something pinned, or build from a checkout:
+    # The newest release image (#5629: not :nightly, which is the newest dev build). Substitute a version tag
+    # for something pinned, or build from a checkout:
     #   build: { context: ../.., dockerfile: Darling/Dockerfile }
-    image: ghcr.io/erikdarlingdata/performancemonitor-darling:nightly
+    image: ghcr.io/erikdarlingdata/performancemonitor-darling:latest
     restart: unless-stopped
     depends_on:
       store:
