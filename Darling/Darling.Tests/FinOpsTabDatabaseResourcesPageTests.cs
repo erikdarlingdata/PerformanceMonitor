@@ -36,18 +36,16 @@ public sealed class FinOpsTabDatabaseResourcesPageTests
     [Fact]
     public void ThePickerOffersTheDesktopWindowsInOrder()
     {
-        // Source: FinOpsTab.xaml ~:497-499, FinOpsResourceUsageTimeRangeCombo.
+        // #5562 R5: the shared picker in its Compact, rolling-only form (finops/window.js), not a hand-listed select.
         var tab = Tab();
-        var pairs = Regex.Matches(tab, "\\{ value: (\\d+), label: \"([^\"]+)\" \\}").Select(m => m.Groups[1].Value + "=" + m.Groups[2].Value);
-        Assert.Equal("1=Last 1 hour,4=Last 4 hours,12=Last 12 hours,24=Last 24 hours,168=Last 7 days", string.Join(",", pairs));
-        Assert.Contains("pickerControl(\"Window\", WINDOWS, HOURS,", tab);
+        Assert.DoesNotContain("WINDOWS", tab);
+        Assert.Contains("finopsWindowControl({ hours: HOURS, onChange: (hours) => load(hours) })", tab);
     }
 
     [Fact]
     public void TheChangeHandlerRereadsWithTheChosenHoursAndTheFirstReadUsesTheDefault()
     {
         var tab = Tab();
-        Assert.Contains("sel.addEventListener(\"change\", () => onPick(Number(sel.value)));", tab);
         Assert.Contains("(hours) => load(hours)", tab);
         Assert.Contains("load(HOURS);", tab);
     }
@@ -127,7 +125,7 @@ public sealed class FinOpsTabDatabaseResourcesPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "./gate.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "./gate.js", "./window.js" }));
         Assert.Contains("./gate.js", imports);
     }
 

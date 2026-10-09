@@ -7,35 +7,15 @@
  */
 
 /* FinOps "Database Resources" tab: per-database CPU, reads, writes, executions and file I/O from get_finops
-   (view database_resources) over a window picked from 1 hour to 7 days, with each database's share of the server's CPU and I/O. */
+   (view database_resources) over a window picked on the shared time range picker (#5562: a rolling length of at least an hour, within the read's reach), with each database's share of the server's CPU and I/O. */
 
 import { VIZ } from "../../panels.js";
 import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
+import { finopsWindowControl } from "./window.js";
 
 // The default window.
 const HOURS = 24;
-
-// The desktop's window picker (FinOpsTab.xaml ~:497-499), as hours.
-const WINDOWS = [
-  { value: 1, label: "Last 1 hour" },
-  { value: 4, label: "Last 4 hours" },
-  { value: 12, label: "Last 12 hours" },
-  { value: 24, label: "Last 24 hours" },
-  { value: 168, label: "Last 7 days" },
-];
-
-// A labelled <select> (the server-tabs.js pickerControl pattern); every value goes through el()'s text and attribute paths.
-function pickerControl(label, options, selected, onPick) {
-  const sel = el(
-    "select",
-    { class: "range-select-inline", "aria-label": label },
-    options.map((o) => el("option", { value: o.value, text: o.label }))
-  );
-  sel.value = String(selected);
-  sel.addEventListener("change", () => onPick(Number(sel.value)));
-  return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
-}
 
 const COLUMNS = [
   { key: "database_name", label: "Database" },
@@ -83,7 +63,8 @@ export const tab = {
         if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
       }
     };
-    const root = el("div", {}, [pickerControl("Window", WINDOWS, HOURS, (hours) => load(hours)), body]);
+    const win = finopsWindowControl({ hours: HOURS, onChange: (hours) => load(hours) });
+    const root = el("div", {}, [win.node, body]);
     load(HOURS);
     return root;
   },

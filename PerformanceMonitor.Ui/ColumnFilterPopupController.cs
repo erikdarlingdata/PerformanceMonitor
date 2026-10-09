@@ -49,12 +49,14 @@ internal sealed class ColumnFilterPopupController
         /* Rewire events to the current grid */
         _content!.FilterApplied -= OnFilterApplied;
         _content.FilterCleared -= OnFilterCleared;
+        _content.ClearAllRequested -= OnClearAllRequested;
         _content.FilterApplied += OnFilterApplied;
         _content.FilterCleared += OnFilterCleared;
+        _content.ClearAllRequested += OnClearAllRequested;
 
         /* Initialize with existing filter state */
         manager.Filters.TryGetValue(columnName, out var existingFilter);
-        _content.Initialize(columnName, existingFilter);
+        _content.Initialize(columnName, existingFilter, manager.GetValueCatalog(columnName), manager.AnyFilterActive);
 
         _popup!.PlacementTarget = button;
         _popup.IsOpen = true;
@@ -83,6 +85,18 @@ internal sealed class ColumnFilterPopupController
         if (_currentGrid != null && _managers.TryGetValue(_currentGrid, out var manager))
         {
             manager.SetFilter(e.FilterState);
+        }
+    }
+
+    /// <summary>#5565: "Clear all filters" removes the grid's filters and its stored copy.</summary>
+    private void OnClearAllRequested(object? sender, EventArgs e)
+    {
+        if (_popup != null)
+            _popup.IsOpen = false;
+
+        if (_currentGrid != null && _managers.TryGetValue(_currentGrid, out var manager))
+        {
+            manager.ClearAllFilters();
         }
     }
 

@@ -131,7 +131,7 @@ ORDER BY g;"), ct);
             $"SELECT indisvalid FROM pg_index WHERE indexrelid = '{Index}'::regclass", ct))!);
         var definition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{Index}'::regclass)", ct))!;
         Assert.Contains("USING brin (collection_time)", definition);
-        Assert.Contains("autosummarize='on'", definition);
+        Assert.Contains("autosummarize=off", definition);
 
         var oid = await ScalarAsync(connection, $"SELECT '{Index}'::regclass::oid", ct);
         await EnsureAsync(connection, ct);
@@ -360,7 +360,7 @@ WHERE i.indrelid = 'collect.query_store_interval_wide'::regclass
         Assert.NotEqual(oldLeafOid, await ScalarAsync(connection, $"SELECT '{Index}_legacy'::regclass::oid", ct));
         var definition = (string)(await ScalarAsync(connection, $"SELECT pg_get_indexdef('{Index}_legacy'::regclass)", ct))!;
         Assert.Contains("USING brin (collection_time)", definition);
-        Assert.Contains("autosummarize='on'", definition);
+        Assert.Contains("autosummarize=off", definition);
     }
 
     /// <summary>

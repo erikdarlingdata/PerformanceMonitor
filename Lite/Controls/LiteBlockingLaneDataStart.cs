@@ -64,10 +64,12 @@ internal static class LiteBlockingLaneDataStart
         TextBlock banner, Func<QueryWindowRelation, Task<DateTime?>> floorOf, DateTime startUtc, DateTime endUtc,
         IEnumerable<TrendPoint> blockingBars, IEnumerable<TrendPoint> deadlockBars, TimeZoneInfo zone,
         Func<Task<bool>>? blockingReadTookXe = null, Func<Task<DateTime?>>? xeOnlyBlockingFloorOf = null,
-        Func<Task<DateTime?>>? earliestReportOf = null, Func<Task<BlockedProcessThreshold>>? thresholdOf = null)
+        Func<Task<DateTime?>>? earliestReportOf = null, Func<Task<BlockedProcessThreshold>>? thresholdOf = null,
+        Action<DateTime?>? onStartChosen = null)
     {
         var start = await StartAsync(floorOf, startUtc, endUtc, blockingBars, deadlockBars, blockingReadTookXe, xeOnlyBlockingFloorOf, earliestReportOf, thresholdOf);
         ServerTab.ApplyWindowFloorToBanner(banner, start, startUtc, zone);
+        onStartChosen?.Invoke(start); /* #5562 R7: the picker's data-start note takes the start this banner chose */
     }
 
     /// <summary>

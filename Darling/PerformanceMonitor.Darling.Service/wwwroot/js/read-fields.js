@@ -330,7 +330,7 @@ export const READ_FIELDS = {
       emptyText: "No long-running completions in this window.",
       columns: [
         { key: "event_time", label: "Time", format: "time" },
-        { key: "statement", label: "Statement", wrap: true },
+        { key: "statement", label: "Statement", wrap: true, valueList: false },
         { key: "database_name", label: "Database" },
         { key: "duration_ms", label: "Duration", format: "ms" },
         { key: "cpu_ms", label: "CPU", format: "ms" },

@@ -36,7 +36,7 @@ public sealed class JobHistoryPageTests
     public void ThePageReadsGetJobHistoryThroughTheSharedReadWithASignal()
     {
         var page = Page();
-        Assert.Contains("readToolWithinKeptHistory(\"get_job_history\", readParams(), signal)", page);
+        Assert.Contains("readToolWithinKeptHistory(\"get_job_history\", readParams(w), signal)", page);
         Assert.Contains("readTool(\"list_servers\", {}, controller.signal)", page);
         Assert.Contains("VIZ.table(data,", page);
         Assert.Contains("rowsKey: \"runs\"", page);
@@ -55,7 +55,9 @@ public sealed class JobHistoryPageTests
         var aliases = new System.Collections.Generic.Dictionary<string, string> { ["hours"] = "hours_back", ["server"] = "server_name" };
         foreach (var name in sent)
             Assert.Contains(aliases.TryGetValue(name, out var mapped) ? mapped : name, tool);
-        Assert.Contains("const p = { hours: state.hours, limit: state.limit };", Page());
+        // #5562: the held range gives the hours, and a finished range also sends its end as as_of.
+        Assert.Contains("const p = { hours: w.hours, limit: state.limit };", Page());
+        Assert.Contains("if (w.asOf) p.as_of = w.asOf;", Page());
     }
 
     [Fact]
@@ -154,6 +156,47 @@ public sealed class JobHistoryPageTests
         Assert.Equal(",Backup,Maintenance", string.Join(",", Strings(first.GetProperty("categories"))));
         // Text only: a value that looks like markup is drawn as its characters.
         Assert.Contains("<b>boom</b>", first.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void TheRangeIsTheSharedPicker_AFinishedRangeSendsItsEnd_AndALongerOneIsRefusedNotClamped()
+    {
+        var range = Run().GetProperty("range");
+
+        // Past the catalog's 7 day reach: refused with the reason, and no read goes out (nothing is clamped).
+        Assert.Equal("This page's reads reach at most 7 days back.", range.GetProperty("past30d").GetString());
+        Assert.Equal(0, range.GetProperty("past30dCalls").GetInt32());
+
+        // A rolling length reads whole hours back from now and sends no as_of.
+        var rolling = Assert.Single(range.GetProperty("twoHours").GetProperty("calls").EnumerateArray());
+        Assert.Equal("2", rolling.GetProperty("hours").GetString());
+        Assert.False(rolling.TryGetProperty("as_of", out _));
+
+        // A finished range (yesterday) sends its end: the reader bounds the runs by it before the row limit.
+        var finished = Assert.Single(range.GetProperty("yesterday").GetProperty("calls").EnumerateArray());
+        Assert.InRange(int.Parse(finished.GetProperty("hours").GetString()!), 23, 25);
+        Assert.EndsWith("Z", finished.GetProperty("as_of").GetString());
+
+        // 30 minutes is read as the whole hour and cut at its start: the 50 minute old run goes, the 5 minute old one stays.
+        var half = range.GetProperty("thirtyMinutes");
+        Assert.Equal("1", Assert.Single(half.GetProperty("calls").EnumerateArray()).GetProperty("hours").GetString());
+        Assert.Equal("1 runs shown", Strings(half.GetProperty("shown")).Single());
+
+        // The popup greys out what the read cannot reach, and still offers the calendar periods and the end boxes.
+        Assert.Equal("Past 30 days,Month to Date,Previous Month,Year to Date,Previous Year", string.Join(",", Strings(range.GetProperty("items"))));
+        Assert.Equal(2, range.GetProperty("shape").GetProperty("dateBoxes").GetInt32());
+    }
+
+    [Fact]
+    public void TheReaderBoundsTheRunsByTheEndBeforeTheRowLimit()
+    {
+        // R6: the end is applied in SQL (JobHistoryFilter.UntilUtc), inside the per-server top-N, and again exactly in C# before the cap.
+        var reader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingJobHistoryReader.cs").ReplaceLineEndings("\n");
+        Assert.Contains("AND   jh.run_datetime <= ${UntilParam(firstParam)} + make_interval(mins => so.offset_minutes)", reader);
+        Assert.Contains("return ApplyWindow(rows, sinceUtc, limit, filter?.UntilUtc);", reader);
+        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpJobTools.cs").ReplaceLineEndings("\n");
+        Assert.Contains("windowEnd);", tool);
+        Assert.Contains("DarlingJobHistoryReader.GetAsync(", tool);
     }
 
     [Fact]

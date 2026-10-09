@@ -62,6 +62,15 @@ public partial class AlertsHistoryTab : UserControl
     public AlertsHistoryTab()
     {
         InitializeComponent();
+        RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened */
+        /* #5562 M1: typed times and calendar periods are read in the zone the Time column is worded in (the display mode), as the
+           Darling Viewer's Alert History does with its display zone. */
+        RangePicker.ZoneProvider = () => ServerTimeHelper.CurrentDisplayZone;
+        /* R8: "All" is a span of 365 days, longer than anything Lite keeps (archive files are deleted by whole month, 3 months
+           back, so rows older than 3 months survive until their month's file goes), through the shared control's longest choice. */
+        RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, "All");
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
@@ -117,7 +126,7 @@ public partial class AlertsHistoryTab : UserControl
 
         try
         {
-            var hoursBack = GetSelectedHoursBack();
+            var (sinceUtc, untilUtc) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
 
             /* #4766: the rows and each server's collected clock come back from ONE hop off the UI thread, and the
@@ -125,7 +134,7 @@ public partial class AlertsHistoryTab : UserControl
             var dataService = _dataService;
             var (alerts, collectedClocks) = await System.Threading.Tasks.Task.Run(async () =>
             {
-                var rows = await dataService.GetAlertHistoryAsync(hoursBack, RowCap, serverId);
+                var rows = await dataService.GetAlertHistoryWindowAsync(sinceUtc, untilUtc, serverId, RowCap);
                 return (rows, await ReadCollectedClocksAsync(dataService, rows));
             });
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
@@ -134,7 +143,7 @@ public partial class AlertsHistoryTab : UserControl
             StampClocks(alerts, collectedClocks, _openTabClock);
 
             var displayCount = ShowAlerts(alerts);
-            AppLogger.Debug("AlertsHistory", $"Loaded {displayCount} alert(s) (query returned {alerts.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
+            AppLogger.Debug("AlertsHistory", $"Loaded {displayCount} alert(s) (query returned {alerts.Count}, since={sinceUtc:O}, until={(untilUtc.HasValue ? untilUtc.Value.ToString("O") : "now")}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -251,12 +260,9 @@ public partial class AlertsHistoryTab : UserControl
         ServerFilterComboBox.SelectionChanged += ServerFilterComboBox_SelectionChanged;
     }
 
-    private int GetSelectedHoursBack()
-    {
-        if (TimeRangeComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
-            return int.TryParse(tagStr, out var hours) ? hours : 24;
-        return 24;
-    }
+    /// <summary>The picker's window for the read and for Dismiss All (#5562): the start and, for a range that has finished, its exclusive end (null while it runs to now).</summary>
+    private (DateTime sinceUtc, DateTime? untilUtc) GetSelectedWindow()
+        => LiteTimeRange.BoundsOf(RangePicker, 24, DateTime.UtcNow);
 
     private int? GetSelectedServerId()
     {
@@ -358,7 +364,7 @@ public partial class AlertsHistoryTab : UserControl
 
     #region Event Handlers
 
-    private async void TimeRangeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void RangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (IsLoaded)
             await LoadAlertsAsync();
@@ -484,9 +490,10 @@ public partial class AlertsHistoryTab : UserControl
 
         try
         {
-            var hoursBack = GetSelectedHoursBack();
+            /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
+            var (sinceUtc, untilUtc) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
-            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAllVisibleAlertsAsync(hoursBack, serverId));
+            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, untilUtc, serverId));
             if (affected < liveCount && App.LogAlertDismissals)
             {
                 AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {liveCount} live alert(s) were updated");

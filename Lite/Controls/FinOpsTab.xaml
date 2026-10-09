@@ -666,14 +666,7 @@
                     <TextBlock Text="Database Resource Usage" VerticalAlignment="Center" Margin="0,0,10,0"
                                FontWeight="Bold" FontSize="14"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="ResourceUsageTimeRangeCombo" SelectedIndex="3" Width="120" Margin="0,0,8,0"
-                              SelectionChanged="ResourceUsageTimeRange_Changed">
-                        <ComboBoxItem Content="Last 1 hour"/>
-                        <ComboBoxItem Content="Last 4 hours"/>
-                        <ComboBoxItem Content="Last 12 hours"/>
-                        <ComboBoxItem Content="Last 24 hours"/>
-                        <ComboBoxItem Content="Last 7 days"/>
-                    </ComboBox>
+                    <ui:TimeRangePicker x:Name="ResourceUsageTimeRangePicker" Compact="True" Margin="0,0,8,0" RangeChanged="ResourceUsageTimeRange_RangeChanged"/>
                     <Button Content="Refresh" Click="RefreshDatabaseResources_Click"
                             Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="DbResourcesCountIndicator" Text="" Margin="12,0,0,0"
@@ -867,12 +860,8 @@
                     <TextBlock Text="Window:" VerticalAlignment="Center" Margin="16,0,6,0" FontSize="11"
                                x:Name="ObjectHeatmapWindowLabel" Visibility="Collapsed"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                    <ComboBox x:Name="ObjectHeatmapWindowCombo" Visibility="Collapsed" SelectedIndex="1"
-                              Width="120" FontSize="11" Padding="4,2" SelectionChanged="ObjectHeatmapWindow_Changed">
-                        <ComboBoxItem Content="Last 7 days"/>
-                        <ComboBoxItem Content="Last 30 days"/>
-                        <ComboBoxItem Content="Last 90 days"/>
-                    </ComboBox>
+                    <ui:TimeRangePicker x:Name="ObjectHeatmapWindowPicker" Compact="True" Visibility="Collapsed"
+                                        RangeChanged="ObjectHeatmapWindow_RangeChanged"/>
                 </StackPanel>
 
                 <Grid Grid.Row="1" Margin="10,0,10,10">
@@ -2278,14 +2267,7 @@
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="Wait Stats Summary" VerticalAlignment="Center"/>
                                 <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
-                                <ComboBox x:Name="WaitStatsTimeRangeCombo" SelectedIndex="3" Width="120" FontSize="11"
-                                          SelectionChanged="WaitStatsTimeRange_Changed">
-                                    <ComboBoxItem Content="Last 1 hour"/>
-                                    <ComboBoxItem Content="Last 4 hours"/>
-                                    <ComboBoxItem Content="Last 12 hours"/>
-                                    <ComboBoxItem Content="Last 24 hours"/>
-                                    <ComboBoxItem Content="Last 7 days"/>
-                                </ComboBox>
+                                <ui:TimeRangePicker x:Name="WaitStatsTimeRangePicker" Compact="True" RangeChanged="WaitStatsTimeRange_RangeChanged"/>
                             </StackPanel>
                         </Expander.Header>
                         <StackPanel>
@@ -2344,14 +2326,7 @@
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="Expensive Queries (Top 20 by CPU)" VerticalAlignment="Center"/>
                                 <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
-                                <ComboBox x:Name="ExpensiveQueriesTimeRangeCombo" SelectedIndex="3" Width="120" FontSize="11"
-                                          SelectionChanged="ExpensiveQueriesTimeRange_Changed">
-                                    <ComboBoxItem Content="Last 1 hour"/>
-                                    <ComboBoxItem Content="Last 4 hours"/>
-                                    <ComboBoxItem Content="Last 12 hours"/>
-                                    <ComboBoxItem Content="Last 24 hours"/>
-                                    <ComboBoxItem Content="Last 7 days"/>
-                                </ComboBox>
+                                <ui:TimeRangePicker x:Name="ExpensiveQueriesTimeRangePicker" Compact="True" RangeChanged="ExpensiveQueriesTimeRange_RangeChanged"/>
                             </StackPanel>
                         </Expander.Header>
                         <StackPanel>
@@ -2501,14 +2476,7 @@
                             Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="16,0,4,0" FontSize="11"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="HighImpactTimeRangeCombo" SelectedIndex="3" Width="120" FontSize="11"
-                              SelectionChanged="HighImpactTimeRange_Changed">
-                        <ComboBoxItem Content="Last 1 hour"/>
-                        <ComboBoxItem Content="Last 4 hours"/>
-                        <ComboBoxItem Content="Last 12 hours"/>
-                        <ComboBoxItem Content="Last 24 hours"/>
-                        <ComboBoxItem Content="Last 7 days"/>
-                    </ComboBox>
+                    <ui:TimeRangePicker x:Name="HighImpactTimeRangePicker" Compact="True" RangeChanged="HighImpactTimeRange_RangeChanged"/>
                     <TextBlock x:Name="HighImpactCountIndicator" VerticalAlignment="Center" Margin="12,0,0,0"
                                FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                 </StackPanel>

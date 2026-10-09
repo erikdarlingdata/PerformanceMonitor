@@ -43,6 +43,13 @@ public partial class JobHistoryTab : UserControl
     public JobHistoryTab()
     {
         InitializeComponent();
+        RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened; '1mo' is the old 30 days, '90d' can be typed */
+        /* R8: the old "Last Year" (365 days). The parser has no year unit, so "1y" cannot be typed; this choice is the way to a year. */
+        RangePicker.SetLongestChoice(LiteTimeRange.JobHistoryLongestChoice, "Last Year");
+        /* #5562 M1: typed times and calendar periods are read in the zone the grid words its rows in (see PickerZone). */
+        RangePicker.ZoneProvider = PickerZone;
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
@@ -79,6 +86,42 @@ public partial class JobHistoryTab : UserControl
     /// "Showing since" note names the oldest run of a page this full (#4966).</summary>
     internal const int RowCap = 2000;
 
+    /// <summary>The clocks the last read worked each server's window on (<see cref="LocalDataService.GetJobHistoryWithClocksAsync"/>), kept so the picker can word a single server's range in the same clock.</summary>
+    private readonly Dictionary<int, ServerClock> _readClocks = new();
+
+    /// <summary>
+    /// The zone the picker reads typed times and calendar periods in (#5562 M1): the zone the grid words its rows in. For one
+    /// server that is its wall clock (the clock its last read used, else its open tab's, else this machine's, the chain
+    /// <see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/> follows); for All Servers it is UTC, since the rows
+    /// sit on different servers' clocks (<see cref="ShowDataStartNoteAsync"/>).
+    /// </summary>
+    internal static TimeZoneInfo JobHistoryZone(int? serverId, IReadOnlyDictionary<int, ServerClock>? readClocks, IReadOnlyDictionary<int, ServerClock>? openTabClocks)
+    {
+        if (serverId is not int one)
+        {
+            return TimeZoneInfo.Utc;
+        }
+
+        if (readClocks is not null && readClocks.TryGetValue(one, out var read))
+        {
+            return read.AsTimeZone();
+        }
+
+        if (openTabClocks is not null && openTabClocks.TryGetValue(one, out var tab))
+        {
+            return tab.AsTimeZone();
+        }
+
+        return TimeZoneInfo.Local;
+    }
+
+    private TimeZoneInfo PickerZone()
+    {
+        /* The open tabs' clocks are only asked for when the last read has none for this server (they are UI objects). */
+        var serverId = GetSelectedServerId();
+        return JobHistoryZone(serverId, _readClocks, serverId is int id && !_readClocks.ContainsKey(id) ? _openTabClocks?.Invoke() : null);
+    }
+
     private async System.Threading.Tasks.Task LoadJobsAsync()
     {
         if (_dataService == null) return;
@@ -92,18 +135,22 @@ public partial class JobHistoryTab : UserControl
 
         try
         {
-            var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
 
             /* #4966: the window's start is worked out ONCE, and the read and the data-start probe both take that instant: the note is
                worded against the window the rows were read over. The open tabs' clocks are taken here, on the UI thread (they are
                UI objects), and the read gets them as a plain snapshot. */
             var nowUtc = DateTime.UtcNow;
-            var startUtc = nowUtc.AddHours(-hoursBack);
+            var (startUtc, rangeEndUtc) = LiteTimeRange.BoundsOf(RangePicker, 24, nowUtc);
             var openTabClocks = _openTabClocks?.Invoke();
 
-            var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks));
+            var (all, readClocks) = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc));
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
+            foreach (var (id, readClock) in readClocks)
+            {
+                _readClocks[id] = readClock;
+            }
 
             /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
                config layer knows one, so the Server column and filter speak the same names as every
@@ -147,7 +194,7 @@ public partial class JobHistoryTab : UserControl
                a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
                the underlying read still hit the cap. */
             JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, all.Count, RowCap);
-            AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
+            AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, since={startUtc:O}, until={(rangeEndUtc.HasValue ? rangeEndUtc.Value.ToString("O") : "now")}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -160,7 +207,7 @@ public partial class JobHistoryTab : UserControl
             /* #4966: the rows are bound and the loading note is down; the note comes last, from the UNFILTERED read (all): the Status
                and Category filters narrow the grid on the client and say nothing about where the data starts. A probe that fails
                costs the note and never the grid. */
-            await ShowDataStartNoteAsync(serverId, readClocks, startUtc, nowUtc, all, gen);
+            await ShowDataStartNoteAsync(serverId, readClocks, startUtc, rangeEndUtc ?? nowUtc, all, gen);
         }
         catch (Exception ex)
         {
@@ -196,7 +243,8 @@ public partial class JobHistoryTab : UserControl
             JobHistoryWindowTruncatedBanner,
             () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryDataStartAsync(serverId, startUtc, endUtc)),
             startUtc, endUtc, read, zone, inUtc: serverId is null,
-            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen));
+            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen),
+            onFloor: floor => RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(floor, DateTime.UtcNow));
     }
 
     /// <summary>
@@ -222,7 +270,8 @@ public partial class JobHistoryTab : UserControl
     /// <param name="superseded">True when a newer load has started: checked after the probe answers and before the banner is written.</param>
     internal static System.Threading.Tasks.Task ShowJobHistoryDataStartAsync(
         TextBlock banner, Func<System.Threading.Tasks.Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc,
-        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc, Func<bool>? superseded = null)
+        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc, Func<bool>? superseded = null,
+        Action<DateTime?>? onFloor = null)
     {
         var runTimes = read.Where(r => r.RunDateTimeUtc.HasValue).Select(r => r.RunDateTimeUtc!.Value).ToList();
 
@@ -246,6 +295,7 @@ public partial class JobHistoryTab : UserControl
                 if (superseded?.Invoke() == true) return;
 
                 ServerTab.ApplyWindowFloorToBanner(banner, ServerTab.EarlierOfFloorAndRowShown(floor, ServerTab.EarliestRowShown(runTimes, t => t)), startUtc, zone);
+                onFloor?.Invoke(floor); /* #5562 R7: the picker's data-start note takes the floor this probe found */
                 Word();
             });
     }
@@ -415,13 +465,6 @@ public partial class JobHistoryTab : UserControl
         CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
     }
 
-    private int GetSelectedHoursBack()
-    {
-        if (TimeRangeComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
-            return int.TryParse(tagStr, out var hours) ? hours : 24;
-        return 24;
-    }
-
     private int? GetSelectedServerId()
     {
         if (ServerFilterComboBox.SelectedIndex > 0 &&
@@ -538,6 +581,12 @@ public partial class JobHistoryTab : UserControl
     #region Event Handlers
 
     private async void Filter_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (IsLoaded)
+            await LoadJobsAsync();
+    }
+
+    private async void RangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (IsLoaded)
             await LoadJobsAsync();

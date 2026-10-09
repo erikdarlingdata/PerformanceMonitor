@@ -15,35 +15,16 @@ import { VIZ } from "../../panels.js";
 import { planColumn } from "../plan-viewer.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat } from "../../util.js";
 import { gatedEmptyStrip, gatedSections } from "./gate.js";
+import { finopsWindowControl } from "./window.js";
 
 // The default window.
 const HOURS = 24;
 
-// The desktop's window choices (FinOpsTab.xaml ~:791 Wait Stats and ~:818 Expensive Queries), as hours. The desktop has a
-// picker for each of those two sections; the web keeps ONE picker that moves both. The other sections stay fixed, as on
-// the desktop.
-const WINDOWS = [
-  { value: 1, label: "Last 1 hour" },
-  { value: 4, label: "Last 4 hours" },
-  { value: 12, label: "Last 12 hours" },
-  { value: 24, label: "Last 24 hours" },
-  { value: 168, label: "Last 7 days" },
-];
+// ONE picker moves both the Wait Stats and Expensive Queries windows (the desktop has one for each); the other sections stay fixed.
 
 // The chosen window per server, kept here so the 60 s rebuild of the tab does not put it back to 24 hours.
 const chosenHours = new Map();
 
-// A labelled <select> (the server-tabs.js pickerControl pattern); every value goes through el()'s text and attribute paths.
-function pickerControl(label, options, selected, onPick) {
-  const sel = el(
-    "select",
-    { class: "range-select-inline", "aria-label": label },
-    options.map((o) => el("option", { value: o.value, text: o.label }))
-  );
-  sel.value = String(selected);
-  sel.addEventListener("change", () => onPick(Number(sel.value)));
-  return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
-}
 const LIMIT = 20;
 
 const IDLE_COLUMNS = [
@@ -72,7 +53,7 @@ const WAIT_COLUMNS = [
 
 const QUERY_COLUMNS = [
   { key: "database_name", label: "Database" },
-  { key: "query_preview", label: "Query preview" },
+  { key: "query_preview", label: "Query preview", valueList: false },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms_per_exec", label: "Avg CPU/exec (ms)", format: "num2" },
   { key: "total_reads", label: "Total reads", format: "int" },
@@ -171,7 +152,8 @@ export const tab = {
       }
     };
     const start = chosenHours.get(server) ?? HOURS;
-    const root = el("div", {}, [pickerControl("Window", WINDOWS, start, (hours) => load(hours)), body]);
+    const win = finopsWindowControl({ hours: start, onChange: (hours) => load(hours) });
+    const root = el("div", {}, [win.node, body]);
     load(start);
     return root;
   },

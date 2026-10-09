@@ -369,13 +369,17 @@ export function relTime(s) {
 }
 
 /** Compact axis label for a Date: HH:MM, widening to include the calendar date when `withDate` is set (the
- *  chart passes true whenever the domain's start and end fall on different calendar days). */
-export function axisTime(date, withDate) {
+ *  chart passes true whenever the domain's start and end fall on different calendar days). `withSeconds` adds the
+ *  seconds, for a window too short to give each tick its own minute (#5586). `withZone` adds the zone's short name ("EDT"),
+ *  for a window across a clock change, where one wall-clock hour happens twice (#5586). */
+export function axisTime(date, withDate, withSeconds = false, withZone = false) {
   if (!date) return "";
+  const time = withSeconds ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : { hour: "2-digit", minute: "2-digit" };
+  if (withZone) time.timeZoneName = "short";
   if (withDate) {
-    return date.toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    return date.toLocaleString([], { month: "numeric", day: "numeric", ...time });
   }
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleTimeString([], time);
 }
 
 /**

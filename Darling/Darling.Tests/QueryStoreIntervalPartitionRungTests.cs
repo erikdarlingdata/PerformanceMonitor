@@ -363,6 +363,13 @@ FROM generate_series(1, 50) AS g", ct);
             /* The same physical files under the renamed indexes: nothing was rebuilt. */
             Assert.Equal(filesBefore, await TextAsync(connection,
                 "SELECT string_agg(relfilenode::text, ',' ORDER BY replace(relname, '_legacy', '')) FROM pg_class WHERE relname IN ('ux_query_store_interval_wide_legacy', 'ix_query_store_interval_wide_server_first_exec_legacy', 'ix_query_store_interval_wide_collection_time_brin_legacy', 'idx_query_store_interval_wide_first_exec_legacy')", ct));
+
+            /* #5594: the parent's BRIN says off, so a day partition made later clones off; the legacy copy keeps what it was built with
+               (it cannot change without a lock) until the runtime step turns it off. */
+            Assert.Equal("autosummarize=off", await TextAsync(connection,
+                "SELECT array_to_string(reloptions, ',') FROM pg_class WHERE oid = 'collect.ix_query_store_interval_wide_collection_time_brin'::regclass", ct));
+            Assert.Equal("autosummarize=on", await TextAsync(connection,
+                "SELECT array_to_string(reloptions, ',') FROM pg_class WHERE oid = 'collect.ix_query_store_interval_wide_collection_time_brin_legacy'::regclass", ct));
             bodySucceeded = true;
         }
         finally

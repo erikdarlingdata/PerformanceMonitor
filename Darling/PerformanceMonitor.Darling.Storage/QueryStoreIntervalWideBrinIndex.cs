@@ -27,7 +27,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// rows, so BRIN ranges widen: windows ending now should stay selective, while historical windows lose
 /// selectivity and the plan may flip back to a Seq Scan for part of the cycle. Results stay exact and
 /// nothing is slower than without the index. If that matters, the remedy is a periodic
-/// <c>REINDEX INDEX CONCURRENTLY</c> or re-summarizing the ranges, which this class does not do.</para>
+/// <c>REINDEX INDEX CONCURRENTLY</c>, which this class does not do. (The hourly summarize of new ranges is
+/// <see cref="QueryStoreIntervalBrin"/>'s; it does not re-summarize a range that widened.)</para>
 ///
 /// <para><b>Why BRIN and not a btree.</b> The writer's upsert (<c>QueryStoreIntervalWide.cs</c>,
 /// <c>ON CONFLICT ... DO UPDATE SET collection_time = EXCLUDED.collection_time, ...</c>) rewrites
@@ -55,9 +56,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// on a hypertable, so if the table is ever converted the ensure skips with a warning instead of failing
 /// or retrying.</para>
 ///
-/// <para><b>Autosummarize.</b> <c>autosummarize = on</c> lets autovacuum work items summarize each new block
-/// range as the table grows. A range that is not summarized yet is always read by the scan, so results stay
-/// correct while the summary catches up; the index is 856 kB on that store.</para>
+/// <para><b>Autosummarize is off (#5594; #4862 turned it on).</b> <c>autosummarize = on</c> lets an autovacuum work item
+/// summarize each new block range, but the item waits for the table's <c>SHARE UPDATE EXCLUSIVE</c> lock, the one a
+/// running VACUUM holds, and after <c>deadlock_timeout</c> PostgreSQL cancels that VACUUM. After a big retention drain the
+/// table's vacuum was cancelled every couple of minutes and never finished. Off, a VACUUM summarizes new ranges when it
+/// ends and <see cref="QueryStoreIntervalBrin.SummarizeNewRangesAsync"/> summarizes hourly in between, without ever
+/// cancelling a vacuum. A range that is not summarized yet is always read by the scan, so results stay correct while the
+/// summary catches up; the index is 856 kB on that store. An index built with <c>on</c> by an earlier build is turned off
+/// by <see cref="QueryStoreIntervalBrin.TurnOffAutosummarizeAsync"/>.</para>
 ///
 /// <para><b>The start delay, the validity read and the build.</b> They are
 /// <see cref="QueryStoreBackgroundIndexes"/>'s, shared with the btree #4952 adds: it waits
@@ -83,7 +89,7 @@ public static class QueryStoreIntervalWideBrinIndex
 
     internal const string CreateSql =
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_wide_collection_time_brin "
-        + "ON collect.query_store_interval_wide USING brin (collection_time) WITH (autosummarize = on);";
+        + "ON collect.query_store_interval_wide USING brin (collection_time) WITH (autosummarize = off);";
 
     internal const string DropSql =
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_collection_time_brin;";
@@ -99,7 +105,7 @@ public static class QueryStoreIntervalWideBrinIndex
         DropSql,
         MinimumServerVersionNum,
         "a BRIN index on collection_time would make the upsert non-HOT below PG 16",
-        "USING brin (collection_time) WITH (autosummarize = on)");
+        "USING brin (collection_time) WITH (autosummarize = off)");
 
     /// <summary>What the ensure does about the index.</summary>
     public enum BrinAction
