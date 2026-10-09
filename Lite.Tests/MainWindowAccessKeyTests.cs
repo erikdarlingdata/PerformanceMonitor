@@ -177,7 +177,7 @@ public sealed class MainWindowAccessKeyTests
     [Fact]
     public void TabControl_RealizesOnlyTheSelectedTabsContent()
     {
-        var counts = OnStaThread(() =>
+        var counts = StaTestThread.Run(() =>
         {
             static UserControl TabBody()
             {
@@ -280,29 +280,6 @@ public sealed class MainWindowAccessKeyTests
                 yield return descendant;
             }
         }
-    }
-
-    /// <summary>WPF objects require STA; same shape as Dashboard.Tests' DataGridExport tests.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
     }
 
 }

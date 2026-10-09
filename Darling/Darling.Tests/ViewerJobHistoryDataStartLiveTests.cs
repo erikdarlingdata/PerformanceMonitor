@@ -198,7 +198,7 @@ public sealed class ViewerJobHistoryDataStartLiveTests : IDisposable
             await probe.WaitAsync(ct);
 
             string? text = null;
-            OnStaThread(() =>
+            StaTestThread.Run(() =>
             {
                 ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
                 /* Seeded visible, so a no-op cannot pass as a hidden note. */
@@ -284,22 +284,4 @@ FROM generate_series($3::timestamp, $4::timestamp, $5::interval) AS t", connecti
     }
 
     /* WPF objects require STA; same shape as ViewerJobHistoryDataStartTests. */
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

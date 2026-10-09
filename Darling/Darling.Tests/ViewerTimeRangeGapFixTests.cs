@@ -89,7 +89,7 @@ public sealed class ViewerTimeRangeGapFixTests
     [Fact]
     public void ARollingOnlyPicker_RefusesWhatItsReadCannotHonor_AndHidesTheCalendar()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var now = new DateTime(2026, 10, 8, 11, 1, 0, DateTimeKind.Unspecified);
             var picker = new TimeRangePicker { ZoneProvider = () => TimeZoneInfo.Utc, NowProvider = () => now, Compact = true };
@@ -196,7 +196,7 @@ public sealed class ViewerTimeRangeGapFixTests
     [Fact]
     public void TheFeed_ReachesOnlyABannerThatIsOnScreenInATab()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var banner = new TextBlock();
             var host = new Border();
@@ -232,7 +232,7 @@ public sealed class ViewerTimeRangeGapFixTests
     [Fact]
     public void ThePickersLongestChoice_IsOneMoreButton_ThatSelectsItsSpan()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var now = new DateTime(2026, 10, 8, 11, 1, 0, DateTimeKind.Unspecified);
             var picker = new TimeRangePicker { ZoneProvider = () => TimeZoneInfo.Utc, NowProvider = () => now, Compact = true };
@@ -349,24 +349,5 @@ public sealed class ViewerTimeRangeGapFixTests
         await jh.ExecuteNonQueryAsync(ct);
         await using var svr = new NpgsqlCommand("DELETE FROM servers WHERE server_id = -556201", connection);
         await svr.ExecuteNonQueryAsync(ct);
-    }
-
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
     }
 }

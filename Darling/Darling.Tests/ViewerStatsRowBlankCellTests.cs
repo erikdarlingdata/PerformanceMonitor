@@ -79,7 +79,7 @@ public sealed class ViewerStatsRowBlankCellTests
     [Fact]
     public void ANullCell_ShowsBlank_ANumberShowsFormatted_AZeroShowsZero()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             Assert.Equal("", CellText(new ViewerQueryStatsRow(), "TotalLogicalReads"));
             Assert.Equal("", CellText(new ViewerQueryStatsRow(), "AvgReads"));
@@ -95,7 +95,7 @@ public sealed class ViewerStatsRowBlankCellTests
     [Fact]
     public void ADescendingSort_PutsBlankRowsLast_AndAllBlankKeepsTheReadsOrder()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var mixed = new List<ViewerQueryStatsRow>
             {
@@ -148,22 +148,4 @@ public sealed class ViewerStatsRowBlankCellTests
         return cell.Text;
     }
 
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

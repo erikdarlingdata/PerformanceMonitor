@@ -47,7 +47,7 @@ public class CollectorDurationHoverTests
 
     /// <summary>The hover text over each of the line's twenty points in turn (the mouse exactly on the point), in bucket order.</summary>
     private static List<string?> HoverOverEachBucket(List<CollectorDurationBucket> buckets) =>
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             var hover = new ChartHoverHelper(chart, "ms", displayZone: () => TimeZoneInfo.Utc);
@@ -96,7 +96,7 @@ public class CollectorDurationHoverTests
     [Fact]
     public void TheLinesAreKeyedByX_SoEveryDrawnBucketFindsItsOwn_AndThePointTheBreakInsertsFindsNone()
     {
-        var (line, drawn) = OnStaThread(() =>
+        var (line, drawn) = StaTestThread.Run(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             var series = Assert.Single(ServerTab.BuildCollectorDurationSeries(TwentyBucketsWithOneBreak()));
@@ -127,7 +127,7 @@ public class CollectorDurationHoverTests
     [Fact]
     public void ASeriesRegisteredWithoutDetails_KeepsTheThreeLineText()
     {
-        var text = OnStaThread(() =>
+        var text = StaTestThread.Run(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             var hover = new ChartHoverHelper(chart, "ms", displayZone: () => TimeZoneInfo.Utc);
@@ -154,7 +154,7 @@ public class CollectorDurationHoverTests
     [Fact]
     public void ClearingTheHover_LeavesItHoldingNothing()
     {
-        var (before, after) = OnStaThread(() =>
+        var (before, after) = StaTestThread.Run(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             var hover = new ChartHoverHelper(chart, "ms", displayZone: () => TimeZoneInfo.Utc);
@@ -222,25 +222,4 @@ public class CollectorDurationHoverTests
         Assert.Equal(code.IndexOf("_collectorDurationHover?.Clear();", StringComparison.Ordinal), code.LastIndexOf("_collectorDurationHover?.Clear();", StringComparison.Ordinal));
     }
 
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 }

@@ -198,7 +198,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
     private static string? BannerText(
         Func<Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc, IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc)
     {
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock { Visibility = System.Windows.Visibility.Visible, Text = "stale" };
             JobHistoryTab.ShowJobHistoryDataStartAsync(banner, probe, startUtc, endUtc, read, zone, inUtc).GetAwaiter().GetResult();
@@ -412,7 +412,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
     [Fact]
     public void ASupersededLoad_WritesNoNote()
     {
-        var note = OnStaThread(() =>
+        var note = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock { Visibility = System.Windows.Visibility.Collapsed, Text = "newer" };
             JobHistoryTab.ShowJobHistoryDataStartAsync(
@@ -634,26 +634,4 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
     private static string RepoFile(string folder, string subFolderOrFile, string? file = null, [CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", folder, subFolderOrFile, file ?? string.Empty));
 
-    /// <summary>WPF objects require STA, and a probe answer that has already completed keeps the continuation on this thread.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 }

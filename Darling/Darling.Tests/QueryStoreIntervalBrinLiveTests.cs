@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to
    CREATE and DROP its own database through ScratchPostgres and works entirely inside it, so it cannot race
    live collection. */
+[Collection("timing")]
 public sealed class QueryStoreIntervalBrinLiveTests
 {
     private const string Brin = "ix_query_store_interval_wide_collection_time_brin";

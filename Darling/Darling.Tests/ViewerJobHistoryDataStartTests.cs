@@ -198,7 +198,7 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
     private static string? BannerFor(Task<DateTime?> probe, IEnumerable<DateTime?> runTimes, DateTime? startUtc = null)
     {
         string? text = null;
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
@@ -282,22 +282,4 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         Assert.Equal("Showing since 2026-09-04 00:00:00", BannerFor(At(3), [null, At(4)]));
     }
 
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

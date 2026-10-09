@@ -72,6 +72,12 @@ public sealed class LivePostgresCollectionHygieneTests
 
     private const string LiveCollectionAttribute = "[Collection(\"" + LiveCollectionName + "\")]";
 
+    /// <summary>
+    /// #5602: the collection that runs ALONE (<c>DisableParallelization</c>), for the classes that write the cluster's
+    /// fixed roles or settings. It is a stronger decision than the live collection's turn-taking, so it counts as one.
+    /// </summary>
+    private const string ClusterRolesCollectionAttribute = "[Collection(\"pg-cluster-roles\")]";
+
     /// <summary>The recorded-exemption marker. Prose, deliberately: the point is that a human wrote down why.</summary>
     private const string OwnStoreMarker = "#1776 own-store";
 
@@ -293,7 +299,8 @@ public sealed class LivePostgresCollectionHygieneTests
     {
         foreach (var line in header.Split('\n'))
         {
-            if (line.TrimStart().StartsWith(LiveCollectionAttribute, StringComparison.Ordinal))
+            if (line.TrimStart().StartsWith(LiveCollectionAttribute, StringComparison.Ordinal)
+                || line.TrimStart().StartsWith(ClusterRolesCollectionAttribute, StringComparison.Ordinal))
             {
                 return true;
             }

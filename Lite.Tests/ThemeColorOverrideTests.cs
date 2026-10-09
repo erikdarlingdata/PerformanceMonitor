@@ -637,7 +637,7 @@ public sealed class ThemeColorOverrideTests
            reading .Color from the test runner's thread throws "the calling thread cannot access this
            object" (which is exactly what the first CI run of this test did). Only plain Color structs
            come back out. */
-        var (parsed, brushColors, colorEntries, warnings) = OnStaThread(() =>
+        var (parsed, brushColors, colorEntries, warnings) = StaTestThread.Run(() =>
         {
             var captured = new List<string>();
             var previous = ThemeManager.LogWarning;
@@ -712,7 +712,7 @@ public sealed class ThemeColorOverrideTests
         var xaml = ReadRepoFile(ThemeFiles[0]);
         var stock = ThemeXamlRewriter.DeclaredColors(xaml);
 
-        var dictionary = OnStaThread(() => ThemeManager.TryParseRegenerated("Dark", xaml, new Dictionary<string, Color>()));
+        var dictionary = StaTestThread.Run(() => ThemeManager.TryParseRegenerated("Dark", xaml, new Dictionary<string, Color>()));
 
         Assert.NotNull(dictionary);
         foreach (var (key, hex) in stock)
@@ -726,7 +726,7 @@ public sealed class ThemeColorOverrideTests
     public void RegeneratingUnparseableText_ReturnsNullAndWarns_NeverThrows()
     {
         var warnings = new List<string>();
-        var dictionary = OnStaThread(() =>
+        var dictionary = StaTestThread.Run(() =>
         {
             var previous = ThemeManager.LogWarning;
             ThemeManager.LogWarning = warnings.Add;
@@ -994,26 +994,4 @@ public sealed class ThemeColorOverrideTests
         return directory?.FullName ?? throw new InvalidOperationException("PerformanceMonitor.sln not found above the test output directory.");
     }
 
-    /// <summary>WPF objects require STA; same shape as <c>MainWindowAccessKeyTests</c>.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 }

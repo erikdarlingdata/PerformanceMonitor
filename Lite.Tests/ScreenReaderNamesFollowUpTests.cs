@@ -30,27 +30,6 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Reads", "Darling")]
 public class ScreenReaderNamesFollowUpTests
 {
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
-        }
-
-        return result;
-    }
-
     private static void Settle(Window window)
     {
         window.Show();
@@ -120,7 +99,7 @@ public class ScreenReaderNamesFollowUpTests
     [Fact]
     public void AHeaderAndATabPutBackAtTheSameSize_ReadTheirChangedText()
     {
-        var (headerBefore, headerAfter, tabBefore, tabAfter) = OnStaThread(() =>
+        var (headerBefore, headerAfter, tabBefore, tabAfter) = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
 
@@ -169,7 +148,7 @@ public class ScreenReaderNamesFollowUpTests
     [Fact]
     public void ARowIsRenamed_WhenTheUserDragsColumnsIntoANewOrder()
     {
-        var (before, after) = OnStaThread(() =>
+        var (before, after) = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var grid = NewGrid(new DataGridColumn[] { TextColumn("Time", "Time"), TextColumn("Server", "Server"), TextColumn("Retries", "Retries") },
@@ -193,7 +172,7 @@ public class ScreenReaderNamesFollowUpTests
     [Fact]
     public void HiddenElementsInATemplatedCell_AreNotContent()
     {
-        var (hiddenText, hiddenButton, rowName) = OnStaThread(() =>
+        var (hiddenText, hiddenButton, rowName) = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var hiddenButtonFactory = new FrameworkElementFactory(typeof(Button));
@@ -224,7 +203,7 @@ public class ScreenReaderNamesFollowUpTests
     [Fact]
     public void HeatMapAndBarCells_GiveTheirValueToTheRowName_AndAnEmptyHeatCellIsBlank()
     {
-        var (rowName, emptyHeat, barRowName) = OnStaThread(() =>
+        var (rowName, emptyHeat, barRowName) = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var heat = new FrameworkElementFactory(typeof(Border));
@@ -266,7 +245,7 @@ public class ScreenReaderNamesFollowUpTests
     [Fact]
     public void ARowNamePart_IsCapped_SoALongQueryTextIsNotReadOutInFull()
     {
-        var name = OnStaThread(() =>
+        var name = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var grid = NewGrid(new DataGridColumn[] { TextColumn("Collected", "Time"), TextColumn("Query Text", "Query") },

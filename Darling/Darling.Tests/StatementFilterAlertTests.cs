@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// record it. These pins run the real engine against a fake deliverer, so an alert that carries a statement or a
 /// report in its details, its attachments or its short message reaches the deliverer withheld.
 /// </summary>
+[Collection("timing")]
 public sealed class StatementFilterAlertTests
 {
     private const string Marker = SensitiveStatements.PlaceholderText;

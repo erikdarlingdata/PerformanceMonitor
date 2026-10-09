@@ -30,6 +30,7 @@ namespace PerformanceMonitorLite.Tests;
 /// they assert is generous against a 1e12-row cross product: an interrupt that did nothing would sit in the statement
 /// for minutes, not seconds.</para>
 /// </summary>
+[Collection("timing")]
 public sealed class CollectionHealthReadBehaviourTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 5371;

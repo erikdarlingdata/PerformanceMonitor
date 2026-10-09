@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// web path) and reads back what a browser would get. The tests are RED on a writer with no sweep, because the canary
 /// then comes through.
 /// </summary>
+[Collection("timing")]
 public sealed class StatementFilterWebTests
 {
     private static readonly string Canary = StatementScrubCanary.CanaryStatement;

@@ -24,7 +24,7 @@ namespace Darling.Tests;
 /// unique <c>current</c> key, the one <c>pending</c> marker row and the two reads. The roles carry fixed cluster-wide
 /// names, so a cluster that already has them skips these facts (the same rule the security-split facts follow).
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class PasswordKeyTablesLiveTests
 {
     /// <summary>One statement per table and verb; each statement reaches the row trigger (or the TRUNCATE trigger) of its table.</summary>

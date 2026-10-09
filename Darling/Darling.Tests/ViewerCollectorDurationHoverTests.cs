@@ -43,39 +43,25 @@ public sealed class ViewerCollectorDurationHoverTests
         Enumerable.Range(0, 20).Select(k => new CollectorDurationBucket(
             "wait_stats", Start.AddMinutes(10 * k + (k >= 5 ? 60 : 0)), 100 + 3 * k, 50 + k, k + 1)).ToList();
 
-    /// <summary>Runs <paramref name="body"/> on an STA thread in US English (the chart is a WPF control), and rethrows what it threw.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
+    /// <summary>Runs <paramref name="body"/> on the shared STA thread in US English (the chart is a WPF control), then puts the thread's culture back so the next body does not inherit it (#5602).</summary>
+    private static T InEnglish<T>(Func<T> body) =>
+        StaTestThread.Run(() =>
         {
+            var saved = CultureInfo.CurrentCulture;
             try
             {
                 CultureInfo.CurrentCulture = English;
-                result = body();
+                return body();
             }
-            catch (Exception ex)
+            finally
             {
-                error = ex;
+                CultureInfo.CurrentCulture = saved;
             }
         });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            ExceptionDispatchInfo.Capture(error).Throw();
-        }
-
-        return result;
-    }
 
     /// <summary>The hover text over each of the line's twenty points in turn (the mouse exactly on the point), in bucket order.</summary>
     private static List<string?> HoverOverEachBucket(List<CollectorDurationBucket> buckets) =>
-        OnStaThread(() =>
+        InEnglish(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             var hover = new ChartHoverHelper(chart, "ms", displayZone: () => TimeZoneInfo.Utc);
@@ -109,7 +95,7 @@ public sealed class ViewerCollectorDurationHoverTests
     [InlineData(12L, 0.5, "Slowest of 12 runs; average 0.5 ms")]
     public void TheSharedText_SaysTheRunCountAndTheAverage_InTheseExactWords(long runs, double average, string expected)
     {
-        var text = OnStaThread(() => CollectorDurationHoverText.Detail(runs, average));
+        var text = InEnglish(() => CollectorDurationHoverText.Detail(runs, average));
 
         Assert.Equal(expected, text);
     }
@@ -153,7 +139,7 @@ public sealed class ViewerCollectorDurationHoverTests
     {
         var line = Assert.Single(CollectorDurationSeries.Build(TwentyBucketsWithOneBreak()));
 
-        var byX = OnStaThread(() => line.DetailsByX());
+        var byX = InEnglish(() => line.DetailsByX());
 
         Assert.Equal(20, byX.Count);
         for (var k = 0; k < 20; k++)
@@ -188,7 +174,7 @@ public sealed class ViewerCollectorDurationHoverTests
     [Fact]
     public void TheLinesAreKeyedByX_SoEveryDrawnBucketFindsItsOwn_AndThePointTheBreakInsertsFindsNone()
     {
-        var (line, drawn) = OnStaThread(() =>
+        var (line, drawn) = InEnglish(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             var series = Assert.Single(CollectorDurationSeries.Build(TwentyBucketsWithOneBreak()));
@@ -198,7 +184,7 @@ public sealed class ViewerCollectorDurationHoverTests
             return (series, scatter.Data.GetScatterPoints().ToList());
         });
 
-        var byX = OnStaThread(() => line.DetailsByX());
+        var byX = InEnglish(() => line.DetailsByX());
 
         Assert.Equal(20, byX.Count);
         Assert.Equal(21, drawn.Count);
