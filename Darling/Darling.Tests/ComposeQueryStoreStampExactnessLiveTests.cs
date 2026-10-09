@@ -85,17 +85,12 @@ public sealed class ComposeQueryStoreStampExactnessLiveTests
         var bodySucceeded = false;
         try
         {
-            /* Rows whose weighted products need 63 bits and are odd: a double (53 bits) cannot hold them, nor their sums. The seed's own
-               products are all exactly representable, so without these a weighted sum built as double precision would pass. */
-            await ComposeStampLiveSupport.ExecAsync(connection, $@"
-INSERT INTO collect.query_store_interval_wide
-(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
- module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
-SELECT TIMESTAMP '{ComposeStampLiveSupport.At(hourNow)}' - interval '12 hours' + g * interval '7 minutes', s, 'db1', 700 + g, 700 + g, 'Regular',
-       TIMESTAMP '{ComposeStampLiveSupport.At(hourNow)}' - interval '13 hours', TIMESTAMP '{ComposeStampLiveSupport.At(hourNow)}' - interval '12 hours',
-       'modP', 'hashP', 2000001 + g * 2, 3000000000001 + g * 2, 3000000000003 + g * 2, 5000 + g, 6000 + g, 7000000 + g * 10 + s
-FROM generate_series(1, 6) AS g CROSS JOIN generate_series(1, 2) AS s", ct);
+            /* Rows whose weighted products need 63 bits, many to a group (lane 4c): a weighted sum built as double precision rounds on
+               them, and the seed's own exact products would let it pass. */
+            await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Built, ct);
+            await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Tail, ct);
             Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(source, ct));
+            await ComposeStampLiveSupport.AssertPrecisionRowsHaveTeethAsync(connection, ct);
 
             /* Window A: starts at hourNow - 28 h + 17 min (mid-hour, inside the built run), ends at hourNow - 40 min. The built hours stop at
                hourNow - 3 h, so the rollup answers up to hourNow - 2 h and the rest is the wide-table tail. */
@@ -111,36 +106,36 @@ FROM generate_series(1, 6) AS g CROSS JOIN generate_series(1, 2) AS s", ct);
             Assert.Equal(endB, throughB);
 
             var counter = new Counter(0, 0, 0);
-            foreach (var scope in new IReadOnlyList<string>?[] { null, new[] { "srv2" } })
-            {
-                foreach (var filters in new string?[] { null, Db1 })
-                {
-                    var label = $"scope={(scope is null ? "fleet" : "srv2")} filter={(filters is null ? "none" : "db1")}";
-                    foreach (var (start, end, through, buckets) in new[]
-                    {
-                        (startA, endA, throughA, new[] { "hour", "day" }),
-                        (startB, endB, throughB, new[] { "minute", "hour" }),
-                    })
-                    {
-                        var withStamp = QueryStoreRankedHarness.WideContext(start, end, scope) with { QueryStoreStampThrough = through };
-                        var without = QueryStoreRankedHarness.WideContext(start, end, scope);
-                        var windowLabel = $"{label} window={start:HH:mm}..{end:HH:mm}";
-                        foreach (var measure in Measures)
-                        {
-                            counter = await CompareAsync(connection, Panel(measure, "stat", null, null, null, false, filters), withStamp, without, windowLabel, counter, ct);
-                            foreach (var group in new[] { "module_name", "query_hash" })
-                            {
-                                counter = await CompareAsync(connection, Panel(measure, "bar", new[] { group }, 4, null, false, filters), withStamp, without, windowLabel, counter, ct);
-                            }
 
-                            foreach (var bucket in buckets)
+            async Task RunMatrixAsync((DateTime Start, DateTime End, DateTime? Through, string[] Buckets)[] windows, string tag, bool reduced = false)
+            {
+                foreach (var scope in reduced ? new IReadOnlyList<string>?[] { null } : new IReadOnlyList<string>?[] { null, new[] { "srv2" } })
+                {
+                    foreach (var filters in reduced ? new string?[] { null } : new string?[] { null, Db1 })
+                    {
+                        var label = $"{tag} scope={(scope is null ? "fleet" : "srv2")} filter={(filters is null ? "none" : "db1")}";
+                        foreach (var (start, end, through, buckets) in windows)
+                        {
+                            var withStamp = QueryStoreRankedHarness.WideContext(start, end, scope) with { QueryStoreStampThrough = through };
+                            var without = QueryStoreRankedHarness.WideContext(start, end, scope);
+                            var windowLabel = $"{label} window={start:HH:mm}..{end:HH:mm}";
+                            foreach (var measure in Measures)
                             {
-                                counter = await CompareAsync(connection, Panel(measure, "line", null, null, bucket, false, filters), withStamp, without, windowLabel, counter, ct);
-                                foreach (var (groups, topN) in new[] { (new[] { "module_name" }, 3), (new[] { "database_name", "module_name" }, 5), (new[] { "query_hash" }, 4) })
+                                counter = await CompareAsync(connection, Panel(measure, "stat", null, null, null, false, filters), withStamp, without, windowLabel, counter, ct);
+                                foreach (var group in new[] { "module_name", "query_hash" })
                                 {
-                                    foreach (var includeOther in new[] { false, true })
+                                    counter = await CompareAsync(connection, Panel(measure, "bar", new[] { group }, 4, null, false, filters), withStamp, without, windowLabel, counter, ct);
+                                }
+
+                                foreach (var bucket in buckets)
+                                {
+                                    counter = await CompareAsync(connection, Panel(measure, "line", null, null, bucket, false, filters), withStamp, without, windowLabel, counter, ct);
+                                    foreach (var (groups, topN) in new[] { (new[] { "module_name" }, 3), (new[] { "database_name", "module_name" }, 5), (new[] { "query_hash" }, 4) })
                                     {
-                                        counter = await CompareAsync(connection, Panel(measure, "line", groups, topN, bucket, includeOther, filters), withStamp, without, windowLabel, counter, ct);
+                                        foreach (var includeOther in new[] { false, true })
+                                        {
+                                            counter = await CompareAsync(connection, Panel(measure, "line", groups, topN, bucket, includeOther, filters), withStamp, without, windowLabel, counter, ct);
+                                        }
                                     }
                                 }
                             }
@@ -148,6 +143,15 @@ FROM generate_series(1, 6) AS g CROSS JOIN generate_series(1, 2) AS s", ct);
                     }
                 }
             }
+
+            await RunMatrixAsync(new[] { (startA, endA, (DateTime?)throughA, new[] { "hour", "day" }), (startB, endB, (DateTime?)throughB, new[] { "minute", "hour" }) }, "built");
+
+            /* The stale arm (lane 4c): a late run of 63-bit and rounding-tie rows into a built hour of servers 1 and 2 turns those pairs stale,
+               and the statement keeps the StampThrough it had (the window A one), so those rows go through the compiler's per-row partials
+               and the sums must still be numeric. Window A only, forced StampThrough. */
+            await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Stale, ct);
+            Assert.True(await ComposeStampLiveSupport.CountAsync(connection, "SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE built_seq IS DISTINCT FROM late_seq", ct) >= 2, "the late rows must make the pairs stale");
+            await RunMatrixAsync(new[] { (startA, endA, (DateTime?)throughA, new[] { "hour", "day" }) }, "stale", reduced: true);
 
             Assert.True(counter.Compared >= 1500, $"expected the full matrix; compared {counter.Compared}");
             Assert.Equal(counter.Compared, counter.StampText);
