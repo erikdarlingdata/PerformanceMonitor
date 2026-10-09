@@ -102,7 +102,7 @@ public sealed class WebReadReachTests
             new[]
             {
                 "get_alert_history", "get_blocking_stats", "get_blocking_trend", "get_cpu_utilization", "get_deadlock_trend", "get_file_io_trend",
-                "get_lock_wait_trend", "get_memory_trend", "get_pg_cpu_utilization", "get_pg_database_trend", "get_pg_io_trend",
+                "get_lock_wait_trend", "get_memory_trend", "get_perfmon_trend", "get_pg_cpu_utilization", "get_pg_database_trend", "get_pg_io_trend",
                 "get_procedure_duration_trend", "get_query_duration_trend", "get_query_store_duration_trend", "get_tempdb_trend",
                 "get_wait_trend",
             },
@@ -111,8 +111,8 @@ public sealed class WebReadReachTests
         Assert.Equal(720, WebReadReach.RawTrendHours);
         Assert.Equal(2160, WebReadReach.AlertHistoryHours);
 
-        /* Review r1: get_perfmon_trend (11.2 s cold at 30 days, #5574) and get_query_heatmap (raw query_stats, four days on a TimescaleDB store) stay at a week. */
-        Assert.Equal(McpHelpers.MaxHoursBack, WebReadReach.MaxHoursFor("get_perfmon_trend"));
+        /* #5574: get_perfmon_trend joined the raised set once its compressed data was re-grouped by counter (11.2 s to 1.3 s cold at 30 days); get_query_heatmap (raw query_stats, four days on a TimescaleDB store) stays at a week. */
+        Assert.Equal(WebReadReach.RawTrendHours, WebReadReach.MaxHoursFor("get_perfmon_trend"));
         Assert.Equal(McpHelpers.MaxHoursBack, WebReadReach.MaxHoursFor("get_query_heatmap"));
     }
 
@@ -234,6 +234,19 @@ public sealed class WebReadReachTests
     }
 
     /// <summary>
+    /// #5574: the perfmon re-group drain covers exactly what the 30-day perfmon trend reads. The trend is fast over a
+    /// chunk only once that chunk is re-grouped by counter, so the drain's reach in days must be the trend's reach in
+    /// hours divided by 24: raising one without the other would leave part of the window on the 11.2 s shape, or
+    /// re-group chunks no read ever reaches.
+    /// </summary>
+    [Fact]
+    public void ThePerfmonReGroupDrainsReach_IsThePerfmonTrendsReachInDays()
+    {
+        Assert.Equal(PerformanceMonitor.Darling.Storage.TimescaleSupport.PerfmonRegroupReachDays, WebReadReach.RawTrendHours / 24);
+        Assert.Equal(PerformanceMonitor.Darling.Storage.TimescaleSupport.PerfmonRegroupReachDays, WebReadReach.MaxHoursFor("get_perfmon_trend") / 24);
+    }
+
+    /// <summary>
     /// The validator of each opted-in read takes its ceiling from the table, and no other tool does: a row that says
     /// 2,160 with a validator still on the 168-hour overload would advertise a window the read then refuses, and a
     /// validator that opts in with no row would reach further than the picker was told.
@@ -308,6 +321,7 @@ public sealed class WebReadReachTests
 
         Assert.Equal(2160, HoursParam(catalog, "get_query_store_duration_trend")["max_hours"]!.GetValue<int>());
         Assert.Equal(720, HoursParam(catalog, "get_wait_trend")["max_hours"]!.GetValue<int>());
+        Assert.Equal(720, HoursParam(catalog, "get_perfmon_trend")["max_hours"]!.GetValue<int>());
         Assert.Equal(168, HoursParam(catalog, "get_server_trend")["max_hours"]!.GetValue<int>());
         Assert.Equal(2160, HoursParam(catalog, "get_alert_history")["max_hours"]!.GetValue<int>());
         Assert.Equal("bucketed_trend", HoursParam(catalog, "get_wait_trend")["shape"]!.GetValue<string>());

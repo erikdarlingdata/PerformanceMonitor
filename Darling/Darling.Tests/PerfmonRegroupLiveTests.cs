@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
+using static Darling.Tests.PerfmonRegroupLiveSupport;
 
 namespace Darling.Tests;
 
@@ -29,16 +30,6 @@ namespace Darling.Tests;
 public sealed class PerfmonRegroupLiveTests
 {
     private const string WantedChunkSegmentBy = "server_id,counter_name";
-    private const string OldChunkSegmentBy = "server_id";
-    private const long IdBase = -495_200_000_000L;
-
-    /// <summary>"Now" for every day the tests seed, name and compare, captured ONCE: a run that crosses midnight UTC between a
-    /// seed and a lookup must not move the day a chunk is looked up by. The database's own clock decides the reach, which has
-    /// days of slack on both sides of the seeded chunks in every test but <c>TheReach_IsClampedToTheRetentionLessADay</c>; that
-    /// one reads the chunks in its reach from <c>now()</c> itself.</summary>
-    private static readonly DateTime RunStartUtc = DateTime.UtcNow;
-
-    private sealed record ChunkRow(string Name, bool IsCompressed, string SegmentBy, DateTime Start);
 
     /// <summary>
     /// The upgraded store converges: with the hypertable already on the new grouping, the drain re-groups the chunks inside
@@ -120,7 +111,10 @@ public sealed class PerfmonRegroupLiveTests
         Assert.Equal("server_id, counter_name", await HypertableSegmentByAsync(connection, ct));
 
         var today = DateTime.SpecifyKind(RunStartUtc.Date, DateTimeKind.Unspecified);
-        foreach (var daysBack in new[] { 2, 3, 4 })
+        /* Three to five days back, not two to four: perfmon_stats compresses after 1 day plus its heavy-table offset hours
+           (TimescaleSupport.CompressAfterFor), so the chunk of two days back is not yet old enough in the first hours after
+           midnight UTC, and the policy rightly leaves it alone. From three days back every chunk is due at any hour. */
+        foreach (var daysBack in new[] { 3, 4, 5 })
         {
             await SeedDayAsync(connection, today.AddDays(-daysBack), daysBack, ct);
         }
@@ -416,110 +410,6 @@ public sealed class PerfmonRegroupLiveTests
     }
 
     /// <summary>
-    /// A reader beside the re-group of a chunk of about 1.5 M rows never waits more than a few seconds (#5574; the bound is 2.5 s, against 0.1 to 0.2 s measured with two transactions and 4.9 s of a 10.3 s re-group with one): the
-    /// decompress holds only a lock that lets reads go on, and the ACCESS EXCLUSIVE it takes at its end is released by
-    /// its own commit, before the compress half starts. The same re-group in ONE transaction made the reader wait for
-    /// the whole compress half.
-    /// </summary>
-    [Fact]
-    public async Task AReaderBesideTheReGroupOfALargeChunk_NeverWaitsMoreThanAFewSeconds()
-    {
-        var connectionString = RequireLivePostgres();
-        var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
-        using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
-        await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
-        await RequirePerChunkSettingsAsync(connection, ct);
-        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql(TimescaleSupport.PerfmonStatsTable, "collection_time"), ct);
-        await ExecAsync(connection, "ALTER TABLE perfmon_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
-
-        /* 4 servers x 130 counters x 2 instances = 1040 series, a sample a minute for a day: 1,497,600 rows. */
-        var day = DateTime.SpecifyKind(RunStartUtc.Date.AddDays(-3), DateTimeKind.Unspecified);
-        using (var seed = new NpgsqlCommand(
-            @"INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds, cntr_type)
-              SELECT $1 - row_number() OVER (), g.t AT TIME ZONE 'UTC', s.id, 'REGROUP-SRV', 'SQLServer:Test', 'Counter ' || c.n, 'inst' || i.i,
-                     (extract(epoch FROM g.t)::bigint / 60 + s.id + c.n * 7 + i.i) % 100000, (extract(epoch FROM g.t)::bigint / 60 + c.n) % 50, 60, 65792
-              FROM generate_series($2::timestamp, $2::timestamp + INTERVAL '23 hours 59 minutes', INTERVAL '1 minute') AS g(t)
-              CROSS JOIN generate_series(1, 4) AS s(id)
-              CROSS JOIN generate_series(1, 130) AS c(n)
-              CROSS JOIN generate_series(0, 1) AS i(i)", connection) { CommandTimeout = 300 })
-        {
-            seed.Parameters.AddWithValue(IdBase);
-            seed.Parameters.AddWithValue(day);
-            await seed.ExecuteNonQueryAsync(ct);
-        }
-
-        var chunkName = await ScalarAsync<string>(connection,
-            "SELECT format('%I.%I', chunk_schema, chunk_name) FROM timescaledb_information.chunks WHERE hypertable_name = 'perfmon_stats' AND NOT is_compressed AND range_end <= now()", ct);
-        await ExecAsync(connection, $"SELECT compress_chunk('{chunkName}')", ct);
-        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql(TimescaleSupport.PerfmonStatsTable), ct);
-
-        /* The bound is on what the re-group ADDS to a read (#5574): the same read is timed without a re-group first, in this test,
-           so a slow runner moves both numbers and only a lock wait moves the difference. */
-        static async Task<TimeSpan> TimeReadAsync(NpgsqlConnection readConnection, CancellationToken token)
-        {
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            using var read = new NpgsqlCommand(
-                "SELECT count(*), max(cntr_value) FROM v_perfmon_stats WHERE server_id = 2 AND counter_name = 'Counter 7' AND collection_time >= now() - INTERVAL '30 days'", readConnection)
-            { CommandTimeout = 120 };
-            await read.ExecuteScalarAsync(token);
-            clock.Stop();
-            return clock.Elapsed;
-        }
-
-        /* The baseline is the MEDIAN of the warm reads (#5574, check round 2): the first read after the compress is cold (plan,
-           buffers) and is dropped, and one slow outlier must not lift the baseline, because the stall this test guards is a
-           lock wait of about 3 s on top of a warm read, and a baseline raised by 0.5 s lets it through. */
-        var warm = new List<TimeSpan>();
-        using (var baselineConnection = new NpgsqlConnection(scratch.ConnectionString))
-        {
-            await baselineConnection.OpenAsync(ct);
-            await TimeReadAsync(baselineConnection, ct);
-            for (var i = 0; i < 5; i++)
-            {
-                warm.Add(await TimeReadAsync(baselineConnection, ct));
-            }
-        }
-
-        var baseline = warm.OrderBy(took => took).ElementAt(warm.Count / 2);
-
-        var stop = false;
-        var slowest = TimeSpan.Zero;
-        var reads = 0;
-        var reader = Task.Run(async () =>
-        {
-            using var readConnection = new NpgsqlConnection(scratch.ConnectionString);
-            await readConnection.OpenAsync(ct);
-            while (!Volatile.Read(ref stop))
-            {
-                var took = await TimeReadAsync(readConnection, ct);
-                if (took > slowest)
-                {
-                    slowest = took;
-                }
-
-                reads++;
-                await Task.Delay(100, ct);
-            }
-        }, ct);
-
-        var logger = new CapturingTestLogger();
-        var outcome = await TimescaleSupport.RegroupPerfmonChunkAsync(
-            connection, logger, new TimescaleSupport.PerfmonRegroupCandidate(chunkName, OldChunkSegmentBy), ct);
-        Volatile.Write(ref stop, true);
-        await reader;
-
-        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.Regrouped, outcome.Result);
-        Assert.Equal(1_497_600, outcome.Rows);
-        Assert.True(reads >= 3, $"the reader only got {reads} reads in during a {outcome.Elapsed.TotalSeconds:0.0} s re-group");
-        Assert.True(slowest - baseline < TimeSpan.FromSeconds(2.5),
-            $"a read took {slowest.TotalSeconds:0.0} s during a {outcome.Elapsed.TotalSeconds:0.0} s re-group, against {baseline.TotalSeconds:0.0} s without one");
-    }
-
-    /// <summary>
     /// A service stop during the drain's pause ends the run at once (#5574): the pause is waited on with the stopping token,
     /// so the run's task completes within a moment, without a warning, with the chunks it had not reached untouched.
     /// </summary>
@@ -562,38 +452,6 @@ public sealed class PerfmonRegroupLiveTests
         var after = await ReadChunksAsync(connection, ct);
         Assert.Equal(1, after.Count(chunk => chunk.SegmentBy == WantedChunkSegmentBy));
         Assert.Equal(5, after.Count(chunk => chunk.SegmentBy == OldChunkSegmentBy));
-    }
-
-    /// <summary>
-    /// A service stop during the compress half (#5574): the wait for a held lock is cancelled at once (not after the 3 s lock
-    /// timeout), the cancellation propagates, and the log says the chunk is left for the compression policy.
-    /// </summary>
-    [Fact]
-    public async Task AServiceStopDuringTheCompressHalf_CancelsTheWait_AndSaysTheChunkIsLeftToThePolicy()
-    {
-        var connectionString = RequireLivePostgres();
-        var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
-        using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await BuildOldStoreAsync(connection, scratch.ConnectionString, ct);
-        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql(TimescaleSupport.PerfmonStatsTable), ct);
-        TimescaleSupport.BusyStreaks.Reset();
-
-        var chunk = ChunkOfDay(await ReadChunksAsync(connection, ct), 3);
-        await ExecAsync(connection, $"SELECT decompress_chunk('{chunk.Name}')", ct);
-        await using var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
-        var logger = new CapturingTestLogger();
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        using var stopping = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        stopping.CancelAfter(TimeSpan.FromMilliseconds(500));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromSeconds(5), stopping.Token));
-        await holder.ReleaseAsync(ct);
-
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2.5), $"the stop took {clock.Elapsed.TotalSeconds:0.0} s to end the wait");
-        Assert.Single(logger.Lines, line => line.Contains("the service is stopping with perfmon_stats chunk", StringComparison.Ordinal));
-        TimescaleSupport.BusyStreaks.Reset();
     }
 
     /* ---------------- check round 1 (#5579) ---------------- */
@@ -959,14 +817,6 @@ public sealed class PerfmonRegroupLiveTests
 
     /* ---------------- fixture ---------------- */
 
-    private static string RequireLivePostgres()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the perfmon_stats re-group tests (each mints its own scratch database).");
-        return connectionString!;
-    }
-
     private static PerfmonRegroupDrain NewDrain(
         string connectionString, CapturingTestLogger logger, TimeSpan minPause, List<TimeSpan> pauses,
         int statementTimeoutSeconds = TimescaleSupport.PerfmonRegroupStatementTimeoutSeconds,
@@ -992,83 +842,6 @@ public sealed class PerfmonRegroupLiveTests
         TimescaleSupport.PerfmonRegroupRead read) =>
         (connection, logger, reach, token) => Task.FromResult(read);
 
-    /// <summary>
-    /// perfmon_stats as every build before #5574 left it: a hypertable compressed by <c>server_id</c> alone, five daily
-    /// chunks inside the reach (yesterday back to five days ago) and one 45 days back, all compressed. Skips on a TimescaleDB
-    /// without the per-chunk settings view (before 2.14.1), which these tests read.
-    /// </summary>
-    private static async Task BuildOldStoreAsync(NpgsqlConnection connection, string connectionString, CancellationToken ct)
-    {
-        await PgMigrations.MigrateAsync(connection, ct);
-        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(connectionString, ct), "TimescaleDB is not available on this cluster.");
-        await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
-        Assert.SkipUnless(
-            await ScalarAsync<bool>(connection, "SELECT to_regclass('timescaledb_information.chunk_compression_settings') IS NOT NULL", ct),
-            "this TimescaleDB has no timescaledb_information.chunk_compression_settings (before 2.14.1).");
-
-        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql(TimescaleSupport.PerfmonStatsTable, "collection_time"), ct);
-        await ExecAsync(connection, "ALTER TABLE perfmon_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
-
-        var today = DateTime.SpecifyKind(RunStartUtc.Date, DateTimeKind.Unspecified);
-        foreach (var daysBack in new[] { 1, 2, 3, 4, 5, 45 })
-        {
-            await SeedDayAsync(connection, today.AddDays(-daysBack), daysBack, ct);
-        }
-
-        var chunks = new List<string>();
-        using (var list = new NpgsqlCommand(
-            "SELECT format('%I.%I', chunk_schema, chunk_name) FROM timescaledb_information.chunks "
-            + "WHERE hypertable_schema = 'collect' AND hypertable_name = 'perfmon_stats' AND NOT is_compressed AND range_end <= now()", connection))
-        await using (var reader = await list.ExecuteReaderAsync(ct))
-        {
-            while (await reader.ReadAsync(ct))
-            {
-                chunks.Add(reader.GetString(0));
-            }
-        }
-
-        foreach (var chunk in chunks)
-        {
-            await ExecAsync(connection, $"SELECT compress_chunk('{chunk}')", ct);
-        }
-    }
-
-    /// <summary>Two servers, four counters, two instances each, a sample every 30 minutes: 768 rows for the day.</summary>
-    private static async Task SeedDayAsync(NpgsqlConnection connection, DateTime day, int salt, CancellationToken ct)
-    {
-        using var command = new NpgsqlCommand(
-            @"INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds, cntr_type)
-              SELECT $1 - $3 * 100000 - row_number() OVER (), g.t AT TIME ZONE 'UTC', s.id, 'REGROUP-SRV', 'SQLServer:Test', 'Counter ' || c.n,
-                     CASE WHEN i.i = 0 THEN '' ELSE 'inst' || i.i END,
-                     (extract(epoch FROM g.t)::bigint / 60 + s.id + c.n * 7 + i.i) % 100000, (extract(epoch FROM g.t)::bigint / 60 + c.n) % 50, 60, 65792
-              FROM generate_series($2::timestamp, $2::timestamp + INTERVAL '23 hours 30 minutes', INTERVAL '30 minutes') AS g(t)
-              CROSS JOIN generate_series(1, 2) AS s(id)
-              CROSS JOIN generate_series(1, 4) AS c(n)
-              CROSS JOIN generate_series(0, 1) AS i(i)", connection);
-        command.Parameters.AddWithValue(IdBase);
-        command.Parameters.AddWithValue(day);
-        command.Parameters.AddWithValue(salt);
-        await command.ExecuteNonQueryAsync(ct);
-    }
-
-    private static async Task<List<ChunkRow>> ReadChunksAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        using var command = new NpgsqlCommand(
-            @"SELECT format('%I.%I', c.chunk_schema, c.chunk_name), c.is_compressed, coalesce(s.segmentby, ''), (c.range_start AT TIME ZONE 'UTC')
-              FROM timescaledb_information.chunks AS c
-              LEFT JOIN timescaledb_information.chunk_compression_settings AS s ON s.chunk = to_regclass(format('%I.%I', c.chunk_schema, c.chunk_name))
-              WHERE c.hypertable_schema = 'collect' AND c.hypertable_name = 'perfmon_stats'
-              ORDER BY c.range_start DESC", connection);
-        var chunks = new List<ChunkRow>();
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-        {
-            chunks.Add(new ChunkRow(reader.GetString(0), reader.GetBoolean(1), reader.GetString(2), DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)));
-        }
-
-        return chunks;
-    }
-
     /// <summary>One md5 over the row count and a hash sum per (server, counter): unchanged data gives the same value.</summary>
     private static Task<string> FingerprintAsync(NpgsqlConnection connection, CancellationToken ct) =>
         ScalarAsync<string>(connection,
@@ -1076,19 +849,6 @@ public sealed class PerfmonRegroupLiveTests
               FROM (SELECT server_id, counter_name, count(*) AS n,
                            sum(hashtextextended(concat_ws('|', collection_id, collection_time, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds, cntr_type), 0)::numeric) AS h
                     FROM perfmon_stats GROUP BY server_id, counter_name) AS t", ct);
-
-    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
-    {
-        using var command = new NpgsqlCommand(sql, connection);
-        await command.ExecuteNonQueryAsync(ct);
-    }
-
-    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct)
-    {
-        using var command = new NpgsqlCommand(sql, connection);
-        var value = await command.ExecuteScalarAsync(ct);
-        return (T)Convert.ChangeType(value!, typeof(T), System.Globalization.CultureInfo.InvariantCulture);
-    }
 
     /* ---------------- round 2b helpers ---------------- */
 
@@ -1134,53 +894,6 @@ public sealed class PerfmonRegroupLiveTests
             await Task.Delay(50, ct);
         }
     }
-
-    private static ChunkRow ChunkOfDay(List<ChunkRow> chunks, int daysBack) =>
-        chunks.Single(chunk => chunk.Start.Date == RunStartUtc.Date.AddDays(-daysBack));
-
-    /// <summary>Another session holds ROW EXCLUSIVE on the chunk inside an open transaction, which conflicts with the
-    /// EXCLUSIVE lock both halves of the re-group ask for.</summary>
-    private static async Task<HeldLock> HoldLockAsync(string connectionString, string chunk, CancellationToken ct)
-    {
-        var holder = new NpgsqlConnection(connectionString);
-        await holder.OpenAsync(ct);
-        await ExecAsync(holder, "BEGIN", ct);
-        await ExecAsync(holder, $"LOCK TABLE {chunk} IN ROW EXCLUSIVE MODE", ct);
-        return new HeldLock(holder);
-    }
-
-    /// <summary>The session that holds a chunk's lock; released by <see cref="ReleaseAsync"/> or, at the latest, when
-    /// the test's scope ends.</summary>
-    private sealed class HeldLock : IAsyncDisposable
-    {
-        private NpgsqlConnection? _connection;
-
-        public HeldLock(NpgsqlConnection connection) => _connection = connection;
-
-        public async Task ReleaseAsync(CancellationToken ct)
-        {
-            var connection = Interlocked.Exchange(ref _connection, null);
-            if (connection is not null)
-            {
-                await ExecAsync(connection, "ROLLBACK", ct);
-                await connection.DisposeAsync();
-            }
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            var connection = Interlocked.Exchange(ref _connection, null);
-            if (connection is not null)
-            {
-                await connection.DisposeAsync();
-            }
-        }
-    }
-
-    private static async Task RequirePerChunkSettingsAsync(NpgsqlConnection connection, CancellationToken ct) =>
-        Assert.SkipUnless(
-            await ScalarAsync<bool>(connection, "SELECT to_regclass('timescaledb_information.chunk_compression_settings') IS NOT NULL", ct),
-            "this TimescaleDB has no timescaledb_information.chunk_compression_settings (before 2.14.1).");
 
     /// <summary>perfmon_stats's own segmentby columns in order, joined with ", " (how the product's gate reads them).</summary>
     private static Task<string> HypertableSegmentByAsync(NpgsqlConnection connection, CancellationToken ct) =>
