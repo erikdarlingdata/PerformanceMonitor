@@ -2015,7 +2015,6 @@ function Get-CimInstance {
         Assert.Contains("jsonInteractive=Read, Synchronize", answers);
     }
 
-    /// <summary>The #4034 block, its explaining comment included, exactly as a script ships it.</summary>
     /// <summary>Adds the shared service-written list and its path test to a probe, the way the scripts define them
     /// (the lock and the pre-lock walk both read them).</summary>
     private static void AppendServiceWrittenList(StringBuilder probe, string script)
@@ -2026,6 +2025,7 @@ function Get-CimInstance {
         }
     }
 
+    /// <summary>The #4034 block, its explaining comment included, exactly as a script ships it.</summary>
     private static string InstallTreeLockBlock(string script)
     {
         var start = script.IndexOf("# Lock the install tree against ordinary users (#4034).", StringComparison.Ordinal);
