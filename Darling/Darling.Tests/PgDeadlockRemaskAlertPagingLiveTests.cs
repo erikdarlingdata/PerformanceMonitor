@@ -40,7 +40,6 @@ namespace Darling.Tests;
    DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres, then works entirely inside it: the
    walks read the whole log, so they must not meet another class's alerts. Leave it out; this comment is here so the
    next sweep does not "fix" it. */
-[Trait("Cost", "Slow")]
 public sealed class PgDeadlockRemaskAlertPagingLiveTests
 {
     private const int Servers = 50;
