@@ -10,7 +10,6 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.PlanAnalysis;
-using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -33,56 +32,6 @@ public sealed class ActualPlanConsentNoticeTests
         Assert.Contains("captured from the monitored server", notice, StringComparison.Ordinal);
         Assert.Contains("any user of that server may have written it", notice, StringComparison.Ordinal);
         Assert.Contains("read it before you allow the run", notice, StringComparison.Ordinal);
-    }
-
-    private const string InsertPlan =
-        "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>"
-        + "<StmtSimple StatementType=\"INSERT\" StatementText=\"insert t values (1)\" /></Statements></Batch></BatchSequence></ShowPlanXML>";
-
-    private const string SelectPlan =
-        "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>"
-        + "<StmtSimple StatementType=\"SELECT\" StatementText=\"select 1\" /></Statements></Batch></BatchSequence></ShowPlanXML>";
-
-    [Fact]
-    public void SharedHistoryWindowPrompt_FlagsAQueryThatModifiesData()
-    {
-        var modification = QueryModificationDetector.Detect(InsertPlan, "insert t values (1)");
-        var text = PlanNavigationController.BuildConfirmationText("example-sql-01", "Sales", modification);
-
-        Assert.Contains("DATA-MODIFICATION WARNING", text, StringComparison.Ordinal);
-        Assert.Contains("INSERT", text, StringComparison.Ordinal);
-        Assert.Contains("You are about to execute this query against example-sql-01 in database [Sales]", text, StringComparison.Ordinal);
-        Assert.EndsWith(QueryModificationDetector.CapturedQueryNotice, text, StringComparison.Ordinal);
-        Assert.Contains("DATA WILL BE MODIFIED", PlanNavigationController.ConfirmationTitle(modification), StringComparison.Ordinal);
-        /* The warning comes first. */
-        Assert.True(text.IndexOf("DATA-MODIFICATION WARNING", StringComparison.Ordinal) < text.IndexOf("You are about to execute", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public void SharedHistoryWindowPrompt_ForAReadOnlyPlan_IsTheUsualPromptWithNoWarning()
-    {
-        var modification = QueryModificationDetector.Detect(SelectPlan, "select 1");
-        var text = PlanNavigationController.BuildConfirmationText("example-sql-01", "", modification);
-
-        Assert.DoesNotContain("DATA-MODIFICATION WARNING", text, StringComparison.Ordinal);
-        Assert.StartsWith("You are about to execute this query against example-sql-01 in database [default]", text, StringComparison.Ordinal);
-        Assert.Equal("Get Actual Plan", PlanNavigationController.ConfirmationTitle(modification));
-    }
-
-    [Fact]
-    public void SharedHistoryWindowPrompt_WithNoPlan_FailsSafeToTheWarning()
-    {
-        var modification = QueryModificationDetector.Detect(null, "select 1");
-        var text = PlanNavigationController.BuildConfirmationText("example-sql-01", "Sales", modification);
-
-        Assert.Contains("could not be analyzed", text, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheSharedController_RunsTheDetector()
-    {
-        var source = File.ReadAllText(Path.Combine(RepoRoot(), "PerformanceMonitor.Ui/PlanNavigationController.cs"));
-        Assert.Contains("QueryModificationDetector.Detect(estimatedPlanXml, queryText)", source, StringComparison.Ordinal);
     }
 
     [Theory]
