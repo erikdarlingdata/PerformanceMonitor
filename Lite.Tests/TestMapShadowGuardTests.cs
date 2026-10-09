@@ -252,22 +252,29 @@ public sealed class TestMapShadowGuardTests : IDisposable
         Assert.DoesNotContain("LadderTests", Strings(byWildcard.GetProperty("selected").GetProperty("lite")));
     }
 
-    private void WriteReport(string artifact, string type, string result)
+    private void WriteReport(string artifact, string type, string result, string file = "x.xml")
     {
-        Write(Path.Combine("reports", artifact, "x.xml"),
+        Write(Path.Combine("reports", artifact, file),
             "<assemblies><assembly><collection><test name=\"n\" type=\"" + type + "\" method=\"m\" time=\"1\" result=\"" + result + "\" />"
             + "</collection></assembly></assemblies>");
     }
 
-    private JsonElement ShadowCheck(string? selectionJson)
+    private JsonElement ShadowCheck(string? selectionJson, string meta = "{\"run\": \"1\"}", string? jobsLines = null)
     {
         var args = new List<string> { "shadow-check", "--reports", Path.Combine(_dir, "reports"), "--out", Path.Combine(_dir, "row.jsonl"),
-            "--meta", """{"run": "1"}""" };
+            "--meta", meta };
         if (selectionJson is not null)
         {
             Write("selection.json", selectionJson);
             args.Add("--selection");
             args.Add(Path.Combine(_dir, "selection.json"));
+        }
+
+        if (jobsLines is not null)
+        {
+            Write("jobs.jsonl", jobsLines);
+            args.Add("--jobs");
+            args.Add(Path.Combine(_dir, "jobs.jsonl"));
         }
 
         var (code, output) = Python("ci-select.py", args.ToArray());
@@ -296,6 +303,77 @@ public sealed class TestMapShadowGuardTests : IDisposable
         Assert.Equal("SkippedTests", misses[0].GetProperty("class").GetString());
         Assert.Equal(1, row.GetProperty("reports").GetProperty("darling").GetInt32());
         Assert.Equal(2, row.GetProperty("reports").GetProperty("lite").GetInt32());
+    }
+
+    private const string OnePickedSelection = """
+        {"full": false, "reason": "", "selected": {"darling": ["PickedTests"], "lite": []},
+         "total": {"darling": 5, "lite": 9}, "seconds": {}, "why": {}}
+        """;
+
+    [Fact]
+    public void TheGuardTestsJobsFailedClasses_AreInTheRow_AndCountAsMissesWhenNotSelected()
+    {
+        // #5459: the Guard tests job's xunit report is uploaded as guard-tests-timing-<suite>; the shard reports alone
+        // left five runs with a failing Guard class and an empty row.
+        WriteReport("guard-tests-timing-darling", "Darling.Tests.RepoFileAdoptionTests", "Fail", "guard-darling-a1.xml");
+        WriteReport("guard-tests-timing-lite", "Lite.Tests.WpfStaGateCensusTests", "Fail", "guard-lite-a1.xml");
+        WriteReport("darling-tests-timing-0", "Darling.Tests.PickedTests", "Pass", "darling-timing-0-1-a1.xml");
+
+        var row = ShadowCheck(OnePickedSelection, """{"run": "1", "attempt": "1"}""");
+
+        Assert.Equal(new[] { "RepoFileAdoptionTests" }, row.GetProperty("failed").GetProperty("darling").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "WpfStaGateCensusTests" }, row.GetProperty("failed").GetProperty("lite").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(2, row.GetProperty("misses").GetArrayLength());
+        Assert.Equal(2, row.GetProperty("reports").GetProperty("darling").GetInt32());
+    }
+
+    [Fact]
+    public void OnlyTheLatestAttemptsReports_Count()
+    {
+        // #5459, run 37776652739: shard 0 failed in attempt 1 and passed in attempt 2. The check ran in attempt 2 and
+        // listed the attempt-1 class. A report names the attempt that wrote it; another attempt's is ignored.
+        WriteReport("lite-tests-timing-0", "Lite.Tests.ScreenReaderRowNamesTests", "Fail", "lite-timing-0-1-a1.xml");
+        WriteReport("lite-tests-timing-0", "Lite.Tests.ScreenReaderRowNamesTests", "Pass", "lite-timing-0-1-a2.xml");
+        WriteReport("darling-tests-timing-1", "Darling.Tests.SomeTests", "Fail", "darling-timing-1-1-a1.xml");
+
+        var row = ShadowCheck(OnePickedSelection, """{"run": "1", "attempt": "2"}""");
+
+        Assert.Empty(row.GetProperty("failed").GetProperty("lite").EnumerateArray());
+        Assert.Empty(row.GetProperty("failed").GetProperty("darling").EnumerateArray());
+        Assert.Empty(row.GetProperty("misses").EnumerateArray());
+        Assert.Equal(1, row.GetProperty("reports").GetProperty("lite").GetInt32());
+        Assert.Equal(2, row.GetProperty("stale_reports").GetInt32());
+
+        // The same attempt-1 report still counts when the check belongs to attempt 1.
+        var first = ShadowCheck(OnePickedSelection, """{"run": "1", "attempt": "1"}""");
+        Assert.Equal(new[] { "ScreenReaderRowNamesTests" }, first.GetProperty("failed").GetProperty("lite").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(1, first.GetProperty("stale_reports").GetInt32());
+    }
+
+    [Fact]
+    public void AJobThatFailedWithoutAFailedTest_IsListedAsAFailedJob()
+    {
+        // #5459: the whole-tree guards job can end red on a leaked foreground thread, with 0 failed tests.
+        var jobs = """
+            {"name":"Guard tests","conclusion":"success"}
+            {"name":"Darling whole-tree guards","conclusion":"failure"}
+            {"name":"Lite tests (0)","conclusion":"skipped"}
+            """;
+
+        var row = ShadowCheck(OnePickedSelection, """{"run": "1", "attempt": "1"}""", jobs);
+
+        Assert.Equal(new[] { "Darling whole-tree guards" }, row.GetProperty("failed_jobs").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Empty(row.GetProperty("misses").EnumerateArray());
+    }
+
+    [Fact]
+    public void ACancelledSelectionJob_IsNamedInTheReason_NotReportedAsAScriptFault()
+    {
+        // #5459, run 37832135291: a newer push cancelled the run one second into the selection job.
+        var row = ShadowCheck(null, """{"run": "1", "selection_job": "cancelled"}""");
+
+        Assert.True(row.GetProperty("full").GetBoolean());
+        Assert.Contains("selection job ended cancelled", row.GetProperty("reason").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -350,7 +428,7 @@ public sealed class TestMapShadowGuardTests : IDisposable
         }
 
         Assert.Contains("needs: [gate]", Job(yml, "test-map-shadow"), StringComparison.Ordinal);
-        Assert.Contains("needs: [gate, test-map-shadow, darling-pg, lite-tests]", Job(yml, "shadow-check"), StringComparison.Ordinal);
+        Assert.Contains("needs: [gate, guard-tests, test-map-shadow, darling-pg, lite-tests]", Job(yml, "shadow-check"), StringComparison.Ordinal);
         Assert.Contains("always()", Job(yml, "shadow-check"), StringComparison.Ordinal);
         foreach (var name in jobNames.Where(n => n is not "shadow-check"))
         {

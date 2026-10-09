@@ -39,3 +39,53 @@ eca647c2f4 PerformanceMonitorLite.Tests.SignificantWaitsToolTests
 c3a18e1785 Darling.Tests.PgTargetWaitTests
 67bf55c45a Darling.Tests.ClipboardTextRetryBudgetTests
 48216212d0 Darling.Tests.PlanSync4512CancellationTests
+
+# Map back-test (ci-select.py --replay --map, #5459): a class failed on a run whose changed files do not reach it,
+# and the failure is not a selection gap. Each class was checked against the corpus: none of the run's changed
+# product files is named by the class, none is covered by it, and the class also failed on runs with a different
+# change set, on a push to dev, or as the only failing class of one shard job (a flake or an environment fault).
+# The two mass failures of 2026-09-26 and 2026-09-27 (a store migration broke the shared live-store fixture) are not
+# here: the map builder now links every class of a big xunit collection to what the collection's fixture ran.
+02ae3efb1f Darling.Tests.StatementFilterAlertTests
+03d9905807 Darling.Tests.PgServerLogTailRotationLiveTests
+0654199a72 Darling.Tests.PgServerLogTailRotationLiveTests
+0ac14fc78e Darling.Tests.DarlingAnomalyBaselineTests
+0b92d8248f Darling.Tests.PgServerLogTailRotationLiveTests
+0c58c0eb56 Darling.Tests.PgTargetSampledWaitLiveTests
+0c983ef54d Darling.Tests.PgLogBurstAndRotationLiveTests
+11729239b1 Darling.Tests.XminHorizonPersistenceReadTests
+2c39e009ff Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+33932296ca Darling.Tests.StoreStatementStatsLiveTests
+3af3ade9ea Darling.Tests.StoreStatementStatsLiveTests
+3b2d41baae Darling.Tests.QueryStoreIntervalWideGridLiveTests
+3bb3ae8fe9 Darling.Tests.TrendPayloadBudgetLiveTests
+3de285b652 Darling.Tests.DarlingAnomalyBaselineTests
+40284b0061 Darling.Tests.PayloadDimensionLiveTests
+4756659045 Darling.Tests.QueryStoreLegacyRowIndexLiveTests
+4a3f52389e PerformanceMonitorLite.Tests.TimeHonestyRungReadTests
+4f8499a944 PerformanceMonitorLite.Tests.TimeHonestyRungReadTests
+6ac72f8605 Darling.Tests.StoreStatementStatsLiveTests
+6de10f4dcb Darling.Tests.StoreSessionTimeZoneLiveTests
+87836cc97e Darling.Tests.DarlingAnomalyBaselineTests
+87e78aa474 PerformanceMonitorLite.Tests.DataStartBannerProbeFailureTests
+88204f7cd2 Darling.Tests.RdsDeadlockIngestorTests
+8875188337 Darling.Tests.DarlingAnomalyBaselineTests
+89c271dd17 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+8a800ed6c6 PerformanceMonitorLite.Tests.LiteDeltaSeederTests
+8b3c5767f0 Darling.Tests.SqlServerStoreTileBehaviourTests
+8f95de197e Darling.Tests.StatementFilterAlertTests
+93d34a73cd Darling.Tests.RollupBackfillLiveTests
+99ad6aebf6 Darling.Tests.PlanSync4512CancellationTests
+9be59f1a95 Darling.Tests.CollectionLogDrainForensicsStoreTests
+a3b5749937 Darling.Tests.DarlingAnomalyBaselineTests
+af31e98db0 Darling.Tests.StoreSessionTimeZoneLiveTests
+b33399f219 Darling.Tests.DarlingCloudIdentityProbeTests
+c20797c24a Darling.Tests.PgDeadlockNormalizationTests
+c9877aad46 Darling.Tests.DarlingAnomalyBaselineTests
+c9a1a81456 Darling.Tests.QueryStoreTopLiteralEndStraddleLiveTests
+d0d482835c Darling.Tests.XminHorizonPersistenceReadTests
+d0fb0ff183 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+d5370df470 Darling.Tests.DarlingAnomalyBaselineTests
+d6c02bf28a Darling.Tests.DarlingStoreUpgradeRevertTests
+ed114b5b17 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+f07bfc441f PerformanceMonitorLite.Tests.TrendEmptyParityToolTests

@@ -63,6 +63,13 @@ MAX_TOOL_FILES = 6
 MEMBER_REF = re.compile(r"\b([A-Z][A-Za-z0-9_]{2,})\.([A-Z][A-Za-z0-9_]{2,})\b")
 MAX_MEMBER_FILES = 5  # `Type.Member` of a partial type: the files that declare the member, when there are this few
 MAX_NAMED_PARTIALS = 12
+COLLECTION_ATTR = re.compile(r'\[\s*Collection\(\s*"([^"]+)"')
+# A xunit collection shares one fixture (the live-store tests share the store's schema setup). The fixture's set-up
+# runs once and a coverage run credits it to the one test that happened to start it, so most members never "visit"
+# the files it ran. A file that more than this share of a collection's classes visited was therefore run by the
+# fixture, and every member depends on it (#5459: a PgMigrations.cs change broke 389 classes, 8 of them unmapped).
+COLLECTION_SHARE = 0.5
+COLLECTION_MIN_MEMBERS = 5
 MAX_OVERFLOW_FILES = 60  # a class that would be a hole may take the files of a type declared in more files than the cap
 # A repo path written in a comment or doc cref (`Lite/Analysis/AnomalyDetector.cs:120`): the author names the file the
 # class pins, so a change to it selects the class (#5459 slice 4, the Darling/Lite twin pairs).
@@ -404,6 +411,44 @@ def load_shards(directory: str) -> dict[str, list[dict]]:
     return shards
 
 
+def class_collections(text: str) -> dict[str, set[str]]:
+    """{class: {xunit collection names}} for the classes declared in one source file: the [Collection("x")] attributes
+    written between the previous member's end and the class declaration."""
+    out: dict[str, set[str]] = {}
+    for m in CLASS_DECL.finditer(text):
+        window = text[max(0, m.start() - 800):m.start()]
+        window = window[max(window.rfind("}"), window.rfind(";")) + 1:]
+        out[m.group(1)] = set(COLLECTION_ATTR.findall(window))
+    return out
+
+
+def shared_fixture_files(files_by_class: dict[str, set[str]], collections_by_class: dict[str, set[str]],
+                         never: set[str], share: float = COLLECTION_SHARE,
+                         min_members: int = COLLECTION_MIN_MEMBERS) -> dict[str, set[str]]:
+    """Files each class of a big xunit collection must also depend on: the ones more than `share` of the collection's
+    classes visited (see COLLECTION_SHARE). `never` holds files that cannot be a shared dependency (a test class's own
+    file). Returns {class: files to add}. A collection under `min_members` classes adds nothing: a small collection's
+    overlap is its tests' own, not a fixture's."""
+    members: dict[str, list[str]] = {}
+    for cls, names in collections_by_class.items():
+        for name in names:
+            members.setdefault(name, []).append(cls)
+    out: dict[str, set[str]] = {}
+    for classes in members.values():
+        if len(classes) < min_members:
+            continue
+        seen: dict[str, int] = {}
+        for cls in classes:
+            for f in files_by_class.get(cls, ()):
+                seen[f] = seen.get(f, 0) + 1
+        shared = {f for f, n in seen.items() if n / len(classes) > share and f not in never}
+        for cls in classes:
+            add = shared - files_by_class.get(cls, set())
+            if add:
+                out.setdefault(cls, set()).update(add)
+    return out
+
+
 def build_map(root: str, tracked: list[str], shards: dict[str, list[dict]], sha: str, built_at: str, tool: str,
               max_ident_files: int) -> tuple[dict, dict]:
     """Returns (the map, the facts the summary prints)."""
@@ -441,9 +486,11 @@ def build_map(root: str, tracked: list[str], shards: dict[str, list[dict]], sha:
             info = analyze_source(text, repo, rel, own_types)
             idents = type_files(text, repo, rel, own_types, max_ident_files) | member_files(text, repo, rel, max_ident_files)
             over = overflow_type_files(text, repo, rel, own_types, max_ident_files)
+            colls = class_collections(text)
             for cls in decls:
                 s = sources.setdefault(cls, {"own": set(), "ident": set(), "patterns": {}, "tree": False, "guard": False,
-                                             "overflow": set()})
+                                             "overflow": set(), "collections": set()})
+                s["collections"] |= colls.get(cls, set())
                 s["own"].add(rel)
                 s["ident"] |= idents
                 s["overflow"] |= over
@@ -500,6 +547,14 @@ def build_map(root: str, tracked: list[str], shards: dict[str, list[dict]], sha:
                                        else "no test context" if not m["seen"] else "no product file"))
             if m["tests"] and m["skipped"] == m["tests"]:
                 facts["skipped_all"].append((suite, cls))
+        # A class of a big xunit collection depends on what the collection's fixture ran (see COLLECTION_SHARE).
+        all_own = {f for e in entries.values() for f in e["own"]}
+        shared = shared_fixture_files({c: set(e["files"]) for c, e in entries.items()},
+                                      {c: sources[c]["collections"] for c in entries
+                                       if c in sources and not sources[c]["guard"]}, all_own)
+        for cls, add in shared.items():
+            entries[cls]["files"] = sorted(set(entries[cls]["files"]) | add)
+            used.update(add)
         suites[suite] = entries
         facts["suites"][suite] = {"classes": len(entries), "covered": covered, "guard": guards, "holes": holes,
                                   "shards": len(parts), "tests_exit": [p.get("tests_exit") for p in parts],

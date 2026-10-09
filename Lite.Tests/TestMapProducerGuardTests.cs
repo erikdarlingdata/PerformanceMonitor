@@ -226,6 +226,62 @@ public sealed class TestMapProducerGuardTests : IDisposable
     }
 
     [Fact]
+    public void ABigCollection_ShareWhatMostOfItsClassesVisited_ASmallOneDoesNot()
+    {
+        // #5459: a xunit collection shares one fixture. Its set-up runs once and the coverage run credits it to the one
+        // class that started it, so a change to a file the fixture ran selected only some of the classes that failed.
+        var tracked = new List<string> { "src/Store.cs", "src/Tiny.cs" };
+        var rows = new List<(string Full, string[] Files, double Seconds, int Tests, int Skipped)>();
+        for (var i = 1; i <= 6; i++)
+        {
+            var name = $"Live{i}Tests";
+            tracked.Add($"Darling/Darling.Tests/{name}.cs");
+            Write($"Darling/Darling.Tests/{name}.cs", $"[Collection(\"live\")]\npublic sealed class {name} {{ public void Runs() {{ }} }}\n");
+            // Four of six visited the fixture's file (more than half); the last two did not.
+            rows.Add(($"Ns.{name}", i <= 4 ? new[] { "src/Store.cs" } : new[] { "src/Other.cs" }, 1.0, 1, 0));
+        }
+
+        for (var i = 1; i <= 3; i++)
+        {
+            var name = $"Small{i}Tests";
+            tracked.Add($"Darling/Darling.Tests/{name}.cs");
+            Write($"Darling/Darling.Tests/{name}.cs", $"[Collection(\"tiny\")]\npublic sealed class {name} {{ public void Runs() {{ }} }}\n");
+            rows.Add(($"Ns.{name}", i <= 2 ? new[] { "src/Tiny.cs" } : new[] { "src/Other.cs" }, 1.0, 1, 0));
+        }
+
+        tracked.AddRange(new[] { "src/Other.cs", "Darling/Darling.Tests/PlainTests.cs" });
+        Write("Darling/Darling.Tests/PlainTests.cs", "public sealed class PlainTests { public void Runs() { } }\n");
+        rows.Add(("Ns.PlainTests", new[] { "src/Other.cs" }, 1.0, 1, 0));
+        Write("src/Store.cs", "public sealed class Store { }\n");
+        Write("src/Tiny.cs", "public sealed class Tiny { }\n");
+        Write("src/Other.cs", "public sealed class Other { }\n");
+        Write("tracked.txt", string.Join("\n", tracked));
+        Write("shards/a/shard-darling-0.json", ShardJson("darling", 0, rows.ToArray()));
+        Write("shards/d/shard-lite-0.json", ShardJson("lite", 0, ("Ns.BetaTests", new[] { "src/Other.cs" }, 0.2, 1, 0)));
+        tracked.Add("Lite.Tests/BetaTests.cs");
+        Write("Lite.Tests/BetaTests.cs", "public sealed class BetaTests { public void Runs() { } }\n");
+        Write("tracked.txt", string.Join("\n", tracked));
+
+        var (code, output, map) = Build();
+        Assert.True(code == 0, output);
+        using (map)
+        {
+            var root = map!.RootElement;
+            var universe = root.GetProperty("files").EnumerateArray().Select(e => e.GetString()!).ToList();
+            var classes = root.GetProperty("classes").GetProperty("darling");
+            List<string> Files(string cls) => classes.GetProperty(cls).GetProperty("files").EnumerateArray()
+                .Select(e => universe[e.GetInt32()]).ToList();
+
+            Assert.Contains("src/Store.cs", Files("Live5Tests"));   // did not visit it, but the collection's fixture ran it
+            Assert.Contains("src/Store.cs", Files("Live6Tests"));
+            Assert.Contains("src/Store.cs", Files("Live1Tests"));   // unchanged for the classes that visited it
+            Assert.DoesNotContain("src/Tiny.cs", Files("Small3Tests")); // two classes of three: under the collection minimum
+            Assert.DoesNotContain("src/Store.cs", Files("PlainTests")); // no collection, no sharing
+            Assert.DoesNotContain("Darling/Darling.Tests/Live1Tests.cs", Files("Live5Tests")); // another class's own file is never shared
+        }
+    }
+
+    [Fact]
     public void TextPatterns_CarryPathAndToolNameLiterals_AndTreeReaders()
     {
         SeedCheckout();

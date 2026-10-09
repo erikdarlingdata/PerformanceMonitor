@@ -79,8 +79,8 @@ public sealed class GuardStageWorkflowTests
         Assert.DoesNotContain("DARLING_TEST_", job, StringComparison.Ordinal);
         Assert.DoesNotContain("pg-runtime", job, StringComparison.Ordinal);
         Assert.DoesNotContain("lite-tests-timing", job, StringComparison.Ordinal);
-        /* The only uploads are the two built test projects (#5459 change 2), pinned by TheGuardJobUploadsTheBuiltTestProjects_... below. */
-        Assert.Equal(2, Regex.Matches(job, "actions/upload-artifact@").Count);
+        /* The uploads are the two built test projects (#5459 change 2, pinned by TheGuardJobUploadsTheBuiltTestProjects_... below) and the two xunit reports the shadow check reads (#5459). */
+        Assert.Equal(4, Regex.Matches(job, "actions/upload-artifact@").Count);
     }
 
     /// <summary>
