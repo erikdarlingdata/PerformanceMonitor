@@ -1276,7 +1276,11 @@ jobs:
       # step never fails on a test exit code, and each chunk's report is kept (a later chunk's report may
       # already hold the earlier visits; the join takes the union). DARLING_TEST_PGRUNTIME lights up the
       # classes gated on the bundled runtime; the store-upgrade fixtures (~680 MB of archives) are not built
-      # here, so those classes skip and get text patterns instead of coverage.
+      # here, so those classes skip and get text patterns instead of coverage. The log-format and log-rotation
+      # clusters (the other DARLING_TEST_PG_* variables build.yml's darling-pg job sets) are not started here either,
+      # and this env block is NOT meant to grow to match: ci-select.py always selects every class whose source names
+      # such a variable (GATE_ENV_LITERAL), so the map needs no coverage edge for them. CiSelectMapSelectGuardTests pins
+      # this block to ci-select.py's MAP_SHARD_ENV.
       - name: Run this shard's classes (instrumented, AltCover runner)
         shell: pwsh
         env:

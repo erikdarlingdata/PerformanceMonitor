@@ -2861,9 +2861,10 @@ jobs:
   # summary and uploads them as the `test-map-selection` artifact. `build`, `darling-pg` and `lite-tests` wait for it
   # (it starts with the Guard tests job, which they wait for anyway), download the artifact and run only the classes it
   # names, after their own hash cut (ci-select.py `map-keep`, run-darling-pg-shard.ps1, run-lite-shard.ps1). They keep
-  # the Guard stage. A FULL, missing, unreadable, empty or late selection (this job is capped at 5 minutes, and a job
-  # that failed or was cancelled leaves nothing to download) means the shard runs every class it was cut: the selection
-  # only ever narrows. NOT a required check, and continue-on-error: its own failure is a notice at most. A missing,
+  # the Guard stage. A FULL, missing, unreadable or empty selection, and a job that failed or was cancelled and so
+  # left nothing to download, mean the shard runs every class it was cut: the selection only ever narrows. A selection
+  # is never "late": the shards `needs` this job, so a hung one only delays them, by up to its 5-minute cap. NOT a
+  # required check, and continue-on-error: its own failure is a notice at most. A missing,
   # unreadable, old or wrong-schema map, a failed download and a failed diff all mean FULL. Pull requests only; a push,
   # a merge group and the nightly never get a selection, so they run everything.
   test-map-select:

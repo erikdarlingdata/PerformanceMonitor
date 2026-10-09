@@ -727,4 +727,25 @@ public sealed class TestMapShadowGuardTests : IDisposable
         Assert.Empty(none.Ran);
         Assert.Contains("nothing runs", none.Output, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("run-darling-pg-shard.ps1", "darling", "Darling.Tests")]
+    [InlineData("run-lite-shard.ps1", "lite", "Lite.Tests")]
+    public void TheShardScripts_KeyANestedClassByItsOwnName_LikeTestMapAndCiSelect(string script, string suite, string ns)
+    {
+        // The runner lists a nested class as Namespace.Outer+Inner. test-map.py's simple_name and ci-select.py's scan_classes
+        // split on [.+/], so the selection holds `Inner`; a shard script that split on '.' alone keyed it `Outer+Inner` and
+        // dropped it from every narrowed pull request (#5459 review).
+        string[] all = [$"{ns}.OuterTests", $"{ns}.OuterTests+InnerLive", $"{ns}.OtherTests", $"{ns}.OtherTests+NotSelected"];
+        var selection = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["full"] = false,
+            ["reason"] = "",
+            ["selected"] = new Dictionary<string, string[]> { [suite] = ["OuterTests", "InnerLive"] },
+        });
+
+        var run = RunShardScript(script, suite, all, selection);
+        Assert.True(run.ExitCode == 0, run.Output);
+        Assert.Equal([$"{ns}.OuterTests", $"{ns}.OuterTests+InnerLive"], run.Ran.OrderBy(c => c, StringComparer.Ordinal));
+    }
 }

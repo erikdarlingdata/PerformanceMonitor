@@ -55,6 +55,12 @@ $mine = @($classes | Where-Object {
 Write-Host "shard ${Shard}: $($mine.Count) of $($classes.Count) classes"
 if ($mine.Count -eq 0) { throw "shard ${Shard} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
 
+# The key a class is selected by: its own simple name, split on the same [.+/] as test-map.py's simple_name and
+# ci-select.py's scan_classes. The runner lists a nested class as Namespace.Outer+Inner, and the selection holds
+# `Inner`; splitting on '.' alone would key it `Outer+Inner`, so a nested class (a live PostgreSQL one included) would
+# be left out of every narrowed pull request (#5459 review).
+function Get-ClassKey([string] $FullName) { return ($FullName -split '[.+/]')[-1] }
+
 # #5459 live selection: a pull request run whose gate pinned a test map keeps only the classes the map picked for its
 # diff (the test-map-select job's selection.json, downloaded by the workflow into -SelectionFile). It is applied AFTER
 # the cut and the zero check above, so every shard still agrees on which shard owns which class. `map-keep` answers
@@ -73,7 +79,7 @@ if ($EventName -eq 'pull_request' -and $SelectionFile -and (Test-Path -LiteralPa
     }
 }
 if ($null -ne $selected) {
-    $kept = @($mine | Where-Object { $selected.Contains(($_ -split '\.')[-1]) })
+    $kept = @($mine | Where-Object { $selected.Contains((Get-ClassKey $_)) })
     Write-Host "shard ${Shard}: $($mine.Count - $kept.Count) classes outside the test map selection left out, $($kept.Count) to run"
     $mine = $kept
     if ($mine.Count -eq 0) { Write-Host "shard ${Shard}: no class of this shard is in the test map selection, so nothing runs"; exit 0 }
@@ -85,7 +91,7 @@ elseif ($EventName -eq 'pull_request') {
     # happens AFTER the cut and the zero check, and an emptied shard ends here rather than reaching a runner with
     # no -class arguments.
     $skip = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $EventName "--base-ref=$env:SLOW_BASE_REF" --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ })
-    $kept = @($mine | Where-Object { $skip -notcontains ($_ -split '\.')[-1] })
+    $kept = @($mine | Where-Object { $skip -notcontains (Get-ClassKey $_) })
     Write-Host "shard ${Shard}: $($mine.Count - $kept.Count) Cost=Slow classes left out on this pull request, $($kept.Count) to run"
     $mine = $kept
     if ($mine.Count -eq 0) { Write-Host "shard ${Shard}: every class of this shard is a skipped Cost=Slow class, so nothing runs"; exit 0 }

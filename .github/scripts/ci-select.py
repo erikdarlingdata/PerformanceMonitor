@@ -287,6 +287,19 @@ _CLASS_DECL = re.compile(
     r"^[ \t]*(?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*class\s+(\w+)")
 _TRAIT = re.compile(r'Trait\(\s*"(\w+)"\s*,\s*"(\w+)"\s*\)')
 
+# The test map is built on shards that set only DARLING_TEST_PG and DARLING_TEST_PGRUNTIME (nightly.yml's "Run this
+# shard's classes" step; a test pins that env block to MAP_SHARD_ENV). A class that gates its tests on any OTHER
+# DARLING_TEST_PG_* or DARLING_TEST_PGRUNTIME_* variable (the log-format targets, the log-rotation targets, the
+# store-upgrade fixtures) skips at map build, so the map has no coverage edges for what its tests would run and a
+# change to the code under them would never select it (#5459 review; measured on the 2026-10-09 map: 16 files, 19
+# mapped classes, 12 to 44 coverage files each against 100 and more for a fully covered class). The map cannot tell
+# us, so the SOURCE does: every class in a file that names such a variable in a quoted literal carries the Gate=Env
+# trait and map_select always selects it. It is found from the source at selection time, so a new gated class needs
+# no list edit. The cost is a few seconds: on a pull request where the variable is unset the class skips.
+MAP_SHARD_ENV = frozenset({"DARLING_TEST_PG", "DARLING_TEST_PGRUNTIME"})
+GATE_TRAIT = "Gate=Env"
+GATE_ENV_LITERAL = re.compile(r'"DARLING_TEST_PG(?:RUNTIME)?_[A-Z0-9_]+"')
+
 SUITE_DIRS = {
     "darling": os.path.join("Darling", "Darling.Tests"),
     "lite": "Lite.Tests",
@@ -319,11 +332,12 @@ def _walk_classes(root: str):
                 except OSError:
                     continue
                 relfile = os.path.relpath(path, root).replace(os.sep, "/")
+                gated = any(GATE_ENV_LITERAL.search(line) for line in lines)
                 for n, line in enumerate(lines):
                     m = _CLASS_DECL.match(line)
                     if not m:
                         continue
-                    traits: set[str] = set()
+                    traits: set[str] = {GATE_TRAIT} if gated else set()
                     j = n - 1
                     while j >= 0:
                         s = lines[j].strip()
@@ -797,6 +811,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                 reasons[cls] = "new class"
             elif "Stage=Guard" in traits:
                 reasons.setdefault(cls, "guard stage")
+            if GATE_TRAIT in traits:
+                reasons.setdefault(cls, "gated on an environment the map shards lack")
         selected[suite] = sorted(reasons)
         why[suite] = {c: reasons[c] for c in sorted(reasons)}
         seconds[suite] = round(sum(_seconds(classes[suite][c]) for c in reasons if c in mapped), 3)
