@@ -30,21 +30,16 @@ public sealed class MigrationLockHolderLogTests
     [Fact]
     public void TheThrottle_ClaimsOnce_ThenAgainAfterTenMinutes()
     {
+        /* No try/finally: a failed assertion here leaves a claimed throttle, and the live test below resets it before it reads. */
         PgMigrations.ResetLockHolderLogThrottleForTests();
-        try
-        {
-            var t0 = new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Utc);
-            Assert.True(PgMigrations.TryClaimLockHolderLog(t0));
-            Assert.False(PgMigrations.TryClaimLockHolderLog(t0.AddMinutes(1)));
-            Assert.False(PgMigrations.TryClaimLockHolderLog(t0.AddMinutes(9).AddSeconds(59)));
-            Assert.True(PgMigrations.TryClaimLockHolderLog(t0.AddMinutes(10)));
-            Assert.False(PgMigrations.TryClaimLockHolderLog(t0.AddMinutes(10).AddSeconds(1)));
-            Assert.Equal(TimeSpan.FromMinutes(10), PgMigrations.LockHolderLogInterval);
-        }
-        finally
-        {
-            PgMigrations.ResetLockHolderLogThrottleForTests();
-        }
+        var t0 = new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Utc);
+        Assert.True(PgMigrations.TryClaimLockHolderLog(t0));
+        Assert.False(PgMigrations.TryClaimLockHolderLog(t0.AddMinutes(1)));
+        Assert.False(PgMigrations.TryClaimLockHolderLog(t0.AddMinutes(9).AddSeconds(59)));
+        Assert.True(PgMigrations.TryClaimLockHolderLog(t0.AddMinutes(10)));
+        Assert.False(PgMigrations.TryClaimLockHolderLog(t0.AddMinutes(10).AddSeconds(1)));
+        Assert.Equal(TimeSpan.FromMinutes(10), PgMigrations.LockHolderLogInterval);
+        PgMigrations.ResetLockHolderLogThrottleForTests();
     }
 
     [Fact]

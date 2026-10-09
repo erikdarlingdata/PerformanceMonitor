@@ -8132,6 +8132,9 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         }
     }
 
+    /// <summary>The most lock-holding sessions one log line names ($1 of <see cref="LockHoldersSql"/>).</summary>
+    internal const int LockHolderListCap = 20;
+
     /// <summary>The sessions of this database holding a lock on a <c>collect</c> table that blocks a schema change, one row per session
     /// with the tables it holds. Row-share locks (what a plain SELECT takes) do not block DDL, so they are left out.</summary>
     internal const string LockHoldersSql = """
@@ -8152,7 +8155,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
           AND l.mode IN ('RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
         GROUP BY a.pid, a.backend_type, a.state, a.xact_start, left(a.query, 200)
         ORDER BY a.xact_start NULLS LAST, a.pid
-        LIMIT 20
+        LIMIT $1
         """;
 
     /// <summary>
@@ -8171,7 +8174,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         try
         {
             var holders = new List<string>();
-            using (var command = new NpgsqlCommand(LockHoldersSql, connection) { CommandTimeout = 30 })
+            using var command = new NpgsqlCommand(LockHoldersSql, connection) { CommandTimeout = 30 };
+            command.Parameters.AddWithValue(LockHolderListCap);
             using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
                 while (await reader.ReadAsync(cancellationToken))
