@@ -3795,19 +3795,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 415 otherwise. Requiring a non-simple Content-Type forces the browser to CORS-preflight ANY cross-origin
     /// write, and the dashboard answers no preflight — so a simple-request CSRF (which can only send
     /// <c>text/plain</c> / <c>application/x-www-form-urlencoded</c> / <c>multipart/form-data</c>) can never reach
-    /// a write. A null/empty or non-json Content-Type is rejected.
+    /// a write. A null/empty or non-json Content-Type is rejected. The test itself lives in
+    /// <c>PerformanceMonitor.Common.JsonContentType</c>, shared with Lite's MCP host.
     /// </summary>
     internal static bool IsJsonContentType(string? contentType)
-    {
-        if (string.IsNullOrEmpty(contentType))
-        {
-            return false;
-        }
-
-        var semicolon = contentType.IndexOf(';');
-        var mediaType = semicolon >= 0 ? contentType.AsSpan(0, semicolon) : contentType.AsSpan();
-        return mediaType.Trim().Equals("application/json", StringComparison.OrdinalIgnoreCase);
-    }
+        => PerformanceMonitor.Common.JsonContentType.IsJson(contentType);
 
     /* ── definition validation (the authority: a bad doc can never be stored) ── */
 
