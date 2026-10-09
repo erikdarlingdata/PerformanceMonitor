@@ -94,13 +94,9 @@ public sealed class McpHostService : BackgroundService
     }
 
     /// <summary>
-    /// A POST must carry a JSON Content-Type, installed right after the Host guard and before <c>MapMcp</c>. The
-    /// MCP transport is stateless here, so one POST is a complete tool call with no session to obtain, and the
-    /// listener is tokenless on loopback. The SDK refuses text/plain, form and multipart bodies itself but lets
-    /// an empty Content-Type and <c>application/problem+json</c> through to the tool; a page in a browser can send
-    /// those cross-origin without a preflight. Answering 415 up front keeps every body that is not
-    /// <c>application/json</c> (a charset parameter is fine) from reaching a tool. GET (the event stream) and
-    /// DELETE carry no body to type and pass. This is the twin of the gate in Darling's MCP host
+    /// A POST must carry a JSON Content-Type; any other type, or none, is answered 415 before <c>MapMcp</c>.
+    /// The guard is installed right after the Host guard. A charset parameter is fine. GET (the event stream)
+    /// and DELETE carry no body to type and pass. This is the twin of the gate in Darling's MCP host
     /// (<c>DarlingMcpHostService</c>); both call the one shared test, <see cref="JsonContentType.IsJson"/>.
     /// </summary>
     internal static void UseJsonPostGuard(IApplicationBuilder app)

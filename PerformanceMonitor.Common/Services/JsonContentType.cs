@@ -16,10 +16,9 @@ namespace PerformanceMonitor.Common;
 /// apps already reference, so the two MCP hosts cannot drift apart on what counts as JSON.
 ///
 /// <para>PURE (a string in, a bool out, no HTTP types) so it unit-tests without a server and this library keeps no
-/// ASP.NET Core dependency. Requiring a non-simple Content-Type makes a browser send a CORS preflight before ANY
-/// cross-origin write, and these servers answer no preflight, so a cross-origin form-style POST
-/// (<c>text/plain</c>, <c>application/x-www-form-urlencoded</c>, <c>multipart/form-data</c>, or no Content-Type
-/// at all) never reaches a handler.</para>
+/// ASP.NET Core dependency. A request with a body must carry <c>application/json</c> (a charset parameter is fine);
+/// <c>text/plain</c>, <c>application/x-www-form-urlencoded</c>, <c>multipart/form-data</c> or no Content-Type at all
+/// is answered 415 before a handler runs.</para>
 /// </summary>
 public static class JsonContentType
 {

@@ -1115,7 +1115,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* DNS-rebinding guard — runs in BOTH modes (the #1576 fix: it previously guarded network mode only,
            leaving the tokenless loopback write path reachable cross-origin via a DNS rebind). The loopback
-           surface is tokenless, so a browser ON the host that loads attacker content could be rebound to
+           surface is tokenless unless a token is configured, so a browser ON the host that loads attacker content could be rebound to
            127.0.0.1:5153 and read/write the whole surface same-origin. Require the Host header to name an
            address we actually bind — a loopback name/IP (localhost / 127.0.0.1 / [::1]) or, in network mode,
            the configured listen IP. networkListenIp is null in loopback mode, so ONLY loopback Hosts pass

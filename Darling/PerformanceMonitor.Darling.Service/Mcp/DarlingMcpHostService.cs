@@ -729,10 +729,10 @@ public sealed class DarlingMcpHostService : BackgroundService
             _app = builder.Build();
 
             /* The Host guard also admits mcp.network.hostName (#5288), in NETWORK mode only (review F2). networkMode
-               is final by here (an unreadable token above has already made it loopback-only), and a loopback-only
+               is final by here (a token that cannot be used stops the start before this point), and a loopback-only
                server admits no extra name. This deliberately differs from the web host (#4220), which admits
                web.publicBaseUrl's host in both modes: MCP has no link builder that needs the name, and its
-               loopback surface is tokenless, so one more admitted name there would widen the very surface the
+               loopback surface is tokenless unless a token is configured, so one more admitted name there would widen the very surface the
                guard exists to protect and buy nothing. A name that is set but refused logs one Warning inside
                ResolveAllowedHostName and is not admitted (fail closed). */
             var allowedHostName = ResolveAllowedHostName(config.Mcp.Network?.HostName, networkMode, _logger);
@@ -1007,7 +1007,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                any handler, and Darling registers no fallback CallToolHandler, so a tools/call for a tool
                outside the closure gets the SDK's own "unknown tool" error on /core. Security posture is
                inherited for free: this callback runs from inside the MCP transport, AFTER every _app.Use
-               middleware below (Host-header guard, bearer token, CIDR) — a /core request is refused there
+               middleware below (the Host guard, the CIDR check in network mode, the token gate when one is in force, and the JSON check) — a /core request is refused there
                exactly as a / request would be, before this callback, or MapMcp, ever runs.
                The subset holds only in Stateless mode, where this callback runs on every request. A stateful
                session is looked up by its id alone, not by route, so one opened on / could call any tool on
@@ -1396,7 +1396,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// every mode that degraded to it (a refused certificate), it returns null even for a
     /// valid name, because that surface is tokenless unless a token was configured and the name exists for the network listener's clients. This
     /// deliberately differs from the web host (#4220), which admits <c>web.publicBaseUrl</c>'s host in both
-    /// modes: MCP has no link builder, and its loopback surface is tokenless.
+    /// modes: MCP has no link builder, and its loopback surface is tokenless unless a token is configured.
     ///
     /// <para>A value that is SET but is not a bare DNS name (<see cref="McpNetworkConfig.NormalizeHostName"/>
     /// returns null for it while the raw value is not blank) logs ONE Warning and admits nothing: fail closed,
@@ -1562,14 +1562,10 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
            #1576 fix. The loopback bind is tokenless unless the operator configured a token (the CIDR check installs only in
-           network mode; the token gate installs in network mode and wherever a token was configured), so a browser ON this host that loads attacker content could be rebound to
-           127.0.0.1:5152 and reach the MCP surface same-origin — and that surface is no longer read-only
-           (custom-view CRUD, add_servers/remove_server, alert-config writes). The application/json content
-           type does NOT save us: under a rebind the browser treats the request as same-origin, so no CORS
-           preflight applies. Require the Host header to name an address we actually bind — a loopback
-           name/IP or, in network mode, the configured listen IP. networkListenIp is null in loopback mode,
-           so ONLY loopback Hosts pass there; a rebound foreign hostname is rejected 400 before the bearer
-           check, the CIDR check, MapMcp, or any tool handler.
+           network mode; the token gate installs in network mode and wherever a token was configured). The Host header
+           must name an address we actually bind: a loopback name/IP or, in network mode, the configured listen IP.
+           networkListenIp is null in loopback mode, so ONLY loopback Hosts pass there; any other Host is answered 400
+           before the bearer check, the CIDR check, MapMcp, or any tool handler.
 
            #5288: allowedHostName admits ONE more exact name (mcp.network.hostName, case-insensitive, no port),
            the standard AllowedHosts pattern: a rebind needs a hostname the ATTACKER chooses, and this admits

@@ -31,6 +31,7 @@ public sealed class ActualPlanSnapshotResolveLiveTests
     private const string ServerName = "darling-actual-plan-snapshot-resolve-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private const int SessionId = 61;
+    private const int NullDbSessionId = 62;
     private const string StoredDb = "StoredDb";
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -52,10 +53,15 @@ public sealed class ActualPlanSnapshotResolveLiveTests
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text) VALUES ($1,$2,$3,$4,$5,$6,$7)",
                 CollectionIdGenerator.Next(), captured, ServerId, ServerName, SessionId, StoredDb, "SELECT 1 FROM dbo.Posts");
+            // A snapshot whose session had no database context stores NULL there (DB_NAME() returns NULL when the
+            // login cannot see the database).
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                CollectionIdGenerator.Next(), captured, ServerId, ServerName, NullDbSessionId, null, "SELECT 2 FROM dbo.Votes");
 
-            async Task<string?> ResolveAsync(string? requestDatabase)
+            async Task<string?> ResolveAsync(string? requestDatabase, int sessionId = SessionId)
             {
-                var request = new ActualPlanRequest(null, null, captured, SessionId, requestDatabase);
+                var request = new ActualPlanRequest(null, null, captured, sessionId, requestDatabase);
                 await using var command = new NpgsqlCommand(DarlingWorker.ResolveStoredSnapshotForActualPlanSql, connection);
                 DarlingWorker.BindActualPlanResolveParameters(command, ServerId, request);
                 await using var reader = await command.ExecuteReaderAsync(ct);
@@ -66,6 +72,10 @@ public sealed class ActualPlanSnapshotResolveLiveTests
             Assert.Null(await ResolveAsync("OtherDb"));
             Assert.Null(await ResolveAsync(StoredDb.ToLowerInvariant()));
             Assert.Null(await ResolveAsync(null));
+
+            // A row stored with no database matches a request with no database, and only that request.
+            Assert.Equal("SELECT 2 FROM dbo.Votes", await ResolveAsync(null, NullDbSessionId));
+            Assert.Null(await ResolveAsync(StoredDb, NullDbSessionId));
 
             bodySucceeded = true;
         }

@@ -22,12 +22,10 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// Lite's MCP host is stateless and tokenless on loopback, so one POST is a complete tool call. It answers 415 to a
-/// POST whose Content-Type is not JSON, before <c>MapMcp</c>, the same as Darling's MCP host. The SDK refuses
-/// text/plain, form and multipart bodies on its own but lets an empty Content-Type and
-/// <c>application/problem+json</c> through to the tool, so those are the rows that matter. The middleware is run
-/// through a real pipeline with a terminal handler that stands in for <c>MapMcp</c> and counts the requests it
-/// receives; a second test pins that the host installs it after the Host guard and before <c>MapMcp</c>.
+/// Lite's MCP host answers 415 to a POST whose Content-Type is not JSON, before <c>MapMcp</c>, the same as
+/// Darling's MCP host. This pins 415 for every non-JSON type in the matrix, and the install order: Host guard,
+/// this guard, <c>MapMcp</c>. The middleware is run through a real pipeline with a terminal handler that stands
+/// in for <c>MapMcp</c> and counts the requests it receives.
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class McpJsonPostGuardTests
