@@ -48,6 +48,7 @@ public sealed class DatabaseStateSweepAfterArchiveTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         CollectionResetGate.ResetForTests();
         try
         {
@@ -82,7 +83,7 @@ public sealed class DatabaseStateSweepAfterArchiveTests : IDisposable
 
     private async Task SeedAsync(params string[] statements)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await ExecAsync(statements);
     }
 

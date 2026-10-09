@@ -199,7 +199,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var sinceUtc = now.AddHours(-1);
             var at = now.AddMinutes(-5);
 
@@ -211,7 +211,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
                 serverName: "darling-4477-gone-raw");
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerDeregistered);
 
-            var rows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit: 2000, ct);
+            var rows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit: 2000, cancellationToken: ct);
             var orphan = rows.SingleOrDefault(r => r.JobId == "orphan_job" && r.ServerId == ServerDeregistered);
 
             Assert.NotNull(orphan);
@@ -220,7 +220,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
             Assert.Equal("darling-4477-gone-raw", orphan!.ServerName);
 
             /* And it is reachable server-scoped too — the read's other parameter shape. */
-            var scoped = await viewer.GetJobHistoryAsync(sinceUtc, ServerDeregistered, 2000, ct);
+            var scoped = await viewer.GetJobHistoryAsync(sinceUtc, ServerDeregistered, 2000, cancellationToken: ct);
             Assert.Contains(scoped, r => r.JobId == "orphan_job");
 
             bodySucceeded = true;
@@ -255,7 +255,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
         var bodySucceeded = false;
         try
         {
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var sinceUtc = now.AddDays(-3);
 
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerPlus60, "darling-4477-plus60", ct);
@@ -327,7 +327,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
             const int limit = 20;
 
             var oldRows = await ReadOldFleetAsync(connection, sinceUtc, limit, ct);
-            var newRows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit, ct);
+            var newRows = await viewer.GetJobHistoryAsync(sinceUtc, serverId: null, limit, cancellationToken: ct);
 
             Assert.Equal(limit, newRows.Count);
             Assert.Equal(oldRows.Count, newRows.Count);
@@ -339,7 +339,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
             /* And scoped-to-one-server, for the server with the same-server tie — the other parameter shape,
                same equivalence requirement. */
             var oldScopedRows = await ReadOldScopedFullAsync(connection, sinceUtc, ServerZeroOffset, limit, ct);
-            var newScopedRows = await viewer.GetJobHistoryAsync(sinceUtc, ServerZeroOffset, limit, ct);
+            var newScopedRows = await viewer.GetJobHistoryAsync(sinceUtc, ServerZeroOffset, limit, cancellationToken: ct);
             Assert.Equal(oldScopedRows.Count, newScopedRows.Count);
             for (var i = 0; i < oldScopedRows.Count; i++)
             {
@@ -413,7 +413,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerZeroOffset, "darling-4477-plan", ct);
 
-            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             var sinceUtc = now.AddDays(-3);
 
             for (var i = 0; i < 500; i++)
@@ -667,7 +667,7 @@ public sealed class JobHistoryPerServerTopNLiveTests
             @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes)
               VALUES ($1, $2, $3, $4, $5)", connection);
         command.Parameters.AddWithValue(4_477_000_000L + serverId);
-        command.Parameters.AddWithValue(DarlingMcpTestData.Naive(DateTime.UtcNow));
+        command.Parameters.AddWithValue(DarlingMcpTestData.Naive(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc)));
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue("srv" + serverId.ToString(CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue(offsetMinutes);

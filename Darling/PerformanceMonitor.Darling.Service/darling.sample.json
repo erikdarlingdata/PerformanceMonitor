@@ -155,6 +155,15 @@
     }
   ],
 
+  // Which AWS roles the web and MCP may set for an Amazon RDS or Aurora PostgreSQL target. An entry is an
+  // IAM role ARN (matched exactly) or a 12-digit AWS account id (every role in that account, in the aws partition; write
+  // "aws-cn:123456789012" or "aws-us-gov:123456789012" for an account in the China or GovCloud partition). The service
+  // assumes a saved role only if it is listed here, or a server in the "servers" list above names it in
+  // "awsRoleArn". A role saved from the web, MCP, the desktop viewer or --add-server does not take effect
+  // until then. Empty by default. Read at start, so an edit applies on restart.
+  // Example: [ "arn:aws:iam::123456789012:role/darling-monitor", "123456789012" ]
+  "allowedAwsRoles": [],
+
   // Capture execution plans (default true). A query_stats plan is stored ONCE per distinct plan in
   // query_plan_dim, and the fact row carries only its content digest (query_plan_digest), so
   // re-collecting the same cached plan every cycle costs a hash rather than another copy of the XML
@@ -187,6 +196,25 @@
   // capture cycle is offset per server, so a fleet spreads across the interval instead of every server
   // rendering on the same cycle. A file-only knob (not stored in the control plane): edit + restart.
   "procedureStatsPlanCycleInterval": 4,
+
+  // query_stats plan fetching. true (the default) leaves plan XML out of query_stats' main query and renders it in
+  // a second query for only the statement plans this service has not already stored; rows for plans it has stored
+  // carry the existing digest, so every reader sees the same data. On one large store the inline capture rendered
+  // 54 GB of plans an hour on the monitored servers against 1.1 GB an hour of distinct plans. false restores the
+  // inline capture (every row's plan, every run). A file-only knob: edit + restart. Only matters while
+  // capturePlans is on.
+  "queryStatsDeferredPlanFetch": true,
+
+  // procedure_stats plan fetching: "on" (the default since 3.10), "shadow" or "off". "off" renders and ships every captured
+  // module plan, as before. "shadow" does the same and also checks, run by run, whether this service's way of
+  // recognizing a module plan (its handle, cached time and a fingerprint of its statements) would have recognized
+  // the plans it just rendered; the run's collection-log note reports deferred_would_hit, deferred_false_hit (the plan's shape
+  // changed, or could not be compared) and deferred_same_shape (the bytes changed but the shape held, for example a
+  // memory grant adjusted in place; "on" treats that as a correct hit), and no stored row changes. "on" skips the render for a plan the service has already stored and renders at most
+  // 150 others per run; procedureStatsPlanCycleInterval still decides which runs may render. Move from "shadow"
+  // to "on" only after deferred_false_hit has stayed 0; deferred_same_shape does not count. An unrecognized value means "off". A file-only knob:
+  // edit + restart. Only matters while capturePlans is on; Azure SQL Database stays "off" whatever this says. Set "off" to restore the inline capture.
+  "procedureStatsDeferredPlanFetch": "on",
 
   // The alert engine (optional section). Every default mirrors Performance Monitor Lite's:
   // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, long-running query
@@ -338,14 +366,19 @@
   // three can run on one machine.
   //
   // OPT-IN NETWORK EXPOSURE for MCP (managed mode only) — omit "network" for the secure default
-  // (loopback-only, tokenless HTTP, today's behavior). When present with a non-loopback "listen", the
+  // (loopback-only, tokenless HTTP, today's behavior). A "token" or "encryptedToken" with no non-loopback
+  // "listen" keeps it loopback-only and gates the loopback listener on that token too: every local client
+  // presents "Authorization: Bearer <token>". When present with a non-loopback "listen", the
   // MCP host binds the LAN interface behind a REQUIRED bearer token + an in-app CIDR check, fail-closed
   // (any missing precondition — token / valid allowFrom / managed mode — keeps it loopback-only).
   // THREAT MODEL: the token gates the whole read surface AND analyze_server, which opens LIVE outbound
   // connections to your monitored SQL Servers — so this is a trusted-LAN opt-in, NEVER internet-exposed.
-  // There is deliberately NO TLS on MCP (a self-signed cert breaks real MCP clients), so the token
-  // travels cleartext on-segment: the MITM control is a TLS REVERSE PROXY in front of the endpoint
-  // (the in-app CIDR only bounds WHO can route to it, not the wire).
+  // TLS is OPT-IN via the "tls" block below (#5288) and applies to the network listener only. WITHOUT it the
+  // token travels cleartext on-segment and every exposed start warns about exactly that: the in-app CIDR only
+  // bounds WHO can route to the port, never what an on-path attacker reads off the wire. The product consumes a
+  // certificate, it does not issue one: no ACME, and no self-signed fallback. A missing, unreadable, ambiguous or
+  // EXPIRED certificate keeps MCP loopback-only rather than quietly serving the LAN over HTTP. A TLS REVERSE
+  // PROXY in front of the endpoint remains a perfectly good alternative.
   // "enabled"/"port" here are the SEED; after first start they live in the control plane and the
   // Viewer's Settings toggles them LIVE (the service starts/stops/rebinds the endpoint within
   // seconds - no restart). The "network" exposure block below stays file-defined and restart-only
@@ -358,7 +391,34 @@
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.
     //   "allowFrom": "192.168.1.0/24",                 // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).
-    //   "encryptedToken": "<output of --encrypt-password>"  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
+    //                                                  // One CIDR, or several separated by commas: "10.8.0.0/16,192.168.1.0/24".
+    //                                                  // Every entry in CIDR form (/32 for one address) and of the listen address
+    //                                                  // family (a "::" listen takes IPv6 entries only). One bad entry keeps MCP
+    //                                                  // loopback-only. A JSON array also loads, but only on this version or later:
+    //                                                  // an older service refuses to start on one, so prefer the comma string.
+    //   "encryptedToken": "<output of --encrypt-password>",  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
+    //
+    //   // OPTIONAL: the one DNS name clients use to reach MCP (no scheme, port or wildcard). The anti-DNS-rebind
+    //   // Host guard admits "listen", localhost, this name and loopback addresses (and any IP address when listen
+    //   // is 0.0.0.0 or ::), and no other name. The name is admitted only while MCP is exposed. Set it to the
+    //   // name on the certificate below, so a client that connects by name is not answered with a 400.
+    //   "hostName": "darling.example.com",
+    //
+    //   // OPTIONAL TLS (#5288) -- omit the whole block for plain HTTP. Give ONE form, never both. It is the MCP
+    //   // twin of web.network.tls below and takes the same settings. The certificate must name the address or
+    //   // the hostName clients actually use; issue it from your internal CA. Renew it: an EXPIRED certificate
+    //   // keeps MCP loopback-only (by design -- it will not fall back to HTTP), the service logs a warning for
+    //   // the last 30 days before that, and the "MCP TLS Certificate Expiring" self-alert fires too.
+    //   // With a specific "listen" the network listener is HTTPS and the two loopback listeners stay plain HTTP;
+    //   // with "0.0.0.0" or "::" the one listener is HTTPS for everyone, loopback included.
+    //   "tls": {
+    //     "pfxPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.pfx",
+    //     "encryptedPfxPassword": "<output of --encrypt-password>"  // or "pfxPassword" (file:/env: reference, or plaintext for dev)
+    //                                                               // omit both if the bundle has no password
+    //     // ... OR a PEM pair instead of the two lines above:
+    //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.crt",
+    //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.key"
+    //   }
     // }
   },
 
@@ -375,7 +435,8 @@
   // ?token=, which is exchanged for an HMAC-signed session cookie (then the token is stripped from the URL).
   // LOOPBACK is exempt from the CIDR check ONLY -- while exposed it presents the token like anyone else
   // (#1649: the Custom Views composer is a write path, so a tokenless local process could mutate views).
-  // A dashboard with NO "network" block registers no auth middleware at all and stays tokenless.
+  // A dashboard with NO token configured registers no auth middleware at all and stays tokenless. A "token" or
+  // "encryptedToken" with no non-loopback "listen" keeps it loopback-only and puts the same token gate on it.
   // Fail-closed: any missing precondition (token / valid allowFrom / managed mode) keeps it loopback-only.
   // TLS is OPT-IN via the "tls" block (#2562) and applies to the network listener only -- loopback stays
   // plain HTTP, because the certificate names the LAN address rather than "localhost". WITHOUT it the token
@@ -385,7 +446,7 @@
   // buy encryption without authentication and train you to click through the warning). An internal CA is the
   // normal answer here. A missing, unreadable, ambiguous or EXPIRED certificate keeps the dashboard
   // loopback-only rather than quietly serving the LAN over HTTP. A TLS reverse proxy in front of the port
-  // remains a perfectly good alternative -- it is what MCP still relies on. NEVER internet-exposed either way.
+  // remains a perfectly good alternative. MCP has its own "tls" block (see "mcp" above). NEVER internet-exposed either way.
   // "enabled"/"port" here are the SEED; after first start they live in the control plane and the Viewer's
   // Settings toggles them LIVE (the service starts/stops/rebinds the endpoint within seconds - no restart).
   // The "network" exposure block below stays file-defined and restart-only; the Viewer toggle still stops an
@@ -418,6 +479,7 @@
     // "network": {
     //   "listen": "192.168.1.205",                     // specific bind IP preferred; "0.0.0.0" = all interfaces.
     //   "allowFrom": "192.168.1.0/24",                 // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).
+    //                                                  // One CIDR, or several separated by commas, exactly as for mcp.network.allowFrom.
     //   "encryptedToken": "<output of --encrypt-password>",  // REQUIRED to expose; or a plaintext "token" (dev only, warned).
     //
     //   // OPTIONAL TLS (#2562) -- omit the whole block for plain HTTP. Give ONE form, never both.
@@ -520,5 +582,19 @@
     "storeName": "",
     "thisStoreCovers": "",
     "stores": []
+  },
+
+  // Outbound heartbeat (#5450): a GET to a dead-man's-switch URL (Healthchecks.io, Uptime Kuma and the like) every
+  // intervalSeconds (60 to 3600, default 300) WHILE the service is collecting. It skips the ping when no enabled server
+  // has collected in the last 15 minutes or the store cannot be read, so the outside check alerts both when the process
+  // stops and when it runs but no longer collects. Off unless "url" is set. The WHOLE URL is a secret (it carries the
+  // check's token): lead with a "file:/path" reference to a file only the service account can read, or an "env:NAME"
+  // reference (on Windows a service's environment is readable by other local users, so prefer the file). Both are the
+  // same reference forms the other secrets take. A URL typed here is plaintext in this file. It is never logged, and
+  // it may not carry a user name and password. An http:// URL works but logs a warning. File-only: the web Admin and
+  // MCP cannot edit it.
+  "heartbeat": {
+    "url": "",
+    "intervalSeconds": 300
   }
 }

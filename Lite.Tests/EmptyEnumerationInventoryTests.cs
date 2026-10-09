@@ -36,6 +36,7 @@ namespace PerformanceMonitorLite.Tests;
 /// silently never does. Darling.Tests pins the identical expectations against live Postgres on the same
 /// query shape.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class EmptyEnumerationInventoryTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const int ServerId = 4343;

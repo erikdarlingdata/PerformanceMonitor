@@ -48,8 +48,8 @@ public sealed class AgentStatusArchivedHistoryTests : IDisposable
     public async Task ARunningRowInTheArchive_StillCounts_WhenTheHotTableHoldsOnlyTheNewestStoppedRow()
     {
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        var initializer = new DuckDbInitializer(dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(dbPath);
+        await initializer.InitializeFromTemplateAsync();
         const string columns = "(collection_id, collection_time, server_id, server_name, agent_running, agent_status_desc, agent_startup_desc, next_scheduled_run)";
         var now = DateTime.UtcNow;
 

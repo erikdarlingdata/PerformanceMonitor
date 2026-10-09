@@ -80,8 +80,8 @@ public sealed class ArchiveWatermarkCacheTests : IDisposable
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
         var archivePath = Path.Combine(_tempDir, "archive");
         Directory.CreateDirectory(archivePath);
-        var initializer = new DuckDbInitializer(dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(dbPath);
+        await initializer.InitializeFromTemplateAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
         {
@@ -108,7 +108,7 @@ VALUES (1, now() - INTERVAL 30 HOUR, 1, 'S1', 'SOS_SCHEDULER_YIELD')";
     [Fact]
     public async Task BumpArchiveViewGeneration_RaisesGeneration()
     {
-        var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "bump.duckdb"));
+        using var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "bump.duckdb"));
         var before = initializer.ArchiveViewGeneration;
         initializer.BumpArchiveViewGeneration();
         Assert.Equal(before + 1, initializer.ArchiveViewGeneration);

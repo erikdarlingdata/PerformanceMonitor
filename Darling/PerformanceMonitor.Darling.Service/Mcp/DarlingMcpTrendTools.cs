@@ -114,7 +114,8 @@ public sealed class DarlingMcpTrendTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: reaches the raw table's 30-day retention (720 h); 0.86 s at 30 days on a large store. The ceiling is the WebReadReach row. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_memory_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -166,7 +167,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. artifacts_set_aside counts an isolated single-sample Wait Statistics spike excluded from the sums before bucketing (notes explains it); it is not a missing-data count. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable), and each point carries it as per_second (null where the interval is 0); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. hours_back reaches 720 (30 days). Use get_perfmon_stats first to see available counter names. artifacts_set_aside counts an isolated single-sample Wait Statistics spike excluded from the sums before bucketing (notes explains it); it is not a missing-data count. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable), and each point carries it as per_second (null where the interval is 0); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
@@ -186,7 +187,10 @@ public sealed class DarlingMcpTrendTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5574: reaches the raw table's 30-day retention (720 h); 1.3 s cold at 30 days on a large store once the compressed perfmon_stats
+           data was re-grouped by counter (it read 11.2 s while the compression grouped by server only, so the read decoded every counter's
+           name). The ceiling is the WebReadReach row. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_perfmon_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -275,7 +279,7 @@ public sealed class DarlingMcpTrendTools
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         [Description("One database, charted per file. Omit for every database.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetFileIoTrend(postgres, server_name, hours_back, as_of, bucket_minutes, database_name, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), cancellationToken);
+        GetFileIoTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), cancellationToken);
 
     /// <summary>
     /// get_file_io_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool above passes its own,
@@ -287,15 +291,21 @@ public sealed class DarlingMcpTrendTools
     /// bucket width — five lines and an "(other)" line need coarser buckets than two lines do to stay inside the
     /// same budget. The second buckets only those lines; it re-derives the same ranking in SQL rather than taking
     /// the list back as parameters, which keeps the two statements one shared CTE and the two SKUs one shape.</para>
+    ///
+    /// <para><paramref name="databases"/> (#5244) limits both reads. One database keeps the per-file chart (each line a
+    /// file, <c>file_name</c> on every row); two or more draw per-database lines within the set, and every database is the
+    /// per-database view. The top five lines plus "(other)" cap applies in each shape, after the filter. The name is kept
+    /// exactly: a leading or trailing space is part of it, as for every other filtered read.</para>
     /// </summary>
     internal static async Task<string> GetFileIoTrend(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes,
-        string? database_name, TrendBudget budget, CancellationToken cancellationToken = default)
+        DatabaseFilter databases, TrendBudget budget, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: reaches the raw table's 30-day retention (720 h); 6.3 s at 30 days on a large store. The ceiling is the WebReadReach row. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_file_io_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         /* An unusable width is a fault in the request whatever the window holds, so it is refused before anything
@@ -303,20 +313,22 @@ public sealed class DarlingMcpTrendTools
         var widthError = TrendBuckets.ValidateWidth(bucket_minutes);
         if (widthError != null) return widthError;
 
-        var scope = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
+        /* The one-database case is the per-file chart; the same single name is what the empty answer names. */
+        var scope = databases.Names.Count == 1 ? databases.Names[0] : null;
+        var echo = databases.Describe();
 
         try
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var series = await DarlingTrendReader.GetFileIoSeriesAsync(postgres, resolved.ServerId, start, now, scope, cancellationToken);
+            var series = await DarlingTrendReader.GetFileIoSeriesAsync(postgres, resolved.ServerId, start, now, databases, cancellationToken);
             if (series.Count == 0)
             {
                 /* Same two states as the memory trend, same probe discipline. The quiet-window sentence
                    carries one extra clause the others do not need: the ranking counts only series that read
                    or wrote, so a genuinely idle file set is empty here even on a server whose file_io_stats
                    collector ran every cycle. */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken);
+                var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken), echo);
                 if (gated != null)
                 {
                     return gated;
@@ -325,37 +337,52 @@ public sealed class DarlingMcpTrendTools
                 var everCollected = await DarlingTrendReader.HasAnyFileIoStatAsync(postgres, resolved.ServerId, cancellationToken);
 
                 /* A scoped read that found nothing is first a question about the NAME: a misspelt database
-                   and an idle one land here alike, and only the collected names tell them apart. */
-                if (scope is not null && everCollected)
+                   and an idle one land here alike, and only the collected names tell them apart. With a list the
+                   sentence says "the chosen databases" and no verdict about any one of them: the read looked at
+                   the set, and the quiet-window sentence below is about the whole server, which it never read. */
+                if (!databases.IsAll && everCollected)
                 {
-                    return McpHelpers.Status("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.ServerName, scope, hours_back));
+                    return McpHelpers.StatusForDatabase(
+                        "empty",
+                        scope is not null
+                            ? TrendPayloads.FileIoScopeEmptyMessage(resolved.ServerName, scope, hours_back)
+                            : FileIoChosenDatabasesEmptyMessage(resolved.ServerName, hours_back),
+                        echo);
                 }
 
                 return everCollected
-                    ? McpHelpers.Status(
+                    ? McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.")
-                    : McpHelpers.Status(
+                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.", echo)
+                    : McpHelpers.StatusForDatabase(
                         "unavailable",
-                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.");
+                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", echo);
             }
 
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, TrendPayloads.LinesFor(series.Count), budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
             var points = await DarlingTrendReader.GetFileIoTrendAsync(
-                postgres, resolved.ServerId, start, now, scope, TrendPayloads.ChartedFor(series.Count), bucketMinutes, cancellationToken);
+                postgres, resolved.ServerId, start, now, databases, TrendPayloads.ChartedFor(series.Count), bucketMinutes, cancellationToken);
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
             return TrendPayloads.FileIoTrend(
                 resolved.ServerName, hours_back, scope, series, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), databaseEcho: echo);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_file_io_trend", ex);
         }
     }
+
+    /// <summary>
+    /// The empty answer for a file I/O trend limited to two or more databases that saw no I/O in the window (#5244): about the
+    /// set, not about any one name. The single-name sentence is <see cref="TrendPayloads.FileIoScopeEmptyMessage"/>.
+    /// </summary>
+    internal static string FileIoChosenDatabasesEmptyMessage(string serverName, int hoursBack) =>
+        $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} in the last {hoursBack} hour(s). "
+        + "Each name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
     [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
@@ -471,26 +498,39 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of query elapsed_ms_per_second and executions_per_second across all queries, points ending at as_of. A collection whose interval was unknowable is excluded, not counted as 0: unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero. No points: unavailable means query_stats was never collected here; empty means it was (the message says quiet window or rollup coverage gap). window_truncated is the store's retention floor, not a page cut: effective_start / effective_hours_back say where the answer begins. <<GUIDE>> Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). The hourly rollup route divides by the bucket width and has no unrated point." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of query elapsed_ms_per_second and executions_per_second across all queries, points ending at as_of. A collection whose interval was unknowable is excluded, not counted as 0: unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero. No points: unavailable means query_stats was never collected here; empty means it was (the message says quiet window or rollup coverage gap). window_truncated is the store's retention floor, not a page cut: effective_start / effective_hours_back say where the answer begins. <<GUIDE>> Gets a time-series of average query duration over time. hours_back reaches 2160 (90 days), served from the hourly rollup past the raw tier's four days. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). The hourly rollup route divides by the bucket width and has no unrated point." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetQueryDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetQueryDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
+        GetQueryDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
 
     /// <summary>get_query_duration_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes
     /// its own, the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
-    internal static async Task<string> GetQueryDurationTrend(
+    internal static Task<string> GetQueryDurationTrend(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetQueryDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.All, budget, cancellationToken);
+
+    /// <summary>
+    /// get_query_duration_trend over a SET of databases (#5244). The MCP tool passes
+    /// <c>DatabaseFilter.One(database_name)</c> and the web mirror the repeated keys; the predicate is on both tiers the
+    /// route reads (raw <c>query_stats</c> and the hourly rollup). Every consumer that said something about "the
+    /// server" on an empty answer now says which databases it looked at.
+    /// </summary>
+    internal static async Task<string> GetQueryDurationTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, DatabaseFilter databases,
+        TrendBudget budget, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: a bucketed trend that routes through the hourly rollup opts in to the 90-day reach WebReadReach declares; every other read keeps 168. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_duration_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -524,11 +564,11 @@ public sealed class DarlingMcpTrendTools
                 bucketMinutes = TrendBuckets.OnHourlyTier(bucket_minutes, bucketMinutes);
             }
 
-            var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, cancellationToken);
+            var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, databases, cancellationToken);
 
             if (result.Points.Count == 0)
             {
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken);
+                var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken), databases.Describe());
                 if (gated != null)
                 {
                     return gated;
@@ -543,14 +583,14 @@ public sealed class DarlingMcpTrendTools
                     DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId, cancellationToken),
                     postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, route, "query",
                     "Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
-                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), cancellationToken);
+                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken);
             }
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
             return SerializeTrend(resolved.ServerName, hours_back, result.Points,
                 DescribeRoute(result, now, new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)),
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -558,26 +598,34 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed_ms_per_second and executions_per_second, summed across every procedure and charged to the whole call rather than smeared across its statements the way query_stats attributes work. Points end at as_of. unrated_points, unrated_collections, the empty/unavailable split and window_truncated (a retention floor, not a page cut) all follow get_query_duration_trend exactly. <<GUIDE>> Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Points, rates and unrated collections (unrated_points, unrated_collections) follow get_query_duration_trend exactly." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed_ms_per_second and executions_per_second, summed across every procedure and charged to the whole call rather than smeared across its statements the way query_stats attributes work. Points end at as_of. unrated_points, unrated_collections, the empty/unavailable split and window_truncated (a retention floor, not a page cut) all follow get_query_duration_trend exactly. <<GUIDE>> Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. hours_back reaches 2160 (90 days), served from the hourly rollup past the raw tier's four days. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Points, rates and unrated collections (unrated_points, unrated_collections) follow get_query_duration_trend exactly." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetProcedureDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
+        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
 
     /// <summary>get_procedure_duration_trend under an explicit <paramref name="budget"/> (#3897) — the query
     /// trend's twin, over the procedure pair.</summary>
-    internal static async Task<string> GetProcedureDurationTrend(
+    internal static Task<string> GetProcedureDurationTrend(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.All, budget, cancellationToken);
+
+    /// <summary>get_procedure_duration_trend over a SET of databases (#5244): the query trend's twin, over the procedure pair.</summary>
+    internal static async Task<string> GetProcedureDurationTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, DatabaseFilter databases,
+        TrendBudget budget, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: a bucketed trend that routes through the hourly rollup opts in to the 90-day reach WebReadReach declares; every other read keeps 168. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_procedure_duration_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -600,11 +648,11 @@ public sealed class DarlingMcpTrendTools
                 bucketMinutes = TrendBuckets.OnHourlyTier(bucket_minutes, bucketMinutes);
             }
 
-            var result = await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, cancellationToken);
+            var result = await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, databases, cancellationToken);
 
             if (result.Points.Count == 0)
             {
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken);
+                var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken), databases.Describe());
                 if (gated != null)
                 {
                     return gated;
@@ -614,12 +662,12 @@ public sealed class DarlingMcpTrendTools
                     DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId, cancellationToken),
                     postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, route, "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
-                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), cancellationToken);
+                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken);
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, result.Points,
                 DescribeRoute(result, now, new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)),
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -627,18 +675,30 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over its own stored interval, its end minus its start. A raw point with no stored end (a row collected before the end was recorded, and every legacy row) falls back to the gap since the PREVIOUS point, so only such a point, when it is first in the window and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
-    public static async Task<string> GetQueryStoreDurationTrend(
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. hours_back reaches 2160 (90 days), served from the hourly rollup past the raw tier's four days. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over its own stored interval, its end minus its start. A raw point with no stored end (a row collected before the end was recorded, and every legacy row) falls back to the gap since the PREVIOUS point, so only such a point, when it is first in the window and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    public static Task<string> GetQueryStoreDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        CancellationToken cancellationToken = default) =>
+        GetQueryStoreDurationTrend(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), cancellationToken);
+
+    /// <summary>
+    /// get_query_store_duration_trend over a SET of databases (#5244). The predicate is on the rollup arm and both
+    /// raw arms (or both raw-only arms), so the series is the chosen databases' Query Store work and an empty answer
+    /// names them.
+    /// </summary>
+    internal static async Task<string> GetQueryStoreDurationTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: a bucketed trend that routes through the hourly rollup opts in to the 90-day reach WebReadReach declares; every other read keeps 168. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_store_duration_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -664,7 +724,7 @@ public sealed class DarlingMcpTrendTools
             var (_, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var route = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
             var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
-                postgres, resolved.ServerId, startUtc, now, route, cancellationToken);
+                postgres, resolved.ServerId, startUtc, now, route, databases, cancellationToken);
             var disclosure = DescribeQueryStoreRoute(route, points, startUtc, now);
 
             if (points.Count == 0)
@@ -674,7 +734,7 @@ public sealed class DarlingMcpTrendTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken);
+                var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken), databases.Describe());
                 if (gated != null)
                 {
                     return gated;
@@ -691,7 +751,7 @@ public sealed class DarlingMcpTrendTools
                     return EmptyStatus(
                         "empty",
                         $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. This read serves history from query_store_stats_corrected_hourly rather than ranking the raw Query Store slab (#2736), so windows before that floor come back empty even when rows were collected — run --backfill-rollups to materialize deeper history.",
-                        disclosure);
+                        disclosure, databases);
                 }
 
                 var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId, cancellationToken);
@@ -701,7 +761,7 @@ public sealed class DarlingMcpTrendTools
                         "unavailable",
                         NeverSampledMessage(resolved.ServerName, "Query Store",
                             "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server."),
-                        disclosure);
+                        disclosure, databases);
                 }
 
                 /*
@@ -714,15 +774,15 @@ public sealed class DarlingMcpTrendTools
                 {
                     return EmptyStatus(
                         "empty",
-                        $"No Query Store samples were recorded for {resolved.ServerName} between {head:o} — the oldest hour the corrected rollup has materialized — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736) — run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
-                        disclosure);
+                        $"No Query Store samples were recorded for {ScopedServer(resolved.ServerName, databases)} between {head:o} — the oldest hour the corrected rollup has materialized — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736) — run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
+                        disclosure, databases);
                 }
 
-                return EmptyStatus("empty", QuietWindowMessage(resolved.ServerName, hours_back, "Query Store"), disclosure);
+                return EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.ServerName, databases), hours_back, "Query Store"), disclosure, databases);
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, points, disclosure,
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -871,12 +931,14 @@ public sealed class DarlingMcpTrendTools
     /// </summary>
     private static string SerializeTrend(
         string serverName, int hours_back, List<DarlingTrendReader.QueryDurationTrendPoint> points,
-        TrendDisclosure disclosure, IReadOnlyList<BaselineDiscontinuity> discontinuities)
+        TrendDisclosure disclosure, IReadOnlyList<BaselineDiscontinuity> discontinuities, DatabaseFilter databases)
     {
         var envelope = new Dictionary<string, object?>
         {
             ["server"] = serverName,
             ["hours_back"] = hours_back,
+            /* #5244: which databases the series is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+            ["database_name"] = databases.Describe(),
         };
         disclosure.WriteTo(envelope);
         /* #3541 A12: a point with no rate is published as null, never as 0, and the envelope says how many
@@ -925,12 +987,15 @@ public sealed class DarlingMcpTrendTools
     /// <c>message</c>: an empty answer still says which tier it read and how far that tier reached, because
     /// "nothing here" means different things from a four-day raw tier and a ninety-day rollup.
     /// </summary>
-    private static string EmptyStatus(string status, string message, TrendDisclosure disclosure)
+    private static string EmptyStatus(string status, string message, TrendDisclosure disclosure, DatabaseFilter databases)
     {
         var envelope = new Dictionary<string, object?>
         {
             ["status"] = status,
             ["message"] = message,
+            /* #5244 review L2: the same echo SerializeTrend writes, so a caller reads which databases the answer was
+               limited to whether it got data or none: the name for one, "the chosen databases" for two or more, null for all. */
+            ["database_name"] = databases.Describe(),
         };
         disclosure.WriteTo(envelope);
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
@@ -991,6 +1056,15 @@ public sealed class DarlingMcpTrendTools
             routing);
     }
 
+    /// <summary>
+    /// The server's name with the databases an answer covered (#5244), for the empty answers that say a stretch was
+    /// quiet: with a filter the read looked at the chosen databases only, so "nothing recorded for the server" would
+    /// be a verdict about databases it never read. Every database leaves the name as it was. The never-sampled
+    /// answer stays on the bare name, because its probe is server-wide and its verdict is too.
+    /// </summary>
+    private static string ScopedServer(string serverName, DatabaseFilter databases) =>
+        serverName + DarlingMcpBlockingTools.ForChosenDatabases(databases);
+
     /// <summary>The two-state sentence pair the trio shares with Lite's twins, word for word (#2484, #2485).</summary>
     private static string QuietWindowMessage(string serverName, int hours_back, string what) =>
         $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.";
@@ -1017,13 +1091,14 @@ public sealed class DarlingMcpTrendTools
     private static async Task<string> EmptyRoutedTrendAsync(
         Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, int hours_back,
         DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
-        string what, string checkThis, BucketChoice bucket, CancellationToken cancellationToken = default)
+        string what, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var disclosure = DescribeEmptyRoute(route, startUtc, windowEndUtc, bucket);
+        var scoped = ScopedServer(serverName, databases);
 
         if (!await DarlingTrendReader.HasAnySampleOnRouteAsync(postgres, rawProbe, route, serverId, cancellationToken))
         {
-            return EmptyStatus("unavailable", NeverSampledMessage(serverName, what, checkThis), disclosure);
+            return EmptyStatus("unavailable", NeverSampledMessage(serverName, what, checkThis), disclosure, databases);
         }
 
         if (route.Tier == RetentionTier.Hourly)
@@ -1031,14 +1106,14 @@ public sealed class DarlingMcpTrendTools
             var floor = route.Coverage.HourlyFloorUtc;
             var reach = floor is DateTime f
                 ? (f <= startUtc
-                    ? $"The rollup has materialized history from {f:o}, which covers the whole window, so nothing was recorded for this server in it in the tier searched — a quiet stretch, or a refresh gap inside the rollup (check get_collection_health)."
+                    ? $"The rollup has materialized history from {f:o}, which covers the whole window, so nothing was recorded for {(databases.IsAll ? "this server" : scoped)} in it in the tier searched — a quiet stretch, or a refresh gap inside the rollup (check get_collection_health)."
                     : $"The rollup has materialized history only from {f:o}; the part of the window before that is UNSERVED rather than quiet, and the raw rows for it were dropped by retention. Run --backfill-rollups to materialize deeper history.")
                 : "The rollup has materialized NOTHING yet, so this is a coverage gap rather than a quiet server: the raw rows for this span were dropped by retention and only --backfill-rollups can materialize them.";
 
             return EmptyStatus(
                 "empty",
-                $"No {what} samples in the hourly rollup ({route.HourlyView}) for {serverName} over the last {hours_back} hour(s), from {startUtc:o}. The window reaches past the raw tier's {TimescaleSupport.RawRetentionSpan.TotalDays:0}-day retention, so this read served the rollup, not raw. {reach} Widening hours_back cannot help here.",
-                disclosure);
+                $"No {what} samples in the hourly rollup ({route.HourlyView}) for {scoped} over the last {hours_back} hour(s), from {startUtc:o}. The window reaches past the raw tier's {TimescaleSupport.RawRetentionSpan.TotalDays:0}-day retention, so this read served the rollup, not raw. {reach} Widening hours_back cannot help here.",
+                disclosure, databases);
         }
 
         /*
@@ -1057,15 +1132,15 @@ public sealed class DarlingMcpTrendTools
         var rawReaches = route.RawReaches(startUtc) ?? !pastRawHorizon;
         if (rawReaches)
         {
-            return EmptyStatus("empty", QuietWindowMessage(serverName, hours_back, what), disclosure);
+            return EmptyStatus("empty", QuietWindowMessage(scoped, hours_back, what), disclosure, databases);
         }
 
         if (!pastRawHorizon && route.Coverage.RawOldestUtc is DateTime storeOldest)
         {
             return EmptyStatus(
                 "empty",
-                $"No {what} samples were recorded for {serverName} between {storeOldest:o} — the oldest {route.RawTable} row this store holds for any server — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {storeOldest:o} predates the store's history rather than being quiet, and widening hours_back cannot reach it.",
-                disclosure);
+                $"No {what} samples were recorded for {scoped} between {storeOldest:o} — the oldest {route.RawTable} row this store holds for any server — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {storeOldest:o} predates the store's history rather than being quiet, and widening hours_back cannot reach it.",
+                disclosure, databases);
         }
 
         /* Past the horizon on the raw route with the rollup present: coverage put the read here because the
@@ -1077,8 +1152,8 @@ public sealed class DarlingMcpTrendTools
 
         return EmptyStatus(
             "empty",
-            $"No {what} samples were recorded for {serverName} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o} — the part before raw's reach is UNSERVED rather than quiet, because the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
-            disclosure);
+            $"No {what} samples were recorded for {scoped} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o} — the part before raw's reach is UNSERVED rather than quiet, because the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
+            disclosure, databases);
     }
 
     /// <summary>

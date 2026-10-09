@@ -237,7 +237,8 @@ public sealed class PostgresEngineGateBehaviorTests
     {
         /* runner is null on purpose: reaching it would mean the gate did not fire. */
         await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-            PostgresRuntime(), runner: null!, enabled, NullLogger<DarlingWorker>.Instance, CancellationToken.None);
+            PostgresRuntime(), runner: null!, enabled, LongQueryTracePass.Full, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(),
+            createFailureWarned: false, NullLogger<DarlingWorker>.Instance, CancellationToken.None);
     }
 
     /// <summary>
@@ -252,9 +253,15 @@ public sealed class PostgresEngineGateBehaviorTests
         /* The engine is the ONLY difference from the gated case — same host, same connection string. */
         var ungated = PostgresRuntime(CollectorTargetEngine.SqlServer);
 
+        /* A runner with an install id, because a runner without one has no session to name and stops before it connects (#4961).
+           The store is never opened: this reconcile reaches only the SQL Server connection string. */
+        await using var store = Npgsql.NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=unused;Username=unused");
+        var runner = new DarlingCollectorRunner(store, new CollectorDeltaCalculator(), installId: () => "0a1b2c3d");
+
         var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
             DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
-                ungated, runner: null!, enabled: true, NullLogger<DarlingWorker>.Instance, CancellationToken.None));
+                ungated, runner, enabled: true, LongQueryTracePass.Full, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(),
+                createFailureWarned: false, NullLogger<DarlingWorker>.Instance, CancellationToken.None));
 
         /* The words from the sweep log, so a future reader can match this pin to that incident. */
         Assert.Contains("Keyword not supported", ex.Message, StringComparison.Ordinal);
@@ -488,6 +495,7 @@ public sealed class PostgresEngineGateBehaviorTests
         SetField(worker, "_serversLock", new object());
         SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
         SetField(worker, "_postgres", postgres);
+        SetField(worker, "_collectorFaultStacks", new CollectorFaultStackLog());
         /* The analysis pass reads the published registry for an Azure master target's separately monitored
            databases. Unpublished, it reads as none, as it does before the worker first publishes. */
         SetField(worker, "_registryState", new PerformanceMonitor.Darling.Service.Mcp.MonitoredServerRegistryState());
@@ -662,6 +670,9 @@ VALUES ($1, $2, $3, $4, 'appdb', 1000, 10, 100, 9000, 0, 0, 0, NULL)");
         SetField(worker, "_logger", NullLogger<DarlingWorker>.Instance);
         SetField(worker, "_postgres", postgres);
         SetField(worker, "_scheduleOverrides", SingleEnabledCollectorOverrides(serverId));
+        /* A collector that fails here lands in RunOneAsync's general arm, which records the first failure of each
+           kind in this log. An uninitialized worker skips the field initializer, so the log is set here. */
+        SetField(worker, "_collectorFaultStacks", new CollectorFaultStackLog());
 
         var runner = new DarlingCollectorRunner(
             postgres, new CollectorDeltaCalculator(), NullLogger<DarlingCollectorRunner>.Instance);

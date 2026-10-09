@@ -60,7 +60,7 @@ public sealed class PlanCacheStatsCollector : CollectorDefinitionBase<PlanCacheS
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     cacheobjtype = cp.cacheobjtype,
     objtype = cp.objtype,
     total_plans = CONVERT(integer, COUNT_BIG(*)),

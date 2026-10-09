@@ -1,0 +1,129 @@
+# Corpus rows today's rules do not select a failing class for, and why that is not a selection gap.
+# A miss not listed here fails ci-select.py --replay. Format: <10-char head sha> <class>.
+
+# A Darling class failed on a run whose changed files (as last recorded for the pull request) are
+# documentation only. The failing attempt ran on an earlier head of the pull request that held code, so the
+# recorded list is not the list that run saw.
+cc29d98125 Darling.Tests.RepoFileAdoptionTests
+7b64070c98 Darling.Tests.DarlingDeployRollbackRetentionTests
+e6dbdbea94 Darling.Tests.IncidentAttachmentDeliveryTests
+
+# A Lite class failed on a Darling-only diff, before the Reads=Darling selection (build.yml, 2026-10-04)
+# existed or while the pull request still carried the older workflow. DarlingReadsTraitGuardTests derives the
+# Reads=Darling tag from the class source, so a class without it reads no Darling file: the diff did not cause
+# the failure.
+d0d482835c PerformanceMonitorLite.Tests.PerformanceCalendarDataTests
+cd34bbcb31 PerformanceMonitorLite.Tests.StatusBarSizeReadLockTests
+1792370ebd PerformanceMonitorLite.Tests.McpPageContractTests
+32239fd349 PerformanceMonitorLite.Tests.MemoryTrendGrantJoinToolTests
+ad89ad83a7 PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+08ca596e65 PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+d064b8ebc5 PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+1e9c8ce764 PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+95a42dab2d PerformanceMonitorLite.Tests.LocalClockBucketKeyTests
+5219f29479 PerformanceMonitorLite.Tests.AnomalyDetectorTileBehaviourTests
+e4cb4a3699 PerformanceMonitorLite.Tests.AnomalyDetectorTileBehaviourTests
+1c726d7f67 PerformanceMonitorLite.Tests.AnomalyDetectorTileBehaviourTests
+c0adc53226 PerformanceMonitorLite.Tests.ScenarioTests
+68ddf17466 PerformanceMonitorLite.Tests.ScenarioTests
+a75333e8e2 PerformanceMonitorLite.Tests.ScenarioTests
+801cb7c1d8 PerformanceMonitorLite.Tests.ScenarioTests
+63ba0d2893 PerformanceMonitorLite.Tests.DuckDbSentinelConnectionTests
+411d87afbe PerformanceMonitorLite.Tests.FinOpsTests
+eca647c2f4 PerformanceMonitorLite.Tests.QueryStoreRegressionsToolTests
+eca647c2f4 PerformanceMonitorLite.Tests.SignificantWaitsToolTests
+# A Darling class failed on a pull request whose recorded changes are Lite files only (cut 3a/3c of #5459). The
+# class source names no Lite path (LiteReadsTraitGuardTests derives the Reads=Lite tag from it, and these carry
+# none; the one 'Lite' in PlanSync4512CancellationTests is a doc comment), so no Lite edit can reach what it
+# tests: each is a timing or live-store test that failed on a first attempt, not a selection gap.
+c3a18e1785 Darling.Tests.PgTargetWaitTests
+67bf55c45a Darling.Tests.ClipboardTextRetryBudgetTests
+48216212d0 Darling.Tests.PlanSync4512CancellationTests
+
+# Map back-test (ci-select.py --replay --map, #5459): a class failed on a run whose changed files do not reach it,
+# and the failure is not a selection gap. Each class was checked against the corpus: none of the run's changed
+# product files is named by the class, none is covered by it, and the class also failed on runs with a different
+# change set, on a push to dev, or as the only failing class of one shard job (a flake or an environment fault).
+# The two mass failures of 2026-09-26 and 2026-09-27 (a store migration broke the shared live-store fixture) are not
+# here: the map builder now links every class of a big xunit collection to what the collection's fixture ran.
+02ae3efb1f Darling.Tests.StatementFilterAlertTests
+03d9905807 Darling.Tests.PgServerLogTailRotationLiveTests
+0654199a72 Darling.Tests.PgServerLogTailRotationLiveTests
+0ac14fc78e Darling.Tests.DarlingAnomalyBaselineTests
+0b92d8248f Darling.Tests.PgServerLogTailRotationLiveTests
+0c58c0eb56 Darling.Tests.PgTargetSampledWaitLiveTests
+0c983ef54d Darling.Tests.PgLogBurstAndRotationLiveTests
+11729239b1 Darling.Tests.XminHorizonPersistenceReadTests
+2c39e009ff Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+33932296ca Darling.Tests.StoreStatementStatsLiveTests
+3af3ade9ea Darling.Tests.StoreStatementStatsLiveTests
+3b2d41baae Darling.Tests.QueryStoreIntervalWideGridLiveTests
+3bb3ae8fe9 Darling.Tests.TrendPayloadBudgetLiveTests
+3de285b652 Darling.Tests.DarlingAnomalyBaselineTests
+40284b0061 Darling.Tests.PayloadDimensionLiveTests
+4756659045 Darling.Tests.QueryStoreLegacyRowIndexLiveTests
+4a3f52389e PerformanceMonitorLite.Tests.TimeHonestyRungReadTests
+4f8499a944 PerformanceMonitorLite.Tests.TimeHonestyRungReadTests
+6ac72f8605 Darling.Tests.StoreStatementStatsLiveTests
+6de10f4dcb Darling.Tests.StoreSessionTimeZoneLiveTests
+87836cc97e Darling.Tests.DarlingAnomalyBaselineTests
+87e78aa474 PerformanceMonitorLite.Tests.DataStartBannerProbeFailureTests
+88204f7cd2 Darling.Tests.RdsDeadlockIngestorTests
+8875188337 Darling.Tests.DarlingAnomalyBaselineTests
+89c271dd17 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+8a800ed6c6 PerformanceMonitorLite.Tests.LiteDeltaSeederTests
+8b3c5767f0 Darling.Tests.SqlServerStoreTileBehaviourTests
+8f95de197e Darling.Tests.StatementFilterAlertTests
+93d34a73cd Darling.Tests.RollupBackfillLiveTests
+99ad6aebf6 Darling.Tests.PlanSync4512CancellationTests
+9be59f1a95 Darling.Tests.CollectionLogDrainForensicsStoreTests
+a3b5749937 Darling.Tests.DarlingAnomalyBaselineTests
+af31e98db0 Darling.Tests.StoreSessionTimeZoneLiveTests
+b33399f219 Darling.Tests.DarlingCloudIdentityProbeTests
+c20797c24a Darling.Tests.PgDeadlockNormalizationTests
+c9877aad46 Darling.Tests.DarlingAnomalyBaselineTests
+c9a1a81456 Darling.Tests.QueryStoreTopLiteralEndStraddleLiveTests
+d0d482835c Darling.Tests.XminHorizonPersistenceReadTests
+d0fb0ff183 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+d5370df470 Darling.Tests.DarlingAnomalyBaselineTests
+d6c02bf28a Darling.Tests.DarlingStoreUpgradeRevertTests
+ed114b5b17 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+f07bfc441f PerformanceMonitorLite.Tests.TrendEmptyParityToolTests
+
+# The changelog splice (release archive) run whose failing class is a live-database class that no changelog
+# change can affect. Since #5614 the three splice files (CHANGELOG.md, docs/changelog/<version>.md and
+# tools/changelog/archive-census.txt) are documentation, so a splice takes the docs fast path and selects no
+# class; the failure on that run was not caused by the splice.
+e20c881360 Darling.Tests.MigrationUpgradeLadderLiveTests
+
+# Map replay against the first nightly map (#5459, run 37892110132): six misses left after the map's own links, each
+# checked against the failing job's log (measured) and the corpus. None is a selection gap; none is listed to hide
+# one. A sha here is the head of a pull request run, and the map, if it were live, would have given that run no
+# reason to run the class because the class is unrelated to the diff.
+#
+# LiteServerTagsStoreTests (a304350fe3, measured): the diff is the Lite logger (AppLogger, App.xaml.cs, the
+# collector runner) and the failure is a TimeoutException from LocalDataService.OpenWriteConnectionAsync, "Could not
+# acquire database write lock", on the class's first write and then its second. Nothing in the diff opens or holds
+# a store write lock. Every later head of the same pull request (9981020a8a, 54244d4282, f415eae60c) passed, with
+# the logger files still in its diff, and no other row of the corpus has this class failing. A shared-fixture lock
+# timeout on a loaded runner (the lock holder is inferred, not seen).
+a304350fe3 Lite.Tests.LiteServerTagsStoreTests
+#
+# EventWindowedReadsAreBoundedLivePostgresTests (the four heads of one pull request on 2026-09-25, measured): the
+# test had been failing on dev itself from the merge of #4235 (06:11Z) until its fix, #4275 (10:34Z): the corpus
+# holds it failing on two dev pushes (f5e001fe65, 659e11a39b) and on nine other pull-request heads that day, all
+# changing other things, nearly all with "Darling PG tests (0)" as the failed job. The four heads ran 09:33Z to
+# 10:14Z, inside that window; the first one's log shows the plan test's own message ("expected the floor to exclude at
+# least 2 of the 4 seeded old-day chunks"). The change the four heads carry (how the store host is set up) does not
+# explain the failure: the failure predates it.
+f1a1894fd8 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+69ce7ff7be Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+4b3fe51a97 Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+3747867b5a Darling.Tests.EventWindowedReadsAreBoundedLivePostgresTests
+#
+# StoreMetricsLatestSkipScanLiveTests (3bb3ae8fe9, measured): attempt 1 of the run failed in "Darling PG tests (2)"
+# only, five classes within one second (06:52:04 to 06:52:05), with "57P03: the database system is in recovery
+# mode" (the shard's PostgreSQL server had restarted after a backend crash) and the scratch-database drops retrying
+# on the same error. Attempt 2 of the same head passed every shard. A first-attempt environment fault of the
+# shard's server; the 28 changed files (viewer data-start work) did not cause it.
+3bb3ae8fe9 Darling.Tests.StoreMetricsLatestSkipScanLiveTests

@@ -56,6 +56,7 @@ namespace Lite.Tests;
 /// to read at least one side out of the checked-out tree anyway (that is what <see cref="ParitySource"/>
 /// exists for).</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class QueryHighDopStaleMaxDopParityTests
 {
     /// <summary>

@@ -61,7 +61,7 @@ public sealed class ViewerApplyToAllClockTests
         var selection = Member("MainWindow.xaml.cs", "MainTabs_SelectionChanged");
         var load = Member("MainWindow.xaml.cs", "LoadVisibleTabAsync");
 
-        Assert.Contains("ApplyExternalTimeRange(index, customFromUtc, customToUtc)", broadcast);
+        Assert.Contains("ApplyExternalTimeRange(range)", broadcast);
         Assert.Contains("!ReferenceEquals(serverTab, source)", broadcast);
         Assert.Contains("await RefreshVisibleAsync()", selection);
         Assert.Matches(@"case\s+TabItem\s*\{\s*Content:\s*ViewerServerTab\s+serverTab\s*\}\s*:\s*await\s+serverTab\.RefreshActiveInnerTabAsync\(\)", load);

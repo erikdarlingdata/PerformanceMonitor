@@ -24,6 +24,8 @@ namespace Darling.Tests;
 /// either call does not trip it). <c>deprecated/</c> is out of scope (no work there unless asked for by
 /// name) and is excluded, matching every other census in this file's family.
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class ClipboardWriteCensusTests
 {
     [Fact]

@@ -78,7 +78,8 @@ public sealed class DarlingDailySummaryRangeTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, NeverCollectedServerId, NeverCollectedServerName, ct);
 
-            var today = DateTime.UtcNow.Date;
+            var utcNow = DateTime.UtcNow; // #5496: one reading -- "today" and today's seeded run must be the same calendar day
+            var today = utcNow.Date;
             var twoDaysAgo = today.AddDays(-2);
             var tenDaysAgo = today.AddDays(-10);
 
@@ -100,7 +101,7 @@ public sealed class DarlingDailySummaryRangeTests
                 tier, never Critical). Yesterday is deliberately left alone: it is the gap, and the point of
                 the read is that a gap is visible as an ABSENT day rather than as a quiet one.
             */
-            await SeedRunAsync(connection, ct, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow), "wait_stats", "SUCCESS");
+            await SeedRunAsync(connection, ct, DarlingMcpTestData.TruncateToSeconds(utcNow), "wait_stats", "SUCCESS");
             await SeedRunAsync(connection, ct, twoDaysAgo.AddHours(12), "wait_stats", "SUCCESS");
             await SeedRunAsync(connection, ct, twoDaysAgo.AddHours(13), "query_store", "ERROR");
 

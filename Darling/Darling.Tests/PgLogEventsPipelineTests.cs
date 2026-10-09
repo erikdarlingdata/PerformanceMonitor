@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// (its own fixtures are the source of the <c>%Q</c>-glued query id and the managed <c>%t:%r:%u@%d:[%p]:</c>
 /// prefix). Identifiers are synthesised; shapes are verbatim.</para>
 /// </summary>
+[Collection("timing")]
 public sealed class PgLogEventsPipelineTests
 {
     /* ---- fixtures ------------------------------------------------------------------------------------ */

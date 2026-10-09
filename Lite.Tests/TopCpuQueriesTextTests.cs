@@ -89,7 +89,7 @@ LIMIT 5";
 
     /* One UtcNow read, truncated to the second, so the round-tripped last-seen timestamps compare equal. */
     private static readonly DateTime WindowEnd =
-        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
 
     private static readonly DateTime WindowStart = WindowEnd.AddHours(-4);
 
@@ -163,7 +163,7 @@ LIMIT 5";
         Assert.DoesNotContain("query_text", sql[..cut], StringComparison.Ordinal);
 
         /* ...it is read after the cut, over the same filter, with a NULL-safe path for a NULL key. */
-        Assert.Contains("SELECT LEFT(MAX(v.query_text), 500)", sql[cut..], StringComparison.Ordinal);
+        Assert.Contains("SELECT MAX(v.query_text)", sql[cut..], StringComparison.Ordinal);
         Assert.Contains("v.database_name IS NOT DISTINCT FROM t.database_name", sql[cut..], StringComparison.Ordinal);
         Assert.Contains("v.query_hash IS NOT DISTINCT FROM t.query_hash", sql[cut..], StringComparison.Ordinal);
     }

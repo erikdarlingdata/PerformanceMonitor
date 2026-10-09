@@ -1,0 +1,412 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
+using PerformanceMonitor.Darling.Viewer;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* #1776 own-store: the fixture seeds its own scratch database, so nothing here shares rows with another test. */
+/// <summary>
+/// Live pin for the storage-side recommendation reads over the golden test's seeded store. The edition facts and the
+/// engine edition must equal what the viewer reads for the same server; the memory P95 and the query-stats coverage
+/// are compared with values worked out by hand from the seed. Server A is an Enterprise standalone server, server B
+/// an Azure SQL Database, server C has no rows.
+/// </summary>
+public sealed class FinOpsRecommendationsReadsLiveTests
+{
+    private const int TimeoutSeconds = 30;
+
+    [Fact]
+    public async Task StorageReads_MatchTheViewerAndTheSeed_ForServersAbAndC()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendation reads test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        var cutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
+
+        foreach (var id in new[]
+                 {
+                     FinOpsRecommendationsGoldenLiveTests.ServerIdA,
+                     FinOpsRecommendationsGoldenLiveTests.ServerIdB,
+                     FinOpsRecommendationsGoldenLiveTests.ServerIdC,
+                 })
+        {
+            var stored = await DarlingFinOpsRecommendationsReader.GetEditionFactsAsync(dataSource, id, TimeoutSeconds, ct);
+            var viewed = await viewer.GetEditionFactsAsync(id, ct);
+            Assert.Equal(viewed.HasValue, stored.HasValue);
+            if (viewed.HasValue)
+            {
+                Assert.Equal(viewed.Value.Edition, stored!.Value.Edition);
+                Assert.Equal(viewed.Value.MajorVersion, stored.Value.MajorVersion);
+                Assert.Equal(viewed.Value.CpuCount, stored.Value.CpuCount);
+                Assert.Equal(viewed.Value.AgReplicaRole, stored.Value.AgReplicaRole);
+                Assert.Equal(viewed.Value.IsHadrEnabled, stored.Value.IsHadrEnabled);
+            }
+
+            Assert.Equal(
+                await viewer.GetRecommendationEngineEditionAsync(id, ct),
+                await DarlingFinOpsRecommendationsReader.GetEngineEditionAsync(dataSource, id, TimeoutSeconds, ct));
+        }
+
+        Assert.Null(await DarlingFinOpsRecommendationsReader.GetEditionFactsAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdC, TimeoutSeconds, ct));
+
+        var a = await DarlingFinOpsRecommendationsReader.GetEditionFactsAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdA, TimeoutSeconds, ct);
+        Assert.Equal(new FinOpsEditionFacts("Enterprise Edition (64-bit)", 14, 16, "Standalone", false), a);
+
+        /* Memory P95: 20 samples, value 13000 + 20 * (i % 5), so five values (13000..13080) four times each. The
+           sorted position of the 95th percentile is 0.95 * 19 = 18.05, which lies between ranks 18 and 19, both
+           13080, so P95 = 13080. The samples run from 1200 minutes back to 60 minutes back, a span of 1140 minutes
+           = 19 hours, so the window reads "20 samples over 19 hours". Servers A and B carry the same series. */
+        var expected = (13080, 20L, "20 samples over 19 hours");
+        Assert.Equal(expected, await DarlingFinOpsRecommendationsReader.GetMemoryP95Async(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdA, cutoff, TimeoutSeconds, ct));
+        Assert.Equal(expected, await DarlingFinOpsRecommendationsReader.GetMemoryP95Async(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdB, cutoff, TimeoutSeconds, ct));
+
+        /* Server C has no memory rows: nothing sampled. */
+        Assert.Equal((0, 0L, RightSizingWindow.Describe(0, TimeSpan.Zero)),
+            await DarlingFinOpsRecommendationsReader.GetMemoryP95Async(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdC, cutoff, TimeoutSeconds, ct));
+
+        /* Coverage: server A's oldest query_stats row is 8 days old, at or before the 7-day cutoff, so true.
+           Servers B and C have no query_stats rows, so false. */
+        Assert.True(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdA, TimeoutSeconds, ct));
+        Assert.False(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdB, TimeoutSeconds, ct));
+        Assert.False(await DarlingFinOpsRecommendationsReader.HasQueryStatsCoverageAsync(dataSource, FinOpsRecommendationsGoldenLiveTests.ServerIdC, TimeoutSeconds, ct));
+    }
+
+    [Fact]
+    public async Task MaintenanceCpuStorageTierAndReservedReads_MatchTheSeed_ForServersAbAndC()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendation reads test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        var cutoff = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified);
+        var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
+        var idB = FinOpsRecommendationsGoldenLiveTests.ServerIdB;
+        var idC = FinOpsRecommendationsGoldenLiveTests.ServerIdC;
+
+        /* Maintenance runs (server A only; the seed puts no jobs on B or C). WeeklyRebuildA ran long 5 times at 4000 s
+           against a 60 s average: avg 4000, max 4000, historical 60, 5 long runs. NightlyLoadA ran long 3 times at
+           100, 101 and 101 s: the average is 302 / 3 = 100.67, which converts to 101; max 101, historical 60, 3 long
+           runs. HourlyPurgeA ran long only twice, so the HAVING filter drops it. Most long runs first. */
+        Assert.Equal(
+            new[]
+            {
+                new MaintenanceJobRun("WeeklyRebuildA", 4000L, 4000L, 60L, 5),
+                new MaintenanceJobRun("NightlyLoadA", 101L, 101L, 60L, 3),
+            },
+            await DarlingFinOpsRecommendationsReader.GetMaintenanceJobRunsAsync(dataSource, idA, cutoff, TimeoutSeconds, ct));
+        Assert.Empty(await DarlingFinOpsRecommendationsReader.GetMaintenanceJobRunsAsync(dataSource, idB, cutoff, TimeoutSeconds, ct));
+        Assert.Empty(await DarlingFinOpsRecommendationsReader.GetMaintenanceJobRunsAsync(dataSource, idC, cutoff, TimeoutSeconds, ct));
+
+        /* Storage-tier I/O (server A only). Six samples each for OrdersA and SalesA, three hours apart from 2 hours
+           back to 17 hours back, every sample 400 reads and 200 writes: 2400 reads and 1200 writes. OrdersA stalls
+           2 ms per read and 1 ms per write: 2400 * 2 = 4800 and 1200 * 1 = 1200. SalesA stalls 20 ms per read:
+           2400 * 20 = 48000, and 1 ms per write: 1200. Both pass the over-1000-reads filter; ArchiveA (500 reads)
+           does not. The first and last sample are 15 hours apart (17 - 2); the query has no ORDER BY, so sort by name. */
+        var tiers = (await DarlingFinOpsRecommendationsReader.GetStorageTierIoAsync(dataSource, idA, cutoff, TimeoutSeconds, ct))
+            .OrderBy(t => t.DatabaseName, StringComparer.Ordinal).ToList();
+        Assert.Equal(new[] { "OrdersA", "SalesA" }, tiers.Select(t => t.DatabaseName).ToArray());
+        Assert.Equal(new[] { 2400L, 2400L }, tiers.Select(t => t.TotalReads).ToArray());
+        Assert.Equal(new[] { 4800L, 48000L }, tiers.Select(t => t.TotalStallReadMs).ToArray());
+        Assert.Equal(new[] { 1200L, 1200L }, tiers.Select(t => t.TotalWrites).ToArray());
+        Assert.Equal(new[] { 1200L, 1200L }, tiers.Select(t => t.TotalStallWriteMs).ToArray());
+        Assert.Equal(new[] { 6L, 6L }, tiers.Select(t => t.WindowSamples).ToArray());
+        foreach (var tier in tiers)
+        {
+            Assert.Equal(TimeSpan.FromHours(15), tier.LastSample!.Value - tier.FirstSample!.Value);
+            Assert.InRange(DateTime.UtcNow - DateTime.SpecifyKind(tier.LastSample.Value, DateTimeKind.Utc), TimeSpan.FromHours(2), TimeSpan.FromHours(2.5));
+        }
+
+        Assert.Empty(await DarlingFinOpsRecommendationsReader.GetStorageTierIoAsync(dataSource, idB, cutoff, TimeoutSeconds, ct));
+        Assert.Empty(await DarlingFinOpsRecommendationsReader.GetStorageTierIoAsync(dataSource, idC, cutoff, TimeoutSeconds, ct));
+
+        /* CPU P95 (servers A and B carry the same series): 30 samples, value cpu[i % 10] for
+           { 20, 22, 24, 21, 23, 22, 20, 24, 22, 21 }, so 20 x 6, 21 x 6, 22 x 9, 23 x 3, 24 x 6. Sorted, the 95th
+           percentile sits at 0.95 * 29 = 27.55, between ranks 27 and 28, both 24 (ranks 24 to 29 are the 24s), so
+           P95 = 24. The samples run 45 minutes apart, 29 gaps = 1305 minutes = 21.75 hours, which reads "21 hours". */
+        var cpuExpected = (24m, "31 samples over 22 hours");
+        Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idA, cutoff, TimeoutSeconds, ct));
+        Assert.Equal(cpuExpected, await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idB, cutoff, TimeoutSeconds, ct));
+        Assert.Null(await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idC, cutoff, TimeoutSeconds, ct));
+
+        /* Reserved capacity: the same 31 samples (three full cycles of ten and a 31st of 20, the 24-hour CPU rule needs
+           the oldest sample 23 hours old). Sum = 3 * 219 + 20 = 677, so the mean is 677 / 31 = 21.8387096774193548.
+           Sum of squares = 3 * 4815 + 400 = 14845, so the squared deviations total 14845 - 677^2 / 31 = 60.19355, the
+           sample variance is 60.19355 / 30 = 2.00645 and the deviation sqrt = 1.41649. */
+        foreach (var id in new[] { idA, idB })
+        {
+            var reserved = await DarlingFinOpsRecommendationsReader.GetReservedCapacityAsync(dataSource, id, cutoff, TimeoutSeconds, ct);
+            Assert.NotNull(reserved);
+            Assert.InRange(reserved!.Value.AvgCpuPct, 21.83870m, 21.83872m);
+            Assert.InRange(reserved.Value.StddevCpuPct, 1.41649m, 1.41650m);
+        }
+
+        Assert.Null(await DarlingFinOpsRecommendationsReader.GetReservedCapacityAsync(dataSource, idC, cutoff, TimeoutSeconds, ct));
+
+        /* The 7-day CPU rule keeps a 24-hour span, and the seed's 31 samples cover only 22.5 hours, so the Hardware CPU row
+           is (rightly) silent on them. One more sample for server A two days back gives the rule a watched week; every
+           figure below is read again AFTER it, so the checks above are unaffected. */
+        await using (var extra = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await extra.OpenAsync(ct);
+            await using var older = new NpgsqlCommand(
+                "CREATE TEMP TABLE older_cpu AS SELECT * FROM cpu_utilization_stats WHERE server_id = " + idA + " LIMIT 1;" +
+                "UPDATE older_cpu SET collection_id = 999002, collection_time = now() AT TIME ZONE 'UTC' - interval '2 days';" +
+                "INSERT INTO cpu_utilization_stats SELECT * FROM older_cpu", extra);
+            await older.ExecuteNonQueryAsync(ct);
+        }
+
+        /* The viewer's rows are the independent check on the builders: the Storage values through the builders give
+           the same rows the viewer returns. Server A is a 16-core server with 98304 MB of physical memory. */
+        var (avg, stddev) = (await DarlingFinOpsRecommendationsReader.GetReservedCapacityAsync(dataSource, idA, cutoff, TimeoutSeconds, ct))!.Value;
+        var builtReserved = FinOpsRecommendationFigures.ReservedCapacity(avg, stddev);
+        Assert.NotNull(builtReserved);
+        var viewedA = await viewer.GetRecommendationsAsync(idA, 1000m, ct);
+        var viewedReserved = Assert.Single(viewedA, r => r.Category == "Cloud");
+        Assert.Equal(builtReserved!.Finding, viewedReserved.Finding);
+        Assert.Equal(builtReserved.Detail, viewedReserved.Detail);
+
+        var (p95Cpu, cpuWindow) = (await DarlingFinOpsRecommendationsReader.GetCpuP95Async(dataSource, idA, cutoff, TimeoutSeconds, ct))!.Value;
+        var builtCpu = Assert.Single(FinOpsRecommendationFigures.VmRightSizing(p95Cpu, cpuWindow, 16, 98304, 0, 0L, "no samples", 1000m));
+        var viewedCpu = Assert.Single(viewedA, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU:", StringComparison.Ordinal));
+        Assert.Equal(builtCpu.Finding, viewedCpu.Finding);
+        Assert.Equal(builtCpu.Detail, viewedCpu.Detail);
+        Assert.Equal(builtCpu.EstMonthlySavings, viewedCpu.EstMonthlySavings);
+    }
+
+    [Fact]
+    public async Task DatabaseEncryptionFactsAndAllocatedTotal_MatchTheViewer_ForServersAbAndC()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendation reads test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct);
+
+            /* Two extra server A rows, in this test's own store only: a database that exists only in a capture 30 hours
+               before the latest one, and a database in the latest capture whose encryption flag is NULL. */
+            await using var latestCommand = new NpgsqlCommand("SELECT MAX(capture_time) FROM database_config WHERE server_id = $1", connection);
+            latestCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = FinOpsRecommendationsGoldenLiveTests.ServerIdA });
+            var latest = (DateTime)(await latestCommand.ExecuteScalarAsync(ct))!;
+            await InsertConfigAsync(connection, ct, latest.AddHours(-30), "OldOnlyA", true);
+            await InsertConfigAsync(connection, ct, latest, "NullFlagA", null);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
+        var idB = FinOpsRecommendationsGoldenLiveTests.ServerIdB;
+        var idC = FinOpsRecommendationsGoldenLiveTests.ServerIdC;
+
+        foreach (var id in new[] { idA, idB, idC })
+        {
+            var stored = await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, id, TimeoutSeconds, ct);
+            var viewed = (await viewer.GetLatestDatabaseConfigAsync(id, cancellationToken: ct))
+                .Select(r => new DatabaseEncryptionFact(r.DatabaseName, r.StateDesc, r.IsEncrypted)).ToList();
+            Assert.Equal(viewed, stored);
+
+            /* Allocated total and its decimal scale. */
+            var storedTotal = (await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(dataSource, id, TimeoutSeconds, ct))?.AllocatedMb ?? 0m;
+            var viewedTotal = DatabaseSizeRow.AllocatedTotalMb(await viewer.GetDatabaseSizeLatestAsync(id, cancellationToken: ct));
+            Assert.Equal(viewedTotal, storedTotal);
+            Assert.Equal((decimal.GetBits(viewedTotal)[3] >> 16) & 0xFF, (decimal.GetBits(storedTotal)[3] >> 16) & 0xFF);
+        }
+
+        /* Server A's latest capture: the four seeded databases plus NullFlagA, compared as a set (the store's text ordering depends on its collation; the ordered
+           parity check against the viewer above pins that order). OldOnlyA is only in the older capture, so it is absent. The NULL flag
+           reads as not encrypted. Servers B and C carry no configuration rows. */
+        var a = await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idA, TimeoutSeconds, ct);
+        Assert.DoesNotContain(a, f => f.DatabaseName == "OldOnlyA");
+        Assert.Equal(
+            new[]
+            {
+                new DatabaseEncryptionFact("NullFlagA", "ONLINE", false),
+                new DatabaseEncryptionFact("OrdersA", "ONLINE", true),
+                new DatabaseEncryptionFact("SalesA", "ONLINE", true),
+                new DatabaseEncryptionFact("app_dev_a", "ONLINE", false),
+                new DatabaseEncryptionFact("qa1_a", "ONLINE", false),
+            }.OrderBy(f => f.DatabaseName, StringComparer.Ordinal).ToArray(),
+            a.OrderBy(f => f.DatabaseName, StringComparer.Ordinal).ToArray());
+        Assert.Empty(await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idB, TimeoutSeconds, ct));
+        Assert.Empty(await DarlingFinOpsRecommendationsReader.GetDatabaseEncryptionFactsAsync(dataSource, idC, TimeoutSeconds, ct));
+    }
+
+    private static Task InsertConfigAsync(NpgsqlConnection c, CancellationToken ct, DateTime at, string db, bool? encrypted) =>
+        DarlingMcpTestData.ExecAsync(c, ct, @"
+INSERT INTO database_config
+    (config_id, capture_time, server_id, server_name, database_name,
+     state_desc, compatibility_level, collation_name, recovery_model, is_read_only,
+     is_auto_close_on, is_auto_shrink_on, is_auto_create_stats_on, is_auto_update_stats_on,
+     is_auto_update_stats_async_on, is_read_committed_snapshot_on, snapshot_isolation_state,
+     is_parameterization_forced, is_query_store_on, is_encrypted, is_trustworthy_on, is_db_chaining_on,
+     is_broker_enabled, is_cdc_enabled, is_mixed_page_allocation_on, log_reuse_wait_desc, page_verify_option,
+     target_recovery_time_seconds, delayed_durability, is_accelerated_database_recovery_on,
+     is_memory_optimized_enabled, is_optimized_locking_on)
+VALUES ($1, $2, $3, $4, $5,
+        'ONLINE', 140, 'SQL_Latin1_General_CP1_CI_AS', 'FULL', FALSE,
+        FALSE, FALSE, TRUE, TRUE,
+        FALSE, TRUE, 'OFF',
+        FALSE, TRUE, $6, FALSE, FALSE,
+        FALSE, FALSE, FALSE, 'NOTHING', 'CHECKSUM',
+        60, 'DISABLED', FALSE,
+        FALSE, FALSE)",
+            CollectionIdGenerator.Next(), at, FinOpsRecommendationsGoldenLiveTests.ServerIdA, FinOpsRecommendationsGoldenLiveTests.ServerNameA, db,
+            encrypted.HasValue ? encrypted.Value : (object)DBNull.Value);
+
+    [Fact]
+    public async Task Composer_ReportsAFailedCheck_ToTheHook_AndKeepsTheRest()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendation reads test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct, DateTime.UtcNow);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
+        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, cancellationToken: ct);
+        Assert.Contains(baseline, r => r.Category == "Maintenance");
+
+        /* The maintenance read selects from the v_running_jobs view; dropping the view on this scratch store breaks that one read. */
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using var drop = new NpgsqlCommand("DROP VIEW v_running_jobs CASCADE", connection);
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        var failed = new System.Collections.Generic.List<string>();
+        var after = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
+            dataSource, idA, 1000m, TimeoutSeconds, (label, ex) =>
+            {
+                Assert.NotNull(ex);
+                failed.Add(label);
+            }, cancellationToken: ct);
+
+        Assert.Equal(new[] { "Maintenance window" }, failed.ToArray());
+        Func<FinOpsRecommendation, string> key = r => $"{r.Severity}|{r.Category}|{r.Finding}|{r.Detail}|{r.EstMonthlySavings}";
+        Assert.Equal(
+            baseline.Where(r => r.Category != "Maintenance").Select(key).ToArray(),
+            after.Select(key).ToArray());
+    }
+
+    [Fact]
+    public void TheStorageComposer_KeepsOneDebugLinePerFailedCheck()
+    {
+        var src = System.IO.File.ReadAllText(System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(SourcePath())!, "..", "PerformanceMonitor.Darling.Storage", "FinOps",
+            "DarlingFinOpsRecommendationsReader.cs"));
+        foreach (var label in new[]
+        {
+            "Enterprise features", "CPU right-sizing", "Memory right-sizing", "Compression", "Dormant databases",
+            "Dev/test detection", "Maintenance window", "VM right-sizing", "Storage tier", "Reserved capacity",
+        })
+        {
+            Assert.Contains($"Recommendation check failed ({label}): {{ex.Message}}", src, StringComparison.Ordinal);
+            Assert.Contains($"onCheckFailed?.Invoke(\"{label}\", ex);", src, StringComparison.Ordinal);
+        }
+    }
+
+    private static string SourcePath([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+
+    [Fact]
+    public async Task Composer_DoesNotReportTheVmCpuFallback_WhileTheVmRowsStillEmit()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live FinOps recommendation reads test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct, DateTime.UtcNow);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var idA = FinOpsRecommendationsGoldenLiveTests.ServerIdA;
+        var baseline = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(dataSource, idA, 1000m, TimeoutSeconds, cancellationToken: ct);
+
+        /* Rows older than 30 hours raise a division by zero when the 7-day P95 statement (the only one that orders the CPU
+           column with PERCENTILE_CONT) projects them. The 24-hour utilization read never touches them, and since the CPU
+           sample-span rule (the 7-day span read the Hardware CPU row needs) now reads the same view over 7 days, the poison
+           is scoped to the P95 statement by its text: a poison on every read of the column would also fail the span read and
+           withhold the CPU row for a reason this test is not about. So only the inner fallback of the VM check fires. */
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using var cols = new NpgsqlCommand(
+                "SELECT string_agg(CASE WHEN column_name = 'sqlserver_cpu_utilization' " +
+                "THEN 'CASE WHEN collection_time < now() - interval ''30 hours'' AND current_query() LIKE ''%PERCENTILE_CONT%'' THEN (sqlserver_cpu_utilization / 0)::int ELSE sqlserver_cpu_utilization END AS sqlserver_cpu_utilization' " +
+                "ELSE quote_ident(column_name) END, ', ' ORDER BY ordinal_position) FROM information_schema.columns " +
+                "WHERE table_schema = current_schema() AND table_name = 'cpu_utilization_stats'", connection);
+            var list = (string)(await cols.ExecuteScalarAsync(ct))!;
+            await using var swap = new NpgsqlCommand(
+                "DROP VIEW v_cpu_utilization_stats CASCADE; CREATE VIEW v_cpu_utilization_stats AS SELECT " + list + " FROM cpu_utilization_stats;" +
+                "CREATE TEMP TABLE old_cpu AS SELECT * FROM cpu_utilization_stats WHERE server_id = " + idA + " LIMIT 1;" +
+                "UPDATE old_cpu SET collection_id = 999001, collection_time = now() - interval '3 days';" +
+                "INSERT INTO cpu_utilization_stats SELECT * FROM old_cpu", connection);
+            await swap.ExecuteNonQueryAsync(ct);
+        }
+
+        var failed = new System.Collections.Generic.List<string>();
+        var after = await DarlingFinOpsRecommendationsReader.GetRecommendationsAsync(
+            dataSource, idA, 1000m, TimeoutSeconds, (label, _) => failed.Add(label), cancellationToken: ct);
+
+        Assert.DoesNotContain("VM right-sizing", failed);
+        Assert.Contains(after, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU:", StringComparison.Ordinal));
+    }
+}

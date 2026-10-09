@@ -27,10 +27,17 @@ public sealed class WatermarkReadFailureLogTests : IDisposable
 
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
 
+    private readonly List<DuckDbInitializer> _stores = [];
+
     public WatermarkReadFailureLogTests() => Directory.CreateDirectory(_tempDir);
 
     public void Dispose()
     {
+        foreach (var duckDb in _stores)
+        {
+            duckDb.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -65,7 +72,8 @@ public sealed class WatermarkReadFailureLogTests : IDisposable
     private async Task<DuckDbInitializer> StoreAsync()
     {
         var duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
-        await duckDb.InitializeAsync();
+        _stores.Add(duckDb);
+        await duckDb.InitializeFromTemplateAsync();
         return duckDb;
     }
 

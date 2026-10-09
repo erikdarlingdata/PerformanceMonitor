@@ -29,30 +29,9 @@ public sealed class DisplayZoneRendererTests
 
     private static DateTime Project(DateTime utc) => utc.AddDays(ProjectedOffsetDays);
 
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
-
     /// <summary>Runs one render and returns the first plotted X and the bottom tick generator's type.</summary>
     private static (double FirstX, Type TickGenerator) Drive(Action<ScottPlot.WPF.WpfPlot> render)
-        => OnStaThread(() =>
+        => StaTestThread.Run(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             render(chart);

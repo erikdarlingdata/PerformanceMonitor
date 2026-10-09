@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
@@ -18,6 +19,22 @@ namespace Darling.Tests;
 /// drain-resets, and bucket-edge placement.</summary>
 public sealed class ReadLatencyAccumulatorTests
 {
+    [Fact]
+    public void OutcomeLabels_AreTheClosedSet_AndTheOldFiveKeepTheirStoredSpelling()
+    {
+        var all = Enum.GetValues<ReadOutcome>();
+
+        Assert.Equal(
+            new[] { "ok", "timeout", "cancelled", "error", "limit", "fallback_raw", "gate_failed" },
+            all.Select(ReadLatencyAccumulator.OutcomeLabel).ToArray());
+        foreach (var old in all.Where(o => o <= ReadOutcome.Limit))
+        {
+            Assert.Equal(old.ToString().ToLowerInvariant(), ReadLatencyAccumulator.OutcomeLabel(old));
+        }
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => ReadLatencyAccumulator.OutcomeLabel((ReadOutcome)99));
+    }
+
     [Fact]
     public async Task Record_ManyConcurrentThreads_DrainTotalsMatch()
     {

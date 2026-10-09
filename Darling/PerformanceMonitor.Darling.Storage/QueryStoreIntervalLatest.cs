@@ -327,37 +327,32 @@ LEFT JOIN collect.query_store_interval_latest_coverage AS c
   ON c.server_id = $1;";
 
     /// <summary>
-    /// The floors, from TimescaleDB's catalog (metadata, never a scan): raw's oldest chunk (NULL when raw is not a
-    /// hypertable, which the rule reads as "raw holds everything"), and the table's, when the table is one. A
-    /// chunk's <c>range_start</c> is at or below its oldest row, so both err toward raw. <c>AT TIME ZONE 'UTC'</c>
-    /// collapses the catalog's <c>timestamptz</c> to the store's naive-UTC discipline, as DarlingRetention does.
+    /// Raw's floor, from TimescaleDB's catalog (metadata, never a scan): its oldest chunk (NULL when raw is not a
+    /// hypertable, which the rule reads as "raw holds everything"). A chunk's <c>range_start</c> is at or below its
+    /// oldest row, so a low <c>R</c> errs toward raw. <c>AT TIME ZONE 'UTC'</c> collapses the catalog's
+    /// <c>timestamptz</c> to the store's naive-UTC discipline, as DarlingRetention does. The TABLE's floor is never
+    /// read from the catalog (#5541): neither interval table is a hypertable in production (retention purges both with
+    /// a sliced DELETE), and a chunk's <c>range_start</c> would sit far below the real floor anyway, because a DELETE
+    /// leaves emptied chunks listed, so a catalog <c>H</c> would move the rule toward the table, not toward raw.
     /// </summary>
-    public const string ChunkFloorsSql = @"
+    public const string RawChunkFloorSql = @"
 SELECT
-    (
-        SELECT
-            MIN(ch.range_start) AT TIME ZONE 'UTC'
-        FROM timescaledb_information.chunks AS ch
-        WHERE ch.hypertable_schema = 'collect'
-        AND   ch.hypertable_name = 'query_store_stats'
-    ) AS raw_floor,
-    EXISTS
-    (
-        SELECT
-            1
-        FROM timescaledb_information.hypertables AS h
-        WHERE h.hypertable_schema = 'collect'
-        AND   h.hypertable_name = 'query_store_interval_latest'
-    ) AS table_is_hypertable,
-    (
-        SELECT
-            MIN(ch.range_start) AT TIME ZONE 'UTC'
-        FROM timescaledb_information.chunks AS ch
-        WHERE ch.hypertable_schema = 'collect'
-        AND   ch.hypertable_name = 'query_store_interval_latest'
-    ) AS table_floor;";
+    MIN(ch.range_start) AT TIME ZONE 'UTC' AS raw_floor
+FROM timescaledb_information.chunks AS ch
+WHERE ch.hypertable_schema = 'collect'
+AND   ch.hypertable_name = 'query_store_stats';";
 
-    /// <summary>The table's floor for one server where the table is a plain heap: its oldest interval.</summary>
+    /// <summary>
+    /// The table's floor <c>H</c> for one server: its oldest interval. Always this read (#5541), whether or not the
+    /// table is ever converted to a hypertable, because it is exact: the purge deletes oldest first on
+    /// <c>first_execution_time</c>, so every deleted row is below the remaining minimum.
+    /// <b>Cost after a drain (#5581):</b> the table is partitioned by day since #5571, so this MIN runs over each
+    /// partition's index. The dead entries are in the legacy table and the DEFAULT partition, the only places rows
+    /// are deleted one by one (a whole expired day is dropped, indexes and all). Right after a large row delete
+    /// the read makes a heap fetch for every dead entry vacuum has not removed and no read has marked yet. The
+    /// retention pass runs this constant once per server after such a delete (<c>QueryStoreIntervalFloorWarmUp</c>),
+    /// so a user's first read does not pay it; it executes this constant, never a copy.
+    /// </summary>
     public const string PlainTableFloorSql = @"
 SELECT
     MIN(t.first_execution_time)
@@ -370,10 +365,19 @@ WHERE t.server_id = $1;";
     /// <item><c>F</c> exists: this build has claimed coverage for the server.</item>
     /// <item><c>F &lt;= max(R, B)</c>: the table holds every snapshot the raw read would read (it reads
     /// <c>collection_time &gt;= max(R, B)</c>), and may hold more, which is the ruled window extension.</item>
-    /// <item><c>R &gt;= H</c> or <c>B &gt;= H</c>: raw holds no history the table has dropped, or every interval the
-    /// window needs starts inside the table (<c>B</c> is the window minus a day, and an interval spans at most a
-    /// day). A NULL <c>H</c> means the table holds nothing for the server, and then clause 2 already says raw holds
-    /// nothing in the window either.</item>
+    /// <item><c>R &gt;= H + <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/></c> or <c>B &gt;= H</c>: raw holds no
+    /// snapshot of an interval the table has dropped, or every interval the window needs starts inside the table
+    /// (<c>B</c> is the window minus a day, and an interval spans at most a day). The margin is there because the two
+    /// purge on different columns (#5541): raw drops a snapshot by <c>collection_time</c>, the table drops an interval
+    /// by <c>first_execution_time</c>, and a snapshot can be collected up to one interval length plus the collector's
+    /// lag after its interval began. So with <c>R</c> only at or above <c>H</c>, raw can still hold a snapshot of an
+    /// interval that began below <c>H</c> and that the table dropped; <c>R</c> a full margin above <c>H</c> rules that
+    /// out (same bound as the Wide gate's below-floor edge). The <c>B &gt;= H</c> arm needs no margin here, unlike the
+    /// Wide gate's twin: this rule's raw read also filters <c>last_execution_time &gt;= $2</c>, which keeps every
+    /// interval it counts at <c>first_execution_time &gt;= B</c> (an interval spans at most a day), so an interval
+    /// the table purged (first execution below <c>H</c>) is below <c>B</c> and raw never counts it either. The Wide raw
+    /// read filters <c>collection_time</c> only. A NULL <c>H</c> means the table holds nothing for the
+    /// server, and then clause 2 already says raw holds nothing in the window either.</item>
     /// <item>No pending batch: a batch that stored raw but missed the table is not in the claim.</item>
     /// </list>
     /// A NULL <c>R</c> is raw with no chunk floor (a plain store, whose raw keeps 30 days): minus infinity, which can
@@ -397,7 +401,7 @@ WHERE t.server_id = $1;";
             return true;
         }
 
-        return (rawFloor is DateTime floor && floor >= h) || rawBound >= h;
+        return (rawFloor is DateTime floor && floor >= h + QueryStoreIntervalWide.PurgeEdgeMargin) || rawBound >= h;
     }
 
     /// <summary>
@@ -434,21 +438,15 @@ WHERE t.server_id = $1;";
             }
 
             DateTime? rawFloor = null;
-            DateTime? tableFloor = null;
-            var tableIsHypertable = false;
             if (hasTimescale)
             {
-                await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
-                await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
-                await reader.ReadAsync(cancellationToken);
-                rawFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
-                tableIsHypertable = reader.GetBoolean(1);
-                tableFloor = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+                await using var floors = new NpgsqlCommand(RawChunkFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                rawFloor = await floors.ExecuteScalarAsync(cancellationToken) as DateTime?;
             }
 
-            if (!tableIsHypertable)
+            DateTime? tableFloor;
+            await using (var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds })
             {
-                await using var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
                 plain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                 tableFloor = await plain.ExecuteScalarAsync(cancellationToken) as DateTime?;
             }
@@ -463,6 +461,53 @@ WHERE t.server_id = $1;";
         {
             logger?.LogWarning(ex, "PLAN_REGRESSION source decision failed for server {ServerId}; reading raw", serverId);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// The built days of the PLAN_REGRESSION window for one server (#5448), or none when the read fails. It runs
+    /// <see cref="PlanRegressionDaily.BuiltDaysSql"/> ($1 server_id, $2 the window floor); <paramref name="isExpectedAbandon"/> is
+    /// the pass's abandon filter, so a cancelled or shut-down pass is not swallowed here.
+    ///
+    /// <para><b>Why this is not a caveat.</b> A failure answers "none built", and the fact then runs the exact-bound read,
+    /// the shipped one, which finds everything the daily totals would have. The failure costs the speedup, not the
+    /// finding, so it is logged here, at Warning, and recorded nowhere else: a stored caveat would tell a user the
+    /// regression check is missing data when it is not. If the exact read also fails, that read's own catch records the
+    /// failure, once. It sits beside <see cref="ReadsTableAsync"/> for the same reason: the fact collectors' census
+    /// requires every swallowing catch there to record a failure, which is right for a read that leaves a fact empty and
+    /// wrong for one that falls back to a read that is whole.</para>
+    /// </summary>
+    public static async Task<List<DateOnly>> ReadBuiltDaysAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction? transaction,
+        int serverId,
+        DateTime windowFloor,
+        int commandTimeoutSeconds,
+        ILogger? logger,
+        Func<Exception, bool> isExpectedAbandon,
+        CancellationToken cancellationToken)
+    {
+        var days = new List<DateOnly>();
+        try
+        {
+            await using var cmd = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(serverId);
+            cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, windowFloor);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                days.Add(reader.GetFieldValue<DateOnly>(0));
+            }
+
+            return days;
+        }
+        catch (Exception ex) when (!isExpectedAbandon(ex))
+        {
+            logger?.LogWarning(
+                ex,
+                "PLAN_REGRESSION built-days read failed for server {ServerId}; reading the interval table on its exact bounds",
+                serverId);
+            return new List<DateOnly>();
         }
     }
 

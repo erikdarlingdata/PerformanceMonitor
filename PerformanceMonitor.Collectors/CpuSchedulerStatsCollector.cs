@@ -81,7 +81,7 @@ public sealed class CpuSchedulerStatsCollector : CollectorDefinitionBase<CpuSche
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     max_workers_count = osi.max_workers_count,
     scheduler_count = osi.scheduler_count,
     cpu_count = osi.cpu_count,

@@ -411,6 +411,7 @@ public class DarlingHttpRefusalLogTests
     [InlineData(400, "refused")]
     [InlineData(401, "refused")]
     [InlineData(403, "refused")]
+    [InlineData(415, "refused")]
     [InlineData(200, "did not authorize")]
     [InlineData(302, "did not authorize")]
     public void TheOutcomeVerb_AgreesWithTheStatusCode(int statusCode, string expected) =>

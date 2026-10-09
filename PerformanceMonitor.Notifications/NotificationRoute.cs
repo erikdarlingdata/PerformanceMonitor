@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -50,6 +52,17 @@ public sealed record NotificationRoute(
     string SmtpRecipients,
     bool Enabled)
 {
+    /// <summary>The webhook channels (by <see cref="NotificationRouter"/> channel name) that are OFF on this route
+    /// because a destination the route set could not be read (#5366). Not a stored column: the reader that could not open
+    /// a saved value sets it. A channel that is off here sends nothing for this route's alerts, and does not fall back
+    /// to the settings row or a less specific route, because the alert would then go somewhere it was not configured to
+    /// go. Null or empty means no channel is off.</summary>
+    public IReadOnlyCollection<string>? OffChannels { get; init; }
+
+    /// <summary>Whether <paramref name="channel"/> is off on this route (see <see cref="OffChannels"/>).</summary>
+    public bool IsOffFor(string channel) =>
+        OffChannels is not null && OffChannels.Contains(channel, StringComparer.Ordinal);
+
     /// <summary>The family this route matches, or null when <see cref="MetricMatch"/> is an exact metric name.</summary>
     public string? Family => AlertFamily.NormalizeFamily(MetricMatch);
 

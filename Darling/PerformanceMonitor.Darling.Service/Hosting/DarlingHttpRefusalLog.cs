@@ -41,6 +41,15 @@ internal enum DarlingRefusalGate
     /// SUCCESSFULLY authenticated subject (the role-mapping denial) stays a direct log line instead: it
     /// is the audit trail, and reaching it costs the caller a real IdP handshake.</summary>
     SignIn,
+
+    /// <summary>A throw from response compression, the Host guard or the auth gate itself, before the request was let through
+    /// (round 2, L1). Not a refusal: the failure observer uses this key to throttle the failure line it writes for a caller nobody
+    /// has authenticated, so a request that makes a gate throw repeatedly cannot fill the log with stack traces.</summary>
+    PreAuthFailure,
+
+    /// <summary>The JSON-only POST check on the MCP listener: a POST whose Content-Type is not JSON. 415. Its own
+    /// gate because the fix is on the client (send <c>application/json</c>), not a credential or an address.</summary>
+    JsonContentType,
 }
 
 /// <summary>
@@ -264,6 +273,8 @@ internal sealed class DarlingHttpRefusalLog
         DarlingRefusalGate.SourceCidr => "source address allowlist (network.allowFrom)",
         DarlingRefusalGate.ReadOnlySeat => "read-only seat (web.network.oidc viewerRoles)",
         DarlingRefusalGate.SignIn => "OIDC sign-in flow (web.network.oidc)",
+        DarlingRefusalGate.PreAuthFailure => "failure before the request was authenticated",
+        DarlingRefusalGate.JsonContentType => "JSON-only POST check (Content-Type)",
         _ => gate.ToString(),
     };
 
@@ -318,8 +329,12 @@ internal sealed class DarlingHttpRefusalLog
                grep do not, so a forged entry could hide from ReadLine-based tooling while a splitlines()-based
                one saw it as real. All are sanitized the same as CR/LF so a reader can never disagree with
                another about where one log entry ends. */
-            if (char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029)
+            if (char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029
+                || System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format)
             {
+                /* Unicode format characters (category Cf: zero-width marks, the bidi controls U+202A-U+202E and
+                   U+2066-U+2069) change how a line DISPLAYS, so a request text could make a log line read
+                   reordered; they become '.' the same way. */
                 builder.Append('.');
             }
             else if (char.IsHighSurrogate(c) && i + 1 < take && char.IsLowSurrogate(value[i + 1]))

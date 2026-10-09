@@ -18,9 +18,11 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// The server page's Range goes to 30 days, and most reads keep 7 (<c>McpHelpers.MaxHoursBack</c>). A read that
-/// refuses the page's window for that reason is asked again, once, for the hours it keeps, and the panel shows that
-/// data with a notice naming the window it covers. Run from the shipped <c>util.js</c>, <c>panels.js</c> and
+/// Most reads keep 7 days (<c>McpHelpers.MaxHoursBack</c>). The server page's Range stops there
+/// (<see cref="WebServerPageRangeTests"/>), but a Custom View's read panel stores its own hours and can still ask
+/// for more. A read that refuses a window for that reason is asked again, once, for the hours it keeps, and the
+/// panel shows that data with a notice naming the window it covers. These drive 30 days into the panels directly,
+/// so every ranged read is proven to take that path. Run from the shipped <c>util.js</c>, <c>panels.js</c> and
 /// <c>pages/server-tabs.js</c> under Node (<c>web-kept-history-harness.mjs</c>): the descriptor loader and the
 /// hand-built composites, their fetches, notices, errors and chart windows. Node is skipped when it is not
 /// installed, the way <see cref="AlertNotebookRenderBehaviourTests"/> does; the last test pins the routing in the
@@ -28,12 +30,24 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class WebRangeKeptHistoryBehaviourTests
 {
-    private const string KeptNotice = "This view keeps up to 168 hours (7 days) of history, so it shows the last 7 days.";
+    private const string KeptNotice = "This view reads at most 168 hours (7 days) at a time, so it shows the last 7 days.";
 
-    private static bool TryRun(string scenario, out JsonElement result)
+    /// <summary>How the notice ends when the retry is refused too. The second-refusal pin and the census guard both read
+    /// it, so the guard cannot drift from the text the page shows.</summary>
+    private const string PickShorter = "Pick a shorter range.";
+
+    /// <param name="scenario">The harness scenario; one that ends in "Local" takes the browser's zone after a colon.</param>
+    /// <param name="result">What the harness printed.</param>
+    /// <param name="input">The JSON answer the page reads, for a scenario that draws a server note (HARNESS_INPUT).</param>
+    internal static bool TryRun(string scenario, out JsonElement result, string? input = null)
     {
         result = default;
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        if (input is not null)
+        {
+            psi.Environment["HARNESS_INPUT"] = input;
+        }
+
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-kept-history-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
         psi.ArgumentList.Add(scenario);
@@ -45,6 +59,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         }
         catch (Win32Exception)
         {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             return false;
         }
 
@@ -88,6 +103,24 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal(0, r.GetProperty("loading").GetInt32());
         /* The chart spans the 7 days the read answered for, not the 30 the page asked for (#2802). */
         Assert.Equal(new int?[] { 168 }, ChartHours(r));
+    }
+
+    /// <summary>The footer's "Updated" time stamps only while the page's read-error count holds still, and that count is the red
+    /// strips drawn. A read narrowed to the widest window it takes and then answered draws data and a notice, so it must not move
+    /// the count; a failure that draws a red strip must.</summary>
+    [Fact]
+    public void ANarrowedReadThatIsThenAnswered_DrawsNoRedStrip_AndLeavesTheReadErrorCountAlone()
+    {
+        if (!TryRun("loaderRefused", out var narrowed)) return;
+        Assert.Equal(0, narrowed.GetProperty("readErrors").GetInt32());
+
+        if (!TryRun("loaderOtherError", out var failed)) return;
+        Assert.Single(Strings(failed, "errors"));
+        Assert.Equal(1, failed.GetProperty("readErrors").GetInt32());
+
+        if (!TryRun("loaderRefusedTwice", out var refusedTwice)) return;
+        Assert.Empty(Strings(refusedTwice, "errors"));
+        Assert.Equal(0, refusedTwice.GetProperty("readErrors").GetInt32());
     }
 
     [Fact]
@@ -138,7 +171,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal(2, Strings(r, "fetches").Length);
         /* The second refusal falls back to the #2780 notice, which names the window the read now reports. */
         Assert.Equal(
-            "This view keeps up to 96 hours (4 days) of history — pick a shorter range.",
+            "This view reads at most 96 hours (4 days) at a time. " + PickShorter,
             Assert.Single(Strings(r, "notices")));
         Assert.Empty(Strings(r, "errors"));
     }
@@ -199,7 +232,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
     /// <summary>
     /// Every tab of both registries at 30 days, with every read refusing it: each ranged read on the page, whether
     /// a descriptor, a fanout or a hand-built composite, is asked exactly once more at 168 hours, and no panel is
-    /// left on the "pick a shorter range" notice. The picker reads (wait, counter and query trends) are in the count,
+    /// left on the "Pick a shorter range." notice. The picker reads (wait, counter and query trends) are in the count,
     /// so a composite that bypasses the shared helper fails here.
     /// </summary>
     [Fact]
@@ -224,7 +257,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
             Assert.Contains(ranged, f => f.StartsWith("/api/read/" + trend + "?", StringComparison.Ordinal) && f.Contains("hours=168", StringComparison.Ordinal));
         }
 
-        Assert.DoesNotContain(Strings(r, "notices"), n => n.Contains("pick a shorter range", StringComparison.Ordinal));
+        Assert.DoesNotContain(Strings(r, "notices"), n => n.Contains(PickShorter, StringComparison.Ordinal));
         Assert.Contains(KeptNotice, Strings(r, "notices"));
         Assert.Empty(Strings(r, "errors"));
         Assert.Empty(Strings(r, "rejections"));

@@ -90,31 +90,7 @@ public sealed partial class ViewerDataService
     /// that merged nothing at its one collection's own raw time (ruling item 3), matching
     /// <see cref="ViewerDataService.GetCpuUtilizationAsync"/>.</para>
     /// </summary>
-    public static readonly string CpuSchedulerTrendSql = $"""
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                collection_id,
-                total_runnable_tasks_count,
-                total_blocked_task_count,
-                total_queued_request_count
-            FROM v_cpu_scheduler_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-        )
-        SELECT
-            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
-            AVG(COALESCE(total_runnable_tasks_count, 0)) AS total_runnable_tasks_count,
-            AVG(COALESCE(total_blocked_task_count, 0)) AS total_blocked_task_count,
-            AVG(COALESCE(total_queued_request_count, 0)) AS total_queued_request_count,
-            MIN(collection_time) AS first_collection_time,
-            COUNT(*) AS collection_count
-        FROM raw
-        GROUP BY 1
-        ORDER BY 1
-        """;
+    public static readonly string CpuSchedulerTrendSql = ServerTrendSql.CpuScheduler;
 
     /// <summary>
     /// The CPU Scheduler latest-snapshot read: the single most recent cpu_scheduler_stats row in the
@@ -253,5 +229,38 @@ public sealed partial class ViewerDataService
             NodesOnlineCount: reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
             OfflineCpuCount: reader.IsDBNull(25) ? 0 : reader.GetInt32(25),
             OfflineCpuWarning: !reader.IsDBNull(26) && reader.GetBoolean(26));
+    }
+}
+
+/// <summary>
+/// One row of the CPU Scheduler latest-snapshot grid (#4966): the shared metric row plus when the snapshot it reads was collected.
+/// The shared <see cref="CpuSchedulerMetricRow"/> leaves the time out on purpose (each app keeps its own time handling), so the
+/// viewer adds it here: every row of one snapshot carries that snapshot's naive-UTC <see cref="CollectionTime"/>, worded in the
+/// display zone to the second as <see cref="CollectionTimeLocal"/>; the column sorts by <see cref="CollectionTime"/>.
+/// </summary>
+public sealed class CpuSchedulerGridRow
+{
+    public string Metric { get; init; } = "";
+    public string Value { get; init; } = "";
+    public bool IsWarning { get; init; }
+    public DateTime CollectionTime { get; init; }
+
+    public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
+
+    /// <summary>The grid's rows for the snapshot; no rows (and so no time) for a window that holds no snapshot.</summary>
+    public static List<CpuSchedulerGridRow> Build(CpuSchedulerSnapshot? snapshot)
+    {
+        var rows = new List<CpuSchedulerGridRow>();
+        if (snapshot is null)
+        {
+            return rows;
+        }
+
+        foreach (var metric in CpuSchedulerMetrics.BuildMetrics(snapshot))
+        {
+            rows.Add(new CpuSchedulerGridRow { Metric = metric.Metric, Value = metric.Value, IsWarning = metric.IsWarning, CollectionTime = snapshot.CollectionTime });
+        }
+
+        return rows;
     }
 }

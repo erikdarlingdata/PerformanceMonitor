@@ -69,6 +69,13 @@ public partial class ViewerServerTab : UserControl
         _longQueryFilterMgr = new DataGridFilterManager<ViewerLongQueryRow>(LongQueryCompletionsGrid);
         _blockedProcessFilterMgr = new DataGridFilterManager<ViewerBlockedProcessRow>(BlockedProcessReportGrid);
         _deadlockFilterMgr = new DataGridFilterManager<DeadlockProcessDetail>(DeadlockGrid);
+        /* Empty-state wording (F15): a grid that comes back with no rows says what is missing, in the words the System Events
+           sub-tabs use, instead of showing a bare header row. Grids without wording here say "No rows to show.". */
+        EmptyState.SetText(QuerySnapshotsGrid, "No active queries in the selected time window.");
+        EmptyState.SetText(ProcedureStatsGrid, "No procedure executions in the selected time window.");
+        EmptyState.SetText(BlockedProcessReportGrid, "No blocked process reports in the selected time window.");
+        EmptyState.SetText(DeadlockGrid, "No deadlocks in the selected time window.");
+        EmptyState.SetText(QueryStoreRegressionsGrid, QueryStoreRegressionsEmptyText);
         _querySnapshotsFilterMgr = new DataGridFilterManager<ViewerQuerySnapshotRow>(QuerySnapshotsGrid);
         _queryStatsFilterMgr = new DataGridFilterManager<ViewerQueryStatsRow>(QueryStatsGrid);
         _procStatsFilterMgr = new DataGridFilterManager<ViewerProcedureStatsRow>(ProcedureStatsGrid);
@@ -139,7 +146,7 @@ public partial class ViewerServerTab : UserControl
         /* Where the collector cannot run (Azure SQL Database) or has never run for this server, an empty grid says so. Keyed on the
            unfiltered row count. */
         await ShowEngineGapAsync(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
-        await ShowEngineGapAsync(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count);
+        await ShowEngineGapAsync(TraceFlagsNoDataMessage, "trace_flags", traceFlagsTask.Result.Count, keepsOwnEmptyText: true);
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the

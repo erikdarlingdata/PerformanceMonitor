@@ -168,7 +168,7 @@ public partial class ServerTab : UserControl
     /// Raised after each data refresh with alert counts for tab badge display.
     /// </summary>
     public event Action<int, int, DateTime?>? AlertCountsChanged; /* blockingCount, deadlockCount, latestEventTimeUtc */
-    public event Action<int>? ApplyTimeRangeRequested; /* selectedIndex */
+    public event Action<TimeRangeSpec>? ApplyTimeRangeRequested; /* the range to hold on the other tabs (#5562) */
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
@@ -178,6 +178,8 @@ public partial class ServerTab : UserControl
         SetupBarCellMaxes();
 
         _server = server;
+        /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
+        ColumnFilterScope.SetServer(this, server.Id);
         /* Default to "enabled" when no probe is supplied so the empty-state banner never falsely claims
            the trace is off; MainWindow always wires the live schedule probe. */
         _isLongQueryTraceEnabled = isLongQueryTraceEnabled ?? (() => true);
@@ -196,15 +198,13 @@ public partial class ServerTab : UserControl
         ConnectionStatusText.Text = "Connecting...";
 
         /* Apply default time range from settings */
-        TimeRangeCombo.SelectedIndex = App.DefaultTimeRangeHours switch
-        {
-            1 => 0,
-            4 => 1,
-            12 => 2,
-            24 => 3,
-            168 => 4,
-            _ => 1
-        };
+        /* #5562: the shared picker. The zone is read lazily (display mode, this tab's own server clock), so a mode switch
+           or a refreshed clock needs only RangePicker.Refresh(). The saved default is default_time_range, else
+           default_time_range_hours through FromLegacyHours; Value does not raise RangeChanged, so this restore neither
+           persists nor refreshes. */
+        RangePicker.ZoneProvider = GetPickerZone;
+        RangePicker.Value = App.DefaultTimeRange;
+        RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(null, DateTime.UtcNow);
 
         /* #3479: restore the auto-refresh toggle and interval the same way the time range is restored
            above — from the App-level setting, before _refreshTimer exists. Setting these fires their
@@ -215,9 +215,11 @@ public partial class ServerTab : UserControl
         AutoRefreshCheckBox.IsChecked = App.AutoRefreshEnabled;
 
         _refreshTimer = new DispatcherTimer();
+        /* #5371: a tick is a poll. When a tab-switch read or an earlier refresh is still running (or waiting to
+           replay) the data is being refreshed right now, so the tick starts nothing and queues nothing. */
         _refreshTimer.Tick += async (s, e) =>
         {
-            await RefreshAllDataAsync();
+            await RefreshAllDataOnTimerAsync();
         };
         /* The interval comes off the just-restored combo through the same call a live selection change
            makes, so the constructor and AutoRefreshInterval_Changed cannot disagree about what an index
@@ -243,9 +245,6 @@ public partial class ServerTab : UserControl
 
         /* Show warning on Running Jobs tab if login lacks msdb access, except where the collector cannot run at all */
         RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
-
-        /* Initialize time picker ComboBoxes */
-        InitializeTimeComboBoxes();
 
         /* Sync time display mode picker */
         var modeTag = ServerTimeHelper.CurrentDisplayMode.ToString();
@@ -302,6 +301,7 @@ public partial class ServerTab : UserControl
 
         /* Chart hover tooltips */
         CorrelatedLanes.Initialize(_dataService, _serverId, GetPickerZone);
+        CorrelatedLanes.DataStartFound += start => FeedDataStart("overview", start); /* #5562 R7: the Overview lanes' blocking note */
         /* #4766: the six slicers word their time axis and range caption in the tab's display zone. */
         foreach (var slicer in new[] { ActiveQueriesSlicer, QueryStatsSlicer, ProcStatsSlicer, QueryStoreSlicer, BlockingSlicer, DeadlockSlicer })
             slicer.DisplayZone = GetPickerZone;
@@ -507,11 +507,10 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Returns true if the custom date range is selected and both dates are set.
+    /// Returns true when the held range carries its own instants (#5562): a sub-hour span, a calendar period, a typed or
+    /// picked range, 'since'. False for a rolling range of whole hours, which is read as "the last N hours".
     /// </summary>
-    private bool IsCustomRange => TimeRangeCombo.SelectedIndex == 5
-        && FromDatePicker?.SelectedDate != null
-        && ToDatePicker?.SelectedDate != null;
+    private bool IsCustomRange => LiteTimeRange.HasExplicitInstants(CurrentRange());
 
     /// <summary>
     /// When the user switches main tabs or sub-tabs, refresh only the visible sub-tab.
@@ -521,7 +520,10 @@ public partial class ServerTab : UserControl
     private async void MainTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded || _dataService == null) return;
-        if (_isRefreshing) return;
+        /* #5371: no bail on a refresh in flight any more. A switch that arrives during one is remembered (latest
+           wins) and loaded when it ends, and the timer's refresh that follows a pending switch read joins it
+           instead of starting a second read. Programmatic selection changes are still skipped below by
+           _suppressActiveQueriesAutoRefresh, the only flag that was ever meant to silence this handler. */
         if (e.Source != MainTabControl && e.Source != QueriesSubTabControl
             && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
             && e.Source != SystemEventsSubTabControl && e.Source != ConfigChangesSubTabControl) return;
@@ -533,12 +535,11 @@ public partial class ServerTab : UserControl
         // set/cleared around the tab switch in SelectActiveQueriesForDrillDown().
         if (_suppressActiveQueriesAutoRefresh) return;
 
-        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
         var navContext = MainTabControl.SelectedIndex == 2
             ? $"TabNav-Queries.sub{QueriesSubTabControl.SelectedIndex}"
             : $"TabNav-tab{MainTabControl.SelectedIndex}";
         using var _navTimer = Helpers.MethodProfiler.StartTiming(navContext);
-        await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true);
+        await RefreshVisibleTabOnlyAsync();
     }
 
     private async void LiveSnapshot_Click(object sender, RoutedEventArgs e)
@@ -565,22 +566,21 @@ public partial class ServerTab : UserControl
             command.CommandTimeout = 30;
 
             using var reader = await command.ExecuteReaderAsync();
-            var results = new List<QuerySnapshotRow>();
-            var snapshotTime = DateTime.UtcNow;
-
-            while (await reader.ReadAsync())
-            {
-                results.Add(ReadLiveSnapshotRow(reader, snapshotTime));
-            }
+            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow);
 
             _querySnapshotsFilterMgr!.UpdateData(results);
+            /* #4953: the grid now holds the live rows, not the range the "Showing since" banner described, so the banner
+               comes down (collapsed, text cleared) through the same step that hides it for a window nothing cuts short.
+               The next range read raises it again through RefreshWindowTruncatedBannerAsync. A failed live read never
+               reaches this line: the range rows stay in the grid, and so does the banner that describes them. */
+            SetWindowTruncatedBanner(ActiveQueriesWindowTruncatedBanner, truncated: false, DateTime.UtcNow, GetPickerZone());
             /* #4766: the refresh instant is UTC now, worded in the tab's own display zone; the machine clock is
                neither the server's nor the mode's. */
             LiveSnapshotIndicator.Text = $"LIVE at {DisplayZone.Format(DateTime.UtcNow, GetPickerZone(), "HH:mm:ss")} ({results.Count} queries)";
         }
         catch (Exception ex)
         {
-            LiveSnapshotIndicator.Text = $"Error: {ex.Message}";
+            LiveSnapshotIndicator.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
             AppLogger.Error("ServerTab", $"Live snapshot failed: {ex.Message}");
         }
         finally
@@ -590,21 +590,43 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
+    /// The whole live snapshot read, on a thread-pool thread (#5554). This read is the button's own, not the collector's,
+    /// so the statement text and both plans are judged here (#4348), one session (one shared budget) for the whole read;
+    /// the judge parses every plan and can spend up to the session budget, so the loop never runs on the dispatcher.
+    /// </summary>
+    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime)
+        => Task.Run(async () =>
+        {
+            var results = new List<QuerySnapshotRow>();
+            var scrub = new SensitiveStatements.Session();
+            while (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                results.Add(ReadLiveSnapshotRow(reader, snapshotTime, scrub));
+            }
+
+            return results;
+        });
+
+    /// <summary>
     /// One row of the live snapshot query, read into the grid's row. The query is the scheduled collector's,
     /// but this read is the button's own, so it trims the wait type the same way the collector does (see
     /// <see cref="PerformanceMonitor.Collectors.WaitTypeName"/>): a live row then shows the name a stored row
     /// carries. <c>WaitNameTrimTests</c> drives this method with the spaced name the server returns.
     /// </summary>
-    internal static QuerySnapshotRow ReadLiveSnapshotRow(DbDataReader reader, DateTime snapshotTime)
+    internal static QuerySnapshotRow ReadLiveSnapshotRow(DbDataReader reader, DateTime snapshotTime, SensitiveStatements.Session? scrub = null)
     {
-        var liveQueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
-        var liveActualPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString();
+        /* #4348: the statement text and both plans are judged where they enter the row, as the collector's read does
+           for a stored row (QuerySnapshotsCollector.ReadAsync). A named statement reads as the marker in the grid, in
+           every copy and CSV of it, and in a plan saved from it. */
+        scrub ??= new SensitiveStatements.Session();
+        var liveQueryPlan = reader.IsDBNull(4) ? null : scrub.Xml(reader.GetString(4));
+        var liveActualPlan = reader.IsDBNull(5) ? null : scrub.Xml(reader.GetValue(5)?.ToString());
         return new QuerySnapshotRow
         {
             SessionId = Convert.ToInt32(reader.GetValue(0)),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
             ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
-            QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            QueryText = reader.IsDBNull(3) ? "" : scrub.Text(reader.GetString(3)) ?? "",
             QueryPlan = liveQueryPlan,
             LiveQueryPlan = liveActualPlan,
             /* #4239: this row is never written to the store (CollectionTime is "now", not a

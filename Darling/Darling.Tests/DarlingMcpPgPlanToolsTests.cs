@@ -502,6 +502,58 @@ public sealed class DarlingMcpPgPlanQueryIdLiveTests
         }
     }
 
+    /// <summary>
+    /// #5114: captures of one plan shape whose estimates differ share a <c>(query_id, plan_hash)</c>, so they are one
+    /// group, and the group's JSON is the LATEST capture's, not whichever sorts first as text.
+    /// </summary>
+    [Fact]
+    public async Task CapturesOfOneShapeWithDifferentEstimates_AreOneGroup_CarryingTheLatestJson()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_pg_plans latest-JSON test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var earlier = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-40);
+            var later = earlier.AddMinutes(20);
+
+            /* The EARLIER capture's JSON sorts first as text ("Plan Rows":1 < "Plan Rows":9), so min() would pick it. */
+            await SeedCaptureAsync(connection, ct, earlier, WantedQueryId, planHash: "SHAPE1", durationMs: 10,
+                planJson: """{"Plan":{"Node Type":"Index Scan","Plan Rows":1}}""");
+            await SeedCaptureAsync(connection, ct, later, WantedQueryId, planHash: "SHAPE1", durationMs: 30,
+                planJson: """{"Plan":{"Node Type":"Index Scan","Plan Rows":9}}""");
+
+            var rows = await DarlingPgPlanCaptureReader.GetPgPlanCaptureAsync(
+                postgres, ServerId, DateTime.UtcNow.AddHours(-2), DateTime.UtcNow.AddMinutes(5), 10, cancellationToken: ct);
+
+            var group = Assert.Single(rows);
+            Assert.Equal("SHAPE1", group.PlanHash);
+            Assert.Equal(2, group.Captures);
+            Assert.Equal(40, group.TotalDurationMs);
+            Assert.Contains("\"Plan Rows\":9", group.PlanJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"Plan Rows\":1}", group.PlanJson, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task SeedCaptureAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc,
         long queryId, string planHash, double durationMs, string planJson) =>

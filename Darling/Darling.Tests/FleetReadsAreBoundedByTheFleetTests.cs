@@ -382,7 +382,7 @@ GROUP BY server_id";
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
 
             /* The newest-row reads: identical rows for every compared sentinel. */
@@ -513,7 +513,7 @@ GROUP BY server_id";
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
 
             var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-1), now, now, cancellationToken: ct);
@@ -544,12 +544,14 @@ GROUP BY server_id";
 
             /* #3935: dark for five days, registered nine days ago — Offline, the viewer's word for it, and not
                "Awaiting first collection". Its last collection is outside the kept window, so the card carries
-               none; status is what tells this null from the never-collected one below. */
+               none in the windowed read. Release walk W1b: the card still shows its real last collection, read for it alone from
+               before the window (an index descent, FleetOlderCollectionSql), so the page can say how long it has been dark. */
             Assert.False(dark.IsOnline);
             Assert.Equal(FleetHealthBand.Offline, dark.Band);
             Assert.Equal(ServerCollectionStatus.Offline.Word(), dark.Status);
             Assert.False(dark.AwaitingFirstCollection);
-            Assert.Null(dark.LastCollectionTime);
+            Assert.NotNull(dark.LastCollectionTime);
+            Assert.InRange((DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) - dark.LastCollectionTime!.Value).TotalDays, 4.5, 5.5);
 
             var never = cards[NeverCollected];
             Assert.Null(never.CpuPercent);
@@ -583,6 +585,58 @@ GROUP BY server_id";
             var unstamped = cards[Unstamped];
             Assert.Equal(55, unstamped.CpuPercent);        // no engine claim: probed like a SQL Server
 
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelRowsAsync);
+        }
+    }
+
+    /// <summary>
+    /// Release walk W1b (review round): the older-collection read for a dark server (1) runs on a connection the first read has
+    /// already released - a store whose pool holds ONE connection still answers it, where holding the first reader open while the
+    /// second command took its connection waited for the pool and gave up - and (2) is cached per server for
+    /// <see cref="DarlingFleetReader.OlderCollectionCacheMinutes"/>: a second poll inside the window reuses the answer (proved by
+    /// deleting the rows it came from), and one past it reads again.
+    /// </summary>
+    [Fact]
+    public async Task TheOlderCollectionRead_NeedsOnlyOneConnectionAtATime_AndIsCachedPerServer_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live older-collection test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await PrepareHypertablesAsync(connectionString!, connection, ct);
+
+        var onePooled = new NpgsqlConnectionStringBuilder(connectionString) { MaxPoolSize = 1, Timeout = 3, Pooling = true }.ConnectionString;
+        await using var postgres = NpgsqlDataSource.Create(onePooled);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelRowsAsync(connection, ct);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
+            await SeedAsync(connection, now, ct);
+
+            var first = await DarlingFleetReader.ReadLastCollectionAsync(postgres, now, null, ct);
+            Assert.NotNull(first[DarkFiveDays].OlderCollection);
+
+            await using (var delete = new NpgsqlCommand("DELETE FROM collection_log WHERE server_id = $1", connection) { Parameters = { new() { Value = DarkFiveDays } } })
+            {
+                await delete.ExecuteNonQueryAsync(ct);
+            }
+
+            var cached = await DarlingFleetReader.ReadLastCollectionAsync(postgres, now.AddMinutes(1), null, ct);
+            Assert.Equal(first[DarkFiveDays].OlderCollection, cached[DarkFiveDays].OlderCollection);
+
+            var expired = await DarlingFleetReader.ReadLastCollectionAsync(
+                postgres, now.AddMinutes(DarlingFleetReader.OlderCollectionCacheMinutes + 1), null, ct);
+            Assert.Null(expired[DarkFiveDays].OlderCollection);
             bodySucceeded = true;
         }
         finally
@@ -626,7 +680,7 @@ GROUP BY server_id";
         try
         {
             await DeleteSentinelRowsAsync(connection, ct);
-            var now = Micro(DateTime.UtcNow);
+            var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
             using (var analyze = new NpgsqlCommand("ANALYZE collect.memory_stats; ANALYZE collect.deadlocks; ANALYZE collect.servers;", connection))
             {

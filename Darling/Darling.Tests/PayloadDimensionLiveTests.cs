@@ -929,7 +929,7 @@ public sealed class PayloadDimensionLiveTests
     /// #2388's batched drain against a REAL table, which is the half nothing covered. The existing drain
     /// tests inject a fake executor and prove the LOOP arithmetic; the SQL those batches actually run had
     /// only ever been asserted as a string. Both halves can be individually correct and still not delete
-    /// anything: <c>RowCappedDeleteSql</c> puts the cutoff bound, the ORDER BY and the LIMIT inside a
+    /// anything: <c>CursoredRowCappedDeleteSql</c> puts the cutoff bound, the ORDER BY and the LIMIT inside a
     /// <c>ctid IN (...)</c> subquery, and that shape has to survive contact with a real planner.
     ///
     /// <para>This is the failure #2386 measured on the dogfood store, so it is worth stating what "works"
@@ -985,17 +985,25 @@ public sealed class PayloadDimensionLiveTests
             }
 
             var batches = 0;
-            using var delete = new NpgsqlCommand(
-                DarlingRetention.RowCappedDeleteSql(
-                    PayloadDimensions.QueryPlanDimTable, PayloadDimensions.LastSeenColumn, cap),
-                connection);
-            delete.Parameters.AddWithValue(cutoff);
+
+            /* #5569: runs the production cursored statement (ExecuteCursoredBatchAsync), carrying the cursor
+               the way PurgeOneAsync does. Every expired row shares one last_seen, so every batch after the
+               first runs with a cursor equal to that value: the inclusive bound must keep taking the rest of
+               the tie group, or this drain would stall after one batch. */
+            DateTime? cursor = null;
 
             var deleted = await DarlingRetention.DrainBatchesAsync(
                 async batchCt =>
                 {
                     batches++;
-                    var rows = await delete.ExecuteNonQueryAsync(batchCt);
+                    var (rows, maxDeleted) = await DarlingRetention.ExecuteCursoredBatchAsync(
+                        connection, PayloadDimensions.QueryPlanDimTable, PayloadDimensions.LastSeenColumn,
+                        cap, cutoff, cursor, batchCt);
+                    if (maxDeleted is not null)
+                    {
+                        cursor = maxDeleted;
+                    }
+
                     return (rows, cap);
                 },
                 ct);
@@ -1088,6 +1096,7 @@ public sealed class PayloadDimensionLiveTests
             var batches = 0;
             var capsUsed = new List<int>();
             var cap = startCap;
+            DateTime? cursor = null;
 
             var deleted = await DarlingRetention.DrainBatchesAsync(
                 async ct2 =>
@@ -1096,15 +1105,23 @@ public sealed class PayloadDimensionLiveTests
                         async (attemptCap, attemptCt) =>
                         {
                             batches++;
-                            using var delete = new NpgsqlCommand(
-                                DarlingRetention.RowCappedDeleteSql(
-                                    PayloadDimensions.QueryPlanDimTable, PayloadDimensions.LastSeenColumn, attemptCap),
-                                connection);
-                            delete.Parameters.AddWithValue(cutoff);
-                            return await delete.ExecuteNonQueryAsync(attemptCt);
+                            /* The production statement (#5569): cursored, RETURNING the time column. Every
+                               expired row here shares ONE last_seen, so after the first batch every later one
+                               runs with a cursor equal to that value: the whole-tie-group case, which the
+                               inclusive bound must keep draining. */
+                            var (affected, maxDeleted) = await DarlingRetention.ExecuteCursoredBatchAsync(
+                                connection, PayloadDimensions.QueryPlanDimTable, PayloadDimensions.LastSeenColumn,
+                                attemptCap, cutoff, cursor, attemptCt);
+                            if (maxDeleted is not null)
+                            {
+                                cursor = maxDeleted;
+                            }
+
+                            return affected;
                         },
                         cap,
                         floorCap,
+                        PayloadDimensions.QueryPlanDimTable,
                         ct2);
 
                     capsUsed.Add(usedCap);
@@ -1707,7 +1724,14 @@ public sealed class PayloadDimensionLiveTests
         try
         {
             /* INSIDE the try: creating aggregates is the shared-fixture mutation the finally restores.
-               Policies removed immediately - see EnsureAggregatesWithoutPoliciesAsync. */
+               Policies removed immediately - see EnsureAggregatesWithoutPoliciesAsync.
+
+               The clamp is this test's own arrangement, not a property of whatever ran before it: an
+               aggregate a sibling test left standing with deep coverage would report query_stats as
+               covered and the clamp would not hold. So every standing aggregate is dropped first and the
+               ensure below builds them empty; the single recent refresh further down is then the only
+               coverage there is. The finally puts the original set back. */
+            await DropStandingCaggsAsync(connection, ct);
             await EnsureAggregatesWithoutPoliciesAsync(connection, ct);
 
             /* The held digest-carrying fact... */
@@ -1782,7 +1806,12 @@ public sealed class PayloadDimensionLiveTests
                 await DeleteServerRowsAsync(cleanup, serverId, cleanupCt);
                 await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, referencedDigest, cleanupCt);
                 await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, orphanDigest, cleanupCt);
-                await RestoreCaggsAsync(cleanup, preexistingCaggs, cleanupCt);
+                await RestoreCaggsAsync(cleanup, Array.Empty<string>(), cleanupCt);
+                if (preexistingCaggs.Length > 0)
+                {
+                    await EnsureAggregatesWithoutPoliciesAsync(cleanup, cleanupCt);
+                    await RestoreCaggsAsync(cleanup, preexistingCaggs, cleanupCt);
+                }
             });
         }
     }
@@ -1956,6 +1985,13 @@ public sealed class PayloadDimensionLiveTests
             await batch.RemoveRefreshPolicyAsync(view, ct);
         }
     }
+
+    /// <summary>
+    /// Drops every continuous aggregate standing in <c>collect</c>, verified, so the caller starts from a
+    /// store whose rollups hold no coverage at all. The caller owns putting the original set back.
+    /// </summary>
+    private static async Task DropStandingCaggsAsync(NpgsqlConnection connection, CancellationToken ct)
+        => await new LiveCleanupBatch(connection).DropContinuousAggregatesAsync(await ExistingCaggsAsync(connection, ct), ct);
 
     /// <summary>
     /// Makes the raw tier's rollup coverage reach back over everything raw holds, so the #1784 gate judges a

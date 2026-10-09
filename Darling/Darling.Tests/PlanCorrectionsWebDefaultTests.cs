@@ -39,8 +39,8 @@ public sealed class PlanCorrectionsWebDefaultTests
             web.Split('\n'),
             l => l.Contains("DarlingMcpPlanCorrectionTools.GetPlanCorrections(", StringComparison.Ordinal));
 
-        Assert.Contains("full_text: QueryBool(c, \"full_text\", true)", dispatchLine, StringComparison.Ordinal);
-        Assert.DoesNotContain("full_text: QueryBool(c, \"full_text\", false)", dispatchLine, StringComparison.Ordinal);
+        Assert.Contains("QueryBool(c, \"full_text\", true)", dispatchLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("QueryBool(c, \"full_text\", false)", dispatchLine, StringComparison.Ordinal);
         Assert.Contains("PBool(\"full_text\", true)", web, StringComparison.Ordinal);
     }
 

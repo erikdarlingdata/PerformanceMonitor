@@ -101,21 +101,21 @@ public sealed class ViewerLatchSpinlockSqlTests
     public void SnapshotRows_NullTheDeltasOnTheMarker_AndSpellTheInterval()
     {
         var marker = new LatchStatsSnapshotRow("BUFFER", 0, 0, 0,
-            DeltaSeriesShaping.ReadableDelta(0, 0), DeltaSeriesShaping.ReadableDelta(0, 0), 0);
+            DeltaSeriesShaping.ReadableDelta(0, 0), DeltaSeriesShaping.ReadableDelta(0, 0), 0, DateTime.UnixEpoch);
         Assert.True(marker.IsUnknowable);
         Assert.Null(marker.DeltaWaitTimeMs);
         Assert.Null(marker.DeltaWaitingRequestsCount);
         Assert.Equal("restart / first sample", marker.IntervalDisplay);
 
         var measured = new SpinlockStatsSnapshotRow("LOCK_HASH", 900, 0, 0, 0, 0,
-            DeltaSeriesShaping.ReadableDelta(400, 120), DeltaSeriesShaping.ReadableDelta(0, 120), 120);
+            DeltaSeriesShaping.ReadableDelta(400, 120), DeltaSeriesShaping.ReadableDelta(0, 120), 120, DateTime.UnixEpoch);
         Assert.False(measured.IsUnknowable);
         Assert.Equal(400L, measured.DeltaCollisions);
         Assert.Equal(0L, measured.DeltaSpins);   // a measured zero stays a zero
         Assert.Equal("120", measured.IntervalDisplay);
 
         var preV127 = new LatchStatsSnapshotRow("LOG_MANAGER", 0, 0, 0,
-            DeltaSeriesShaping.ReadableDelta(100, null), DeltaSeriesShaping.ReadableDelta(4000, null), null);
+            DeltaSeriesShaping.ReadableDelta(100, null), DeltaSeriesShaping.ReadableDelta(4000, null), null, DateTime.UnixEpoch);
         Assert.False(preV127.IsUnknowable);
         Assert.Equal(4000L, preV127.DeltaWaitTimeMs);
         Assert.Equal("not stored", preV127.IntervalDisplay);

@@ -490,35 +490,16 @@
                         </Grid>
                     </Border>
                 </Popup>
-                <ComboBox x:Name="TimeRangeCombo" SelectedIndex="3" Width="120" Margin="0,0,8,4"
-                          SelectionChanged="TimeRangeCombo_SelectionChanged"
-                          ToolTip="Time window every inner tab reads">
-                    <ComboBoxItem Content="Last 1 hour"/>
-                    <ComboBoxItem Content="Last 4 hours"/>
-                    <ComboBoxItem Content="Last 12 hours"/>
-                    <ComboBoxItem Content="Last 24 hours"/>
-                    <ComboBoxItem Content="Last 7 days"/>
-                    <ComboBoxItem Content="Custom Range"/>
-                </ComboBox>
-                <DatePicker x:Name="FromDatePicker" Width="120" Margin="0,0,2,4" Visibility="Collapsed"
-                            SelectedDateChanged="CustomDateRange_Changed" CalendarOpened="DatePicker_CalendarOpened"/>
-                <ComboBox x:Name="FromHourCombo" Width="70" Margin="0,0,2,4" Visibility="Collapsed"
-                          SelectionChanged="CustomTimeCombo_Changed" ToolTip="Hour"/>
-                <ComboBox x:Name="FromMinuteCombo" Width="60" Margin="0,0,2,4" Visibility="Collapsed"
-                          SelectionChanged="CustomTimeCombo_Changed" ToolTip="Minute"/>
-                <TextBlock x:Name="ToLabel" Text="to" VerticalAlignment="Center" Margin="4,0,4,0" Visibility="Collapsed"
-                           Foreground="{DynamicResource ForegroundBrush}"/>
-                <DatePicker x:Name="ToDatePicker" Width="120" Margin="0,0,2,4" Visibility="Collapsed"
-                            SelectedDateChanged="CustomDateRange_Changed" CalendarOpened="DatePicker_CalendarOpened"/>
-                <ComboBox x:Name="ToHourCombo" Width="70" Margin="0,0,2,4" Visibility="Collapsed"
-                          SelectionChanged="CustomTimeCombo_Changed" ToolTip="Hour"/>
-                <ComboBox x:Name="ToMinuteCombo" Width="60" Margin="0,0,8,4" Visibility="Collapsed"
-                          SelectionChanged="CustomTimeCombo_Changed" ToolTip="Minute"/>
+                <!-- #5562: the shared time range picker (presets from 5 minutes, calendar periods, typed or calendar-picked
+                     ranges) replaces the preset combo and the From/To date, hour and minute pickers. -->
+                <ui:TimeRangePicker x:Name="RangePicker" AutomationProperties.Name="Time range" Margin="0,0,8,4" VerticalAlignment="Top"
+                                    RangeChanged="RangePicker_RangeChanged"
+                                    ToolTip="Time window every inner tab reads"/>
                 <Button Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,4"
                         ToolTip="Apply this time range to all open server tabs"/>
                 <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,0"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <ComboBox x:Name="CompareToCombo" SelectedIndex="0" Width="150" Margin="0,0,8,4"
+                <ComboBox x:Name="CompareToCombo" AutomationProperties.Name="Compare to" ToolTipService.ShowOnDisabled="True" SelectedIndex="0" Width="150" Margin="0,0,8,4"
                           SelectionChanged="CompareToCombo_SelectionChanged"
                           ToolTip="Compare the current window against a baseline period">
                     <ComboBoxItem Content="None"/>
@@ -532,7 +513,7 @@
                 <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center"
                           Margin="0,0,4,4" Foreground="{DynamicResource ForegroundBrush}"
                           IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
-                <ComboBox x:Name="AutoRefreshIntervalCombo" SelectedIndex="1" Width="70" Margin="0,0,0,4"
+                <ComboBox x:Name="AutoRefreshIntervalCombo" AutomationProperties.Name="Auto-refresh interval" SelectedIndex="1" Width="70" Margin="0,0,0,4"
                           SelectionChanged="AutoRefreshInterval_Changed"
                           ToolTip="Auto-refresh interval">
                     <ComboBoxItem Content="30s"/>
@@ -542,7 +523,7 @@
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
                 <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,0"
                            Foreground="{DynamicResource ForegroundBrush}"/>
-                <ComboBox x:Name="TimeDisplayModeBox" Width="120" Margin="0,0,0,4"
+                <ComboBox x:Name="TimeDisplayModeBox" AutomationProperties.Name="Time display" Width="120" Margin="0,0,0,4"
                           SelectionChanged="TimeDisplayMode_SelectionChanged"
                           ToolTip="How timestamps are displayed">
                     <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
@@ -690,10 +671,17 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <local:TimeRangeSlicerControl x:Name="ActiveQueriesSlicer" Grid.Row="0"/>
-                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+                            <!-- "Showing since <start>" when this server's query_snapshots rows start after the range
+                                 does (DataWindowFloor via LoadActiveQueriesAsync). -->
+                            <TextBlock Grid.Row="1" x:Name="QuerySnapshotsTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
                                 <TextBlock Text="Currently Running Queries" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0"/>
                                 <Button x:Name="LatestSnapshotButton" Content="Latest Snapshot"
                                         Click="LatestSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
@@ -701,7 +689,7 @@
                                 <TextBlock x:Name="LatestSnapshotIndicator" Text="" FontSize="12"
                                            Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
                             </StackPanel>
-                            <DataGrid Grid.Row="2" x:Name="QuerySnapshotsGrid" Style="{StaticResource DarkGrid}"
+                            <DataGrid Grid.Row="3" x:Name="QuerySnapshotsGrid" Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource QuerySnapshotGridRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                                       Sorting="QuerySnapshotsGrid_Sorting">
@@ -1712,12 +1700,19 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        Text="Queries whose Query Store performance regressed — recent-window averages vs. the baseline captured before the window, kept when CPU regressed more than 25%, ranked by total added duration. Double-click a row for its execution history."/>
-                            <DataGrid Grid.Row="1" x:Name="QueryStoreRegressionsGrid" Style="{StaticResource DarkGrid}"
+                            <!-- "Showing since <start>" when this server's Query Store history starts after the BASELINE window does: the read
+                                 compares the range with the 7 days before it, so the notice keys on that earlier window (#4966). -->
+                            <TextBlock Grid.Row="1" x:Name="QueryStoreRegressionsTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="2" x:Name="QueryStoreRegressionsGrid" Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource QueryStorePlanGridRowStyle}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -1802,6 +1797,7 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
@@ -1816,12 +1812,20 @@
                             <TextBlock Grid.Row="1" x:Name="QueryStoreClutterServerNote" Visibility="Collapsed"
                                        Margin="8,0,8,4" FontSize="11" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <!-- "Showing since <start>" when this server's Query Store history starts after the range does: the
+                                 plan churn is an aggregate over the window from query_store_stats, and the read cost one from the
+                                 query_store collector's runs in the collection log, so the note names the later of the two starts
+                                 and a range that reaches before it would read as a verdict over the whole of it (#4966, #5022). -->
+                            <TextBlock Grid.Row="2" x:Name="QueryStoreClutterTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
                             <!-- The measured columns bind NUMBERS with StringFormat and TargetNullValue rather than
                                  pre-formatted text: this grid exists to rank, so a column must sort by magnitude, and a
                                  string column would sort 9 above 1,234 while looking like a working sort. The em-dash
                                  comes from TargetNullValue, so an unmeasured arm reads like every other absent cell in
                                  the Viewer without becoming a zero. -->
-                            <DataGrid Grid.Row="2" x:Name="QueryStoreClutterGrid" Style="{StaticResource DarkGrid}"
+                            <DataGrid Grid.Row="3" x:Name="QueryStoreClutterGrid" Style="{StaticResource DarkGrid}"
                                       SelectionChanged="QueryStoreClutterGrid_SelectionChanged"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -1867,14 +1871,14 @@
                             <!-- The row's recommendation, whole. It is a paragraph per reason, so it gets its own
                                  pane rather than a column nobody can read; the text is the composition's, never
                                  re-worded here, so this pane and the MCP payload say the same thing. -->
-                            <TextBlock Grid.Row="3" x:Name="QueryStoreClutterRecommendation" Margin="8,6,8,6"
+                            <TextBlock Grid.Row="4" x:Name="QueryStoreClutterRecommendation" Margin="8,6,8,6"
                                        FontSize="11" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        Text="Select a database above for its recommendation."/>
                             <!-- Per SERVER, and labelled as such: QDS_* waits and the Query Store memory clerk are
                                  instance-wide. The proxy is the NON-sleep QDS types only — the four sleep waits are
                                  dropped at collection — which is why the excluded list is printed rather than implied. -->
-                            <Expander Grid.Row="4" Header="Query Store overhead (per server)" Margin="8,0,8,8" IsExpanded="True">
+                            <Expander Grid.Row="5" Header="Query Store overhead (per server)" Margin="8,0,8,8" IsExpanded="True">
                                 <StackPanel>
                                     <DataGrid x:Name="QueryStoreOverheadGrid" Style="{StaticResource DarkGrid}"
                                               MaxHeight="160" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -1902,13 +1906,21 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        TextWrapping="Wrap"
                                        Text="The engine's own automatic plan correction findings — sys.dm_db_tuning_recommendations, with the regressed query's text resolved through Query Store at collection time. The engine keeps recommendations only until it restarts, so a captured row can be the only surviving record that a regression happened. Per-database enablement state is on the Configuration tab's Automatic Tuning sub-tab."/>
-                            <DataGrid Grid.Row="1" x:Name="PlanCorrectionGrid" Style="{StaticResource DarkGrid}"
+                            <!-- "Showing since <start>" when this server's plan corrections start after the range does, or the newest
+                                 200 rows (the read's cap) reach back no further than the row named: the earlier of the collector's
+                                 coverage (DataWindowFloor) and the earliest row shown, or the oldest row of a full page (#4966). -->
+                            <TextBlock Grid.Row="1" x:Name="PlanCorrectionsTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="2" x:Name="PlanCorrectionGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">
@@ -2015,6 +2027,7 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,4,0,4">
@@ -2027,7 +2040,14 @@
                                     <ComboBoxItem Content="Execution Count"/>
                                 </ComboBox>
                             </StackPanel>
-                            <scottplot:WpfPlot Grid.Row="1" x:Name="QueryHeatmapChart"
+                            <!-- "Showing since <start>" when this server's query stats start after the range does: the earlier of the
+                                 collector's coverage (DataWindowFloor) and the first column drawn. The chart draws only the 5-minute bins
+                                 that hold a row, so a stretch with no row has no column to say it is empty (#4966). -->
+                            <TextBlock Grid.Row="1" x:Name="QueryHeatmapTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <scottplot:WpfPlot Grid.Row="2" x:Name="QueryHeatmapChart"
                                                 MouseMove="HeatmapChart_MouseMove"
                                                 MouseLeave="HeatmapChart_MouseLeave"/>
                         </Grid>
@@ -2114,6 +2134,7 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="2*"/>
                                 <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
+                                <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                             </DataGrid.Columns>
                         </DataGrid>
                         <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
@@ -2182,6 +2203,10 @@
                                 <StackPanel Margin="0,0,24,0">
                                     <TextBlock Text="Memory Model" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                     <TextBlock x:Name="SqlMemoryModelText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <StackPanel Margin="0,0,24,0">
+                                    <TextBlock Text="Collected" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                    <TextBlock x:Name="MemoryCollectedText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                 </StackPanel>
                             </WrapPanel>
                         </Border>
@@ -2281,7 +2306,9 @@
                                      report.plan_cache_bloat parity): a client-side CASE on single-use/total plans. -->
                                 <TextBlock Text="Bloat Level:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                 <TextBlock x:Name="PlanCacheBloatLevelText" Text="--" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                                <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
+                                <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="PlanCacheCollectedText" Text="--" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Border>
                     </Grid>
@@ -2290,9 +2317,20 @@
                 <!-- Memory Pressure Events Sub-Tab -->
                 <TabItem Header="Memory Pressure Events">
                     <Grid Margin="8">
-                        <scottplot:WpfPlot x:Name="MemoryPressureEventsChart"/>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- "Showing since <start>" when this server's pressure events start after the range does: the earlier of the
+                             collector's coverage (DataWindowFloor) and the first event drawn. The chart draws bars only where pressure was
+                             recorded, so a span with no data reads as a span with no pressure (#4966). -->
+                        <TextBlock Grid.Row="0" x:Name="MemoryPressureEventsTruncationBanner" Visibility="Collapsed"
+                                   Padding="8,4" FontWeight="Bold"
+                                   Foreground="{DynamicResource ForegroundBrush}"
+                                   Background="#22FFAA00"/>
+                        <scottplot:WpfPlot Grid.Row="1" x:Name="MemoryPressureEventsChart"/>
                         <!-- Shown only where the memory_pressure_events collector does not run (Azure SQL Database) or has never run for this server. -->
-                        <TextBlock x:Name="MemoryPressureEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
+                        <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
                 </TabItem>
 
@@ -2384,17 +2422,34 @@
                     <TabItem Header="Trends">
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <Border Grid.Row="0" Margin="0,0,0,4">
+                            <!-- One "Showing since" banner per chart (#4966): the three charts draw from three different floors
+                                 (wait_stats, the blocked-process-report sources, deadlocks), so no one note is true of all of them. -->
+                            <TextBlock Grid.Row="0" x:Name="LockWaitTrendTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="1" Margin="0,0,0,4">
                                 <scottplot:WpfPlot x:Name="LockWaitTrendChart"/>
                             </Border>
-                            <Border Grid.Row="1" Margin="0,4,0,4">
+                            <TextBlock Grid.Row="2" x:Name="BlockingTrendTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="3" Margin="0,4,0,4">
                                 <scottplot:WpfPlot x:Name="BlockingTrendChart"/>
                             </Border>
-                            <Border Grid.Row="2" Margin="0,4,0,0">
+                            <TextBlock Grid.Row="4" x:Name="DeadlockTrendTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="5" Margin="0,4,0,0">
                                 <scottplot:WpfPlot x:Name="DeadlockTrendChart"/>
                             </Border>
                         </Grid>
@@ -2420,7 +2475,9 @@
                              don't collide on a short (768px) laptop. The summary strip spans both columns below. -->
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
@@ -2428,19 +2485,30 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <Border Grid.Row="0" Grid.Column="0" Margin="0,0,4,4">
+                            <!-- One "Showing since" banner per chart pair (#4966): the blocking pair draws from the blocked-process-report
+                                 sources and the deadlock pair from deadlocks, which have different floors. The summary strip below is
+                                 covered by these. -->
+                            <TextBlock Grid.Row="0" Grid.ColumnSpan="2" x:Name="BlockingStatsBlockingTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="1" Grid.Column="0" Margin="0,0,4,4">
                                 <scottplot:WpfPlot x:Name="BlockingDurationChart"/>
                             </Border>
-                            <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,4">
+                            <Border Grid.Row="1" Grid.Column="1" Margin="4,0,0,4">
                                 <scottplot:WpfPlot x:Name="BlockingTotalDurationChart"/>
                             </Border>
-                            <Border Grid.Row="1" Grid.Column="0" Margin="0,4,4,0">
+                            <TextBlock Grid.Row="2" Grid.ColumnSpan="2" x:Name="BlockingStatsDeadlockTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="3" Grid.Column="0" Margin="0,4,4,0">
                                 <scottplot:WpfPlot x:Name="DeadlockWaitChart"/>
                             </Border>
-                            <Border Grid.Row="1" Grid.Column="1" Margin="4,4,0,0">
+                            <Border Grid.Row="3" Grid.Column="1" Margin="4,4,0,0">
                                 <scottplot:WpfPlot x:Name="DeadlockTotalWaitChart"/>
                             </Border>
-                            <Border Grid.Row="2" Grid.ColumnSpan="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
+                            <Border Grid.Row="4" Grid.ColumnSpan="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                                     <TextBlock Text="Blocking Events:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                     <TextBlock x:Name="BlockingStatsEventCountText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
@@ -2463,15 +2531,27 @@
                     <TabItem Header="Current Waits">
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
-                            <Border Grid.Row="0" Margin="0,0,0,4">
+                            <!-- "Showing since <start>" when this server's waiting_tasks rows start after the range
+                                 does (DataWindowFloor via LoadBlockingAsync). Both charts read waiting_tasks. -->
+                            <TextBlock Grid.Row="0" x:Name="CurrentWaitsTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <Border Grid.Row="1" Margin="0,0,0,4">
                                 <scottplot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
                             </Border>
-                            <Border Grid.Row="1" Margin="0,4,0,0">
+                            <Border Grid.Row="2" Margin="0,4,0,0">
                                 <scottplot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
                             </Border>
+                            <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting. -->
+                            <TextBlock Grid.Row="3" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundDimBrush}"
+                                       Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
                         </Grid>
                     </TabItem>
                     <!-- Blocked Process Reports — widened to Lite's full grid (W1e): UTC slicer + ~25 filterable
@@ -2485,8 +2565,16 @@
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <local:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
-                            <TextBlock x:Name="BlockingSeparatelyMonitoredNote" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,2,10,4" FontSize="11"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <!-- "Showing since <start>" when this server's blocked process reports start after the range does: the earlier of the
+                                 collector's coverage (DataWindowFloor) and the earliest event shown (#4966). -->
+                            <StackPanel Grid.Row="1">
+                                <TextBlock x:Name="BlockedProcessReportsTruncationBanner" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                                <TextBlock x:Name="BlockingSeparatelyMonitoredNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,2,10,4" FontSize="11"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            </StackPanel>
                             <DataGrid x:Name="BlockedProcessReportGrid" Grid.Row="2"
                                       Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource BlockingRowStyle}"
@@ -2601,8 +2689,16 @@
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <local:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
-                            <TextBlock x:Name="DeadlockSeparatelyMonitoredNote" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,2,10,4" FontSize="11"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <!-- "Showing since <start>" when this server's deadlocks start after the range does: the earlier of the
+                                 collector's coverage (DataWindowFloor) and the earliest event shown (#4966). -->
+                            <StackPanel Grid.Row="1">
+                                <TextBlock x:Name="DeadlocksTruncationBanner" Visibility="Collapsed"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                                <TextBlock x:Name="DeadlockSeparatelyMonitoredNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,2,10,4" FontSize="11"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            </StackPanel>
                             <DataGrid x:Name="DeadlockGrid" Grid.Row="2"
                                       Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource DeadlockRowStyle}"
@@ -2763,7 +2859,9 @@
                         <TextBlock Text="Top Host:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <TextBlock x:Name="SessionStatsTopHostText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
                         <TextBlock Text="Databases:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                        <TextBlock x:Name="SessionStatsDatabasesText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="SessionStatsDatabasesText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                        <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock x:Name="SessionStatsCollectedText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Border>
             </Grid>
@@ -2803,28 +2901,29 @@
                         <DataGridTextColumn Binding="{Binding StartTimeLocal}" Width="150" SortMemberPath="StartTime">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StartTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Start Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding CurrentDurationFormatted}" Width="120" SortMemberPath="CurrentDurationSeconds">
+                        <DataGridTextColumn Binding="{Binding CurrentDurationFormatted}" Width="150" SortMemberPath="CurrentDurationSeconds">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Current Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="110" SortMemberPath="AvgDurationSeconds">
+                        <DataGridTextColumn Binding="{Binding AvgDurationFormatted}" Width="130" SortMemberPath="AvgDurationSeconds">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding P95DurationFormatted}" Width="110" SortMemberPath="P95DurationSeconds">
+                        <DataGridTextColumn Binding="{Binding P95DurationFormatted}" Width="130" SortMemberPath="P95DurationSeconds">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="P95DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="P95 Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding PercentOfAverageFormatted}" Width="100" SortMemberPath="PercentOfAverage">
+                        <DataGridTextColumn Binding="{Binding PercentOfAverageFormatted}" Width="125" SortMemberPath="PercentOfAverage">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PercentOfAverageFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="% of Average" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding RunningLongDisplay}" Width="90">
+                        <DataGridTextColumn Binding="{Binding RunningLongDisplay}" Width="125">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunningLongDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Running Long" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding SuccessfulRunCount}" ElementStyle="{StaticResource NumericCell}" Width="140">
+                        <DataGridTextColumn Binding="{Binding SuccessfulRunCount}" ElementStyle="{StaticResource NumericCell}" Width="190">
                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SuccessfulRunCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Successful Runs (30d)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                         </DataGridTextColumn>
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                     </DataGrid.Columns>
                 </DataGrid>
                 <!-- Shown only where the running_jobs collector does not run (Azure SQL Database has no SQL Server Agent) or has never run for this server (AWS RDS). -->
-                <TextBlock Grid.Row="2" x:Name="RunningJobsNoDataMessage" Style="{StaticResource EmptyHint}"/>
+                <TextBlock Grid.Row="2" x:Name="RunningJobsNoDataMessage" Text="No SQL Agent jobs are running." Style="{StaticResource EmptyHint}"/>
             </Grid>
         </TabItem>
 
@@ -2842,17 +2941,20 @@
                                     <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="300">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ConfigurationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Setting" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ValueConfigured}" Width="130">
+                                    <DataGridTextColumn Binding="{Binding ValueConfigured}" Width="150">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueConfigured" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Configured Value" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ValueInUse}" Width="130">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueInUse" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value In Use" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding DynamicDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding DynamicDisplay}" Width="95">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DynamicDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Dynamic" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding AdvancedDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding AdvancedDisplay}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AdvancedDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Advanced" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
@@ -2869,46 +2971,46 @@
                                 <DataGridTextColumn Binding="{Binding StateDesc}" Width="90">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StateDesc" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="State" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding CompatibilityLevel}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                <DataGridTextColumn Binding="{Binding CompatibilityLevel}" ElementStyle="{StaticResource NumericCell}" Width="125">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CompatibilityLevel" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Compat Level" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding CollationName}" Width="180">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collation" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding RecoveryModel}" Width="120">
+                                <DataGridTextColumn Binding="{Binding RecoveryModel}" Width="135">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecoveryModel" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recovery Model" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding ReadOnlyDisplay}" Width="85">
+                                <DataGridTextColumn Binding="{Binding ReadOnlyDisplay}" Width="105">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReadOnlyDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Read Only" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding RcsiDisplay}" Width="65">
+                                <DataGridTextColumn Binding="{Binding RcsiDisplay}" Width="75">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RcsiDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="RCSI" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding SnapshotIsolationState}" Width="130">
+                                <DataGridTextColumn Binding="{Binding SnapshotIsolationState}" Width="160">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SnapshotIsolationState" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Snapshot Isolation" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AutoCreateStatsDisplay}" Width="110">
+                                <DataGridTextColumn Binding="{Binding AutoCreateStatsDisplay}" Width="155">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AutoCreateStatsDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Auto Create Stats" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AutoUpdateStatsDisplay}" Width="115">
+                                <DataGridTextColumn Binding="{Binding AutoUpdateStatsDisplay}" Width="155">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AutoUpdateStatsDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Auto Update Stats" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AutoUpdateStatsAsyncDisplay}" Width="135">
+                                <DataGridTextColumn Binding="{Binding AutoUpdateStatsAsyncDisplay}" Width="160">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AutoUpdateStatsAsyncDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Async Stats Update" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding ParameterizationForcedDisplay}" Width="140">
+                                <DataGridTextColumn Binding="{Binding ParameterizationForcedDisplay}" Width="190">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ParameterizationForcedDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Forced Parameterization" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding QueryStoreDisplay}" Width="95">
+                                <DataGridTextColumn Binding="{Binding QueryStoreDisplay}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryStoreDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Store" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding EncryptedDisplay}" Width="85">
+                                <DataGridTextColumn Binding="{Binding EncryptedDisplay}" Width="105">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EncryptedDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Encrypted" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding TrustworthyDisplay}" Width="100">
+                                <DataGridTextColumn Binding="{Binding TrustworthyDisplay}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TrustworthyDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Trustworthy" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding DbChainingDisplay}" Width="100">
+                                <DataGridTextColumn Binding="{Binding DbChainingDisplay}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DbChainingDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="DB Chaining" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding BrokerEnabledDisplay}" Width="95">
@@ -2917,35 +3019,38 @@
                                 <DataGridTextColumn Binding="{Binding CdcEnabledDisplay}" Width="70">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CdcEnabledDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="CDC" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding MixedPageAllocationDisplay}" Width="115">
+                                <DataGridTextColumn Binding="{Binding MixedPageAllocationDisplay}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MixedPageAllocationDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Mixed Pages" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LogReuseWaitDesc}" Width="130">
+                                <DataGridTextColumn Binding="{Binding LogReuseWaitDesc}" Width="135">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LogReuseWaitDesc" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Log Reuse Wait" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AutoCloseDisplay}" Width="85">
+                                <DataGridTextColumn Binding="{Binding AutoCloseDisplay}" Width="110">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AutoCloseDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Auto Close" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AutoShrinkDisplay}" Width="90">
+                                <DataGridTextColumn Binding="{Binding AutoShrinkDisplay}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AutoShrinkDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Auto Shrink" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding PageVerifyOption}" Width="110">
+                                <DataGridTextColumn Binding="{Binding PageVerifyOption}" Width="120">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PageVerifyOption" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Page Verify" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding TargetRecoveryTimeSeconds}" ElementStyle="{StaticResource NumericCell}" Width="135">
+                                <DataGridTextColumn Binding="{Binding TargetRecoveryTimeSeconds}" ElementStyle="{StaticResource NumericCell}" Width="165">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TargetRecoveryTimeSeconds" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Target Recovery (s)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding DelayedDurability}" Width="130">
+                                <DataGridTextColumn Binding="{Binding DelayedDurability}" Width="160">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DelayedDurability" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Delayed Durability" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding AdrDisplay}" Width="65">
+                                <DataGridTextColumn Binding="{Binding AdrDisplay}" Width="70">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AdrDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="ADR" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding MemoryOptimizedDisplay}" Width="120">
+                                <DataGridTextColumn Binding="{Binding MemoryOptimizedDisplay}" Width="150">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MemoryOptimizedDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Memory Optimized" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding OptimizedLockingDisplay}" Width="125">
+                                <DataGridTextColumn Binding="{Binding OptimizedLockingDisplay}" Width="155">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OptimizedLockingDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Optimized Locking" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
@@ -2964,6 +3069,9 @@
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding ValueForSecondary}" Width="200">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueForSecondary" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value for Secondary" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
@@ -2991,11 +3099,14 @@
                                 <DataGridTextColumn Header="Interval Min" Binding="{Binding IntervalLengthMinutes}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
                                 <!-- V137 (#3796): the two capture modes, trailing like the store columns and the MCP payload. ALL is the
                                      plan-churn factory; a dash is a pre-rung row (or, for wait stats, a 2016 engine), never OFF. -->
-                                <DataGridTextColumn Binding="{Binding CaptureModeDisplay}" Width="110">
+                                <DataGridTextColumn Binding="{Binding CaptureModeDisplay}" Width="125">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureModeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Capture Mode" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding WaitStatsCaptureModeDisplay}" Width="130">
+                                <DataGridTextColumn Binding="{Binding WaitStatsCaptureModeDisplay}" Width="160">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitStatsCaptureModeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Stats Capture" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
@@ -3037,16 +3148,19 @@
                                     <DataGridTextColumn Binding="{Binding StatusDisplay}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StatusDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding GlobalDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding GlobalDisplay}" Width="90">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GlobalDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Global" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding SessionDisplay}" Width="80">
+                                    <DataGridTextColumn Binding="{Binding SessionDisplay}" Width="95">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Session" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CaptureTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <!-- Shown only where the trace_flags collector does not run (Azure SQL Database) or has never run for this server. -->
-                            <TextBlock x:Name="TraceFlagsNoDataMessage" Style="{StaticResource EmptyHint}"/>
+                            <!-- Shown when the grid has no rows: its own words say no trace flags are enabled, and the engine-gap sentence replaces them where the trace_flags collector does not run (Azure SQL Database) or has never run for this server. -->
+                            <TextBlock x:Name="TraceFlagsNoDataMessage" Style="{StaticResource EmptyHint}" Text="No trace flags are enabled on this server."/>
                         </Grid>
                     </TabItem>
                 </TabControl>
@@ -3073,7 +3187,17 @@
                 <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="Server Config Changes">
                         <Grid>
-                            <DataGrid x:Name="ServerConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <!-- "Showing since <start>" when this server's server_config snapshots start after the range does: the earlier of the
+                                 collector's coverage (DataWindowFloor) and the earliest change shown (#4966). -->
+                            <TextBlock Grid.Row="0" x:Name="ServerConfigChangesTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="1" x:Name="ServerConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="260"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ConfigurationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Configuration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3087,12 +3211,21 @@
                                     <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="250"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="ServerConfigChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No server configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
+                            <TextBlock Grid.Row="1" x:Name="ServerConfigChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No server configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
                         </Grid>
                     </TabItem>
                     <TabItem Header="Database Config Changes">
                         <Grid>
-                            <DataGrid x:Name="DatabaseConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <!-- The same note for the database_config snapshots (#4966). -->
+                            <TextBlock Grid.Row="0" x:Name="DatabaseConfigChangesTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="1" x:Name="DatabaseConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3102,12 +3235,21 @@
                                     <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="250"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="DatabaseConfigChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No database configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
+                            <TextBlock Grid.Row="1" x:Name="DatabaseConfigChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No database configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
                         </Grid>
                     </TabItem>
                     <TabItem Header="Trace Flag Changes">
                         <Grid>
-                            <DataGrid x:Name="TraceFlagChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <!-- The same note for the trace_flags snapshots (#4966). -->
+                            <TextBlock Grid.Row="0" x:Name="TraceFlagChangesTruncationBanner" Visibility="Collapsed"
+                                       Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Background="#22FFAA00"/>
+                            <DataGrid Grid.Row="1" x:Name="TraceFlagChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TraceFlag}" ElementStyle="{StaticResource NumericCell}" Width="100"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TraceFlag" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Trace Flag" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3119,7 +3261,7 @@
                                     <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="230"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="TraceFlagChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No trace flag changes in the selected time window (needs at least two config captures bracketing an enable/disable)."/>
+                            <TextBlock Grid.Row="1" x:Name="TraceFlagChangesNoDataMessage" Style="{StaticResource EmptyHint}" Text="No trace flag changes in the selected time window (needs at least two config captures bracketing an enable/disable)."/>
                         </Grid>
                     </TabItem>
                 </TabControl>
@@ -3159,7 +3301,19 @@
              shreds it with the Common SystemHealthParser, and shows only the sp_HealthParser-significant
              rows (SystemEventSignificance). Event times render machine-local (the XE @timestamp). -->
         <TabItem Header="System Events">
-            <TabControl x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0"
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <!-- "Showing since <start>" above the sub-tab control, for the nine grids that read system_health_events and
+                     default_trace_events: the earlier of the collectors' coverage and the earliest event shown (#4966). The two
+                     chart sub-tabs take it down. -->
+                <TextBlock x:Name="SystemEventsTruncationBanner" Grid.Row="0" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+            <TabControl Grid.Row="1" x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0"
                         ItemContainerStyle="{DynamicResource SubTabItemStyle}"
                         SelectionChanged="SystemEventsSubTabs_SelectionChanged">
 
@@ -3531,6 +3685,7 @@
                     </Grid>
                 </TabItem>
             </TabControl>
+            </Grid>
         </TabItem>
 
         <!-- Latches & Spinlocks Tab — the Dashboard-parity port of ResourceMetricsContent's Latch Stats /
@@ -3544,15 +3699,22 @@
         <TabItem Header="Latches &amp; Spinlocks">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
                 <!-- Latch wait-time trend (top 5 classes by delta wait) + per-class latest-snapshot grid. -->
-                <scottplot:WpfPlot Grid.Row="0" x:Name="LatchStatsChart"/>
-                <Expander Grid.Row="1" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                <!-- "Showing since <start>" when this server's latch_stats rows start after the range does: the trend draws a flat zero over an empty stretch (#4966). -->
+                <TextBlock Grid.Row="0" x:Name="LatchStatsTruncationBanner" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+                <scottplot:WpfPlot Grid.Row="1" x:Name="LatchStatsChart"/>
+                <Expander Grid.Row="2" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                     <DataGrid x:Name="LatchStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Latch Class" Binding="{Binding LatchClass}" Width="*"/>
@@ -3565,13 +3727,19 @@
                             <DataGridTextColumn Header="Wait Time (ms)" Binding="{Binding WaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                             <DataGridTextColumn Header="Max Wait (ms)" Binding="{Binding MaxWaitTimeMs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                             <DataGridTextColumn Header="Waiting Reqs (total)" Binding="{Binding WaitingRequestsCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                            <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
 
                 <!-- Spinlock collisions trend (top 5 spinlocks by delta collisions) + per-spinlock snapshot grid. -->
-                <scottplot:WpfPlot Grid.Row="2" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
-                <Expander Grid.Row="3" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
+                <!-- "Showing since <start>" when this server's spinlock_stats rows start after the range does: the trend draws a flat zero over an empty stretch (#4966). -->
+                <TextBlock Grid.Row="3" x:Name="SpinlockStatsTruncationBanner" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+                <scottplot:WpfPlot Grid.Row="4" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
+                <Expander Grid.Row="5" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                     <DataGrid x:Name="SpinlockStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Spinlock" Binding="{Binding SpinlockName}" Width="*"/>
@@ -3584,6 +3752,7 @@
                             <DataGridTextColumn Header="Spins (total)" Binding="{Binding Spins, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                             <DataGridTextColumn Header="Sleep Time" Binding="{Binding SleepTime, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                             <DataGridTextColumn Header="Backoffs" Binding="{Binding Backoffs, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
@@ -3686,7 +3855,18 @@
                     <TabItem Header="Collection Log">
                         <!-- Lite's "Open Log File" button dropped (it opens Lite's local log file; the
                              viewer has no equivalent), so the grid fills the whole sub-tab. -->
-                        <DataGrid x:Name="CollectionLogGrid" Style="{StaticResource DarkGrid}">
+                        <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- "Showing since <start>" when this server's collection log starts after the range does, or when the newest 500 runs
+                             stop short of its start: the earlier of the log's coverage (DataWindowFloor) and the earliest run shown (#4966). -->
+                        <TextBlock Grid.Row="0" x:Name="CollectionLogTruncationBanner" Visibility="Collapsed"
+                                   Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                                   Foreground="{DynamicResource ForegroundBrush}"
+                                   Background="#22FFAA00"/>
+                        <DataGrid Grid.Row="1" x:Name="CollectionLogGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Binding="{Binding CollectionTimeFormatted}" Width="130" SortMemberPath="CollectionTime">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -3728,6 +3908,7 @@
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
+                        </Grid>
                     </TabItem>
                     <TabItem Header="Duration Trends">
                         <scottplot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>
@@ -3737,20 +3918,27 @@
         </TabItem>
 
         <!-- Long Queries Tab (#1496) — completed long-running queries + attentions (cancels/timeouts) from
-             the opt-in PerformanceMonitor_LongQueryCompletions XE session. Default OFF; the banner points to
-             where the switch lives when the collector is disabled. MUST remain the last inner tab (index 18). -->
+             the opt-in XE session the service makes (PerformanceMonitor_Darling_{id}_LongQueryCompletions).
+             Default OFF; the banner points to where the switch lives when the collector is disabled. MUST remain
+             the last inner tab (index 18). -->
         <TabItem Header="Long Queries">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
                 <TextBlock Grid.Row="1" x:Name="LongQueriesDisabledWarning" Visibility="Collapsed"
-                           Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
-                           Text="The long-query completion trace is OFF for this server. It is opt-in because a completion trace adds overhead on busy servers. Turn it on in Settings &#x2192; Collection Schedule &#x2192; Edit Collector Schedules&#x2026;, then tick the 'long_query_completions' Enabled box. Enabling it creates the Extended Events session on this server; disabling it drops the session."/>
-                <DataGrid Grid.Row="2" x:Name="LongQueryCompletionsGrid"
+                           Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                <!-- "Showing since <start>" when this server's long-query completions start after the range does: the earlier of the
+                     collector's coverage (DataWindowFloor) and the earliest event shown (#4966). -->
+                <TextBlock Grid.Row="2" x:Name="LongQueriesTruncationBanner" Visibility="Collapsed"
+                           Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Background="#22FFAA00"/>
+                <DataGrid Grid.Row="3" x:Name="LongQueryCompletionsGrid"
                           Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                           CanUserSortColumns="True">
@@ -3932,6 +4120,8 @@
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
+                        <!-- Latest row per extension, so the rows can come from different snapshots. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -3956,6 +4146,8 @@
                         <DataGridTextColumn Header="Change Needs" Binding="{Binding Context}" Width="120"/>
                         <DataGridTextColumn Header="Pending Restart" Binding="{Binding PendingRestart}" Width="120"/>
                         <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" Width="*"/>
+                        <!-- The snapshot these settings came from; every row shares it. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTime}" Width="150" SortMemberPath="CollectionTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -3963,8 +4155,14 @@
                      layer further in: extensions say what this server CAN do, settings say what it was told
                      to do, this says what it is doing right now. Sourced from AWS Performance Insights
                      rather than a database connection. -->
-                <TextBlock Grid.Row="7" x:Name="PgCpuNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="7">
+                    <TextBlock x:Name="PgCpuNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgCpuDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="8" x:Name="PgCpuGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -3996,8 +4194,14 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" x:Name="PgBlockingNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="0">
+                                <TextBlock x:Name="PgBlockingNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgBlockingDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="PgBlockingChainsGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4056,8 +4260,14 @@
 
                                  LoadPgActivityAsync is the only caller of LoadPgDeadlocksAsync, so this panel is filled
                                  by the load that fills the panels above it. -->
-                            <TextBlock Grid.Row="3" x:Name="PgDeadlocksNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="3">
+                                <TextBlock x:Name="PgDeadlocksNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgDeadlocksDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="4" x:Name="PgDeadlocksGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4082,8 +4292,14 @@
                                  the family and severity filters live, this shows the window's newest 200.
 
                                  LoadPgActivityAsync is the only caller of LoadPgLogEventsAsync. -->
-                            <TextBlock Grid.Row="5" x:Name="PgLogEventsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="5">
+                                <TextBlock x:Name="PgLogEventsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgLogEventsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="6" x:Name="PgLogEventsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4120,8 +4336,14 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" x:Name="PgLockStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="0">
+                                <TextBlock x:Name="PgLockStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgLockStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="PgLockStatsGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4166,8 +4388,14 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="0">
+                                <TextBlock x:Name="PgStatementsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgStatementsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="1" x:Name="PgTopQueriesGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4193,8 +4421,14 @@
                                 </DataGrid.Columns>
                             </DataGrid>
                             <TextBlock Grid.Row="2" Text="Per-database counters — where the spills, the deadlocks and the rollbacks are" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                            <TextBlock Grid.Row="3" x:Name="PgDatabasesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="3">
+                                <TextBlock x:Name="PgDatabasesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgDatabasesDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="4" x:Name="PgDatabaseStatsGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4217,8 +4451,14 @@
                                  time cannot separate a statement that WAITED from one that burned CPU.
                                  Same queryid, so the two rows are the same statement. -->
                             <TextBlock Grid.Row="5" Text="OS CPU and disk per statement - what the kernel actually charged" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                            <TextBlock Grid.Row="6" x:Name="PgKernelStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="6">
+                                <TextBlock x:Name="PgKernelStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgKernelStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="7" x:Name="PgKernelStatsGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4240,8 +4480,14 @@
                                  JSON here is REDACTED at collection - auto_explain emits query text and
                                  filter literals verbatim, and neither reaches the store. -->
                             <TextBlock Grid.Row="8" Text="Captured execution plans - grouped by plan shape" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                            <TextBlock Grid.Row="9" x:Name="PgCapturedPlansNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <StackPanel Grid.Row="9">
+                                <TextBlock x:Name="PgCapturedPlansNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <TextBlock x:Name="PgCapturedPlansDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
+                            </StackPanel>
                             <DataGrid Grid.Row="10" x:Name="PgCapturedPlansGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
@@ -4304,8 +4550,14 @@
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                 <TextBlock Grid.Row="1" Text="1. Which session is holding a transaction open — and whether it pins anything at all" FontWeight="SemiBold" Margin="0,0,0,2"/>
-                <TextBlock Grid.Row="2" x:Name="PgSessionStatesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="PgSessionStatesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgSessionStatesDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgSessionStatesGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
@@ -4369,8 +4621,14 @@
                 </DataGrid>
 
                 <TextBlock Grid.Row="4" Text="2. What holds the xmin horizon — vacuum cannot reclaim anything newer than this" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                <TextBlock Grid.Row="5" x:Name="PgXminNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="5">
+                    <TextBlock x:Name="PgXminNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgXminDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="6" x:Name="PgXminHorizonGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4392,8 +4650,14 @@
                 </DataGrid>
 
                 <TextBlock Grid.Row="7" Text="3. Autovacuum backlog — ranked by how far past each table's OWN threshold it is, not by raw dead tuples" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                <TextBlock Grid.Row="8" x:Name="PgAutovacuumNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="8">
+                    <TextBlock x:Name="PgAutovacuumNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgAutovacuumDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="9" x:Name="PgAutovacuumGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
@@ -4465,6 +4729,8 @@
                         <DataGridTextColumn Header="Satisfied" Binding="{Binding Satisfied}" Width="80"/>
                         <DataGridTextColumn Header="Observed" Binding="{Binding Observed}" Width="240"/>
                         <DataGridTextColumn Header="What it means / what to do" Binding="{Binding Detail}" Width="*"/>
+                        <!-- Newest row per facet, so the rows can come from different snapshots. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -4479,8 +4745,14 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" x:Name="PgWaitsNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="0">
+                    <TextBlock x:Name="PgWaitsNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgWaitStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="1" x:Name="PgWaitStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4496,8 +4768,14 @@
                      pg_wait_sampling and attributes each wait to the QUERY that waited, on any
                      PostgreSQL that loads the module. On most servers exactly one of the two has
                      rows, and which one it is says which instrument the server offers. -->
-                <TextBlock Grid.Row="2" x:Name="PgWaitSamplingNote" FontSize="12" Margin="0,12,0,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="PgWaitSamplingNote" FontSize="12" Margin="0,12,0,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgWaitSamplingDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgWaitSamplingGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4530,8 +4808,14 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" x:Name="PgIoNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="0">
+                    <TextBlock x:Name="PgIoNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgIoStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="1" x:Name="PgIoStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4571,8 +4855,14 @@
                      26-column grid one row deep is unreadable and unsortable. Per-row also gives each
                      metric somewhere to carry its own note, which matters here because several are NULL for
                      a version reason rather than an absence-of-activity reason. -->
-                <TextBlock Grid.Row="2" x:Name="PgWriteStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="PgWriteStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgWriteStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgWriteStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4604,6 +4894,9 @@
                         <DataGridTextColumn Header="Avg Usage" Binding="{Binding AvgUsageCount}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Pool Used" Binding="{Binding PoolBuffersUsed}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Pool Total" Binding="{Binding PoolBuffersTotal}" ElementStyle="{StaticResource NumericCell}" Width="*"/>
+                        <!-- One collection for every row; a column rather than a label keeps this grid's time
+                             where every other snapshot grid has it. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
@@ -4661,8 +4954,14 @@
                      WAL and exists with nobody attached; this is who is actually streaming. Worst-in-window
                      rides beside the latest value because a replica that drifts far behind and recovers
                      looks perfect in any single sample. -->
-                <TextBlock Grid.Row="2" x:Name="PgReplicationStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="2">
+                    <TextBlock x:Name="PgReplicationStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgReplicationStatsDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="3" x:Name="PgReplicationStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4707,8 +5006,14 @@
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgStorageNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <TextBlock Grid.Row="1" x:Name="PgTableBloatNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="1">
+                    <TextBlock x:Name="PgTableBloatNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgTableBloatDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="2" x:Name="PgTableBloatGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
@@ -4740,8 +5045,14 @@
                         <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
-                <TextBlock Grid.Row="3" x:Name="PgIndexUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="3">
+                    <TextBlock x:Name="PgIndexUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <TextBlock x:Name="PgIndexUsageDataStartBanner" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap"
+                               Padding="8,4" FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Background="#22FFAA00"/>
+                </StackPanel>
                 <DataGrid Grid.Row="4" x:Name="PgIndexUsageGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
@@ -4893,6 +5204,8 @@
                              are a sample and the panel has to say so. -->
                         <DataGridTextColumn Header="Sample Rate" Binding="{Binding SampleRate}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="*"/>
+                        <!-- Newest row per predicate, so the rows can come from different snapshots. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>

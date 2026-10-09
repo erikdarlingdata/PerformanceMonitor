@@ -40,17 +40,34 @@ public partial class LocalDataService
     /// </summary>
     public async Task<List<AlertHistoryRow>> GetAlertHistoryAsync(int hoursBack = 24, int limit = 500, int? serverId = null, DateTime? asOfUtc = null, bool includeDismissed = false)
     {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
         /* Both edges, not just the lower one: the row cap is applied by the database, so trimming
            after the read would spend the whole LIMIT on rows newer than an as_of anchor and hand back an
            empty window that looks exactly like a quiet one. */
         var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        return await ReadAlertHistoryAsync(cutoff, until, "<=", limit, serverId, includeDismissed);
+    }
+
+    /// <summary>
+    /// <see cref="GetAlertHistoryAsync"/> over a window that may END before now (#5562), the Alert History tab's read: the rows
+    /// from <paramref name="sinceUtc"/> up to but not including <paramref name="untilUtc"/>, which is <c>null</c> for a window
+    /// that runs to now. The end is applied in the SQL, ahead of the row cap, so a finished range is never shown the alerts
+    /// raised after its end and a busy fleet's cap is not spent on them. Dismissed alerts stay hidden. The Darling Viewer's
+    /// Alert History reads the same way (<c>GetAlertHistoryWindowAsync</c>).
+    /// </summary>
+    public Task<List<AlertHistoryRow>> GetAlertHistoryWindowAsync(DateTime sinceUtc, DateTime? untilUtc, int? serverId = null, int limit = 500)
+        => untilUtc is { } end
+            ? ReadAlertHistoryAsync(sinceUtc, end, "<", limit, serverId, includeDismissed: false)
+            : ReadAlertHistoryAsync(sinceUtc, DateTime.UtcNow, "<=", limit, serverId, includeDismissed: false);
+
+    private async Task<List<AlertHistoryRow>> ReadAlertHistoryAsync(
+        DateTime cutoff, DateTime until, string untilOperator, int limit, int? serverId, bool includeDismissed)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
 
         if (serverId.HasValue)
         {
-            command.CommandText = @"
+            command.CommandText = $@"
 SELECT
     alert_time,
     server_id,
@@ -68,7 +85,7 @@ SELECT
     dismissed
 FROM v_config_alert_log
 WHERE alert_time >= $1
-AND   alert_time <= $2
+AND   alert_time {untilOperator} $2
 AND   server_id = $3
 AND   (dismissed = FALSE OR $5)
 ORDER BY alert_time DESC
@@ -81,7 +98,7 @@ LIMIT $4";
         }
         else
         {
-            command.CommandText = @"
+            command.CommandText = $@"
 SELECT
     alert_time,
     server_id,
@@ -99,7 +116,7 @@ SELECT
     dismissed
 FROM v_config_alert_log
 WHERE alert_time >= $1
-AND   alert_time <= $2
+AND   alert_time {untilOperator} $2
 AND   (dismissed = FALSE OR $4)
 ORDER BY alert_time DESC
 LIMIT $3";
@@ -321,38 +338,59 @@ AND NOT EXISTS (
     /// Updates the live table, then inserts any remaining archived alerts into the sidecar table.
     /// Logs structured telemetry and verifies dismissal success.
     /// </summary>
-    public async Task<int> DismissAllVisibleAlertsAsync(int hoursBack, int? serverId = null)
+    public Task<int> DismissAllVisibleAlertsAsync(int hoursBack, int? serverId = null)
+        => DismissAllVisibleAlertsWindowAsync(DateTime.UtcNow.AddHours(-hoursBack), null, serverId);
+
+    /// <summary>
+    /// <see cref="DismissAllVisibleAlertsAsync"/> over the window <see cref="GetAlertHistoryWindowAsync"/> shows (#5562): the
+    /// alerts from <paramref name="sinceUtc"/> up to but not including <paramref name="untilUtc"/> (<c>null</c> = to now), so a
+    /// finished range's Dismiss All touches exactly the rows its grid shows and none raised after its end. The Darling Viewer's
+    /// <c>DismissAllVisibleAlertsWindowAsync</c> scopes the same way.
+    /// </summary>
+    public async Task<int> DismissAllVisibleAlertsWindowAsync(DateTime sinceUtc, DateTime? untilUtc, int? serverId = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         if (App.LogAlertDismissals)
-            AppLogger.Info("AlertDismiss", $"Action=DismissAll, HoursBack={hoursBack}, ServerId={serverId?.ToString() ?? "all"}");
+            AppLogger.Info("AlertDismiss", $"Action=DismissAll, Since={sinceUtc:O}, Until={(untilUtc.HasValue ? untilUtc.Value.ToString("O") : "now")}, ServerId={serverId?.ToString() ?? "all"}");
 
         using var connection = await OpenWriteConnectionAsync();
         PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var cutoff = sinceUtc;
+
+        /* The exclusive end is the last parameter of each statement ($3 with a server filter, $2 without). */
+        var endParam = serverId.HasValue ? "$3" : "$2";
+        var liveEnd = untilUtc.HasValue ? $"AND    alert_time < {endParam}" : string.Empty;
+        var viewEnd = untilUtc.HasValue ? $"AND    v.alert_time < {endParam}" : string.Empty;
 
         if (serverId.HasValue)
         {
-            command.CommandText = @"
+            command.CommandText = $@"
 UPDATE config_alert_log
 SET    dismissed = TRUE
 WHERE  alert_time >= $1
 AND    server_id = $2
+{liveEnd}
 AND    dismissed = FALSE";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
             command.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
         }
         else
         {
-            command.CommandText = @"
+            command.CommandText = $@"
 UPDATE config_alert_log
 SET    dismissed = TRUE
 WHERE  alert_time >= $1
+{liveEnd}
 AND    dismissed = FALSE";
             command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        }
+
+        if (untilUtc.HasValue)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = untilUtc.Value });
         }
 
         var liveAffected = await command.ExecuteNonQueryAsync();
@@ -361,12 +399,13 @@ AND    dismissed = FALSE";
         using var sidecarCmd = connection.CreateCommand();
         if (serverId.HasValue)
         {
-            sidecarCmd.CommandText = @"
+            sidecarCmd.CommandText = $@"
 INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name)
 SELECT v.alert_time, v.server_id, v.metric_name
 FROM   v_config_alert_log v
 WHERE  v.alert_time >= $1
 AND    v.server_id = $2
+{viewEnd}
 AND    v.dismissed = FALSE
 AND    NOT EXISTS (
     SELECT 1 FROM config_alert_log l
@@ -385,11 +424,12 @@ AND    NOT EXISTS (
         }
         else
         {
-            sidecarCmd.CommandText = @"
+            sidecarCmd.CommandText = $@"
 INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name)
 SELECT v.alert_time, v.server_id, v.metric_name
 FROM   v_config_alert_log v
 WHERE  v.alert_time >= $1
+{viewEnd}
 AND    v.dismissed = FALSE
 AND    NOT EXISTS (
     SELECT 1 FROM config_alert_log l
@@ -406,6 +446,11 @@ AND    NOT EXISTS (
             sidecarCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
         }
 
+        if (untilUtc.HasValue)
+        {
+            sidecarCmd.Parameters.Add(new DuckDBParameter { Value = untilUtc.Value });
+        }
+
         var archivedAffected = await sidecarCmd.ExecuteNonQueryAsync();
         sw.Stop();
 
@@ -415,7 +460,7 @@ AND    NOT EXISTS (
         // Post-dismiss verification: confirm no undismissed live rows remain
         if (liveAffected > 0)
         {
-            await VerifyDismissAllAsync(connection, cutoff, serverId, liveAffected);
+            await VerifyDismissAllAsync(connection, cutoff, untilUtc, serverId, liveAffected);
         }
 
         return liveAffected + archivedAffected;
@@ -493,28 +538,36 @@ AND    dismissed = FALSE";
     /// <summary>
     /// Verifies that no undismissed alerts remain in the dismissed time range.
     /// </summary>
-    private static async System.Threading.Tasks.Task VerifyDismissAllAsync(LockedConnection connection, DateTime cutoff, int? serverId, int expectedDismissed)
+    private static async System.Threading.Tasks.Task VerifyDismissAllAsync(LockedConnection connection, DateTime cutoff, DateTime? untilUtc, int? serverId, int expectedDismissed)
     {
         try
         {
             using var cmd = connection.CreateCommand();
+            var endClause = untilUtc.HasValue ? $"AND    alert_time < {(serverId.HasValue ? "$3" : "$2")}" : string.Empty;
             if (serverId.HasValue)
             {
-                cmd.CommandText = @"
+                cmd.CommandText = $@"
 SELECT COUNT(1) FROM config_alert_log
 WHERE  alert_time >= $1
 AND    server_id = $2
+{endClause}
 AND    dismissed = FALSE";
                 cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
                 cmd.Parameters.Add(new DuckDBParameter { Value = serverId.Value });
             }
             else
             {
-                cmd.CommandText = @"
+                cmd.CommandText = $@"
 SELECT COUNT(1) FROM config_alert_log
 WHERE  alert_time >= $1
+{endClause}
 AND    dismissed = FALSE";
                 cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            }
+
+            if (untilUtc.HasValue)
+            {
+                cmd.Parameters.Add(new DuckDBParameter { Value = untilUtc.Value });
             }
 
             var remaining = Convert.ToInt64(await cmd.ExecuteScalarAsync());

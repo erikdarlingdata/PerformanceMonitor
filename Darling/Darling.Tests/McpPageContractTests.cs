@@ -63,6 +63,7 @@ namespace Darling.Tests;
 /// arithmetic through each projection is <see cref="DarlingMcpPgPercentDenominatorTests"/>' subject; this
 /// file holds the census.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class McpPageContractTests
 {
     /* ───────────────────────── the census ───────────────────────── */
@@ -1059,13 +1060,14 @@ public sealed class McpPageContractTests
         })
         {
             var floor = sql.IndexOf("COALESCE(MAX(max_dop), 0) >= $6", StringComparison.Ordinal);
-            var order = sql.IndexOf("ORDER BY SUM(delta_worker_time) DESC", StringComparison.Ordinal);
+            var order = sql.IndexOf("ORDER BY rank_metric DESC NULLS LAST", StringComparison.Ordinal);
             Assert.True(floor >= 0, $"{name}: the parallelism floor is not in the statement");
             Assert.True(order > floor, $"{name}: the parallelism floor sits after the ranking, so it filters a ranked page rather than ranking a filtered population");
         }
 
         var active = DarlingSessionReader.ActiveQueriesSql;
-        Assert.Contains("($5::text IS NULL OR w.database_name = $5)", active, StringComparison.Ordinal);
+        /* #5245: the list form (one text[] at $5), the same statement for one name or several. */
+        Assert.Contains("($5::text[] IS NULL OR w.database_name = ANY($5))", active, StringComparison.Ordinal);
         Assert.Contains("(NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)", active, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) OVER () AS population_count", active, StringComparison.Ordinal);
         /* The head-blocker keep: a WAITFOR row stays when a row in the SAME capture names it. */
@@ -1253,6 +1255,7 @@ public sealed class McpPageContractTests
 /// because a window holding exactly <c>limit</c> rows is the case <c>count &gt;= limit</c> gets wrong.
 /// </summary>
 [Collection("live-postgres")]
+[Trait("Reads", "Lite")]
 public sealed class McpPageContractLivePostgresTests
 {
     private const string ServerName = "darling-mcp-page-contract-e2e";
@@ -1499,6 +1502,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", CollectionIdGenerator.Next(), now.AddMinutes(
             var corrections = await DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, ServerName, 24, 3);
             JsonAssert.Contains("\"recommendations_returned\": 3", corrections);
             JsonAssert.Contains("\"truncated\": false", corrections);
+            /* #4966: where the page's rows stop describes the window, so it prints as UTC with the Z: the oldest row's instant. */
+            Assert.Equal(
+                DateTime.SpecifyKind(now.AddMinutes(-10), DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
+                JsonDocument.Parse(corrections).RootElement.GetProperty("oldest_returned_collection_time").GetString());
 
             /* Waiting tasks: 3 rows; the envelope now carries the window. */
             for (var i = 0; i < 3; i++)

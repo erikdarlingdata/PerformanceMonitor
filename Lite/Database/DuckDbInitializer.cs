@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Database;
 
@@ -171,6 +172,10 @@ public partial class DuckDbInitializer : IDisposable
     /* Test seam (#4720): whether the calling thread holds the write lock. It is per thread, so a test reads it
        from inside the code under test (see OnArchiveViewRebuildForTests), not from a thread of its own. */
     internal static bool IsWriteLockHeldForTests => s_dbLock.IsWriteLockHeld;
+
+    /* Test seam (#5371): how many threads are parked waiting for a read lock right now. A test that holds the write lock reads it
+       to know a read has reached the lock wait, instead of sleeping and hoping the pool started it. */
+    internal static int WaitingReadCountForTests => s_dbLock.WaitingReadCount;
 
     /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
        recreated: a test throws from it to stand in for a process kill with no database file on disk. */
@@ -364,6 +369,77 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>The archive folder; the restore marker lives at its top level.</summary>
     internal string ArchivePath => _archivePath;
 
+    /// <summary>The database file's path; its folder is Lite's data folder, the one whose volume must have room (#5377).</summary>
+    internal string DatabasePath => _databasePath;
+
+    /// <summary>
+    /// Free bytes on the volume holding a path, or null when unknown (#5377). A test replaces it to stand in for
+    /// a nearly full disk; production reads the drive.
+    /// </summary>
+    internal Func<string, long?> AvailableFreeBytesProvider { get; set; } = DataVolumeSpace.GetAvailableFreeBytes;
+
+    /// <summary>The clock the volume warning's cadence reads; a test replaces it.</summary>
+    internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>How long a volume that stays low goes without repeating its warning.</summary>
+    internal static readonly TimeSpan DataVolumeWarningRepeat = TimeSpan.FromHours(24);
+
+    private readonly object _volumeWarningLock = new();
+    private DateTime? _lastVolumeWarningUtc;
+
+    /// <summary>
+    /// Warns when the volume holding the data folder has less free space than the larger of
+    /// <paramref name="compactionNeedBytes"/> (the biggest merge the archive's next compaction needs, 0 when not
+    /// known yet) and the database file's size (a CHECKPOINT can grow the file by up to that much). Called at
+    /// startup and once per archive pass (#5377), but it speaks on a cadence: when the volume enters the low
+    /// state, again at most every <see cref="DataVolumeWarningRepeat"/> while it stays low, and one information
+    /// line when it recovers. <paramref name="atStartup"/> always warns when low. Never throws: a failed disk
+    /// check must not stop the store or the archive. Returns whether it warned.
+    /// </summary>
+    internal bool WarnIfDataVolumeLow(long compactionNeedBytes, bool atStartup = false)
+    {
+        try
+        {
+            var folder = Path.GetDirectoryName(Path.GetFullPath(_databasePath)) ?? ".";
+            var databaseBytes = File.Exists(_databasePath) ? new FileInfo(_databasePath).Length : 0;
+            var reason = compactionNeedBytes > databaseBytes
+                ? $"the archive's next compaction ({DataVolumeSpace.FormatBytes(compactionNeedBytes)} of merged output)"
+                : $"a CHECKPOINT (the database file is {DataVolumeSpace.FormatBytes(databaseBytes)})";
+            var needed = Math.Max(databaseBytes, compactionNeedBytes);
+
+            lock (_volumeWarningLock)
+            {
+                var observed = AvailableFreeBytesProvider(folder);
+                if (!DataVolumeSpace.IsLow(folder, needed, _ => observed, out var free))
+                {
+                    if (_lastVolumeWarningUtc is not null && observed is long recovered)
+                    {
+                        _lastVolumeWarningUtc = null;
+                        _logger?.LogInformation(
+                            "The Lite data folder {Folder} has enough free disk space again: {FreeBytes} bytes free ({Free})",
+                            folder, recovered, DataVolumeSpace.FormatBytes(recovered));
+                    }
+
+                    return false;
+                }
+
+                var at = UtcNow();
+                if (!atStartup && _lastVolumeWarningUtc is DateTime last && at - last < DataVolumeWarningRepeat)
+                {
+                    return false;
+                }
+
+                _lastVolumeWarningUtc = at;
+                return DataVolumeSpace.WarnIfLow(_logger, folder, needed, reason, _ => free);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Could not check the free space on the data folder's volume");
+            return false;
+        }
+    }
+
     public DuckDbInitializer(string databasePath, ILogger<DuckDbInitializer>? logger = null)
     {
         _databasePath = databasePath;
@@ -550,7 +626,7 @@ public partial class DuckDbInitializer : IDisposable
 
     /// <summary>
     /// The <c>memory_limit</c> the trim cycle restores after trimming — parsed out of
-    /// <see cref="ConnectionString"/> rather than repeated as a second "1GB" literal, so the two can never
+    /// <see cref="ConnectionString"/> rather than repeated as a second literal, so the two can never
     /// drift apart (#4262 round 1 finding 1).
     /// </summary>
     private string ConfiguredMemoryLimit
@@ -563,7 +639,7 @@ public partial class DuckDbInitializer : IDisposable
                 if (eq > 0 && part[..eq].Trim().Equals("memory_limit", StringComparison.OrdinalIgnoreCase))
                     return part[(eq + 1)..].Trim();
             }
-            return "1GB"; // unreachable — ConnectionString always sets memory_limit
+            return MainConnectionMemoryLimit; // unreachable — ConnectionString always sets memory_limit
         }
     }
 
@@ -739,8 +815,15 @@ public partial class DuckDbInitializer : IDisposable
             /* No key for query_store_stats: its rows are cumulative snapshots of an interval, the open interval is
                read again every cycle by design, and every reader takes the latest snapshot per interval or plan. */
             /* sysjobhistory.instance_id: a unique monotonic IDENTITY per server that survives
-               sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark. */
-            ["job_history"] = "server_id, instance_id",
+               sp_purge_jobhistory — JobHistoryCollector's exact-and-complete dedup watermark.
+               run_datetime is in the key so DuckDB can run a reader's run_datetime filter BELOW the window
+               (#5457): DuckDB moves a filter under a window only when the filter reads nothing but PARTITION BY
+               columns. Keyed on (server_id, instance_id) alone, every Job History read sorted the server's whole
+               archive, message text included, before it could drop a row: on a 30-server store that took a
+               per-server read from 0.7 s to 11 s and ran Lite's 1 GB cap out of memory. It does not change
+               which copies collapse: run_datetime is worked out on the server from the msdb row's own run_date
+               and run_time, which never change for an instance_id, so every copy of a run carries the same value. */
+            ["job_history"] = "server_id, instance_id, run_datetime",
             /* The default trace's EventSequence is unique within a trace; pairing it with event_time
                (the StartTime watermark) keeps events distinct across the server restarts that reset
                EventSequence, and groups identical re-collected rows (NULLs included) for dedup. */
@@ -760,14 +843,69 @@ public partial class DuckDbInitializer : IDisposable
     /// - checkpoint_threshold=1GB: disables automatic WAL checkpoints to prevent
     ///   2-3s stop-the-world stalls during collector writes. Manual CHECKPOINT
     ///   runs between collection cycles instead.
-    /// - memory_limit=1GB: caps the resting buffer pool so it doesn't grow
+    /// - memory_limit=<see cref="MainConnectionMemoryLimit"/> (2GB, #5381; was 1GB): caps the resting buffer pool so it doesn't grow
     ///   unbounded as the archive directory fills with parquet files (the
     ///   ".tmp dir caching" path is the actual driver of #933's titled
     ///   complaint — uncapped, buffer pool grows toward 80% of system RAM).
     ///   ArchiveService raises this temporarily for parquet COPY operations,
     ///   which need more headroom due to a DuckDB pre-reservation behavior.
+    /// - threads=<see cref="MainConnectionThreads"/> (min(8, processors, memory limit / 256 MB), #5381, #5457): bounds the per-thread buffers of a wide read.
+    /// - parquet_metadata_cache is deliberately left at DuckDB's default, off (#5377). Measured on DuckDB
+    ///   1.5.5, turning it on cut the bind of a 518-file union_by_name read from about 140 ms to about 45 ms,
+    ///   and a file replaced at the same path (compaction's swap, the Query Store repair) still read its new
+    ///   bytes on a fresh connection of the same instance. But the cache lives in the OBJECT_CACHE, which the
+    ///   buffer manager cannot evict and which counts against memory_limit: 38 MB for those 518 files, growing
+    ///   with every 8192-row group of every file. Once it is over the trim cycle's 64 MB target, the trim's
+    ///   `SET memory_limit` fails with "could not free up enough memory" and the trim stops working. The file
+    ///   count is the real cost of a bind, and compaction (this issue) is what keeps that count down.
     /// </summary>
-    public string ConnectionString => $"Data Source={_databasePath};memory_limit=1GB;checkpoint_threshold=1GB";
+    public string ConnectionString =>
+        $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB";
+
+    /// <summary>
+    /// The main connection's resting <c>memory_limit</c> (#5381, owner ruling 2026-10-06). It was 1 GB, which
+    /// failed five measured wide reads (Query Store and query stats text over a multi-day archive) with
+    /// out-of-memory; at 2 GB and <see cref="MainConnectionThreads"/> threads every measured read passes and the
+    /// worst peak is 1,100 MB. Every place that puts the limit back after lowering or raising it (the trim
+    /// cycle, <c>ArchiveService.WithRaisedCopyMemoryLimit</c>) restores to THIS property (the user's setting), never a literal.
+    /// Compaction's own in-memory 4 GB instance and the data importer's plain connection are separate DuckDB
+    /// instances and do not use it.
+    /// </summary>
+    internal static string MainConnectionMemoryLimit => $"{ConfiguredMemoryLimitGb}GB";
+
+    /// <summary>
+    /// The user's DuckDB memory limit in whole GB (#5457, owner ruling 2026-10-08), set once at startup from
+    /// settings.json by <c>DuckDbMemoryLimitSetting.LoadAtStartup</c>. Defaults to
+    /// <see cref="DuckDbMemoryLimitSetting.DefaultGb"/> (2 GB, #5381). <c>memory_limit</c> belongs to a DuckDB
+    /// instance, so a value changed in Settings takes effect at the next start.
+    /// </summary>
+    internal static int ConfiguredMemoryLimitGb { get; set; } = Services.DuckDbMemoryLimitSetting.DefaultGb;
+
+    /// <summary>
+    /// The main connection's <c>threads</c> (#5381, #5457): derived from the memory setting by
+    /// <see cref="ThreadsFor"/>, min(8, logical processors, memory limit / 256 MB), at least 1. Unset, DuckDB used
+    /// every core, and on a 32-core machine five reads that pass at 8 threads ran out of memory at 1 GB because
+    /// each thread holds its own buffers. It follows <see cref="ConfiguredMemoryLimitGb"/> (the resting limit),
+    /// so it is fixed for the life of the process: the trim cycle (which only moves memory_limit to 64 MB and
+    /// back) and the COPY raise (memory_limit up to the larger of 4 GB and the setting, then back) never touch it.
+    /// </summary>
+    internal static int MainConnectionThreads =>
+        ThreadsFor(ConfiguredMemoryLimitGb, Environment.ProcessorCount);
+
+    /// <summary>The most threads the main connection uses, whatever the memory setting or core count.</summary>
+    internal const int MainConnectionThreadCap = 8;
+
+    /// <summary>
+    /// Memory each DuckDB thread gets at the limit (256 MB, double DuckDB's documented 125 MB per-thread minimum),
+    /// so the 2 GB default is exactly the 8-thread cap and the 1 GB minimum runs 4 threads. Measured on the
+    /// Lite store (Job History over 20 weeks and the top-queries read over 90 days, 32 cores, 1 GB and 4 GB):
+    /// 4 and 8 threads took the same time, while 16 and 32 threads were slower and peaked 20-70% higher in
+    /// memory, so a raised memory setting does not raise the thread count past the cap.
+    /// </summary>
+    internal const int MainConnectionMemoryPerThreadMb = 256;
+
+    internal static int ThreadsFor(int memoryGb, int cores) =>
+        Math.Max(1, Math.Min(Math.Min(MainConnectionThreadCap, cores), memoryGb * 1024 / MainConnectionMemoryPerThreadMb));
 
     /// <summary>
     /// Ensures the database exists and all tables are created, then opens the sentinel (#4262).
@@ -796,6 +934,42 @@ public partial class DuckDbInitializer : IDisposable
            on-disk file what callers should see. Opening here — still under the write lock — means no
            caller can attach to a partially-initialized file. */
         ReopenSentinel();
+
+        /* Once per start (#5377): a nearly full volume is the cause behind a compaction or CHECKPOINT that
+           fails part way, so it is named up front rather than inferred from the I/O error. */
+        WarnIfDataVolumeLow(compactionNeedBytes: 0, atStartup: true);
+    }
+
+    /// <summary>
+    /// Test seam (#5208): takes over a database file a test copied from one that <see cref="InitializeAsync"/>
+    /// had already built, instead of rebuilding the schema. <see cref="InitializeAsync"/> holds the one
+    /// process-wide write lock for its whole ~80-statement body, and a suite that runs it once per test class
+    /// or per test queues every other test's database read behind it. Only the sentinel is opened here, which
+    /// is what <see cref="InitializeAsync"/> ends with for a file that needs no migration. Production never
+    /// calls it.
+    ///
+    /// <para>The write lock covers only the hand-over of the sentinel. The copy is a file no other code has
+    /// open, so opening a connection on it needs no lock, and doing that inside the lock cost every copy
+    /// about 40 ms of exclusive hold, measured, which queued every other test's read behind it (#5208). The
+    /// copy's own <c>store_identity</c> row is renewed by <c>PreinitializedDuckDb.CopyTo</c> before this runs,
+    /// also without the lock.</para>
+    /// </summary>
+    internal void AdoptInitializedFileForTests()
+    {
+        var connection = new DuckDBConnection(ConnectionString);
+        try
+        {
+            connection.Open();
+            using var writeLock = AcquireWriteLock();
+            ReleaseSentinel();
+            _sentinel = connection;
+            connection = null!;
+            BumpArchiveViewGeneration();
+        }
+        finally
+        {
+            connection?.Dispose();
+        }
     }
 
     private bool _identityReadFailed;

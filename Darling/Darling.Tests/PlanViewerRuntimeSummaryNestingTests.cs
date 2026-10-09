@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// product surface; <see cref="PlanViewerControl.LoadPlan"/> is not used because it awaits <c>Task.Run</c>
 /// and nothing here pumps a dispatcher.
 /// </summary>
+[Trait("Cost", "Slow")]
 public sealed class PlanViewerRuntimeSummaryNestingTests
 {
     private static PlanStatement StatementWith(string? optimizationLevel, string? earlyAbortReason) => new()
@@ -42,7 +43,7 @@ public sealed class PlanViewerRuntimeSummaryNestingTests
     [Fact]
     public void RuntimeSummary_EarlyAbortUnderOptimization_IndentsItsLabelOnly()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var control = new PlanViewerControl();
             try
@@ -84,7 +85,7 @@ public sealed class PlanViewerRuntimeSummaryNestingTests
     [Fact]
     public void RuntimeSummary_EarlyAbortWithNoOptimizationRow_IsNotIndented()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var control = new PlanViewerControl();
             try
@@ -124,22 +125,4 @@ public sealed class PlanViewerRuntimeSummaryNestingTests
         return (labelText, valueText);
     }
 
-    /// <summary>WPF objects require STA; same shape as the other WPF tests here.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

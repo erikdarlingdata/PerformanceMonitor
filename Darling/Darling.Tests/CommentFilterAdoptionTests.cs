@@ -63,8 +63,12 @@ namespace Darling.Tests;
 /// its throwaway cluster. <c>CrossAppGuardCiGateTests</c> does see the
 /// three <c>Lite.Tests</c> keys below — #3067 widened its anchor past the app directory, since
 /// <c>Lite.Tests</c> is a sibling of <c>Lite</c> rather than a directory inside it — and exempts them on
-/// this same reasoning, under the same bound.</para>
+/// this same reasoning, under the same bound. The fourth, <c>Lite.Tests/DataStartBannerQueriesTabTests.cs</c>
+/// (#4966), is named in the <c>darling</c> filter instead, as the single file it is: that costs a Darling build only
+/// when that one file changes, so it has no exemption.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class CommentFilterAdoptionTests
 {
     /// <summary>
@@ -80,8 +84,8 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Seven <b>collect</b> a doc-comment run,
-    /// where the prefix is what defines the run. One reads a <b>stated, measured</b> bound off a named file.
+    /// <para>Four kinds live here and they are not the same kind. Eight <b>collect</b> a doc-comment run,
+    /// where the prefix is what defines the run. Three read a <b>stated, measured</b> bound off a named file each.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
     /// </summary>
@@ -146,6 +150,16 @@ public sealed class CommentFilterAdoptionTests
             + "that happened to spell one would register as a phantom entry needing lineage of its own, "
             + "which is again loud; nothing in the table today is a block comment.",
 
+        ["Lite.Tests/DataStartBannerQueriesTabTests.cs"] =
+            "COLLECTS a doc run. DocBefore gathers the contiguous /// run (attribute lines included) above a "
+            + "named declaration, so that a pin can read which surfaces a doc comment names - the names live ONLY "
+            + "in that comment, so asking for the walker would leave nothing to read. Stated bound: the walk "
+            + "STOPS at the first line that is neither /// -prefixed nor an attribute, so a /* */ block, a // line "
+            + "or a blank line between the run and its declaration truncates it and the surfaces it names read as "
+            + "MISSING - a spurious red, the loud direction, because every surface is asserted present before the "
+            + "pin passes. A signature that is not found fails the pin on its own message rather than reading an "
+            + "empty run.",
+
         ["Lite.Tests/LiteSidebarDotRendersTheCardStatusTests.cs"] =
             "STATED BOUND, and asking for the walker would BREAK it. Its doc comment records the measurement: "
             + "ServerConnection.cs carries exactly one block comment, the licence header, so dropping "
@@ -154,6 +168,15 @@ public sealed class CommentFilterAdoptionTests
             + "which is a pass for the wrong reason. Measurement-dependent, not permanent: a second block "
             + "comment in that file makes the bound wrong.",
 
+        ["Lite.Tests/LiteTimeRangeGapTests.cs"] =
+            "STATED BOUND, measured. It COUNTS call sites of ApplyWindowFloorToBanner( across Lite's tab sources (#5562 R7: every banner site feeds the "
+            + "picker's data start). IsDocOrDefinition drops a match whose line, trimmed, starts with //, ///, * or /*, so a "
+            + "doc or comment mention is not a site, and drops the method's own definition line. Stated bound: it reads one "
+            + "line, so a call written inside a block comment on a line that does not begin with * or /* is miscounted as a "
+            + "site (a spurious extra site, the loud direction: the per-file count then disagrees with the sites pinned). "
+            + "The walker would drop the call as comment text correctly, but the same test also needs the definition line "
+            + "kept apart, which the line check does in one step; the sources it reads carry no such block comment today.",
+
         ["Darling.Tests/Pg18IoBytesTests.cs"] =
             "NOT C#. The filter runs over DarlingPgIoReader.PgIoSql - SQL text already extracted from a raw "
             + "string literal - and drops SQL block-comment lines from the outer SELECT list before counting "
@@ -161,6 +184,17 @@ public sealed class CommentFilterAdoptionTests
             + "The window it cuts (the outer SELECT through FROM differenced) holds no comment today, so the "
             + "/* and * arms are inert; a comment added there whose continuation line contains ' AS ' would "
             + "over-count the select list and fail the 19 pin loudly.",
+
+        ["Darling.Tests/DarlingWebTlsTests.cs"] =
+            "STATED BOUND, and asking for the walker would BREAK it. NoMessage_SpellsTheWebSectionOutright hunts a "
+            + "string LITERAL that spells the web section outright, and the walker blanks literal text, so adopting "
+            + "it would blank the very thing the scan reads and pass for the wrong reason. The filter drops the lines "
+            + "whose trimmed text starts with // (a /// line starts with it too), then reports a line that carries a "
+            + "double quote ahead of the name. Stated bound: ONLY whole-line // comments are skipped, so a /* */ "
+            + "block-comment line, or a trailing // comment, that has a quote ahead of the name reads as a literal "
+            + "and is reported - a spurious red, the loud direction, because the scan can only over-report. "
+            + "Measurement-dependent, not permanent: the two files it reads (DarlingWebTls.cs and DarlingConfig.cs) "
+            + "name the web setting on whole-line // and /// comments only today.",
 
         ["Darling.Tests/PgTargetMeasuredLineageTests.cs"] =
             "COLLECTS a doc run. CommentBlockAbove walks upward from a named constant through the contiguous "
@@ -268,7 +302,7 @@ public sealed class CommentFilterAdoptionTests
     private static readonly (string Label, string Claim)[] s_kinds =
     {
         ("COLLECTS", "collect a doc-comment run"),
-        ("STATED BOUND", "reads a stated, measured bound"),
+        ("STATED BOUND", "read a stated, measured bound"),
         ("NOT C#", "filters SQL"),
         ("DEMONSTRATES", "demonstrates the shape"),
     };

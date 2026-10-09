@@ -29,6 +29,7 @@
 
 import { el, mount, apiGetFleet, readToolWithinKeptHistory } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
+import { orderServers } from "./server-order.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
 import { buildCreateAlertAction } from "./alert-seed.js";
@@ -36,6 +37,7 @@ import * as api from "./views-api.js";
 import { refreshChoiceOf } from "./refresh-policy.js";
 import { buildRefreshControl } from "./refresh-control.js";
 import * as derive from "./derive.js";
+import { rollingHoursPicker } from "./page-range.js";
 
 /** The FORMATTERS keys the format pickers offer (mirrors util.js FORMATTERS). */
 const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "rate", "pct", "ms", "mb", "time", "reltime", "bool"];
@@ -51,6 +53,8 @@ const RANGE_OPTIONS = [
   { hours: 24 * 90, label: "Last 90 days" },
 ];
 const DEFAULT_RANGE_HOURS = 24;
+/** The longest default range a view takes: the compose runner's window ceiling (ComposeLimits.MaxWindowHours, 90 days). */
+const MAX_VIEW_RANGE_HOURS = 24 * 90;
 
 /** The default chart per composed-panel shape (a working chart the instant a measure is picked). */
 const DEFAULT_VIZ_FOR_SHAPE = { timeseries: "line", topseries: "line", ranked: "bar", scalar: "stat" };
@@ -113,7 +117,7 @@ export async function renderEditor(main, id) {
 export async function loadFleetOptions() {
   const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
-  return [...(res.data.cards || [])]
+  return orderServers(res.data.cards || [])
     .map((c) => ({
       value: c.server_name || c.display_name,
       label: c.display_name,
@@ -121,8 +125,7 @@ export async function loadFleetOptions() {
       isAzureSqlDb: c.is_azure_sql_db === true,
       isAzureMi: c.is_azure_mi === true,
     }))
-    .filter((o) => o.value)
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .filter((o) => o.value);
 }
 
 /* Fleet TAG options for the alert-rule scope picker (#3350): the /api/fleet tag forest flattened depth-first
@@ -1817,14 +1820,18 @@ export function buildViewScopeSection(model, catalog, onStructuralChange) {
   const compose = catalog.compose || {};
   const dimNames = variableDimensionNames(compose);
 
-  const rangeSel = el("select", { class: "editor-select", "aria-label": "Default time range" });
-  rangeSel.appendChild(el("option", { value: "", text: "Default (last 24 hours)" }));
-  for (const r of RANGE_OPTIONS) rangeSel.appendChild(el("option", { value: String(r.hours), text: r.label }));
-  rangeSel.value = model.rangeHours != null ? String(model.rangeHours) : "";
-  rangeSel.addEventListener("change", () => {
-    model.rangeHours = rangeSel.value ? parseInt(rangeSel.value, 10) : null;
-    onStructuralChange();
-  });
+  /* The view's default range is "this many hours back from now" (def.range.hours), so it is the shared picker's rolling-only form
+     (#5562): up to the compose runner's 90 days, a longer length greyed out with the reason, never clamped. It starts on the saved
+     hours, or the 24 hour default for a view with none, and saves what the reader picks. */
+  const rangeSel = rollingHoursPicker({
+    hours: model.rangeHours != null ? model.rangeHours : DEFAULT_RANGE_HOURS,
+    reachHours: MAX_VIEW_RANGE_HOURS,
+    label: "Default time range",
+    onChange: (hours) => {
+      model.rangeHours = hours;
+      onStructuralChange();
+    },
+  }).node;
 
   const varsBox = el("div", { class: "item-list vars" });
 
@@ -2291,7 +2298,8 @@ function topLevelScalarKeys(sample) {
 
 function rowKeys(sample, rowsKey) {
   const first = firstRow(sample, rowsKey);
-  return first ? Object.keys(first) : [];
+  /* Scalar-valued keys only: a nested value (processes[], graph) would render as [object Object]. */
+  return first ? Object.keys(first).filter((k) => first[k] === null || typeof first[k] !== "object") : [];
 }
 
 function rowNumericKeys(sample, rowsKey) {

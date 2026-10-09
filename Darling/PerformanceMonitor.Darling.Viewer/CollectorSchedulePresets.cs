@@ -35,6 +35,15 @@ public sealed class CollectorScheduleEditItem
     /// parse/format round trip; presets never touch it (they change frequencies only).
     /// </summary>
     public string DatabasesText { get; set; } = "";
+
+    /// <summary>
+    /// The #4938 run time as the grid edits it: a 24-hour <c>HH:MM</c> time on the monitored server's own clock,
+    /// <see cref="CollectorScheduleOverlay.UseDefaultRunAtText"/> (no value at this level: it falls through to the
+    /// fleet row, or to no fixed time), or on a server row <see cref="CollectorScheduleOverlay.NoRunAtText"/> (no
+    /// fixed time on this server, which stops a fleet-wide time). <see cref="CollectorScheduleOverlay"/> owns the
+    /// parse/format round trip; presets never touch it (they change frequencies only).
+    /// </summary>
+    public string RunAtText { get; set; } = CollectorScheduleOverlay.UseDefaultRunAtText;
 }
 
 /// <summary>

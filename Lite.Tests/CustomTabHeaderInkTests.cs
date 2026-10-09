@@ -35,6 +35,7 @@ namespace Lite.Tests;
 /// need a whole window or a loaded plan (server tab, plan tabs of a server tab, the XAML Plan Viewer tab, the Darling
 /// Viewer twin) are pinned in source.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CustomTabHeaderInkTests
 {
     private static ResourceDictionary Theme(string name) =>
@@ -58,7 +59,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("Light")]
     public void PlanSubTabHeader_SelectedUsesAccentInk_UnselectedUsesForegroundInk(string theme)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dict = Theme(theme);
             var tabs = new TabControl();
@@ -83,7 +84,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("CoolBreeze")]
     public void AddTabHeader_TextBlockAsHeader_UsesAccentInkWhenSelected(string theme)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dict = Theme(theme);
             var tabs = new TabControl();
@@ -105,7 +106,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("CoolBreeze")]
     public void Premise_BarePanelHeader_KeepsForegroundInkOnAccent(string theme)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dict = Theme(theme);
             var header = new StackPanel();
@@ -151,7 +152,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("broken", "CriticalTextBrush")]
     public void CollectorHealthInk_FollowsALiveThemeSwitch_WithoutAnotherPaint(string kind, string key)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var text = new TextBlock();
             var host = new Border { Child = text };
@@ -177,20 +178,4 @@ public sealed class CustomTabHeaderInkTests
         Assert.Contains("CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, \"ForegroundMutedBrush\")", src);
     }
 
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

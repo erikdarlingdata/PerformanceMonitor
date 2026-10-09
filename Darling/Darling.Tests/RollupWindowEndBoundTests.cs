@@ -194,13 +194,17 @@ public sealed class RollupWindowEndBoundTests
         Assert.DoesNotContain("f.collection_time < $2", compiled.Sql, StringComparison.Ordinal);
     }
 
-    /* The three first-bucket probes are NOT part of the change: they only locate the first bucket the window
-       holds (where the served span starts), and a bucket at the very end can be that first bucket only when the
-       window holds no other, in which case the read returns no rows either way. */
+    /* #5329: the first-bucket probes take the grids' exclusive end. They once kept `<=` (a bucket at the very end can be the
+       first bucket only when the window holds no other, and then the read returned no rows either way). That reason no
+       longer holds: the probe's answer now names the start of the grid in the window-edges note and the viewer banner, so
+       a server whose only bucket begins AT an hour-aligned end would be told a start for a grid that read nothing. */
     [Fact]
-    public void FirstBucketProbes_AreUnchanged()
+    public void FirstBucketProbes_StopBeforeTheWindowEnd_LikeTheGrids()
     {
-        Assert.Contains("f.bucket <= $3$CEIL$", DarlingDataReader.HourlyFirstBucketSql, StringComparison.Ordinal);
-        Assert.Contains("f.bucket <= $3$CEIL$", DarlingDataReader.HourlyFirstBucketSingleRelationSql, StringComparison.Ordinal);
+        foreach (var sql in new[] { RollupCoverage.HourlyFirstBucketSql, RollupCoverage.HourlyFirstBucketSingleRelationSql })
+        {
+            Assert.Contains("f.bucket < $3$CEIL$", sql, StringComparison.Ordinal);
+            Assert.False(Regex.IsMatch(sql, @"\bbucket\s*<="), "a `bucket <=` bound is back in a first-bucket probe.");
+        }
     }
 }

@@ -167,7 +167,10 @@ public static partial class ReproScriptBuilder
         {
             sb.AppendLine($"Database: [{CommentSafe(databaseName)}]");
         }
-        sb.AppendLine($"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        /* UTC, labelled: the stamp used to be DateTime.Now, the clock of the machine that built the script. For the
+           web dashboard that is the service host, so the line read 04:36:12 at 11:36 UTC with no zone and matched
+           neither the browser's clock nor UTC (release walk). One zone for every app that builds a script. */
+        sb.AppendLine($"Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
 
         if (warnings.Count > 0)
         {

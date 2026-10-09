@@ -44,7 +44,7 @@ public sealed class AzureSiblingGridNoteTests : IClassFixture<SharedDuckDbFixtur
     public void Dispose() => _seedConn?.Dispose();
 
     private static readonly DateTime Collected = DateTime.SpecifyKind(
-        new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
+        new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute), DateTimeKind.Unspecified);
 
     private async Task SeedAsync(string database, int? fileId, string fileName, double total, double? used)
     {

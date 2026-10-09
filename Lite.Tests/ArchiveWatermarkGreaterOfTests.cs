@@ -49,6 +49,7 @@ public sealed class ArchiveWatermarkGreaterOfTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         CollectionResetGate.ResetForTests();
         try
         {
@@ -97,9 +98,29 @@ public sealed class ArchiveWatermarkGreaterOfTests : IDisposable
 
     private static string Ts(DateTime t) => $"TIMESTAMP '{t:yyyy-MM-dd HH:mm:ss}'";
 
+    /* The first call builds the store from the pre-built schema. A later call (the seed after a reset) used to run
+       the whole InitializeAsync again, ~80 table and index statements under the process-wide write lock, to get two
+       things: the archive views rebuilt over what the reset exported, and the archive view generation bumped so a
+       watermark cached before the reset is not reused. CreateArchiveViewsAsync does exactly those two and nothing
+       else (#5208). */
+    private bool _storeBuilt;
+
+    private async Task BuildOrRefreshStoreAsync()
+    {
+        if (!_storeBuilt)
+        {
+            await _duckDb.InitializeFromTemplateAsync();
+            _storeBuilt = true;
+        }
+        else
+        {
+            await _duckDb.CreateArchiveViewsAsync();
+        }
+    }
+
     private async Task ExecuteAsync(params string[] statements)
     {
-        await _duckDb.InitializeAsync();
+        await BuildOrRefreshStoreAsync();
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         foreach (var sql in statements)

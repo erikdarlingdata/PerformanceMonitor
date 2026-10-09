@@ -634,14 +634,49 @@ public sealed class DarlingFleetDeadlockCoverageTests
         var sql = DarlingFleetReader.FleetPgDeadlockSql;
 
         Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(GREATEST(raw_delta, 0))", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time) FILTER (WHERE raw_delta > 0)", sql, StringComparison.Ordinal);
+        /* Only the pairs that moved are ordered (#5526): the LAG partitions by database inside a
+           server_id = s.server_id filter, which is the old (server_id, database_name) series, and the previous
+           single window over the whole fleet's rows must not come back. */
+        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PARTITION BY server_id", sql, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(sql, "OVER ("));
+        /* The unordered aggregate that decides which pairs need the ordered pass, and the exact flat rule: a
+           counter in EVERY row (so a NULL sends the pair to the ordered pass) that never moves (min = max). */
+        Assert.Contains("WITH pairs AS", sql, StringComparison.Ordinal);
+        Assert.Contains("(count(deadlocks) = count(*) AND min(deadlocks) = max(deadlocks)) AS flat", sql, StringComparison.Ordinal);
+        /* A flat pair of n samples has n - 1 differences, all zero: n - 1 intervals, nothing else. */
+        Assert.Contains("SUM(n - 1) FILTER (WHERE flat)", sql, StringComparison.Ordinal);
+        Assert.Contains("s.flat_intervals + d.intervals AS intervals", sql, StringComparison.Ordinal);
+        /* The ordered read keeps only the pairs that are not flat: by name, and the NULL-named shared-relation
+           series by IS NULL because = ANY never matches NULL. */
+        Assert.Contains("FILTER (WHERE NOT flat AND database_name IS NOT NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("database_name = ANY (s.ordered_names) OR (s.ordered_null_name AND database_name IS NULL)", sql, StringComparison.Ordinal);
+        /* The server list is not named for the registry table it must not be mistaken for. */
+        Assert.Contains("window_servers AS", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("WITH servers AS", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   server_id = s.server_id", sql, StringComparison.Ordinal);
+        /* The one-time gate: a server with no ordered pair (every pair flat) must skip the per-server read
+           entirely. Dropping it changes no answer, so the live test cannot see it. */
+        Assert.Contains("WHERE (cardinality(s.ordered_names) > 0 OR s.ordered_null_name)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(sampled.collection_time) FILTER (WHERE sampled.raw_delta > 0)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
-        /* Windowed on the partitioning column, both bounds, like the SQL Server twin. */
-        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
+        /* Windowed on the partitioning column, both bounds, like the SQL Server twin - in the pair aggregate AND
+           in the per-server read, so each opens only the window's chunks. */
+        Assert.Equal(2, CountOf(sql, "collection_time >= $1"));
+        Assert.Equal(2, CountOf(sql, "collection_time <= $2"));
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = text.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -772,7 +807,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
 
             /* Registered, but no collection_log row is ever inserted for this server_id. */
             await InsertServerAsync(connection, NoHistoryServerId, NoHistoryName, 3, ct);
@@ -813,7 +848,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
             var at = now.AddMinutes(-5);   // inside the [now-1h, now] card window
 
             /* Plant representative editions so the read-through card platform can be asserted end-to-end:

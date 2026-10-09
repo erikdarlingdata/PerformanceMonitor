@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// meta-pins this file. Darling's text is read from the compiled constants rather than from source, so
 /// nothing here depends on parsing Darling's own file.</para>
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class DrillDownDopProvenanceParityTests
 {
     private const string LiteFile = "Lite/Analysis/DrillDownCollector.Queries.cs";

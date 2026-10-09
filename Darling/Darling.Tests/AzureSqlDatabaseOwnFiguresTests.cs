@@ -15,6 +15,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.PlanAnalysis;
 using Xunit;
@@ -488,20 +489,23 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         Assert.DoesNotContain("$\"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}\"", tab, StringComparison.Ordinal);
 
         Assert.Contains(
-            "FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;",
+            "FinOpsHealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;",
             tab, StringComparison.Ordinal);
 
-        Assert.Contains(
-            "int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;",
-            tab, StringComparison.Ordinal);
+        // The inventory score is the fleet read's, the Utilization view's own rule: no CPU sample is a dash, never a default.
+        Assert.Contains("item.HealthScore = row.HealthScore;", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("item.AvgCpuPct ?? 0m", tab, StringComparison.Ordinal);
+
+        var reader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsInventoryReader.cs");
+        Assert.Contains("return FinOpsUtilizationFigures.HealthScore(", reader, StringComparison.Ordinal);
+        Assert.Contains("if (reader.IsDBNull(1) || reader.IsDBNull(16)) return null;", reader, StringComparison.Ordinal);
     }
 
     [Fact]
     public void WorkerReads_KeepANullInUseCountNull_InAllThreePlaces()
     {
-        var utilization = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Utilization.cs");
-        var inventory = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Inventory.cs");
+        var utilization = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsUtilizationReader.cs");
+        var inventory = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsInventoryReader.cs");
 
         /* Point-in-time read, 7-day trend and fleet read: the in-use count is read as NULL, not coalesced to 0. */
         Assert.Contains("int? currentWorkers = reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10));", utilization, StringComparison.Ordinal);

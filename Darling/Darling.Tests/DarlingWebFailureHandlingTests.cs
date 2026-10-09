@@ -182,7 +182,7 @@ public sealed class DarlingWebFailureHandlingTests
     /// middleware registered textually before it — the same nesting these test-only routes rely on. No live
     /// Postgres needed: every route here throws before ever opening the (unopened) pool.
     /// </summary>
-    private static async Task<(TestServer Server, CapturingTestLogger Logger)> BuildServer()
+    private static async Task<(TestServer Server, CapturingTestLogger Logger)> BuildServer(CollectorRuntimeState? collectorState = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -203,7 +203,7 @@ public sealed class DarlingWebFailureHandlingTests
         var host = new DarlingWebHostService(
             capturing,
             new WebRuntimeState(),
-            new CollectorRuntimeState(),
+            collectorState ?? new CollectorRuntimeState(),
             new WebTlsCertificateState(),
             new BaselineCache());
 
@@ -218,6 +218,9 @@ public sealed class DarlingWebFailureHandlingTests
 
         app.MapGet("/api/__test/timeout", (HttpContext _) =>
             throw new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014"));
+
+        /* W12: a route that answers 503 on its own, with no report of its own. */
+        app.MapGet("/api/__test/unreported-503", () => Results.Json(new { error = "busy" }, statusCode: StatusCodes.Status503ServiceUnavailable));
 
         app.MapGet("/api/__test/generic", (HttpContext _) =>
             throw new InvalidOperationException("super secret internal connection string detail"));
@@ -254,7 +257,9 @@ public sealed class DarlingWebFailureHandlingTests
         return server.SendAsync(ctx =>
         {
             ctx.Request.Method = "GET";
-            ctx.Request.Path = path;
+            var queryAt = path.IndexOf('?', StringComparison.Ordinal);
+            ctx.Request.Path = queryAt < 0 ? path : path[..queryAt];
+            if (queryAt >= 0) ctx.Request.QueryString = new QueryString(path[queryAt..]);
             ctx.Request.Headers.Host = "localhost";
             ctx.Connection.RemoteIpAddress = IPAddress.Loopback;
             if (requestAborted is { } token)
@@ -288,6 +293,76 @@ public sealed class DarlingWebFailureHandlingTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
         Assert.Contains("/api/__test/timeout", logger.Joined, StringComparison.Ordinal);
         Assert.Contains("57014", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A503TheRouteAnsweredWithoutReporting_StillWritesOneWarning_NamingTheEndpointAndTheServer()
+    {
+        var (server, logger) = await BuildServer();
+        using var _ = server;
+
+        var ctx = await Send(server, "/api/__test/unreported-503?server=example-sql-01");
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, ctx.Response.StatusCode);
+        /* The test server hands the response back once the body is complete; the backstop's line is written just after, so wait for it. */
+        for (var wait = 0; wait < 100 && logger.CountAtLevel(LogLevel.Warning) == 0; wait++)
+        {
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Contains("/api/__test/unreported-503", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("example-sql-01", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("503", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ThePingRoutesOwn503_IsNotReportedAsAFailedRead()
+    {
+        var stopped = new CollectorRuntimeState();
+        stopped.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
+        var (server, logger) = await BuildServer(stopped);
+        using var _ = server;
+
+        var ctx = await Send(server, "/api/ping");
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, ctx.Response.StatusCode);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public async Task AReportedTimeout_StillWritesOnlyOneLine_AndNowNamesTheCause()
+    {
+        var (server, logger) = await BuildServer();
+        using var _ = server;
+
+        var ctx = await Send(server, "/api/__test/timeout");
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, ctx.Response.StatusCode);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("statement_timeout", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cause_TellsAServerStatementTimeoutFromTheClientsOwnWait()
+    {
+        Assert.Equal("statement_timeout", DarlingWebFailureLog.Cause(new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014")));
+        Assert.Equal("client_timeout_or_pool_wait", DarlingWebFailureLog.Cause(new NpgsqlException("Exception while reading from stream", new TimeoutException())));
+    }
+
+    [Fact]
+    public void RouteOf_NamesTheServerTheReadAskedFor()
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Path = "/api/read/get_server_summary";
+        context.Request.QueryString = new QueryString("?server=example-sql-01&hours=24");
+        Assert.Equal("/api/read/get_server_summary (server example-sql-01)", DarlingWebFailureLog.RouteOf(context.Request));
+
+        context.Request.QueryString = new QueryString("?hours=24");
+        Assert.Equal("/api/read/get_server_summary", DarlingWebFailureLog.RouteOf(context.Request));
     }
 
     [Fact]
@@ -470,9 +545,9 @@ public sealed class DarlingWebFailureHandlingTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingWebHostService.cs"));
 
-        var handler = code.IndexOf("DarlingWebFailureLog.Report(_logger", StringComparison.Ordinal);
+        var handler = code.IndexOf("app.UseMiddleware<DarlingWebFailureObserver>(", StringComparison.Ordinal);
         Assert.True(handler >= 0,
-            "ConfigurePipeline no longer calls DarlingWebFailureLog.Report; this pin is reading nothing.");
+            "ConfigurePipeline no longer registers DarlingWebFailureObserver; this pin is reading nothing.");
 
         var mapAll = code.IndexOf("DarlingWebEndpoints.MapAll(app", StringComparison.Ordinal);
         Assert.True(mapAll >= 0,
@@ -483,5 +558,145 @@ public sealed class DarlingWebFailureHandlingTests
             "The #4276 exception backstop must be registered (app.Use) AHEAD of DarlingWebEndpoints.MapAll, so "
           + "it wraps every /api/* route MapAll adds. It is currently registered AFTER, which leaves those "
           + "routes reaching ASP.NET Core's own error handling again — the empty, untraced 500 #4276 reports.");
+    }
+
+    /// <summary>W12: the observer is the FIRST middleware, ahead of response compression and every gate, so a throw there is logged.
+    /// It is registered as a class, so the Host guard stays the first <c>app.Use</c> lambda (HostHeaderGuardTests).</summary>
+    [Fact]
+    public void TheFailureObserver_IsRegisteredBeforeCompressionAndEveryGate()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingWebHostService.cs"));
+        var observer = code.IndexOf("app.UseMiddleware<DarlingWebFailureObserver>(", StringComparison.Ordinal);
+        var compression = code.IndexOf("app.UseResponseCompression()", StringComparison.Ordinal);
+        var firstUse = code.IndexOf("app.Use(", StringComparison.Ordinal);
+        Assert.True(observer >= 0 && compression > observer && firstUse > observer,
+            "the failure observer must be registered ahead of response compression and of every app.Use gate");
+    }
+
+    /// <summary>W12: a throw in a middleware registered AFTER the observer and BEFORE where the old backstop sat (a gate) writes
+    /// exactly one line and answers 500. The old backstop never saw it.</summary>
+    [Fact]
+    public async Task AThrowFromAGateBehindTheObserver_WritesOneErrorLine_AndAnswers500()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        var capturing = new CapturingLogger<DarlingWebHostService>();
+        app.UseMiddleware<DarlingWebFailureObserver>(capturing, new DarlingHttpRefusalLog());
+        app.Use((HttpContext _, RequestDelegate _) => throw new InvalidOperationException("gate fault"));
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        var ctx = await Send(server, "/api/anything?server=example-sql-01");
+        await WaitForLinesAsync(capturing.Inner, 1);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
+        Assert.Equal(1, capturing.Inner.CountAtLevel(LogLevel.Error));
+        Assert.Single(capturing.Inner.Lines);
+        Assert.Contains("/api/anything", capturing.Inner.Joined, StringComparison.Ordinal);
+        /* The line is the catch arm's own (it carries the exception type), not the post-check's "no cause of its own" line; and it
+           is the only one, so a Report plus a ReportUnlogged for one request would fail here. */
+        Assert.Contains(nameof(InvalidOperationException), capturing.Inner.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("unreported", capturing.Inner.Joined, StringComparison.Ordinal);
+    }
+
+    /// <summary>Round 2, L1: the observer sits ahead of the Host guard and the auth gate, so a throw before the request has passed
+    /// the auth gate may belong to a caller nobody authenticated. Its line goes through the refusal log's throttle: the same
+    /// source throwing five times logs once. The answer is a 500 each time. After the gate (a request that passed auth), every
+    /// failure still writes its line.</summary>
+    [Fact]
+    public async Task APreAuthThrowRepeated_LogsWithinTheThrottle_WhileAPostAuthThrowLogsEveryTime()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        var capturing = new CapturingLogger<DarlingWebHostService>();
+        app.UseMiddleware<DarlingWebFailureObserver>(capturing, new DarlingHttpRefusalLog());
+        app.Use((HttpContext context, RequestDelegate next) =>
+        {
+            if (context.Request.Path.StartsWithSegments("/pre"))
+            {
+                throw new InvalidOperationException("pre-auth fault");
+            }
+
+            DarlingWebFailureLog.NotePassedAuth();
+            throw new InvalidOperationException("post-auth fault");
+        });
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        for (var i = 0; i < 5; i++)
+        {
+            var ctx = await Send(server, "/pre/anything");
+            Assert.Equal(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
+        }
+
+        await WaitForLinesAsync(capturing.Inner, 1);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(1, capturing.Inner.CountAtLevel(LogLevel.Error));
+        Assert.Single(capturing.Inner.Lines);
+
+        for (var i = 0; i < 3; i++)
+        {
+            await Send(server, "/api/anything");
+        }
+
+        await WaitForLinesAsync(capturing.Inner, 4);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(4, capturing.Inner.CountAtLevel(LogLevel.Error));
+        Assert.Equal(4, capturing.Inner.Lines.Count);
+    }
+
+    /// <summary>S5: the line names the server as the registry does when the read resolved one, and otherwise passes the request
+    /// text through the bundle aliaser (an address in the text does not survive).</summary>
+    [Fact]
+    public async Task TheRouteNamesTheServerAsTheRegistryDoes_AndAliasesTheRequestTextOtherwise()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        var capturing = new CapturingLogger<DarlingWebHostService>();
+        app.UseMiddleware<DarlingWebFailureObserver>(capturing, new DarlingHttpRefusalLog());
+        app.MapGet("/api/__test/resolved", () =>
+        {
+            DarlingWebFailureLog.NoteResolvedServer("example-sql-01");
+            return Results.Json(new { error = "x" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+        });
+        app.MapGet("/api/__test/unresolved", () => Results.Json(new { error = "x" }, statusCode: StatusCodes.Status503ServiceUnavailable));
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        await Send(server, "/api/__test/resolved?server=exam");
+        await WaitForLinesAsync(capturing.Inner, 1);
+        var resolvedLine = string.Join("\n", capturing.Inner.Lines);
+        Assert.Contains("(server example-sql-01)", resolvedLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("exam)", resolvedLine, StringComparison.Ordinal);
+
+        await Send(server, "/api/__test/unresolved?server=203.0.113.77");
+        await WaitForLinesAsync(capturing.Inner, 2);
+        var all = string.Join("\n", capturing.Inner.Lines);
+        Assert.DoesNotContain("203.0.113.77", all, StringComparison.Ordinal);
+        Assert.Contains("(server ip-1)", all, StringComparison.Ordinal);
+    }
+
+    /// <summary>The observer writes its line just after the response is handed back, so a test waits for it.</summary>
+    private static async Task WaitForLinesAsync(CapturingTestLogger logger, int count)
+    {
+        for (var wait = 0; wait < 100 && logger.Lines.Count < count; wait++)
+        {
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+    }
+
+    /// <summary>S5: Unicode format characters (the bidi controls included) are stripped from a logged route like control characters.</summary>
+    [Fact]
+    public void Sanitize_StripsUnicodeFormatCharacters()
+    {
+        var cleaned = DarlingHttpRefusalLog.Sanitize("/api/x (server a\u202Eb\u200Bc\u2066d)", 256);
+        Assert.Equal("/api/x (server a.b.c.d)", cleaned);
     }
 }

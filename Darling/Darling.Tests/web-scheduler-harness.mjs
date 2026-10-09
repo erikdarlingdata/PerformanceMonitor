@@ -25,6 +25,7 @@ const PAUSED_KEY = "darling.autoRefreshPaused";
 let now = 0;
 let inFlight = 0;
 let readMs = 2000;
+let errors = 0;
 const pending = [];
 const timers = [];
 const renders = [];
@@ -79,6 +80,7 @@ const sandbox = {
   bandClass: () => "",
   localTime: String,
   hasInFlightReads: () => inFlight > 0,
+  readErrorCount: () => errors,
   isSessionExpired: () => false,
   onSessionExpired() {},
   navigateServer() {},
@@ -102,6 +104,20 @@ const sandbox = {
   isBackedOff: policy.isBackedOff,
   defaultRefreshChoice: policy.defaultRefreshChoice,
   refreshLabel: policy.refreshLabel,
+  PAGE_REFRESH_CHOICES: policy.PAGE_REFRESH_CHOICES,
+  loadPageRefreshChoice: policy.loadPageRefreshChoice,
+  savePageRefreshChoice: policy.savePageRefreshChoice,
+  buildPageRefreshControl: () => ({ root: {}, select: {} }),
+  favoritesFirst: (cmp) => cmp,
+  refreshAttention: async () => {},
+  onLocalChange() {},
+  favoriteStar: () => null,
+  alertBadge: () => null,
+  initSidebarCollapse() {},
+  initSidebarSearch() {},
+  paintServerList() {},
+  initSeverityColorSettings() {},
+  readTool: async () => ({ kind: "empty" }),
   getSession: async () => null,
   listViews: async () => [],
 };
@@ -138,6 +154,7 @@ const snapshot = () => ({
   renders: renders.length,
   secondRenderAt: renders.length > 1 ? renders[1].at : null,
   hint: element("refresh-hint").textContent,
+  pageUpdatedAt: get("statusPageUpdatedAt"),
   nextRefreshInMs: settledAt.length ? get("pageNextRefreshAt") - settledAt[settledAt.length - 1] : null,
 });
 
@@ -193,6 +210,21 @@ const scenarios = {
     saved.delete(PAUSED_KEY);
     advance(5000);
     return { away, back: snapshot() };
+  },
+  /* Release walk, review round: the footer's "Updated" time moves only when the render's reads settled without an error. The
+     first render is clean and stamps its settle; the second raises a read error (a red strip) and must keep the first time; a
+     third, clean, stamps again. */
+  failedPoll() {
+    boot();
+    advance(4000);
+    const first = snapshot();
+    advance(59000);
+    errors++;
+    advance(3000);
+    const failed = snapshot();
+    advance(70000);
+    const recovered = snapshot();
+    return { first, failed, recovered };
   },
   /* A render that is still loading, with no hide and no pause: 45 s of reads on a 60 s page. */
   stillLoading() {

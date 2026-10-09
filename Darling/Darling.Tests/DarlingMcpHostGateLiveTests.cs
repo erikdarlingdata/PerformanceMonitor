@@ -21,6 +21,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -49,6 +51,19 @@ public sealed class DarlingMcpHostGateLiveTests
     private const string Token = "correct-mcp-token-value";
     private static readonly IPAddress InCidrRemote = IPAddress.Parse("192.168.1.50");
 
+    /// <summary>Adapts <see cref="CapturingTestLogger"/> (a plain <see cref="ILogger"/>) to the generic
+    /// <see cref="ILogger{TCategoryName}"/> <see cref="DarlingMcpHostService"/>'s constructor requires.</summary>
+    private sealed class CapturingHostLogger(CapturingTestLogger inner) : ILogger<DarlingMcpHostService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => inner.Log(logLevel, eventId, state, exception, formatter);
+    }
+
     /// <summary>
     /// Builds a <see cref="TestServer"/> running the REAL <see cref="DarlingMcpHostService.ConfigureMcpServices"/>
     /// and <see cref="DarlingMcpHostService.ConfigurePipeline"/> — the exact methods the production
@@ -56,7 +71,9 @@ public sealed class DarlingMcpHostGateLiveTests
     /// the singletons the tool classes require (a data source the gates never open, since none of them touch
     /// Postgres — a request is refused or reaches tools/list before any tool body runs).
     /// </summary>
-    private static async Task<TestServer> BuildServer(bool networkMode)
+    private static async Task<TestServer> BuildServer(
+        bool networkMode, string? hostName = null, ILogger? logger = null, string? rawAllowedHostName = null,
+        bool requireTokenWhenLoopbackOnly = false, CapturingTestLogger? hostLogger = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -74,17 +91,35 @@ public sealed class DarlingMcpHostGateLiveTests
 
         var app = builder.Build();
 
+        // hostLogger is the host's own logger, the one the gates write their refusal lines to; the Host-refusal line test reads it.
         var host = new DarlingMcpHostService(
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingMcpHostService>.Instance,
+            hostLogger is null
+                ? Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingMcpHostService>.Instance
+                : new CapturingHostLogger(hostLogger),
             new McpRuntimeState(),
             new MonitoredServerRegistryState());
 
         host.ConfigurePipeline(
             app,
             networkMode: networkMode,
-            networkListenIp: networkMode ? IPAddress.Parse(ListenIp) : null,
+            // #5288: the Host guard's listen address is decided exactly as TryStartServerAsync decides it, through
+            // ResolveHostGuardListenIp from the FINAL mode. The host parses the configured address before any degrade,
+            // so a start that degraded out of network mode (requireTokenWhenLoopbackOnly) still has it in hand and the
+            // resolver is what drops it; a start that never had a network block has none to hand over.
+            networkListenIp: DarlingMcpHostService.ResolveHostGuardListenIp(
+                networkMode, networkMode || requireTokenWhenLoopbackOnly ? IPAddress.Parse(ListenIp) : null),
             allowedCidr: IPNetwork.Parse(AllowedCidr),
-            bearerToken: Token);
+            bearerToken: Token,
+            // #5288: the configured name is decided exactly as TryStartServerAsync decides it, through
+            // ResolveAllowedHostName from the FINAL mode, so loopback mode never admits it. Passing the name here
+            // unconditionally would hide the very rule that HostName_AdmittedInNetworkMode_RefusedInLoopbackMode_OtherNamesStill400 pins.
+            // rawAllowedHostName is the one exception, for the test that hands ConfigurePipeline a name the resolver
+            // would never pass it (a malformed punycode label): the pipeline itself must survive that.
+            allowedHostName: rawAllowedHostName ?? DarlingMcpHostService.ResolveAllowedHostName(
+                hostName, networkMode, logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance),
+            // #5288: true only for a start that network mode degraded out of (TLS refused, token resolved); the
+            // never-network loopback-only server in the tests below leaves it false, exactly as the host does.
+            requireTokenWhenLoopbackOnly: requireTokenWhenLoopbackOnly);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -121,7 +156,8 @@ public sealed class DarlingMcpHostGateLiveTests
     }
 
     private static async Task<(int StatusCode, string Body)> SendJsonRpcCoreAsync(
-        TestServer server, string path, string host, IPAddress remote, string requestBody, string? bearer)
+        TestServer server, string path, string host, IPAddress remote, string requestBody, string? bearer,
+        string contentType = "application/json")
     {
         var ctx = await server.SendAsync(c =>
         {
@@ -129,7 +165,11 @@ public sealed class DarlingMcpHostGateLiveTests
             c.Request.Path = path;
             c.Request.Headers.Host = host;
             c.Request.Headers.Accept = "application/json, text/event-stream";
-            c.Request.ContentType = "application/json";
+            if (contentType.Length > 0)
+            {
+                c.Request.ContentType = contentType;
+            }
+
             var bytes = Encoding.UTF8.GetBytes(requestBody);
             c.Request.Body = new System.IO.MemoryStream(bytes);
             c.Request.ContentLength = bytes.Length;
@@ -168,6 +208,91 @@ public sealed class DarlingMcpHostGateLiveTests
         Assert.Equal(StatusCodes.Status401Unauthorized, statusCode);
     }
 
+    /// <summary>
+    /// #5288: network mode configured, then degraded to loopback-only because the TLS certificate was refused, token
+    /// resolved. The loopback-only server keeps the bearer-token gate (the host passes
+    /// <c>requireTokenWhenLoopbackOnly</c> for exactly that start), on both paths and both loopback families: no token
+    /// and a wrong token get 401, the right token gets <c>tools/list</c>. Every client presented the token before the
+    /// certificate lapsed, so nothing that worked stops working.
+    /// </summary>
+    [Theory]
+    [InlineData("/", "127.0.0.1")]
+    [InlineData("/core", "127.0.0.1")]
+    [InlineData("/", "::1")]
+    [InlineData("/core", "::1")]
+    public async Task TlsRefusal_DegradedLoopbackServer_StillRequiresTheToken(string path, string loopback)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+        var remote = IPAddress.Parse(loopback);
+
+        var (noToken, _) = await ToolsListAsync(server, path, "localhost", remote);
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        var (wrongToken, _) = await ToolsListAsync(server, path, "localhost", remote, "not-the-token");
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrongToken);
+
+        var (withToken, body) = await ToolsListAsync(server, path, "localhost", remote, Token);
+        Assert.True(withToken == StatusCodes.Status200OK, $"the right token must reach tools/list, got {withToken}: {body}");
+    }
+
+    /// <summary>The Host guard still runs first on the token-keeping loopback-only server, so a foreign Host is 400
+    /// whatever token it carries.</summary>
+    [Fact]
+    public async Task TlsRefusal_DegradedLoopbackServer_ForeignHostIsStill400()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+        var ctx = await SendRaw(server, "/", "evil.com", IPAddress.Loopback, bearer: Token);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: the degraded loopback-only server listens on loopback only, so its Host guard admits loopback names
+    /// only. A request that names the configured listen address is answered 400 even with the right token, because
+    /// nothing is listening there any more, while a loopback name with the same token still reaches <c>tools/list</c>.
+    /// The server is built through <c>ResolveHostGuardListenIp</c> with the final mode, the way the host builds it.
+    /// </summary>
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/core")]
+    public async Task TlsRefusal_DegradedLoopbackServer_AdmitsLoopbackNamesOnly_NotTheListenAddress(string path)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var named = await SendRaw(server, path, ListenIp, IPAddress.Loopback, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, named.Response.StatusCode);
+
+        var (loopbackName, body) = await ToolsListAsync(server, path, "localhost", IPAddress.Loopback, Token);
+        Assert.True(loopbackName == StatusCodes.Status200OK, $"a loopback name with the token must reach tools/list, got {loopbackName}: {body}");
+    }
+
+    /// <summary>
+    /// #5288: the CIDR check runs BEFORE the token check, so an address outside <c>allowFrom</c> is answered 403
+    /// whatever it sends: no token, a wrong token and the right token all get the same status, and a client that
+    /// cannot route in learns nothing about the token from the port. An in-list client with the same wrong token
+    /// still gets 401, so the two gates stay distinguishable to the operator.
+    /// </summary>
+    [Theory]
+    [InlineData("/", null)]
+    [InlineData("/", "not-the-token")]
+    [InlineData("/", Token)]
+    [InlineData("/core", null)]
+    [InlineData("/core", "not-the-token")]
+    [InlineData("/core", Token)]
+    public async Task OffListRemote_RightOrWrongToken_Both403(string path, string? bearer)
+    {
+        using var server = await BuildServer(networkMode: true);
+
+        var (offList, _) = await ToolsListAsync(server, path, ListenIp, IPAddress.Parse("203.0.113.50"), bearer);
+        Assert.Equal(StatusCodes.Status403Forbidden, offList);
+
+        if (bearer == "not-the-token")
+        {
+            var (inList, _) = await ToolsListAsync(server, path, ListenIp, InCidrRemote, bearer);
+            Assert.Equal(StatusCodes.Status401Unauthorized, inList);
+        }
+    }
+
     /// <summary>A foreign Host header is refused on both paths, in both modes — the DNS-rebinding guard runs
     /// FIRST, before the bearer/CIDR checks even see the request.</summary>
     [Theory]
@@ -183,6 +308,194 @@ public sealed class DarlingMcpHostGateLiveTests
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
     }
 
+    /// <summary>
+    /// #5288: the line the Host guard logs for a refused name tells the operator which settings decide the names it
+    /// admits, the way the web dashboard's line names <c>web.publicBaseUrl</c>'s host: the loopback names, the listen
+    /// address (<c>mcp.network.listen</c>) and the configured name (<c>mcp.network.hostName</c>), the last two in
+    /// network mode only. Read from the host's own logger through the real pipeline, so it is the line the service
+    /// writes, not a copy of it.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ForeignHost_TheRefusalLogLine_NamesTheSettingsThatDecideTheAdmittedNames(bool networkMode)
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode, hostName: "mcp.corp.example", hostLogger: hostLogger);
+
+        var ctx = await SendRaw(server, "/", "evil.com", networkMode ? InCidrRemote : IPAddress.Loopback, bearer: networkMode ? Token : null);
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.StartsWith("Warning: MCP ", line, StringComparison.Ordinal);
+        Assert.Contains("the Host header 'evil.com' is not an address this endpoint binds", line, StringComparison.Ordinal);
+        Assert.Contains("mcp.network.listen when LAN-exposed", line, StringComparison.Ordinal);
+        Assert.Contains("mcp.network.hostName when LAN-exposed", line, StringComparison.Ordinal);
+        Assert.Contains(DarlingMcpHostService.HostRefusalAdmits, line, StringComparison.Ordinal);
+        /* The line names the setting, never its value: the configured name is not written to the log. */
+        Assert.DoesNotContain("mcp.corp.example", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5288, review F2: <c>mcp.network.hostName</c> is admitted by the Host guard in NETWORK mode only. With the
+    /// name configured, network mode admits it (as written, or in any case) on both paths and still demands the
+    /// token, loopback mode given the SAME configured name refuses it 400 while its loopback names keep working,
+    /// and every OTHER name is still refused 400 in both. The name reaches the pipeline through
+    /// <see cref="DarlingMcpHostService.ResolveAllowedHostName"/>, the method production calls with the final
+    /// mode, so this fails the moment the name is passed in loopback mode too.
+    /// </summary>
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/core")]
+    public async Task HostName_AdmittedInNetworkMode_RefusedInLoopbackMode_OtherNamesStill400(string path)
+    {
+        const string hostName = "mcp.corp.example";
+
+        using var network = await BuildServer(networkMode: true, hostName);
+
+        // Admitted, as written and in any case: with the token the request gets past every gate to a handler.
+        foreach (var host in new[] { hostName, "MCP.Corp.Example" })
+        {
+            var (status, _) = await ToolsListAsync(network, path, host, InCidrRemote, bearer: Token);
+            Assert.True(status == StatusCodes.Status200OK, $"network mode, Host '{host}' on {path}: expected 200, got {status}");
+        }
+
+        // A Host is not a credential: the guard admits the name, and the token gate still runs after it.
+        var (noToken, _) = await ToolsListAsync(network, path, hostName, InCidrRemote);
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        // The names the guard always admitted are untouched by the extra one.
+        foreach (var host in new[] { ListenIp, "localhost" })
+        {
+            var (status, _) = await ToolsListAsync(network, path, host, InCidrRemote, bearer: Token);
+            Assert.True(status == StatusCodes.Status200OK, $"network mode, Host '{host}' on {path}: expected 200, got {status}");
+        }
+
+        // Every other name is still 400, token and all: another site, a longer name that only ENDS with it, a
+        // longer one that only STARTS with it, its parent domain, a child of it, and an IP that is not the listen IP.
+        foreach (var other in new[] { "evil.com", "evil-mcp.corp.example", "mcp.corp.example.evil.com", "corp.example", "sub.mcp.corp.example", "10.9.9.9" })
+        {
+            var ctx = await SendRaw(network, path, other, InCidrRemote, bearer: Token);
+            Assert.True(
+                ctx.Response.StatusCode == StatusCodes.Status400BadRequest,
+                $"network mode, Host '{other}' on {path}: expected 400, got {ctx.Response.StatusCode}");
+        }
+
+        // Loopback mode with the SAME name configured: refused, because that surface is tokenless and a name the
+        // operator wrote for the network listener's clients buys nothing there.
+        using var loopback = await BuildServer(networkMode: false, hostName);
+
+        foreach (var host in new[] { hostName, "MCP.Corp.Example" })
+        {
+            var ctx = await SendRaw(loopback, path, host, IPAddress.Loopback);
+            Assert.True(
+                ctx.Response.StatusCode == StatusCodes.Status400BadRequest,
+                $"loopback mode, Host '{host}' on {path}: expected 400, got {ctx.Response.StatusCode}");
+        }
+
+        // ...while the loopback names keep working, and a foreign name is still refused.
+        var (loopbackStatus, _) = await ToolsListAsync(loopback, path, "localhost", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status200OK, loopbackStatus);
+
+        var foreign = await SendRaw(loopback, path, "evil.com", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status400BadRequest, foreign.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288 item 3: a host name written in Unicode is admitted as the ASCII (punycode) name a client sends in its
+    /// Host header. ASP.NET Core decodes that header to Unicode before the guard sees it, so the pipeline compares
+    /// the configured name in the same decoded form; a different internationalized name is still refused.
+    /// </summary>
+    [Fact]
+    public async Task HostName_WrittenInUnicode_IsAdmittedAsItsPunycodeHost()
+    {
+        using var server = await BuildServer(networkMode: true, hostName: "b\u00FCcher.example");
+
+        var (punycode, body) = await ToolsListAsync(server, "/", "xn--bcher-kva.example", InCidrRemote, bearer: Token);
+        Assert.True(punycode == StatusCodes.Status200OK, $"expected 200, got {punycode}: {body}");
+
+        var other = await SendRaw(server, "/", "xn--e1afmkfd.example", InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, other.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: IDNA names are case-insensitive, so a punycode host name written in upper case is admitted exactly like
+    /// the lower-case spelling. The framework decodes a Host header's <c>xn--</c> labels only when the prefix is lower
+    /// case (the form a client sends), so the configured name is held in lower case and decodes the same way; a
+    /// different internationalized name is still refused.
+    /// </summary>
+    [Theory]
+    [InlineData("XN--BCHER-KVA.EXAMPLE")]
+    [InlineData("xn--bcher-kva.example")]
+    public async Task HostName_UpperCasePunycode_IsAdmitted(string configured)
+    {
+        using var server = await BuildServer(networkMode: true, hostName: configured);
+
+        var (punycode, body) = await ToolsListAsync(server, "/", "xn--bcher-kva.example", InCidrRemote, bearer: Token);
+        Assert.True(punycode == StatusCodes.Status200OK, $"expected 200, got {punycode}: {body}");
+
+        var other = await SendRaw(server, "/", "xn--e1afmkfd.example", InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, other.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288 item 2: a host name that is SET but is not a bare DNS name admits NOTHING, not even the part a lenient
+    /// parser would keep (the host before a port, a name a wildcard would match), and logs exactly one Warning at
+    /// start that names the key and the value as written. The listener is otherwise unaffected: the listen IP and
+    /// the token still work, because a typo in an optional name must not take MCP down.
+    /// </summary>
+    [Theory]
+    [InlineData("mcp.corp.example:5152", "mcp.corp.example")]
+    [InlineData("https://mcp.corp.example/", "mcp.corp.example")]
+    [InlineData("mcp.corp.example/mcp", "mcp.corp.example")]
+    [InlineData("*.corp.example", "mcp.corp.example")]
+    [InlineData("10.9.9.9", "10.9.9.9")]
+    [InlineData("mcp.corp.example..", "mcp.corp.example")]
+    [InlineData("b\u00FCcher..example", "xn--bcher-kva.example")]
+    [InlineData("xn--a", "evil.com")]
+    [InlineData("mcp.xn--a.example", "evil.com")]
+    public async Task HostName_SetButRefused_IsNotAdmitted_AndLogsOneWarning(string refusedValue, string hostAClientWouldSend)
+    {
+        var logger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode: true, refusedValue, logger);
+
+        var line = Assert.Single(logger.Lines);
+        Assert.StartsWith("Warning: ", line);
+        Assert.Contains("mcp.network.hostName", line);
+        Assert.Contains(refusedValue, line);
+
+        var refused = await SendRaw(server, "/", hostAClientWouldSend, InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, refused.Response.StatusCode);
+
+        var (listenIp, _) = await ToolsListAsync(server, "/", ListenIp, InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status200OK, listenIp);
+    }
+
+    /// <summary>
+    /// #5288: <c>ConfigurePipeline</c> admits whatever name it is given, so it must not fail start-up for a malformed
+    /// punycode label (<c>xn--a</c> decodes to nothing and makes <c>HostString.FromUriComponent</c> throw
+    /// <c>ArgumentException</c>), even though <c>McpNetworkConfig.NormalizeHostName</c> already refuses such a name
+    /// before production reaches this method. Called directly, with the raw name, so this fails the moment the
+    /// pipeline's own conversion loses its catch. The conversion falls back to the raw value: the pipeline still
+    /// builds, still refuses a foreign Host, and still admits the names it always admits.
+    /// </summary>
+    [Theory]
+    [InlineData("xn--a")]
+    [InlineData("mcp.xn--a.example")]
+    public async Task MalformedPunycodeAllowedHostName_PassedStraightToConfigurePipeline_DoesNotFailStartUp(string rawAllowedHostName)
+    {
+        using var server = await BuildServer(networkMode: true, rawAllowedHostName: rawAllowedHostName);
+
+        var foreign = await SendRaw(server, "/", "evil.com", InCidrRemote, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, foreign.Response.StatusCode);
+
+        foreach (var host in new[] { ListenIp, "localhost" })
+        {
+            var (status, body) = await ToolsListAsync(server, "/", host, InCidrRemote, bearer: Token);
+            Assert.True(status == StatusCodes.Status200OK, $"Host '{host}': expected 200, got {status}: {body}");
+        }
+    }
+
     /// <summary>Network mode, the right token, an in-CIDR remote: a tools/list on <c>/</c> succeeds — proof
     /// the request got PAST every gate.</summary>
     [Fact]
@@ -193,6 +506,275 @@ public sealed class DarlingMcpHostGateLiveTests
         var (statusCode, _) = await ToolsListAsync(server, "/", ListenIp, InCidrRemote, bearer: Token);
 
         Assert.Equal(StatusCodes.Status200OK, statusCode);
+    }
+
+    /// <summary>
+    /// A token the operator configured gates a loopback-only server too. The production start resolves it with
+    /// <see cref="DarlingMcpHostService.ResolveLoopbackOnlyToken"/> and hands the answer to the pipeline as the bearer
+    /// token with the loopback-only token gate on; this builds the pipeline from the same answer, on both paths and
+    /// both loopback families: no token and a wrong token get 401, the right token gets <c>tools/list</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("/", "127.0.0.1")]
+    [InlineData("/core", "127.0.0.1")]
+    [InlineData("/", "::1")]
+    [InlineData("/core", "::1")]
+    public async Task LoopbackOnly_ConfiguredToken_IsRequired_RightTokenPasses(string path, string loopback)
+    {
+        var resolved = DarlingMcpHostService.ResolveLoopbackOnlyToken(
+            new McpNetworkConfig { Token = Token },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        Assert.False(resolved.Refuse);
+        Assert.Equal(Token, resolved.Token);
+
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: resolved.Token.Length > 0);
+        var remote = IPAddress.Parse(loopback);
+
+        var (noToken, _) = await ToolsListAsync(server, path, "localhost", remote);
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        var (wrongToken, _) = await ToolsListAsync(server, path, "localhost", remote, "not-the-token");
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrongToken);
+
+        var (withToken, body) = await ToolsListAsync(server, path, "localhost", remote, resolved.Token);
+        Assert.True(withToken == StatusCodes.Status200OK, $"the right token must reach tools/list, got {withToken}: {body}");
+    }
+
+    /// <summary>No token configured, loopback-only: the listener is open to local clients exactly as before (no new prompt).</summary>
+    [Fact]
+    public async Task LoopbackOnly_NoTokenConfigured_StaysOpen()
+    {
+        var resolved = DarlingMcpHostService.ResolveLoopbackOnlyToken(
+            new McpNetworkConfig { Token = "   " },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        Assert.False(resolved.Refuse);
+        Assert.Equal("", resolved.Token);
+        Assert.Equal("", DarlingMcpHostService.ResolveLoopbackOnlyToken(null, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance).Token);
+
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: resolved.Token.Length > 0);
+
+        var (statusCode, _) = await ToolsListAsync(server, "/", "localhost", IPAddress.Loopback);
+
+        Assert.Equal(StatusCodes.Status200OK, statusCode);
+    }
+
+    /// <summary>A configured token that cannot be decrypted stops the start (Critical line, no token in it) instead of
+    /// serving the loopback listener open.</summary>
+    [Fact]
+    public void LoopbackOnly_ConfiguredTokenThatCannotBeUsed_RefusesTheStart_WithOneCriticalLine()
+    {
+        var log = new CapturingTestLogger();
+        var resolved = DarlingMcpHostService.ResolveLoopbackOnlyToken(
+            new McpNetworkConfig { EncryptedToken = "not-a-protected-blob" }, new CapturingHostLogger(log));
+
+        Assert.True(resolved.Refuse);
+        Assert.Equal("", resolved.Token);
+        Assert.Contains(log.Lines, l => l.Contains("MCP network token", StringComparison.Ordinal)
+            && l.Contains("refusing to serve", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
+    }
+
+    private static int FreeTcpPort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Network mode with a token that is configured but cannot be used (a blob this host cannot decrypt, a variable
+    /// that is not set) does not start the listener at all, exactly as a loopback-only start does: the real start
+    /// returns false, logs one Critical line, and nothing answers on the loopback port.
+    /// </summary>
+    [Theory]
+    [InlineData("\"encryptedToken\": \"not-a-protected-blob\"")]
+    [InlineData("\"token\": \"env:DARLING_TEST_MCP_TOKEN_THAT_IS_NOT_SET\"")]
+    public async Task NetworkMode_ConfiguredTokenThatCannotBeUsed_DoesNotStart_AndNothingAnswersOnTheLoopbackPort(string tokenJson)
+    {
+        var port = FreeTcpPort();
+        var config = DarlingConfig.Parse(
+            ("{ 'postgres': { 'managed': true }, 'servers': [ { 'host': 'SQL2022' } ], 'mcp': { 'enabled': true, 'port': "
+            + port + ", 'network': { 'listen': '" + ListenIp + "', 'allowFrom': '" + AllowedCidr + "', " + tokenJson + " } } }")
+            .Replace('\'', '"'));
+        var log = new CapturingTestLogger();
+        var host = new DarlingMcpHostService(new CapturingHostLogger(log), new McpRuntimeState(), new MonitoredServerRegistryState());
+        var toggle = new PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.EndpointToggle(
+            true, port, PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.EndpointToggleOrigin.File, false, false);
+        var tryStart = typeof(DarlingMcpHostService).GetMethod(
+            "TryStartServerAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var started = true;
+        var answered = false;
+        try
+        {
+            started = await (Task<bool>)tryStart.Invoke(host, [config, toggle, System.Threading.CancellationToken.None])!;
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
+                answered = true;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+            }
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+
+        Assert.False(started, "a configured token that cannot be used must stop the start in network mode");
+        Assert.False(answered, "nothing may answer on the loopback port");
+        Assert.Contains(log.Lines, l => l.Contains("MCP network token", StringComparison.Ordinal)
+            && l.Contains("MCP server not started", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
+    }
+
+    /// <summary>The start itself calls the resolver on a loopback-only bind and stops on a refusal, so the pipeline
+    /// tests above describe what production serves.</summary>
+    [Fact]
+    public void TryStartServerAsync_ResolvesTheLoopbackOnlyToken_AndStopsOnARefusal()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
+        var start = source.IndexOf("private async Task<bool> TryStartServerAsync(", StringComparison.Ordinal);
+        Assert.True(start > 0);
+        var body = source[start..];
+        var call = body.IndexOf("ResolveLoopbackOnlyToken(config.Mcp.Network, _logger)", StringComparison.Ordinal);
+        Assert.True(call > 0, "TryStartServerAsync must resolve a configured token on a loopback-only start");
+        var tail = body[call..];
+        Assert.Contains("if (loopbackToken.Refuse)", tail[..400], StringComparison.Ordinal);
+        Assert.Contains("bearerToken = loopbackToken.Token;", tail[..700], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A POST must carry a JSON Content-Type; any other type is answered 415 in both modes and the tool does not run,
+    /// whatever the body holds (here a valid <c>tools/call</c> for a write tool).
+    /// </summary>
+    [Theory]
+    [InlineData(false, "text/plain")]
+    [InlineData(false, "application/x-www-form-urlencoded")]
+    [InlineData(false, "multipart/form-data; boundary=x")]
+    [InlineData(false, "")]
+    [InlineData(false, "application/problem+json")]
+    [InlineData(false, "text/json")]
+    [InlineData(false, "application/json-seq")]
+    [InlineData(true, "text/plain")]
+    [InlineData(true, "application/x-www-form-urlencoded")]
+    [InlineData(true, "multipart/form-data; boundary=x")]
+    public async Task Post_WithANonJsonContentType_Is415_AndTheWriteToolDoesNotRun(bool networkMode, string contentType)
+    {
+        using var server = await BuildServer(networkMode: networkMode);
+        var host = networkMode ? ListenIp : "localhost";
+        var remote = networkMode ? InCidrRemote : IPAddress.Loopback;
+        var call = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"mute_analysis_finding\",\"arguments\":{}}}";
+
+        foreach (var path in new[] { "/", "/core" })
+        {
+            var (statusCode, body) = await SendJsonRpcCoreAsync(
+                server, path, host, remote, call, networkMode ? Token : null, contentType);
+
+            Assert.True(statusCode == StatusCodes.Status415UnsupportedMediaType, $"{path} {contentType}: got {statusCode}: {body}");
+            Assert.DoesNotContain("\"result\"", body, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The 415 refusal is reported like the other refusal sites: one log line naming the gate and the media type
+    /// (or saying there was none), read from the host's own logger through the real pipeline.
+    /// </summary>
+    [Theory]
+    [InlineData(false, "text/plain", "the media type 'text/plain'")]
+    [InlineData(true, "text/plain", "the media type 'text/plain'")]
+    [InlineData(false, "", "no Content-Type")]
+    public async Task NonJsonPost_LogsOneRefusalLine_NamingTheJsonContentTypeGate(bool networkMode, string contentType, string expectedDetail)
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode, hostLogger: hostLogger);
+        var host = networkMode ? ListenIp : "localhost";
+        var remote = networkMode ? InCidrRemote : IPAddress.Loopback;
+
+        var (statusCode, _) = await SendJsonRpcCoreAsync(server, "/", host, remote, "{}", networkMode ? Token : null, contentType);
+        Assert.Equal(StatusCodes.Status415UnsupportedMediaType, statusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.StartsWith("Warning: MCP ", line, StringComparison.Ordinal);
+        Assert.Contains(DarlingHttpRefusalLog.Describe(DarlingRefusalGate.JsonContentType), line, StringComparison.Ordinal);
+        Assert.Contains("refused", line, StringComparison.Ordinal);
+        Assert.Contains("415", line, StringComparison.Ordinal);
+        Assert.Contains(expectedDetail, line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The 415 check sits below the CIDR and token gates: a caller that fails a gate is answered 401 or 403 first,
+    /// whatever Content-Type it sends, and only a caller that passes them reaches the 415.
+    /// </summary>
+    [Theory]
+    [InlineData("/", "text/plain")]
+    [InlineData("/", "")]
+    [InlineData("/core", "application/x-www-form-urlencoded")]
+    public async Task NonJsonPost_OnATokenGatedLoopbackListener_Gets401UntilTheTokenIsRight(string path, string contentType)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (noToken, _) = await SendJsonRpcCoreAsync(server, path, "localhost", IPAddress.Loopback, "{}", null, contentType);
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        var (wrongToken, _) = await SendJsonRpcCoreAsync(server, path, "localhost", IPAddress.Loopback, "{}", "not-the-token", contentType);
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrongToken);
+
+        var (rightToken, _) = await SendJsonRpcCoreAsync(server, path, "localhost", IPAddress.Loopback, "{}", Token, contentType);
+        Assert.Equal(StatusCodes.Status415UnsupportedMediaType, rightToken);
+    }
+
+    [Fact]
+    public async Task NonJsonPost_InNetworkMode_Gets403OutsideTheCidr_And401WithoutTheToken()
+    {
+        using var server = await BuildServer(networkMode: true);
+        var outside = IPAddress.Parse("203.0.113.9");
+
+        var (outsideStatus, _) = await SendJsonRpcCoreAsync(server, "/", ListenIp, outside, "{}", Token, "text/plain");
+        Assert.Equal(StatusCodes.Status403Forbidden, outsideStatus);
+
+        var (noToken, _) = await SendJsonRpcCoreAsync(server, "/", ListenIp, InCidrRemote, "{}", null, "text/plain");
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        var (rightToken, _) = await SendJsonRpcCoreAsync(server, "/", ListenIp, InCidrRemote, "{}", Token, "text/plain");
+        Assert.Equal(StatusCodes.Status415UnsupportedMediaType, rightToken);
+    }
+
+    /// <summary>The JSON POST path is untouched: <c>application/json</c> (with or without a charset) still reaches the
+    /// transport, and a GET carries no body to type.</summary>
+    [Theory]
+    [InlineData("application/json")]
+    [InlineData("application/json; charset=utf-8")]
+    [InlineData("Application/JSON")]
+    public async Task Post_WithAJsonContentType_StillWorks(string contentType)
+    {
+        using var server = await BuildServer(networkMode: false);
+        var body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}";
+
+        var (statusCode, text) = await SendJsonRpcCoreAsync(server, "/", "localhost", IPAddress.Loopback, body, null, contentType);
+
+        Assert.True(statusCode == StatusCodes.Status200OK, $"got {statusCode}: {text}");
+    }
+
+    /// <summary>The Host check runs before the content-type check: a foreign Host with a non-JSON body is still 400.</summary>
+    [Fact]
+    public async Task Post_ForeignHost_WithANonJsonContentType_IsStill400()
+    {
+        using var server = await BuildServer(networkMode: false);
+
+        var (statusCode, _) = await SendJsonRpcCoreAsync(
+            server, "/", "evil.example", IPAddress.Loopback, "{}", null, "text/plain");
+
+        Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
     }
 
     /// <summary>Loopback mode, no token: no token middleware is installed at all in this mode, so a
@@ -262,6 +844,43 @@ public sealed class DarlingMcpHostGateLiveTests
         using var document = JsonDocument.Parse(ExtractJsonPayload(body));
         Assert.True(document.RootElement.TryGetProperty("error", out var error), $"expected a JSON-RPC error envelope, got: {body}");
         Assert.Contains("Unknown tool", error.GetProperty("message").GetString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>A <c>tools/call</c> that sends <paramref name="argumentsJson"/> as the call's arguments object.</summary>
+    private static Task<(int StatusCode, string Body)> ToolsCallWithArgumentsAsync(
+        TestServer server, string path, string host, IPAddress remote, string toolName, string argumentsJson)
+        => SendJsonRpcAsync(
+            server, path, host, remote, "tools/call", $"{{\"name\":\"{toolName}\",\"arguments\":{argumentsJson}}}", bearer: null);
+
+    /// <summary>
+    /// The argument guard's typed refusal reaches a caller over the stateless HTTP pipeline the product ships. The guard
+    /// takes its record of each tool's parameter types from the request's services, and the in-process server the other
+    /// pins run on hands it those, so only a call made like this one shows that a real client's request resolves it too.
+    /// A null for <c>hours_back</c> is the proof: the schema says "integer" and does not say which parameters take a
+    /// null, so only the typed path refuses it. With the record missing the null would reach the SDK's binder, which
+    /// answers "An error occurred invoking ..." and names neither the argument nor the reason.
+    /// </summary>
+    [Fact]
+    public async Task ToolsCall_ANullForAWholeNumber_IsRefusedByName_OverTheShippedHttpPipeline()
+    {
+        using var server = await BuildServer(networkMode: false);
+
+        var (statusCode, body) = await ToolsCallWithArgumentsAsync(
+            server, "/", "localhost", IPAddress.Loopback, "get_alert_history", "{\"hours_back\":null}");
+        Assert.Equal(StatusCodes.Status200OK, statusCode);
+
+        var result = ReadJsonRpcResult(body);
+        Assert.True(result.GetProperty("isError").GetBoolean(), $"expected an error result, got: {body}");
+        var text = result.GetProperty("content").EnumerateArray().Single().GetProperty("text").GetString() ?? "";
+        Assert.True(
+            PerformanceMonitor.Common.McpHelpers.IsRefusalEnvelope(text), $"expected the argument guard's refusal, got: {text}");
+
+        using var refusal = JsonDocument.Parse(text);
+        Assert.Equal("hours_back", refusal.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Contains(
+            "Argument 'hours_back' for tool 'get_alert_history' takes a whole number of hours, and cannot be null, and the call sent null.",
+            refusal.RootElement.GetProperty("message").GetString(),
+            StringComparison.Ordinal);
     }
 
     private static JsonElement ReadJsonRpcResult(string body)

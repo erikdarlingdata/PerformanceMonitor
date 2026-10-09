@@ -47,7 +47,7 @@ public sealed class MemoryStatsCollector : CollectorDefinitionBase<MemoryStatsCo
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     total_physical_memory_mb = CONVERT(decimal(18,2), osi.committed_target_kb / 1024.0),
     available_physical_memory_mb = CONVERT(decimal(18,2), (osi.committed_target_kb - osi.committed_kb) / 1024.0),
     total_page_file_mb = CONVERT(decimal(18,2), 0),
@@ -91,7 +91,7 @@ OPTION(RECOMPILE);";
     private const string OnPremQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     total_physical_memory_mb = CONVERT(decimal(18,2), osm.total_physical_memory_kb / 1024.0),
     available_physical_memory_mb = CONVERT(decimal(18,2), osm.available_physical_memory_kb / 1024.0),
     total_page_file_mb = CONVERT(decimal(18,2), osm.total_page_file_kb / 1024.0),

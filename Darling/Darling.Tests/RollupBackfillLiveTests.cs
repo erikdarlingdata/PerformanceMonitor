@@ -66,7 +66,7 @@ public sealed class RollupBackfillLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         /* All timestamps Kind-Unspecified — naive-UTC storage, see PgCollectorRowWriter. */
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         var rawOldest = now.AddDays(-HistoryDays);
 
         /* ── 1. PRE-EXISTING HISTORY: raw rows going back well before any rollup exists. ── */
@@ -234,7 +234,7 @@ public sealed class RollupBackfillLiveTests
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
 
         /* Plant history, materialize ALL of it, then purge raw back to a short horizon — the steady state a
            healthy store reaches once its purges are armed. */
@@ -304,7 +304,7 @@ public sealed class RollupBackfillLiveTests
             Assert.True(await TimescaleSupport.TryEnableAsync(setup, null, ct));
             await TimescaleSupport.ConvertToHypertablesAsync(setup, null, ct);
 
-            var seedNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var seedNow = LiveClock.Now();
             await SeedHourlyQueryStatsAsync(setup, seedNow.AddDays(-HistoryDays), seedNow, ct);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(setup, null, ct);
         }
@@ -431,7 +431,7 @@ public sealed class RollupBackfillLiveTests
             Assert.True(await TimescaleSupport.TryEnableAsync(setup, null, ct));
             await TimescaleSupport.ConvertToHypertablesAsync(setup, null, ct);
 
-            var seedNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var seedNow = LiveClock.Now();
             await SeedHourlyQueryStoreStatsAsync(setup, seedNow.AddDays(-HistoryDays), seedNow, ct);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(setup, null, ct);
         }
@@ -519,7 +519,7 @@ public sealed class RollupBackfillLiveTests
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
@@ -586,7 +586,7 @@ public sealed class RollupBackfillLiveTests
 
         /* Wide enough that the raw hypertable holds several chunks, so that one in the MIDDLE of the range exists to
            hold the refresh at. */
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         var rangeFrom = now.Date.AddDays(-CancellationHistoryDays);
         var rangeTo = now.Date;
 
@@ -654,6 +654,7 @@ public sealed class RollupBackfillLiveTests
             },
             CancellationToken.None);
 
+        var cancelDidNotStopTheRefresh = false;
         try
         {
             await WaitUntilBackendWaitsOnAsync(connection, refreshConnection.ProcessID, heldChunk, refresh, ct);
@@ -663,7 +664,19 @@ public sealed class RollupBackfillLiveTests
             try
             {
                 await cancellation.CancelAsync();
-                _ = await refresh;
+
+                /* #5587: bounded. The lock above is still held here, and the refresh's own command timeout is an hour,
+                   so a cancel that did not reach the backend would leave this wait with nothing to end it (a CI shard
+                   hung to its job timeout on a wait of this shape). On the limit the lock is released below, the refresh
+                   is let finish, and the test fails by name. */
+                try
+                {
+                    _ = await refresh.WaitAsync(CancelledRefreshLimit, CancellationToken.None);
+                }
+                catch (TimeoutException)
+                {
+                    cancelDidNotStopTheRefresh = true;
+                }
 
                 /* Release the cancelled backend BEFORE anything else touches this store. `await refresh` returns when
                    the client-side task completes, which is not the same instant the server-side backend finishes
@@ -672,7 +685,10 @@ public sealed class RollupBackfillLiveTests
                    the same lifecycle-hardening the arming tests got: the shared-store flake class on this rig is
                    connection-level, so a test that deliberately aborts a statement should not leave the cleanup to
                    chance. */
-                await refreshConnection.CloseAsync();
+                if (!cancelDidNotStopTheRefresh)
+                {
+                    await refreshConnection.CloseAsync();
+                }
             }
             finally
             {
@@ -680,6 +696,14 @@ public sealed class RollupBackfillLiveTests
                    chunk, so a lock left standing would hang them rather than fail them. */
                 await lockTransaction.RollbackAsync(CancellationToken.None);
             }
+        }
+
+        if (cancelDidNotStopTheRefresh)
+        {
+            _ = await refresh;
+            Assert.Fail(
+                $"the cancelled refresh was still waiting on the held chunk {heldChunk} {CancelledRefreshLimit.TotalSeconds:0} s after the cancel, " +
+                "so the cancel did not reach its backend. The lock was released so the refresh could end.");
         }
 
         var floor = await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct);
@@ -728,6 +752,9 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
     /// says so. A guard against a hang, never a timing expectation: the newest half of the range commits in
     /// seconds, so reaching this means the refresh is stuck somewhere else.</summary>
     private static readonly TimeSpan HeldChunkWaitLimit = TimeSpan.FromSeconds(120);
+
+    /// <summary>#5587: how long a cancelled refresh may take to end while the chunk lock is still held; a cancel that works ends it in milliseconds.</summary>
+    private static readonly TimeSpan CancelledRefreshLimit = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// The raw <c>collect.query_stats</c> chunk whose time range holds <paramref name="instant"/>, as a
@@ -836,7 +863,7 @@ SELECT EXISTS (
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
@@ -953,7 +980,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
             Assert.True(await TimescaleSupport.TryEnableAsync(setup, null, ct));
             await TimescaleSupport.ConvertToHypertablesAsync(setup, null, ct);
 
-            var seedNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var seedNow = LiveClock.Now();
             await SeedHourlyQueryStatsAsync(setup, seedNow.AddDays(-2), seedNow, ct);
 
             /* ONE corrupt row, which is all it takes. */
@@ -1079,7 +1106,7 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
-        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var now = LiveClock.Now();
         var historyFrom = now.Date.AddDays(-HistoryDays);
 
         await SeedHourlyQueryStatsAsync(connection, historyFrom, now, ct);

@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// <see cref="ChartWindowDomainTests"/> pattern). The browser tab title is the static "Darling Web" in
 /// <c>index.html</c> and no script sets <c>document.title</c>, so there is no second place that printed the key.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerPageTitlePinTests
 {
     private static string ServerJs => ReadRepoFileLf(Path.Combine(
@@ -81,7 +82,7 @@ public sealed class ServerPageTitlePinTests
 
         Assert.Contains("const matches = (c) => c.server_name === server || c.display_name === server;", js, StringComparison.Ordinal);
         Assert.Contains("current = { server, tab: null };", js, StringComparison.Ordinal);
-        Assert.Contains("mount(main, [head, whySlot, tabsSlot, gridNode]);", js, StringComparison.Ordinal);
+        Assert.Contains("mount(main, [head, whySlot, tabsSlot, reachSlot, gridNode]);", js, StringComparison.Ordinal);
         Assert.DoesNotContain("server = card.display_name", js, StringComparison.Ordinal);
         Assert.DoesNotContain("current = { server: card.display_name", js, StringComparison.Ordinal);
     }

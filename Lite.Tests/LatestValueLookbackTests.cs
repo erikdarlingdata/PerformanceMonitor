@@ -372,8 +372,8 @@ public sealed class LatestValueLookbackArchiveTests : IDisposable
     [Fact]
     public async Task AGhostInTheArchive_IsNotCounted_AndALiveSeriesArchivedMinutesAgoStillIs()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
 
         var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
@@ -530,7 +530,7 @@ INSERT INTO file_io_stats
 VALUES ($1, $2, $3, 'latest-value-lookback', $4, $5, 'ROWS', $6)",
             Interlocked.Decrement(ref s_nextId), at, serverId, database, file, sizeMb);
 
-    private static Task InsertSizeAsync(DuckDBConnection connection, int serverId, DateTime at,
+    public static Task InsertSizeAsync(DuckDBConnection connection, int serverId, DateTime at,
         string database, int fileId, string fileType, string file, decimal totalMb, bool percentGrowth,
         string volume, decimal volumeTotalMb, decimal volumeFreeMb) =>
         InsertAsync(connection, @"
@@ -563,7 +563,7 @@ INSERT INTO memory_stats
 VALUES ($1, $2, $3, 'latest-value-lookback', $4, $5, $6)",
             Interlocked.Decrement(ref s_nextId), at, serverId, physicalMb, physicalMb / 2, physicalMb * 3 / 4);
 
-    private static Task InsertDatabaseConfigAsync(DuckDBConnection connection, int serverId, DateTime capturedAt,
+    public static Task InsertDatabaseConfigAsync(DuckDBConnection connection, int serverId, DateTime capturedAt,
         string database, bool autoShrink, bool rcsiOn) =>
         InsertAsync(connection, @"
 INSERT INTO database_config

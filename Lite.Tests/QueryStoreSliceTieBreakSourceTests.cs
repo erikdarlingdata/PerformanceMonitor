@@ -41,6 +41,7 @@ namespace Lite.Tests;
 /// by review on #1919; the alternative on offer was to soften the source comment to stop claiming coverage
 /// that did not exist, which would have been a Lite/Darling parity scope-down.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class QueryStoreSliceTieBreakSourceTests
 {
     /// <summary>

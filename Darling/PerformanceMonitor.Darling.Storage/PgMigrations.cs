@@ -315,6 +315,696 @@ ALTER TABLE collect.store_metrics
     /// </summary>
     private const string V157Sql = @"ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS server_id integer;";
 
+    /// <summary>
+    /// V158 — <c>config.config_install_id</c>: the install id (#4961), one row.
+    ///
+    /// <para>The install id is the eight characters that tell this install's Extended Events sessions from another
+    /// install's on a server both monitor, in the name of every session an install makes there. It has to outlive a
+    /// restart and be the same for every part of the install, so it lives in the store, the one thing every part of
+    /// the install shares. No store-wide table existed to hold it, so this is one: a single row pinned to
+    /// <c>id = 1</c> like <c>config_alert_settings</c>, the id under a CHECK for exactly eight lowercase hex digits
+    /// (lowercase because, on a case-sensitive server collation, an id read back in another case would name a
+    /// different session than the one it made), and the binding stored beside it.</para>
+    ///
+    /// <para><b>The binding</b> is the cluster's <c>system_identifier</c> and the store database's OID, the two values
+    /// that a physical copy of this store keeps and a different store does not. A row whose binding does not match
+    /// the store it is read from was made for another store, so the service makes a new id and logs one Warning that
+    /// names both; the old id's sessions are left alone because the install it came from may still run. Neither value
+    /// is a host name: a recreated container gets a new host name and is still the same store. The OID is NOT NULL,
+    /// because every login can read it. The cluster id is nullable: a login without superuser rights may call
+    /// <c>pg_control_system()</c> by default (checked on PostgreSQL 18), but a managed or hardened server can revoke it,
+    /// and the service has to start there. A NULL cluster id means the make could not read it, so the id is bound to the
+    /// database alone. The OID always counts when the row is compared with the store; the cluster id counts only when
+    /// both the stored row and the current read have one, so a grant that changes later never makes a new id on its
+    /// own.</para>
+    ///
+    /// <para><b>DDL only.</b> The service inserts the row at start, after the migrations and before any worker
+    /// (<c>INSERT ... ON CONFLICT DO NOTHING</c>, then a read), so two starts at once make one row. The CLI and the
+    /// Viewer only read it. Needs no GRANT: provisioning's blanket grants on the config schema re-run on every
+    /// service start and cover a table a migration introduces. Needs no trigger either: nothing reloads when the id
+    /// changes, because it only changes at start. Neither value is a secret, so no read carve is needed.</para>
+    /// </summary>
+    private const string V158Sql = @"
+/* V158: the install id (#4961), one row, made by the service at start. Schema-qualified config.* like every rung. */
+CREATE TABLE IF NOT EXISTS config.config_install_id (
+    id smallint NOT NULL PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    install_id text NOT NULL CONSTRAINT ck_config_install_id_format CHECK (install_id ~ '^[0-9a-f]{8}$'),
+    system_identifier bigint,
+    database_oid bigint NOT NULL,
+    created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
+);";
+
+    /// <summary>
+    /// V159 — <c>config.config_install_id.table_oid</c> and <c>server_major</c>: the OID of the install id table and the
+    /// server's major version, two more bindings for the id (#4961).
+    ///
+    /// <para>V158 bound the id to the cluster's <c>system_identifier</c> and the database's OID, and a different cluster
+    /// id made a new id. A managed major upgrade runs <c>pg_upgrade</c>, which makes a new <c>system_identifier</c>, so each
+    /// upgrade made a new id and left the old id's sessions on every monitored server. <c>pg_upgrade</c> keeps the
+    /// database's OID and the OID of each table (<see cref="StoreInstallId.IsSameStore"/> cites the PostgreSQL sources
+    /// for both) and raises the major, and a store made again by dump and restore gets new OIDs, so the two OIDs say
+    /// whether this is the same store where the cluster id cannot. OIDs restart at the same number after every
+    /// <c>initdb</c>, so a copy of the row into a fresh install of the same version can match both; the major tells that
+    /// copy from an upgrade, because an upgrade always raises it. The service keeps the id through a changed cluster id
+    /// only when both OIDs match and the major rose, and rebinds the row to the new cluster id and major.</para>
+    ///
+    /// <para><b>Nullable, DDL only, one statement.</b> A row made by V158's service has neither value. They are not
+    /// backfilled here, because both are facts of the cluster the service reads at start, not something a migration
+    /// should guess: the service writes them on its first start after this rung, and until then a row without a table OID
+    /// is compared by the old rule, which is the rule that made the row. One catalog-only <c>ADD COLUMN</c> for each, in
+    /// one statement, so the two arrive together or not at all, and a second run changes nothing. Needs no GRANT (the
+    /// roles' table-level grants cover a new column) and no trigger (nothing reloads when the id's binding changes).</para>
+    /// </summary>
+    private const string V159Sql = @"
+ALTER TABLE config.config_install_id
+    ADD COLUMN IF NOT EXISTS table_oid bigint,
+    ADD COLUMN IF NOT EXISTS server_major integer;";
+
+    /// <summary>
+    /// V160 (#4938) — <c>config.config_collector_run_times</c>: an optional run time for a collector that runs once a day
+    /// or less often, so a heavy daily collector can run in a quiet hour instead of whenever the service happened to
+    /// start.
+    ///
+    /// <para><b>Its own table, because released viewers rewrite the schedules table.</b> The viewer's schedule Save
+    /// deletes a scope's rows in <c>config_collector_schedules</c> and inserts them again with a fixed column list, and
+    /// every released viewer connects to a store that is newer than it is (the connect check refuses only an older one).
+    /// A run time kept as a column on that table would be set back to NULL by each Save. A table those Saves never write
+    /// keeps it. No row means no run time, so a store that never sets one reads exactly as it did before.</para>
+    ///
+    /// <para>The value is minutes after midnight on the monitored server's own clock, from 0 to 1439. The table mirrors the
+    /// schedules table: <c>server_id</c> NULL is fleet-wide, there is one fleet row and one server row per collector (two
+    /// partial unique indexes, because a primary key cannot span a nullable column), and the layering is the same (the
+    /// server row, else the fleet row, else no fixed time). <b>-1 is allowed on a server row only.</b> It means "no fixed
+    /// time on this server" and stops a fleet-wide time, the way an empty array stops a fleet-wide database scope; a fleet
+    /// row has no level above it to stop, so the CHECK refuses -1 there. Whether a run time applies at all depends on the
+    /// collector's effective interval (a whole number of days), which is not a property of the row, so the service judges
+    /// that when it resolves the schedule, not the CHECK.</para>
+    ///
+    /// <para><b>DDL only, and a second run changes nothing.</b> Every statement is <c>IF NOT EXISTS</c> or a drop and
+    /// create, so running the rung again keeps the table, its indexes and its rows. Needs no GRANT: provisioning's blanket
+    /// grants on the config schema re-run on every service start and cover a table a migration introduces. It does carry
+    /// the one trigger the schedules table has, V17's reload beacon, so a write here bumps
+    /// <c>config_service.config_version</c> and a running service reloads the run times. No foreign key to the server
+    /// registry, as the schedules table has none: removing a server deletes its definition only and leaves its schedule
+    /// rows, so a removed server's run time stays as well, harmlessly. No Lite twin: Lite keeps its schedules in a JSON
+    /// file.</para>
+    /// </summary>
+    private const string V160Sql = @"
+/* V160 (#4938): a collector's optional run time, in its own table. Schema-qualified config.* like every rung. */
+CREATE TABLE IF NOT EXISTS config.config_collector_run_times (
+    server_id integer,
+    collector_name text NOT NULL,
+    run_at_minute smallint NOT NULL,
+    CONSTRAINT ck_config_collector_run_times_range CHECK (run_at_minute BETWEEN 0 AND 1439 OR (run_at_minute = -1 AND server_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_collector_run_times_fleet
+    ON config.config_collector_run_times (collector_name) WHERE server_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_collector_run_times_server
+    ON config.config_collector_run_times (server_id, collector_name) WHERE server_id IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_bump_collector_run_times ON config.config_collector_run_times;
+CREATE TRIGGER trg_bump_collector_run_times
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_collector_run_times
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
+    /// <summary>
+    /// V161 (#5094) — <c>collect.query_store_top_daily</c> and <c>collect.query_store_top_daily_built</c>: a per-day
+    /// summary of <c>collect.query_store_interval_wide</c>, which <c>get_query_store_top</c>'s long windows read for the
+    /// whole UTC days inside the window instead of scanning every interval row.
+    ///
+    /// <para><b>Approximate by design.</b> A day's row is built once after the day ends (and rebuilt once more a day
+    /// later), so a wide-table row that changes after its day was summarized is missed, and a row whose collection time
+    /// moves into the next day after the first build can be counted in both days for about a day. Everything the table
+    /// holds is exactly recombinable for the rows it saw: <c>interval_rows</c>, <c>execution_count_sum</c>, and for each
+    /// of the six averaged columns a sum of the non-NULL values and a count of them (<c>_sum</c>, <c>_n</c>), so a
+    /// reader reproduces the unweighted mean of the interval averages as <c>SUM(_sum) / NULLIF(SUM(_n), 0)</c>. A reader
+    /// that uses it says so in its answer. Rebuilding a day is the builder's job: the service owns every write here, and
+    /// no reader or writer uses these tables yet.</para>
+    ///
+    /// <para><b>Plain tables, not hypertables</b>: one row per server, day and query identity, and the builder deletes
+    /// and re-inserts a whole day, which a compressed chunk would not allow. The key's column types are the wide
+    /// table's, copied, and the unique index is <c>NULLS NOT DISTINCT</c> because <c>replica_role</c>,
+    /// <c>module_name</c> and the others are NULL for most rows. <c>collect.query_store_top_daily_built</c> records
+    /// which days are built, at which pass, and how many wide-table rows the build read.</para>
+    ///
+    /// <para><b>No GRANT</b>: the <c>collect</c> schema's blanket <c>GRANT SELECT ON ALL TABLES</c> to the read-only
+    /// roles (re-run on every managed start and by <c>tools/provision-roles.sql</c>) covers a table a migration
+    /// introduces. Every statement is <c>IF NOT EXISTS</c>, so a second run changes nothing.</para>
+    /// </summary>
+    private const string V161Sql = @"
+/* V161 (#5094): the daily summary for get_query_store_top's long windows. APPROXIMATE by design: a day is summarized
+   after it ends, so a late change to a summarized day is missed. The builder owns every write. Schema-qualified
+   collect.* like every rung; plain tables; timestamps are naive UTC. */
+CREATE TABLE IF NOT EXISTS collect.query_store_top_daily
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    query_hash text,
+    execution_type_desc text,
+    replica_role text,
+    module_name text,
+    interval_rows bigint NOT NULL,
+    execution_count_sum numeric,
+    avg_duration_us_sum numeric,
+    avg_duration_us_n bigint NOT NULL,
+    avg_cpu_time_us_sum numeric,
+    avg_cpu_time_us_n bigint NOT NULL,
+    avg_logical_io_reads_sum numeric,
+    avg_logical_io_reads_n bigint NOT NULL,
+    avg_logical_io_writes_sum numeric,
+    avg_logical_io_writes_n bigint NOT NULL,
+    avg_physical_io_reads_sum numeric,
+    avg_physical_io_reads_n bigint NOT NULL,
+    avg_rowcount_sum numeric,
+    avg_rowcount_n bigint NOT NULL,
+    last_execution_time_max timestamp,
+    query_plan_hash_max text,
+    first_execution_time_min timestamp
+);
+
+/* NULLS NOT DISTINCT: replica_role, module_name and the other key columns are NULL for most rows, and two NULLs must
+   be the same group. */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_top_daily
+ON collect.query_store_top_daily
+(
+    server_id,
+    day,
+    database_name,
+    query_id,
+    plan_id,
+    query_hash,
+    execution_type_desc,
+    replica_role,
+    module_name
+)
+NULLS NOT DISTINCT;
+
+/* Which days are built, at which pass (1 = early, 2 = final), when, and how many wide-table rows the build read. */
+CREATE TABLE IF NOT EXISTS collect.query_store_top_daily_built
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    pass smallint NOT NULL,
+    built_at timestamp NOT NULL,
+    source_rows bigint NOT NULL,
+    CONSTRAINT pk_query_store_top_daily_built PRIMARY KEY (server_id, day)
+);";
+
+    /// <summary>
+    /// V162 (#5097) — <c>collect.slow_reads</c>: one row per read that ran long or ended in a timeout, error or
+    /// limit, with its normalised arguments, the source that answered, and each statement's time. Internal
+    /// self-telemetry like <c>collect.read_latency</c> (V148) and <c>collect.collector_stall_probes</c> (V112): not a
+    /// collector, absent from <c>CollectorCatalog.All</c>, covered by the collect schema's blanket GRANT. The writer
+    /// pays for retention and the row cap itself, so no outcome CHECK and no sweep entry.
+    /// </summary>
+    private const string V162Sql = @"
+CREATE TABLE IF NOT EXISTS collect.slow_reads
+(
+    slow_read_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    read_time timestamp NOT NULL,
+    surface text NOT NULL,
+    route text NOT NULL,
+    outcome text NOT NULL,
+    total_ms integer NOT NULL,
+    server_id integer,
+    window_start timestamp,
+    window_end timestamp,
+    arguments jsonb NOT NULL,
+    arguments_truncated boolean NOT NULL,
+    source text,
+    source_reason text,
+    statements jsonb NOT NULL,
+    statement_count integer NOT NULL,
+    statements_truncated boolean NOT NULL,
+    error_class text,
+    row_count bigint
+);
+
+/* Newest-first read and the retention sweep are both by time; the id breaks ties in the read's total order. */
+CREATE INDEX IF NOT EXISTS idx_slow_reads_time
+    ON collect.slow_reads(read_time, slow_read_id);";
+
+    /// <summary>
+    /// V163 (#5097) — the store's own statement history: an hourly, delta-per-statement record of the store's
+    /// <c>pg_stat_statements</c>, so a statement's mean milliseconds per call can be read hour by hour across a store
+    /// restart, a service restart, a <c>pg_stat_statements_reset()</c> and the nightly upgrade.
+    ///
+    /// <para><b>Not a collector.</b> The store has no <c>servers</c> row and no <c>server_id</c>, and self-telemetry is
+    /// kept out of <c>CollectorCatalog.All</c> on purpose (V111's reasoning), which also keeps the hypertable
+    /// conversion and the catalog purge off these tables. The three tables are plain, like V111's and V161's. The
+    /// hourly store self-metrics tick writes them, and the writer pays for its own retention: 90 days, because
+    /// statement ids change with a major upgrade and a year of hourly rows would read as noise.</para>
+    ///
+    /// <para><b>Why a baseline table.</b> The per-target statement collector keeps its previous snapshot in process
+    /// memory and re-seeds it from stored rows after a restart. A top-N history cannot seed that way: a statement
+    /// left out of last hour's top N has no stored previous row. So the previous cumulative counters live in the store,
+    /// in <c>config.store_statement_baseline</c>, and the delta is computed in SQL. It is state and not collected data,
+    /// so it sits in <c>config</c> where no purge ages it out, the same reasoning as <c>config.store_log_read_marker</c>.
+    /// Provisioning re-grants every <c>config</c> table after migration, so it needs no GRANT here.</para>
+    ///
+    /// <para><b>No statement text.</b> The history stores the role and the query id only. A reader joins the live text
+    /// at read time, so a stored row can never hold a statement the reader function would withhold. There are no WAL or
+    /// temp-file columns beyond temp blocks written: the store's own statements do not move them.</para>
+    ///
+    /// <para><b>Reading the columns.</b> <c>max_exec_ms</c> is the longest single execution since the entry started
+    /// in the extension, not within the interval: it is cumulative and cannot be differenced. <c>first_seen</c> can be
+    /// an upper bound (an entry already there but missing from the baseline, such as a query id that became visible
+    /// after a grant or a renamed role, is credited its whole lifetime as one interval). An entry that was evicted and
+    /// re-added, and has already passed its old baseline, undercounts with no flag; <c>dealloc_delta</c> on the capture
+    /// is the hint. <c>statements_seen</c> is 0 on a <c>rebaselined</c> capture.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite's store is DuckDB, which has no <c>pg_stat_statements</c>; the same structural
+    /// reason as V111.</para>
+    /// </summary>
+    private const string V163Sql = @"
+CREATE TABLE IF NOT EXISTS collect.store_statement_captures
+(
+    capture_time timestamp NOT NULL,
+    interval_seconds integer,
+    stats_reset timestamp,
+    dealloc bigint,
+    dealloc_delta bigint,
+    statements_seen integer NOT NULL,
+    statements_kept integer NOT NULL,
+    hidden_statements integer NOT NULL,
+    outcome text NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_statement_captures_time
+    ON collect.store_statement_captures(capture_time);
+
+CREATE TABLE IF NOT EXISTS collect.store_statement_history
+(
+    capture_time timestamp NOT NULL,
+    interval_seconds integer NOT NULL,
+    role_name text NOT NULL,
+    queryid bigint NOT NULL,
+    delta_calls bigint NOT NULL,
+    delta_total_exec_ms double precision NOT NULL,
+    delta_rows bigint NOT NULL,
+    delta_shared_blks_hit bigint NOT NULL,
+    delta_shared_blks_read bigint NOT NULL,
+    delta_temp_blks_written bigint NOT NULL,
+    max_exec_ms double precision,
+    first_seen boolean NOT NULL,
+    entry_restarted boolean NOT NULL,
+    reset_in_interval boolean NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_statement_history_time
+    ON collect.store_statement_history(capture_time);
+
+CREATE INDEX IF NOT EXISTS idx_store_statement_history_query
+    ON collect.store_statement_history(queryid, capture_time);
+
+CREATE TABLE IF NOT EXISTS config.store_statement_baseline
+(
+    role_name text NOT NULL,
+    queryid bigint NOT NULL,
+    calls bigint NOT NULL,
+    total_exec_ms double precision NOT NULL,
+    rows_returned bigint NOT NULL,
+    shared_blks_hit bigint NOT NULL,
+    shared_blks_read bigint NOT NULL,
+    temp_blks_written bigint NOT NULL,
+    captured_at timestamp NOT NULL,
+    CONSTRAINT pk_store_statement_baseline PRIMARY KEY (role_name, queryid)
+);";
+
+    /// <summary>
+    /// V164 (#4605) — the hourly row-count ledger of <c>collect.query_stats</c> and its one-row state table. The
+    /// count guard of the hourly-edges read compared raw row counts with the rollup's per (server, hour), a scan of
+    /// millions of rows that outran the panel deadline. The ledger is that count kept at write time, so the guard
+    /// reads a few thousand rows. The text, the counted population and the reasoning are on
+    /// <see cref="QueryStatsHourLedger"/>, which the rung embeds.
+    ///
+    /// <para><b>Both tables are empty when created</b> (the data-moving census therefore has nothing to declare), and
+    /// the rung inserts only the state row: <c>counted_since</c>, the next whole hour, below which every window is
+    /// uncounted and a reader stays on raw. The tables are plain and not collectors, like V111's and V162's.</para>
+    ///
+    /// <para><b>No GRANT and no provisioning change.</b> The <c>collect</c> schema carries blanket SELECT for
+    /// admin/viewer/mcp plus the owner-scoped <c>ALTER DEFAULT PRIVILEGES</c>, both re-asserted every managed start
+    /// (<c>DarlingManagedRoles</c>) and re-run in BYO mode by <c>tools/provision-roles.sql</c>, so the compose roles that
+    /// read these tables need no new statement, and the collector writes as the service owner.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite's store is DuckDB, which has no continuous aggregates, so no rollup exists there
+    /// for a count guard to check.</para>
+    /// </summary>
+    private const string V164Sql = QueryStatsHourLedger.CreateSql;
+
+    /// <summary>
+    /// V165 (#5366) — the tables for the service's published password key: <c>config.password_key</c> (the public key,
+    /// one <c>current</c> row at most), <c>config.password_key_service</c> (what each service host holds and its state),
+    /// <c>config.legacy_secret_pin</c> and the one-row <c>config.legacy_secret_pin_marker</c>, seeded <c>pending</c>. The
+    /// text and the reasoning are on <see cref="PasswordKeyTables"/>, which the rung embeds.
+    ///
+    /// <para><b>Only the store owner writes them,</b> by a trigger created here on each table (a row trigger and a
+    /// TRUNCATE trigger, both enabled always), which refuses a write from any session that is not the owner. The
+    /// provisioning scripts also revoke every privilege on the four tables from PUBLIC, admin, viewer and mcp (so none
+    /// of them can add a trigger or a foreign key) and drop any trigger or foreign key already there. The two pin
+    /// tables have row security on with no policy.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
+    /// </summary>
+    private const string V165Sql = PasswordKeyTables.CreateSql;
+
+    /// <summary>
+    /// V166 — the PagerDuty auto-resolve opt-in. Adds <c>pagerduty_auto_resolve</c> to
+    /// <c>config.config_notification</c>: non-null with a FALSE default, so every existing row keeps the
+    /// shipped behaviour of NOT auto-resolving incidents with PagerDuty (the closing edge of an edge-type
+    /// pair stays an info-severity trigger; with the toggle on it becomes a <c>resolve</c> — see
+    /// <c>WebhookAlertService.BuildPagerDutyPayload</c>, which reads the column through
+    /// <c>IAlertSettings.PagerDutyAutoResolve</c>). Non-secret (a behaviour toggle, not a credential), so
+    /// unlike the routing key beside it, it stays in the read-only roles' SELECT grants —
+    /// <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c> and <c>Darling/tools/provision-roles.sql</c>.
+    ///
+    /// <para><b>Numbered 166, the ladder's next free version</b> (the top was 165): the migration ladder is
+    /// applied and stamped in version order, so ANY free number >= 166 would apply on every store — but the
+    /// convention is dense, consecutive versions, and a gap would trip the ladder-density census.</para>
+    /// </summary>
+    private const string V166Sql = @"
+ALTER TABLE config.config_notification
+    ADD COLUMN IF NOT EXISTS pagerduty_auto_resolve boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V167 (#5456) - the record of which old-format saved passwords were in the store at the upgrade:
+    /// <c>config.legacy_secret_pin_candidate</c>, with the hash of each stored value and the connection columns it is
+    /// saved for. The text and the reasoning are on <see cref="LegacyPinCandidateTables"/>, which the rung embeds. The
+    /// table and its two owner-only triggers are made first and the values are recorded after them in the same
+    /// transaction, and only while the one-time pin step is still open (a store whose step is done records nothing). V165
+    /// is not changed: a store already at 165 does not run it again, which is why this is a new rung.
+    ///
+    /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
+    /// </summary>
+    private const string V167Sql = LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql;
+
+    /// <summary>
+    /// V168 (#5448) — <c>collect.plan_regression_daily</c> and <c>collect.plan_regression_daily_built</c>: the per-day
+    /// per-plan totals PLAN_REGRESSION reads for CLOSED days instead of re-aggregating 14 days of
+    /// <c>collect.query_store_interval_latest</c> on every run, plus the trigger that marks a day stale when a late row
+    /// lands in it.
+    ///
+    /// <para><b>Totals, not averages.</b> A day's row holds the plan's execution count and the SUMS of
+    /// <c>avg_cpu_time_us * execution_count</c> and <c>avg_duration_us * execution_count</c>, which is what the read's
+    /// <c>plan_agg</c> step computes before it divides, so summing days and then dividing returns the same per-exec cost
+    /// as the single 14-day aggregate. Row day is the day of <c>last_execution_time</c> (naive UTC), the column the
+    /// read's window filters on. <c>query_plan_hash</c> is part of the unique key (the read's <c>any_value</c> picks one
+    /// hash per plan, and a day's rows keep each one), and the index is <c>NULLS NOT DISTINCT</c> because
+    /// <c>database_name</c>, <c>replica_role</c> and the others are NULL for some rows.</para>
+    ///
+    /// <para><b>The built table is the validity record.</b> <c>late_seq</c> counts the transactions that landed a late
+    /// row on a day (the trigger bumps a (server, day) once per transaction, not once per row, because a whole apply
+    /// is one transaction and tens of thousands of bumps of the same tuple inside it cost quadratic time), and
+    /// <c>built_seq</c> is the value the builder read BEFORE it aggregated: a day is valid only while the two
+    /// are equal, so a late row that lands after the build (even one that races it) leaves the day invalid and the
+    /// builder rebuilds it. The trigger marks the day of <c>first_execution_time</c> and the day after it, because
+    /// <c>last_execution_time</c> (the row's day) can cross midnight. It fires only for rows whose first execution is
+    /// at least a day old and no earlier than the start of the day 17 days back (a whole-day edge, so every day the
+    /// hourly cleanup still keeps can be marked): today and yesterday are always read live, and a row older than that
+    /// can never be read. The <c>WHEN</c> condition reads <c>NEW</c> only, because PostgreSQL does
+    /// not allow a subquery there.</para>
+    ///
+    /// <para><b>Plain tables, SECURITY INVOKER function, no GRANT</b>: the builder deletes and re-inserts whole days,
+    /// which a compressed hypertable chunk would not allow; the trigger function runs with the writer's own
+    /// privileges and pins <c>search_path</c> to <c>pg_catalog, pg_temp</c>, so it names every object schema-qualified;
+    /// and the <c>collect</c> schema's blanket <c>GRANT SELECT ON ALL TABLES</c> covers a table a migration introduces.
+    /// Every statement is idempotent, so a second run changes nothing. No index on
+    /// <c>query_store_interval_latest</c> is added here. V153's index on <c>first_execution_time</c> alone serves the
+    /// retention purge, which has no <c>server_id</c>; it does not serve the per-day builds, which bound
+    /// <c>server_id</c> and <c>first_execution_time</c>. That read's index, a btree on
+    /// <c>(server_id, first_execution_time)</c>, is built in the background (#5507,
+    /// <c>QueryStoreBackgroundIndexes.LatestServerFirstExec</c>), not by a rung, because a rung's build would run inside
+    /// the startup transaction and could pass the migration silence limit on a large store.</para>
+    /// </summary>
+    private const string V168Sql = @"
+/* V168 (#5448): per-day per-plan totals for PLAN_REGRESSION's closed days, and the trigger that marks a day stale when
+   a late row lands in it. Naive UTC throughout. The builder (the service) owns every write to the first table; the
+   function writes only plan_regression_daily_built, the rung's own bookkeeping table. */
+CREATE TABLE IF NOT EXISTS collect.plan_regression_daily
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    replica_role text,
+    query_plan_hash text,
+    execs numeric,
+    cpu_us_sum numeric,
+    dur_us_sum numeric,
+    last_exec timestamp,
+    is_forced_plan boolean,
+    force_failure_count bigint
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_plan_regression_daily
+ON collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash)
+NULLS NOT DISTINCT;
+
+CREATE TABLE IF NOT EXISTS collect.plan_regression_daily_built
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    late_seq bigint NOT NULL DEFAULT 0,
+    built_seq bigint,
+    built_at timestamp,
+    source_rows bigint,
+    CONSTRAINT pk_plan_regression_daily_built PRIMARY KEY (server_id, day)
+);
+
+CREATE OR REPLACE FUNCTION collect.plan_regression_daily_mark_late() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $f$
+/* A (server, day) is bumped at most once per transaction. The apply is one statement, so tens of
+   thousands of late rows would otherwise run ON CONFLICT DO UPDATE on the same one or two built rows, and each update
+   leaves another version of that tuple inside the one transaction: every conflict check after it walks the whole chain
+   (166 buffers at 30,000 versions against 4 on a fresh row), and the batch grows quadratically. One bump is enough:
+   the builder reads late_seq before it aggregates, and the batch's rows commit together with the bump. The pairs
+   already bumped are kept in a transaction-local setting (set_config(.., true)), which a rolled-back savepoint undoes
+   together with the bump it recorded, and which the function's own SET search_path does not touch. Each key is
+   server_id:day-number between commas, so one lookup is a substring test; the 17-day clamp keeps the list to at most
+   17 pairs per server. After a commit the setting reads back as an empty string, not NULL. */
+DECLARE
+    d integer := NEW.first_execution_time::date - DATE '2000-01-01';
+    marked text := coalesce(nullif(current_setting('darling.plan_regression_marked', true), ''), ',');
+    k0 text := ',' || NEW.server_id || ':' || d || ',';
+    k1 text := ',' || NEW.server_id || ':' || (d + 1) || ',';
+    new0 boolean := position(k0 in marked) = 0;
+    new1 boolean := position(k1 in marked) = 0;
+BEGIN
+    IF NOT (new0 OR new1) THEN
+        RETURN NULL;
+    END IF;
+
+    INSERT INTO collect.plan_regression_daily_built AS b (server_id, day, late_seq)
+    SELECT NEW.server_id, v.d, 1
+    FROM (VALUES (NEW.first_execution_time::date, new0), (NEW.first_execution_time::date + 1, new1)) AS v (d, fresh)
+    WHERE v.fresh
+    ON CONFLICT (server_id, day) DO UPDATE SET late_seq = b.late_seq + 1;
+
+    PERFORM set_config('darling.plan_regression_marked',
+        marked || CASE WHEN new0 THEN substr(k0, 2) ELSE '' END || CASE WHEN new1 THEN substr(k1, 2) ELSE '' END, true);
+    RETURN NULL;
+END
+$f$;
+
+DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.query_store_interval_latest;
+CREATE TRIGGER trg_plan_regression_daily_late
+    AFTER INSERT OR UPDATE ON collect.query_store_interval_latest
+    FOR EACH ROW
+    WHEN (NEW.first_execution_time < date_trunc('day', now() AT TIME ZONE 'UTC') - interval '1 day'
+          AND NEW.first_execution_time >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '17 days')
+    EXECUTE FUNCTION collect.plan_regression_daily_mark_late();";
+
+    /// <summary>
+    /// V169 — the per-server AWS role (#5452). Adds to <c>config.config_monitored_servers</c> the IAM role Darling
+    /// assumes to reach an Amazon RDS or Aurora target (<c>aws_role_arn</c>) and the optional external ID that
+    /// goes with it (<c>aws_external_id</c>), plus <c>aws_external_id_set</c>, a stored generated flag the
+    /// read-only roles can SELECT in place of the ID itself. Every existing row gets NULL for all three, which is
+    /// "use the process's own credentials", exactly as before.
+    ///
+    /// <para><b>The constraint is a coarse backstop.</b> It refuses an external ID with no role (no term of the
+    /// CHECK can be NULL, so a NULL role with a non-NULL ID is false, not unknown), a role that is not an IAM role
+    /// ARN, and an external ID outside AWS's character set and length. The lengths are separate <c>char_length</c>
+    /// terms because PostgreSQL's regular expressions refuse a repeat count above 255. The exact rules, with their messages, live
+    /// in <c>AwsRoleSettings</c>; this only stops a blind write from storing a value no surface would accept.
+    /// Added behind a <c>pg_constraint</c> guard, as V62 does, so a re-run is a no-op.</para>
+    ///
+    /// <para><b>Idempotent and non-data-moving:</b> <c>IF NOT EXISTS</c> columns and the guarded constraint, no
+    /// rows rewritten by the script itself (the stored generated column fills from the table's own rows).
+    /// The columns are classified in <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c> (the role and the
+    /// flag readable, the external ID not) and in <c>Darling/tools/provision-roles.sql</c>.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite makes no AWS call.</para>
+    ///
+    /// <para><b>Numbered 169, the ladder's next free version</b> (the top was 168); the convention is dense,
+    /// consecutive versions.</para>
+    /// </summary>
+    private const string V169Sql = @"
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS aws_role_arn text;
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS aws_external_id text;
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS aws_external_id_set boolean
+    GENERATED ALWAYS AS (aws_external_id IS NOT NULL) STORED;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'config_monitored_servers_aws_role_check'
+                     AND conrelid = 'config.config_monitored_servers'::regclass) THEN
+        ALTER TABLE config.config_monitored_servers
+            ADD CONSTRAINT config_monitored_servers_aws_role_check CHECK (
+                (aws_external_id IS NULL OR aws_role_arn IS NOT NULL)
+                AND (aws_role_arn IS NULL OR (aws_role_arn ~ '^arn:aws(-[a-z]+)*:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/-]+$'
+                                              AND char_length(aws_role_arn) <= 2048))
+                AND (aws_external_id IS NULL OR (aws_external_id ~ '^[A-Za-z0-9_+=,.@:/-]+$'
+                                                 AND char_length(aws_external_id) BETWEEN 2 AND 1224)));
+    END IF;
+END $$;";
+
+    /// <summary>
+    /// V170 (#5495) — <c>collect.pg_io_stats_hourly</c> and <c>collect.pg_io_stats_hourly_state</c>: the hourly rollup of the
+    /// differenced PostgreSQL I/O counters that <c>get_pg_io_stats</c> and the viewer's I/O tab read for long windows. The text and
+    /// the reasoning are on <see cref="PgIoStatsHourly"/>, which the rung embeds. <b>Both tables are empty when created</b> (the
+    /// data-moving census has nothing to declare): the service's hourly tick fills them (<see cref="PgIoStatsHourlyBuilder"/>), for at
+    /// most <see cref="PgIoStatsHourlyBuilder.TickBudget"/> per tick, and a read stays on raw rows until its window is covered.
+    /// Plain tables, no GRANT (the <c>collect</c> schema's blanket SELECT covers them). <b>No Lite twin:</b> Lite has no PostgreSQL targets.
+    /// </summary>
+    private const string V170Sql = PgIoStatsHourly.CreateSql;
+
+    /// <summary>
+    /// V171 (#5571) — <c>collect.query_store_interval_wide</c> becomes a table partitioned by day on
+    /// <c>first_execution_time</c>, and the table that holds every row today is ATTACHED to it, whole, as
+    /// <c>query_store_interval_wide_legacy</c>. <b>No row is copied, moved or scanned.</b> V172 does the same for
+    /// <c>query_store_interval_latest</c>; the text is shared (<see cref="BuildQueryStoreIntervalPartitionRungSql"/>).
+    ///
+    /// <para><b>Why this is catalog-only (Erik's rules: no data copy, attach the current table, keep every startup
+    /// statement under <see cref="MigrationCommandTimeoutSeconds"/>).</b> Rename the table and its indexes, create an empty
+    /// partitioned parent with the same columns, and attach the renamed table with the bounds
+    /// <c>(MINVALUE) TO (MAXVALUE)</c>. That partition constraint is only <c>first_execution_time IS NOT NULL</c>, which the
+    /// column's <c>NOT NULL</c> already proves, so <c>ATTACH PARTITION</c> skips its validation scan; the live test reads
+    /// PostgreSQL's DEBUG1 line ("is implied by existing constraints") and the table's <c>seq_scan</c> counter to prove it.
+    /// The parent's indexes are made with <c>CREATE INDEX ... ON ONLY</c> and then <c>ALTER INDEX ... ATTACH PARTITION</c>,
+    /// never as a plain <c>CREATE INDEX</c> on the parent: a plain one BUILDS a child when no valid equivalent exists, and a
+    /// 91 GB build would blow the startup timeout, while <c>ATTACH</c> fails at once. An INVALID leftover (the #5507 shape) is
+    /// therefore dropped here and the background step rebuilds it; a missing one is left for the background step.</para>
+    ///
+    /// <para><b>The one wait.</b> The rename takes ACCESS EXCLUSIVE on the table, so a long reader (the viewer, an MCP
+    /// call) delays it; <c>lock_timeout</c> is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, V153's precedent, so
+    /// the rung fails with a lock error and the next start retries, instead of the command timing out mid-transaction.
+    /// No collector writes during a rung: migrations finish before collectors and the background work start.</para>
+    ///
+    /// <para><b>Guard, idempotence, order.</b> A table that is already partitioned (relkind <c>p</c>) is skipped, so a
+    /// re-run is a no-op. The parent is built <c>LIKE</c> the live table, so the column order is the live attnum order
+    /// that the positional writers use (V155's note); there is no <c>WITH</c> clause because PostgreSQL refuses storage
+    /// parameters on a partitioned table, and the legacy table keeps its fillfactor 50. The rung writes no GRANT: the new
+    /// parent gets the schema's default privileges (DarlingManagedRoles section 4), which cover a table the owner creates,
+    /// and a live test reads the parent as the viewer role.</para>
+    ///
+    /// <para>The names are fixed: <c>X_legacy</c>, and each index's own name plus <c>_legacy</c>. The partitions that
+    /// take over from the legacy table (daily partitions, the default partition, the NOT VALID CHECK on the legacy table)
+    /// are made by the background step, not here. <b>No Lite twin:</b> Lite has no reference to either table.</para>
+    /// </summary>
+    private static readonly string V171Sql = BuildQueryStoreIntervalPartitionRungSql(wide: true);
+
+    /// <summary>
+    /// V172 (#5571) — the same rung for <c>collect.query_store_interval_latest</c>, in its own migration so it gets its own
+    /// <see cref="MigrationCommandTimeoutSeconds"/> window. See <see cref="V171Sql"/>. This table also carries the
+    /// <c>trg_plan_regression_daily_late</c> row trigger (V168): the rung drops the legacy table's copy and creates it on the
+    /// parent, which clones it onto the legacy table (a row trigger on a partitioned table fires for rows written through it).
+    /// </summary>
+    private static readonly string V172Sql = BuildQueryStoreIntervalPartitionRungSql(wide: false);
+
+    /// <summary>
+    /// V173 (#5582) — the exact stamp-grain rollup of <c>collect.query_store_interval_wide</c>: <c>collect.query_store_compose_stamp</c>,
+    /// its per-(server, hour) validity table <c>_built</c>, the fleet-level <c>_hours</c> table, and two row triggers on the partitioned
+    /// PARENT <c>collect.query_store_interval_wide</c> (INSERT, UPDATE) that mark a (server, hour) stale when a row lands in, or leaves,
+    /// an hour the builder may have done. The text, the column map and the reasoning are on <see cref="QueryStoreComposeStamp"/>, which
+    /// the rung embeds. <b>Catalog-only:</b> the tables are created empty, and <c>CREATE TRIGGER</c> on a partitioned table is a catalog
+    /// change that clones the trigger onto each existing leaf (the legacy table, DEFAULT, the day partitions) without scanning one. The
+    /// lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V171's, because the trigger needs a SHARE ROW EXCLUSIVE
+    /// lock on the parent and each leaf; no collector writes during a rung. Plain tables, no GRANT (the <c>collect</c> schema's blanket
+    /// SELECT covers them). The service's hourly tick fills the rollup (<see cref="QueryStoreComposeStamp.RunTickAsync(Npgsql.NpgsqlDataSource, DateTime, int, Microsoft.Extensions.Logging.ILogger, CancellationToken)"/>).
+    /// <b>No Lite twin:</b> Lite has no PostgreSQL store.
+    /// </summary>
+    private static readonly string V173Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.CreateSql;
+
+    /// <summary>
+    /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
+    /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
+    /// </summary>
+    private static string BuildQueryStoreIntervalPartitionRungSql(bool wide)
+    {
+        var table = wide ? "query_store_interval_wide" : "query_store_interval_latest";
+        var uniqueColumns = wide
+            ? "server_id, database_name, runtime_stats_interval_id, plan_id, query_id, replica_role, first_execution_time, execution_type_desc"
+            : "server_id, database_name, runtime_stats_interval_id, plan_id, query_id, replica_role, first_execution_time";
+
+        const string optionalIndex = @"
+
+    IF to_regclass('collect.__NAME___legacy') IS NOT NULL THEN
+        IF (SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass('collect.__NAME___legacy')) THEN
+            CREATE INDEX __NAME__ ON ONLY collect.__TABLE__ __DEFINITION__;
+            ALTER INDEX collect.__NAME__ ATTACH PARTITION collect.__NAME___legacy;
+        ELSE
+            DROP INDEX collect.__NAME___legacy;
+        END IF;
+    END IF;";
+
+        var sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $rung$
+BEGIN
+    IF (SELECT c.relkind FROM pg_class c WHERE c.oid = to_regclass('collect.__TABLE__')) = 'p' THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE collect.__TABLE__ RENAME TO __TABLE___legacy;
+    IF to_regclass('collect.ux___TABLE__') IS NOT NULL THEN
+        ALTER INDEX collect.ux___TABLE__ RENAME TO ux___TABLE___legacy;
+    END IF;
+    IF to_regclass('collect.idx___TABLE___first_exec') IS NOT NULL THEN
+        ALTER INDEX collect.idx___TABLE___first_exec RENAME TO idx___TABLE___first_exec_legacy;
+    END IF;
+    IF to_regclass('collect.ix___TABLE___server_first_exec') IS NOT NULL THEN
+        ALTER INDEX collect.ix___TABLE___server_first_exec RENAME TO ix___TABLE___server_first_exec_legacy;
+    END IF;" + (wide ? @"
+    IF to_regclass('collect.ix___TABLE___collection_time_brin') IS NOT NULL THEN
+        ALTER INDEX collect.ix___TABLE___collection_time_brin RENAME TO ix___TABLE___collection_time_brin_legacy;
+    END IF;" : @"
+    DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.__TABLE___legacy;") + @"
+
+    CREATE TABLE collect.__TABLE__ (LIKE collect.__TABLE___legacy INCLUDING DEFAULTS INCLUDING STORAGE)
+        PARTITION BY RANGE (first_execution_time);
+    ALTER TABLE collect.__TABLE__ ATTACH PARTITION collect.__TABLE___legacy FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
+
+    CREATE UNIQUE INDEX ux___TABLE__ ON ONLY collect.__TABLE__ (__UNIQUECOLUMNS__) NULLS NOT DISTINCT;
+    ALTER INDEX collect.ux___TABLE__ ATTACH PARTITION collect.ux___TABLE___legacy;
+    CREATE INDEX idx___TABLE___first_exec ON ONLY collect.__TABLE__ (first_execution_time);
+    ALTER INDEX collect.idx___TABLE___first_exec ATTACH PARTITION collect.idx___TABLE___first_exec_legacy;"
+            + optionalIndex.Replace("__NAME__", "ix___TABLE___server_first_exec", StringComparison.Ordinal)
+                .Replace("__DEFINITION__", "(server_id, first_execution_time)", StringComparison.Ordinal)
+            + (wide
+                ? optionalIndex.Replace("__NAME__", "ix___TABLE___collection_time_brin", StringComparison.Ordinal)
+                    .Replace("__DEFINITION__", "USING brin (collection_time) WITH (autosummarize = off)", StringComparison.Ordinal)
+                : @"
+
+    CREATE TRIGGER trg_plan_regression_daily_late
+        AFTER INSERT OR UPDATE ON collect.__TABLE__
+        FOR EACH ROW
+        WHEN (NEW.first_execution_time < date_trunc('day', now() AT TIME ZONE 'UTC') - interval '1 day'
+              AND NEW.first_execution_time >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '17 days')
+        EXECUTE FUNCTION collect.plan_regression_daily_mark_late();") + @"
+END
+$rung$;";
+
+        return sql
+            .Replace("__UNIQUECOLUMNS__", uniqueColumns, StringComparison.Ordinal)
+            .Replace("__TABLE__", table, StringComparison.Ordinal);
+    }
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -510,6 +1200,22 @@ ALTER TABLE collect.store_metrics
         new Migration(155, "query-store-interval-end", V155Sql),
         new Migration(156, "checkpoint-longest-sync", V156Sql),
         new Migration(157, "mute-rule-server-id", V157Sql),
+        new Migration(158, "install-id", V158Sql),
+        new Migration(159, "install-id-table-oid", V159Sql),
+        new Migration(160, "collector-run-time", V160Sql),
+        new Migration(161, "query-store-top-daily", V161Sql),
+        new Migration(162, "slow-reads", V162Sql),
+        new Migration(163, "store-statement-history", V163Sql),
+        new Migration(164, "query-stats-hour-ledger", V164Sql),
+        new Migration(165, "password-key", V165Sql),
+        new Migration(166, "pagerduty-auto-resolve", V166Sql),
+        new Migration(167, "legacy-pin-candidates", V167Sql),
+        new Migration(168, "plan-regression-daily", V168Sql),
+        new Migration(169, "aws-per-server-role", V169Sql),
+        new Migration(170, "pg-io-stats-hourly", V170Sql),
+        new Migration(171, "query-store-interval-wide-partitioned", V171Sql),
+        new Migration(172, "query-store-interval-latest-partitioned", V172Sql),
+        new Migration(173, "query-store-compose-stamp", V173Sql),
     };
 
     /// <summary>
@@ -2252,7 +2958,7 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_server_time ON collect.index_o
     /// <c>ORDER BY collection_time DESC, execution_count DESC</c> would keep. Its columns are exactly what the two reads
     /// consume, and their types and nullability mirror raw's, so the table can never refuse a row raw accepted. One
     /// unique index, <c>NULLS NOT DISTINCT</c> because <c>replica_role</c> is NULL off an availability group and must
-    /// still collapse (PostgreSQL 15+; the product minimum is 17). The column order is the writer's: a batch is one
+    /// still collapse (PostgreSQL 15+; the product minimum is 16). The column order is the writer's: a batch is one
     /// database's rows for one or two interval ids, so each batch's entries form one contiguous run.
     /// <c>fillfactor = 50</c> was measured (99% HOT against 56-59% at 70). The hypertable conversion, compression and
     /// retention are runtime work in <c>collection_log</c>'s shape, not this rung's.</para>
@@ -3140,8 +3846,8 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     ///
     /// <para><b>Nesting.</b> <c>parent_id</c> is a self-reference; NULL = a root tag. Depth is capped
     /// app-side at 4 levels — Postgres cannot express that without a trigger, and the tag table is tiny
-    /// (dozens of rows), so the Viewer loads it whole, builds the tree in memory, and checks both the cap
-    /// and cycle-freedom there. No recursive CTE, no ltree extension, no closure table.
+    /// (dozens of rows), so <c>ServerTagRules</c> (Storage) enforces both the cap and cycle-freedom for every
+    /// writer. No recursive CTE, no ltree extension, no closure table.
     /// <c>ON DELETE CASCADE</c> on the self-reference means deleting a tag removes its whole subtree and
     /// (via the map's own cascade) those assignments — the folder mental model. It can never reach
     /// <c>config_monitored_servers</c>: there is no FK to it, so no server row, credential blob, or
@@ -3155,8 +3861,8 @@ CREATE TABLE IF NOT EXISTS config.custom_views (
     /// operator-entered names.</para>
     ///
     /// <para><b>NO <c>config_bump_version</c> trigger</b>, same reasoning as V31: tags feed the VIEWER's
-    /// sidebar, never the collector/service loop, so there is nothing for the service to reload and a
-    /// beacon bump would only cost a needless fleet reconcile. <c>id</c> is
+    /// sidebar and never the collector loop. The alert evaluator reads them, but through its own cache refresh,
+    /// so a beacon is still unnecessary and a bump would only cost a needless fleet reconcile. <c>id</c> is
     /// <c>GENERATED ALWAYS AS IDENTITY</c> so INSERTs need no sequence USAGE grant. No explicit grant is
     /// added: both tables are picked up by the blanket <c>GRANT ... ON ALL TABLES IN SCHEMA config</c>
     /// statements that provisioning re-runs on EVERY service start. Note it is those, not
@@ -3583,9 +4289,9 @@ ALTER TABLE config.config_alert_settings
     /// by running V32 then V50 in order, the same path an upgraded store takes; nothing else needs editing.
     /// <para>Deliberately nullable with NO backfill: existing tags stay NULL and render as a neutral pill
     /// until a user picks a colour, while newly-created tags get a palette colour assigned at creation time
-    /// (rotated by tag id, in the viewer). Stored as <c>#RRGGBB</c> text — the viewer's only concern, the
-    /// service never reads server_tags — so no CHECK constraint is imposed here; the viewer writes only
-    /// palette values or a user pick.</para>
+    /// (rotated by tag id, in the viewer). Stored as <c>#RRGGBB</c> text — read by the service's tag-scoped alert
+    /// rules since #3350 and validated by <c>ServerTagRules</c> — so no CHECK constraint is imposed here; writers
+    /// store only palette values or a user pick.</para>
     /// </summary>
     private const string V50Sql = @"
 ALTER TABLE config.server_tags
@@ -6706,6 +7412,8 @@ CREATE INDEX IF NOT EXISTS idx_default_trace_events_time ON collect.default_trac
     /// it does NOT replace the V1 index (the anomaly-detector self-joins in <c>PgAnomalyDetector</c> key
     /// <c>database_name</c>, which that index still serves) — the two readers diverged on the database key, so
     /// each gets its own index.
+    /// Since #5072 Index Analysis no longer runs that unbounded read: it takes each database's newest snapshot
+    /// (<c>DarlingFinOpsIndexAnalysisReader.IndexObjectStatsLatestSql</c>).
     ///
     /// <para><c>index_object_stats</c> is a TimescaleDB hypertable (every collector table is —
     /// <c>TimescaleSupport.HypertableTables</c>), so a plain <c>CREATE INDEX</c> is applied across every chunk
@@ -7148,7 +7856,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         int applied;
         try
         {
-            applied = await MigrateLockedAsync(connection, cancellationToken);
+            applied = await MigrateLockedAsync(connection, logger, cancellationToken);
         }
         finally
         {
@@ -7314,7 +8022,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         return Convert.ToInt32(await read.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
     }
 
-    private static async Task<int> MigrateLockedAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<int> MigrateLockedAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
     {
         /* Resolve bare names through collect/config for this migrate session. Load-bearing from V8
            on: V8 moves darling_schema_version into collect, and the version stamp below writes it by
@@ -7349,9 +8057,19 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
 
             using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-            using (var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds })
+            try
             {
+                using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds };
                 await apply.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+            {
+                /* #5582: the rung's SET LOCAL lock_timeout fired, so a session holds a lock on a table the rung needs. Roll back first
+                   (the aborted transaction cannot run the diagnostic query), say who holds what, then let the failure go on: the
+                   store-migrate loop retries the rung, and collection waits behind that loop. */
+                await TryRollbackAsync(transaction);
+                await LogLockHoldersAsync(connection, logger, migration.Version, migration.Name, ex.MessageText, cancellationToken);
+                throw;
             }
 
             using (var stamp = new NpgsqlCommand(
@@ -7369,6 +8087,160 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         }
 
         return applied;
+    }
+
+    private static async Task TryRollbackAsync(NpgsqlTransaction transaction)
+    {
+        try
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+        }
+        catch
+        {
+            /* The failed statement already aborted the transaction; disposing it ends it either way. */
+        }
+    }
+
+    /// <summary>The least often the lock-holder list is logged, so a retry loop that fails every minute says it once per this long.</summary>
+    internal static readonly TimeSpan LockHolderLogInterval = TimeSpan.FromMinutes(10);
+
+    private static readonly object s_lockHolderLogGate = new();
+    private static DateTime s_lastLockHolderLogUtc = DateTime.MinValue;
+
+    /// <summary>True when no lock-holder list was logged in the last <see cref="LockHolderLogInterval"/> as of <paramref name="nowUtc"/>.
+    /// Reads the throttle without claiming it.</summary>
+    internal static bool IsLockHolderLogDue(DateTime nowUtc)
+    {
+        lock (s_lockHolderLogGate)
+        {
+            return s_lastLockHolderLogUtc == DateTime.MinValue || nowUtc - s_lastLockHolderLogUtc >= LockHolderLogInterval;
+        }
+    }
+
+    /// <summary>Claims the right to log the lock holders at <paramref name="nowUtc"/>: true when none was logged in the last
+    /// <see cref="LockHolderLogInterval"/>. Static on purpose, because each retry of the rung is a fresh call.</summary>
+    internal static bool TryClaimLockHolderLog(DateTime nowUtc)
+    {
+        lock (s_lockHolderLogGate)
+        {
+            if (s_lastLockHolderLogUtc != DateTime.MinValue && nowUtc - s_lastLockHolderLogUtc < LockHolderLogInterval)
+            {
+                return false;
+            }
+
+            s_lastLockHolderLogUtc = nowUtc;
+            return true;
+        }
+    }
+
+    /// <summary>Test seam: forgets the last lock-holder log.</summary>
+    internal static void ResetLockHolderLogThrottleForTests()
+    {
+        lock (s_lockHolderLogGate)
+        {
+            s_lastLockHolderLogUtc = DateTime.MinValue;
+        }
+    }
+
+    /// <summary>The most lock-holding sessions one log line names ($1 of <see cref="LockHoldersSql"/>).</summary>
+    internal const int LockHolderListCap = 20;
+
+    /// <summary>The server-side limits of the lock-holder lookup, set for its own transaction only (#5582). The rung's
+    /// <c>lock_timeout</c> is gone once the rung rolled back, so without these the lookup would wait on whatever it met.</summary>
+    internal const string LockHolderLookupLimitsSql = "SET LOCAL statement_timeout = '5s'; SET LOCAL lock_timeout = '2s'";
+
+    /// <summary>The sessions of this database holding a granted lock on a <c>collect</c> table, one row per session with the tables and
+    /// modes it holds. Every mode is listed, because a plain SELECT takes <c>AccessShareLock</c> and that conflicts with the
+    /// <c>AccessExclusiveLock</c> most schema changes take. The row holds the session's pid, backend type, application name, state,
+    /// transaction start, wait event, and relation and lock mode; the first 200 characters of the query come back only for an
+    /// autovacuum worker.</summary>
+    internal const string LockHoldersSql = """
+        SELECT a.pid,
+               a.backend_type,
+               a.application_name,
+               a.state,
+               a.xact_start,
+               concat_ws(': ', a.wait_event_type, a.wait_event) AS wait,
+               CASE WHEN a.backend_type = 'autovacuum worker' THEN left(a.query, 200) END AS query,
+               string_agg(DISTINCT c.relname || ' (' || l.mode || ')', ', ') AS held
+        FROM pg_locks l
+        JOIN pg_class c ON c.oid = l.relation
+        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'collect'
+        JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE l.locktype = 'relation'
+          AND l.granted
+          AND a.datname = current_database()
+          AND a.pid <> pg_backend_pid()
+        GROUP BY a.pid, a.backend_type, a.application_name, a.state, a.xact_start, a.wait_event_type, a.wait_event,
+                 CASE WHEN a.backend_type = 'autovacuum worker' THEN left(a.query, 200) END
+        ORDER BY a.xact_start NULLS LAST, a.pid
+        LIMIT $1
+        """;
+
+    /// <summary>
+    /// #5582: after a rung hit <c>lock_timeout</c>, logs the sessions that hold a lock on a <c>collect</c> table: pid, backend type,
+    /// application name, state, transaction start, wait event, relation and lock mode, plus the first 200 characters of the query for
+    /// an autovacuum worker. At most once per <see cref="LockHolderLogInterval"/>, and the interval is claimed only after the lookup
+    /// worked, so a failed lookup does not mute the next attempt. The lookup runs in its own transaction with server-side limits.
+    /// A fault in the diagnostic is swallowed, because the rung's own failure is what the caller reports; a cancel is not.
+    /// </summary>
+    internal static async Task LogLockHoldersAsync(
+        NpgsqlConnection connection, ILogger? logger, int version, string name, string reason, CancellationToken cancellationToken, Func<DateTime>? utcNow = null)
+    {
+        var nowUtc = (utcNow ?? (() => DateTime.UtcNow))();
+        if (logger is null || !IsLockHolderLogDue(nowUtc))
+        {
+            return;
+        }
+
+        List<string> holders;
+        try
+        {
+            holders = new List<string>();
+            using var lookup = await connection.BeginTransactionAsync(cancellationToken);
+            using (var limits = new NpgsqlCommand(LockHolderLookupLimitsSql, connection, lookup) { CommandTimeout = 30 })
+            {
+                await limits.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            using var command = new NpgsqlCommand(LockHoldersSql, connection, lookup) { CommandTimeout = 30 };
+            command.Parameters.AddWithValue(LockHolderListCap);
+            using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var text = reader.IsDBNull(6) ? string.Empty : reader.GetString(6);
+                    holders.Add(string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "pid {0} ({1}), application {2}, state {3}, transaction started {4:u}, waiting on {5}, holding {6}{7}",
+                        reader.GetInt32(0),
+                        reader.IsDBNull(1) ? "unknown" : reader.GetString(1),
+                        reader.IsDBNull(2) || reader.GetString(2).Length == 0 ? "none" : reader.GetString(2),
+                        reader.IsDBNull(3) ? "none" : reader.GetString(3),
+                        reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4),
+                        reader.IsDBNull(5) || reader.GetString(5).Length == 0 ? "nothing" : reader.GetString(5),
+                        reader.GetString(7),
+                        text.Length == 0 ? string.Empty : ", query: " + text));
+                }
+            }
+
+            await lookup.CommitAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
+        {
+            logger.LogDebug("The lock-holder lookup for store migration V{Version} failed: {Message}", version, ex.Message);
+            return;
+        }
+
+        if (!TryClaimLockHolderLog(nowUtc))
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "Store migration V{Version} ({Name}) could not get its table lock in time ({Reason}). Collection waits until it applies. " +
+            "Sessions holding a lock on a collect table: {Holders}",
+            version, name, reason, holders.Count == 0 ? "none found" : string.Join("; ", holders));
     }
 
     /// <summary>

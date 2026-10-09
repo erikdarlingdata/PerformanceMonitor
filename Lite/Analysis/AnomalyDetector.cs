@@ -176,10 +176,14 @@ FROM cur JOIN prv ON cur.database_name = prv.database_name AND cur.object_id = p
 WHERE (SELECT t FROM latest) <> (SELECT t FROM prior)
 AND   cur.mb - prv.mb >= $2
 AND   (CASE WHEN prv.mb > 0 THEN (cur.mb - prv.mb) * 100.0 / prv.mb ELSE 0 END) >= $3
+/*SEC*/
 ORDER BY growth_mb DESC LIMIT 1";
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthMbThreshold });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthPctThreshold });
+                /* #5558: object sizes (reserved_mb) mirror the primary, so a secondary copy's growth is the primary's
+                   to report. Only this growth query is filtered; the contention anomaly stays node-local. */
+                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "ANOMALY_OBJECT_GROWTH", "cur.database_name", 4);
 
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))

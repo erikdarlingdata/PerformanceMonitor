@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// do not exist there);</item>
 /// <item>one row per payload dimension table (<c>object_kind = 'dimension'</c>): total bytes
 /// (<c>pg_total_relation_size</c> — heap + indexes + TOAST, where the plan XML actually lives), the
-/// exact row count and, since V137 (#3783), the TOAST file's own size (<c>toast_bytes</c>) beside a
+/// row count (the planner's <c>reltuples</c> estimate since #5520, not a scan) and, since V137 (#3783), the TOAST file's own size (<c>toast_bytes</c>) beside a
 /// <c>toast_live_bytes</c> that is NULL unless the store happens to carry <c>pg_freespacemap</c> — see
 /// <see cref="DimensionInsertSql"/> and <see cref="ToastLiveBytesUpdateSql"/>. The dims are the store's dominant payloads (measured: query_plan_dim
 /// alone was 101 GB of a 147 GB store, 69%) and invisible to every hypertable-shaped surface because they
@@ -311,10 +311,22 @@ JOIN timescaledb_information.jobs AS j USING (job_id)";
     /// <summary>
     /// The payload dimension rows — every store shape (the dims are plain tables everywhere). Table names
     /// are the <see cref="PayloadDimensions"/> compile-time constants, so interpolation is safe (the
-    /// DarlingRetention.DeleteSqlFor reasoning). The exact <c>count(*)</c> is deliberate over
-    /// <c>pg_class.reltuples</c>: it is an hourly index-only scan over the digest PK, and the dim heap is
-    /// small — the bytes live in TOAST, which <c>pg_total_relation_size</c> counts and a scan never
-    /// touches. $1 metric_time.
+    /// DarlingRetention.DeleteSqlFor reasoning). <c>row_count</c> is the planner's
+    /// <c>pg_class.reltuples</c> ESTIMATE, not a <c>count(*)</c> (#5520). This used to be an exact count, chosen
+    /// on the premise of an hourly index-only scan over the digest PK of a small heap, with the bytes in TOAST
+    /// where a scan never goes. The premise does not hold on a large store: 329 calls measured 149,562 blocks and
+    /// 25.9 s each (49.2 M blocks, 8,510 s in all), because the scan reads the index and whatever of the heap it
+    /// must, and a table this size is not read cheaply once an hour for a figure whose job is "roughly how many
+    /// distinct statements and plans are stored". <c>reltuples</c> is refreshed by every autovacuum and ANALYZE
+    /// (the dims churn through row-capped deletes, so that is often), costs one catalog row, and is the same
+    /// estimate <see cref="TableInsertSql"/> already uses, so <c>row_count</c> means one thing across the kinds
+    /// that carry it. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
+    /// rather than a count of minus one, as it does there. Every reader of a dimension row's <c>row_count</c>
+    /// passes it through (<c>get_store_metrics</c> and its daily series); none computes from it, and the test
+    /// <c>NoReaderComputesFromADimensionRowCount</c> pins that. Because it is an estimate, the daily <c>row_count</c>
+    /// series moves in steps between ANALYZE and autovacuum runs (flat for days, then a jump, so a flat day is not
+    /// "no new rows"), and <c>reltuples</c> is a 4-byte float, so above about 16.7 M rows (2^24) the value is
+    /// rounded to a multiple of the float's step. $1 metric_time.
     ///
     /// <para><b><c>toast_bytes</c> and <c>toast_live_bytes</c> (V137, #3783) — the dimension rows are the
     /// only kind that fills them.</b> <c>pg_total_relation_size</c> says how big the dimension is and nothing
@@ -354,7 +366,7 @@ SELECT
     '{PayloadDimensions.QueryTextDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryTextDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryTextDimTable}),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryTextDimTable}'::regclass),
     pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryTextDimTable}'::regclass), 0)),
     NULL::bigint
 UNION ALL
@@ -363,7 +375,7 @@ SELECT
     '{PayloadDimensions.QueryPlanDimTable}',
     '{DimensionObjectKind}',
     pg_total_relation_size('collect.{PayloadDimensions.QueryPlanDimTable}'),
-    (SELECT count(*) FROM collect.{PayloadDimensions.QueryPlanDimTable}),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryPlanDimTable}'::regclass),
     pg_relation_size(NULLIF((SELECT c.reltoastrelid FROM pg_class AS c WHERE c.oid = 'collect.{PayloadDimensions.QueryPlanDimTable}'::regclass), 0)),
     NULL::bigint";
 
@@ -635,6 +647,35 @@ FROM pg_stat_bgwriter AS b";
     public const string AlertLogTable = "config.config_alert_log";
 
     /// <summary>
+    /// The size of a day-partitioned interval parent (#5571): the sum of <c>pg_total_relation_size</c> over its LEAF
+    /// partitions (heap, indexes and TOAST of the legacy table, every day and DEFAULT), because the partitioned parent
+    /// itself has no storage and reads 0. <c>pg_partition_tree</c> returns NO row for a plain table (it is not the
+    /// table's own single leaf), so for a table that is not partitioned (a store that has not run its rung yet) the sum
+    /// is NULL and the COALESCE falls back to the plain size. Both arms are live: the first for every migrated store,
+    /// the second for a store below the rung.
+    /// </summary>
+    private const string IntervalLatestPartitionBytesSql =
+        $"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('collect.{QueryStoreIntervalLatest.TableName}'))::bigint";
+
+    /// <summary>The wide parent's size, summed over its leaf partitions. See <see cref="IntervalLatestPartitionBytesSql"/>.</summary>
+    private const string IntervalWidePartitionBytesSql =
+        $"COALESCE((SELECT sum(pg_total_relation_size(t.relid)) FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass) AS t WHERE t.isleaf), pg_total_relation_size('collect.{QueryStoreIntervalWide.TableName}'))::bigint";
+
+    /// <summary>
+    /// The row count of a day-partitioned interval parent (#5571): the sum of the leaf partitions' planner estimates
+    /// (<c>reltuples</c>, as every other row of this kind), NULL where none has been vacuumed or analysed yet. The
+    /// parent's own <c>reltuples</c> is only set by an ANALYZE of the parent, so it would lag the partitions. For a table
+    /// that is not partitioned <c>pg_partition_tree</c> returns no row (not the table itself as a leaf), so the
+    /// <c>NOT EXISTS</c> arm counts the table's own estimate instead.
+    /// </summary>
+    private const string IntervalLatestPartitionRowsSql =
+        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalLatest.TableName}'::regclass)))))";
+
+    /// <summary>The wide parent's row estimate, summed over its leaf partitions. See <see cref="IntervalLatestPartitionRowsSql"/>.</summary>
+    private const string IntervalWidePartitionRowsSql =
+        $"(SELECT sum(c.reltuples)::bigint FROM pg_class AS c WHERE c.reltuples >= 0 AND (c.oid IN (SELECT t.relid FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass) AS t WHERE t.isleaf) OR (c.oid = 'collect.{QueryStoreIntervalWide.TableName}'::regclass AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('collect.{QueryStoreIntervalWide.TableName}'::regclass)))))";
+
+    /// <summary>
     /// The named plain-table rows (#3582, extended #4609) — every store shape, like the dimension rows,
     /// and in the same shape: <c>pg_total_relation_size</c> (heap + indexes + TOAST) and the exact row
     /// count. Product-owned tables that are neither hypertables nor payload dimensions and were therefore
@@ -660,15 +701,15 @@ FROM pg_stat_bgwriter AS b";
     /// with (<c>DarlingStoreMetricsReader.LargestUnenumeratedSql</c>) names relations
     /// <c>schema.relation</c>, so a table that moves from that list to this one keeps its name.</para>
     ///
-    /// <para><b><c>row_count</c> here is the planner's <c>reltuples</c> ESTIMATE, not a scan, and the two
-    /// kinds differ on purpose.</b> The dimension arm counts exactly because a dim's heap is small — its
-    /// bytes live in TOAST, which a count never reads. <c>query_store_text</c> is the opposite shape: V74
-    /// stores statement text INLINE, most statements fit a heap page, so the heap IS the 15 GiB and an
-    /// exact <c>count(*)</c> would be a 15 GiB read every hour, on the same store the CAGG refresh convoy
-    /// is running on, for a figure whose job is "roughly how many statements have text". <c>reltuples</c>
-    /// is refreshed by every autovacuum and ANALYZE, is exact enough for that job, and costs one catalog
-    /// row. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
-    /// rather than to a count of minus one. The same estimate is used for all three so the kind means one
+    /// <para><b><c>row_count</c> here is the planner's <c>reltuples</c> ESTIMATE, not a scan, and so is the
+    /// dimension kind's (#5520).</b> <c>query_store_text</c> stores statement text INLINE (V74), most statements
+    /// fit a heap page, so the heap IS the 15 GiB and an exact <c>count(*)</c> would be a 15 GiB read every
+    /// hour, on the same store the CAGG refresh convoy is running on, for a figure whose job is "roughly how
+    /// many statements have text". The dimension arm once counted exactly on the premise of a small heap and an
+    /// index-only scan; measured, that was 149,562 blocks and 25.9 s a call (see <see cref="DimensionInsertSql"/>).
+    /// <c>reltuples</c> is refreshed by every autovacuum and ANALYZE, is exact enough for that job, and costs one
+    /// catalog row. It is <c>-1</c> for a table never vacuumed or analysed (PostgreSQL 14+), which maps to NULL
+    /// rather than to a count of minus one. The same estimate is used for all of them so the column means one
     /// thing. $1 metric_time.</para>
     /// </summary>
     public const string TableInsertSql = $@"
@@ -699,8 +740,8 @@ SELECT
     $1,
     'collect.{QueryStoreIntervalLatest.TableName}',
     '{TableObjectKind}',
-    pg_total_relation_size('collect.{QueryStoreIntervalLatest.TableName}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass)
+    {IntervalLatestPartitionBytesSql},
+    {IntervalLatestPartitionRowsSql}
 UNION ALL
 SELECT
     $1,
@@ -713,8 +754,8 @@ SELECT
     $1,
     'collect.{QueryStoreIntervalWide.TableName}',
     '{TableObjectKind}',
-    pg_total_relation_size('collect.{QueryStoreIntervalWide.TableName}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.TableName}'::regclass)
+    {IntervalWidePartitionBytesSql},
+    {IntervalWidePartitionRowsSql}
 UNION ALL
 SELECT
     $1,
@@ -752,8 +793,16 @@ SELECT
     /// nobody checks. Aliases <c>c</c> (<c>pg_class</c>) and <c>n</c> (<c>pg_namespace</c>) are the
     /// contract every consumer of this fragment supplies.
     /// </summary>
-    public const string CensusRelationPredicateSql = @"c.relkind IN ('r', 'm', 'p', 'S')
-AND   NOT c.relisshared";
+    public const string CensusRelationPredicateSql = $@"c.relkind IN ('r', 'm', 'p', 'S')
+AND   NOT c.relisshared
+AND   NOT (c.relispartition AND EXISTS (
+        SELECT 1 FROM pg_inherits AS inh
+        JOIN pg_class AS parent_c ON parent_c.oid = inh.inhparent
+        JOIN pg_namespace AS parent_n ON parent_n.oid = parent_c.relnamespace
+        WHERE inh.inhrelid = c.oid
+        AND   (parent_n.nspname || '.' || parent_c.relname) IN (
+            'collect.{QueryStoreIntervalLatest.TableName}',
+            'collect.{QueryStoreIntervalWide.TableName}')))";
 
     /// <summary>
     /// Which side of the user/system line a relation falls on, as a fragment over <c>n.nspname</c> (#3582).

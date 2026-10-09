@@ -60,10 +60,11 @@ public partial class QueryStoreHistoryWindow : Window
         _planActions = new PlanNavigationController(
             this,
             async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
-                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
-            (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
+                this, xml, label, qt, await System.Threading.Tasks.Task.Run(() => _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId))),
+            /* #4348: the re-run's plan comes from the monitored server, not the collected rows, so it is judged here. */
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
-                productName: "SQL Server Performance Monitor Lite"),
+                productName: "SQL Server Performance Monitor Lite")),
             "the monitored server");
 
         _filterManager = new DataGridFilterManager<QueryStoreHistoryRow>(HistoryDataGrid);
@@ -82,7 +83,8 @@ public partial class QueryStoreHistoryWindow : Window
     {
         try
         {
-            _historyData = await _dataService.GetQueryStoreHistoryAsync(_serverId, _databaseName, _queryId, _hoursBack);
+            /* #5457: off the UI thread: the read takes the store read lock, which an archive or compaction pass can hold. */
+            _historyData = await System.Threading.Tasks.Task.Run(() => _dataService.GetQueryStoreHistoryAsync(_serverId, _databaseName, _queryId, _hoursBack));
             /* #4766: the grid words each row's times in this window's own zone, as the chart and the summary below do,
                not in whichever server's tab is selected when the row is drawn (this window stays open after another
                tab is selected). Set before the rows reach the grid. */
@@ -95,7 +97,11 @@ public partial class QueryStoreHistoryWindow : Window
 
             if (_historyData.Count > 0)
             {
-                var totalExec = _historyData.Sum(r => r.ExecutionCount);
+                /* #5306: each Query Store interval counts once, at its latest snapshot. The grid lists every snapshot
+                   (an interval collected N times is N rows with a growing count), so adding the column up counted it
+                   about N times. The samples count, the first and last times and the plan count below are not totals
+                   of the counts: they read the rows as they are. */
+                var totalExec = QueryStoreHistoryRow.TotalExecutions(_historyData);
                 var planCount = _historyData.Select(r => r.PlanId).Distinct().Count();
                 var zone = _displayZone();
                 var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
@@ -113,7 +119,7 @@ public partial class QueryStoreHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            SummaryText.Text = $"Error loading history: {ex.Message}";
+            SummaryText.Text = $"Error loading history: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }
     }
 
@@ -202,12 +208,15 @@ public partial class QueryStoreHistoryWindow : Window
         btn.Content = "...";
         try
         {
-            var plan = await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, rowPlanId);
+            var plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, rowPlanId));
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show("No query plan found in Query Store for this plan ID.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
+            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
+            if (WithheldPlanGuard.RefuseSave(plan)) return;
 
             var dialog = new SaveFileDialog
             {
@@ -221,7 +230,7 @@ public partial class QueryStoreHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -301,7 +310,7 @@ public partial class QueryStoreHistoryWindow : Window
     private async System.Threading.Tasks.Task<string?> FetchPlanAsync(long planId)
     {
         if (string.IsNullOrEmpty(_connectionString) || planId == 0) return null;
-        return await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, planId);
+        return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, planId));
     }
 
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)

@@ -35,7 +35,7 @@ public sealed class AvailabilityGroupsTabRefreshTests
         /* The pin the ruling asks for: two refreshes over identical rows must not hand the ItemsControl a new
            object per card. Before the fix, Render assigns a brand new List<AgTopologyCard> (brand new instances)
            every call, so this fails on the pre-#4238 code — proven once, below. */
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var tab = new AvailabilityGroupsTab();
 
@@ -56,7 +56,7 @@ public sealed class AvailabilityGroupsTabRefreshTests
     [Fact]
     public void Render_ChangedValue_UpdatesInPlace_SameInstanceNewValue()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var tab = new AvailabilityGroupsTab();
 
@@ -80,7 +80,7 @@ public sealed class AvailabilityGroupsTabRefreshTests
     [Fact]
     public void Render_AddedOrRemovedAg_AddsOrRemovesExactlyOneCard()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var tab = new AvailabilityGroupsTab();
 
@@ -129,7 +129,7 @@ public sealed class AvailabilityGroupsTabRefreshTests
            reconcile every card, replica and database IN PLACE and never rebuild any of them. A regression that
            tears down and rebuilds rows -- or an O(n^2) loop that amounts to the same thing -- shows up here as a
            nonzero replaced count, independent of how loaded the runner is. */
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var tab = new AvailabilityGroupsTab();
             var topology = BuildTopology(agCount: 42, replicasPerAg: 2, dbRowsPerAg: 9, extraDbRowsOnFirst: 20);
@@ -253,22 +253,4 @@ public sealed class AvailabilityGroupsTabRefreshTests
             RedoRateKbPerSec = 0,
         };
 
-    /// <summary>WPF objects require STA; same shape as RawWindowFloorViewerPortTests / Lite.Tests' MainWindowAccessKeyTests.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

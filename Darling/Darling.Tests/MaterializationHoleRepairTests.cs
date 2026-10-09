@@ -42,7 +42,8 @@ public sealed class MaterializationHoleRepairTests
         Assert.Equal(registered.Length, targets.Count);
         // #3653 LC: 26 (A6 lane LB's count) minus the six the freeze took out of HourlyAggregates/DailyAggregates
         // (they stay in TimescaleSupport.RollupViews and FrozenRollupAggregates, but nothing repairs them now).
-        Assert.Equal(20, targets.Count);
+        /* 20 + the two io hourlies (#5329). */
+        Assert.Equal(22, targets.Count);
         Assert.Equal(registered.Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal), targets.Select(t => t.View).OrderBy(v => v, StringComparer.Ordinal));
 
         /* The rollups come first in the backfill's dependency order — every raw-sourced rollup before the
@@ -130,7 +131,7 @@ public sealed class MaterializationHoleRepairTests
         var sql = TimescaleSupport.MaterializationHoleScanSql(target, ("_timescaledb_internal", "_materialized_hypertable_42"))
             .Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("generate_series($1::timestamp, $2::timestamp, $3::interval)", sql, StringComparison.Ordinal);
-        Assert.Contains("NOT EXISTS (SELECT 1 FROM \"_timescaledb_internal\".\"_materialized_hypertable_42\" AS m WHERE m.bucket = b.bucket OFFSET 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS (SELECT 1 FROM \"_timescaledb_internal\".\"_materialized_hypertable_42\" AS m WHERE m.bucket >= b.bucket AND m.bucket <= b.bucket OFFSET 0)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.query_stats AS s", sql, StringComparison.Ordinal);
         Assert.Contains("s.collection_time >= c.bucket", sql, StringComparison.Ordinal);
         Assert.Contains("s.collection_time < c.bucket + $3::interval", sql, StringComparison.Ordinal);
@@ -416,6 +417,13 @@ public sealed class MaterializationHoleRepairTests
         Assert.EndsWith(")", existsSql, StringComparison.Ordinal);
         Assert.Contains("generate_series(", existsSql, StringComparison.Ordinal);
         Assert.Contains("OFFSET 0", existsSql, StringComparison.Ordinal);
+
+        /* #5521: both bucket probes are range pairs (the equality is estimated from n_distinct and Seq Scans a
+           chunk with few bucket values for a missing bucket), the same text MaterializationHoleScanSql uses. */
+        Assert.Contains("hl.bucket >= hb.bucket AND hl.bucket <= hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.Contains("hs.bucket >= hb.bucket AND hs.bucket <= hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hl.bucket = hb.bucket", existsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hs.bucket = hb.bucket", existsSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -695,7 +703,7 @@ public sealed class MaterializationHoleRepairLiveTests
         /* Twelve hours, all inside the raw horizon: H0-H2 collected and refreshed before the outage, H3-H4 the
            pre-outage TAIL (collected, never refreshed), H5-H8 the outage (nothing collected), H9-H10 collected
            after resume and refreshed by the first post-resume window. H11 is the still-filling current hour. */
-        var h0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-1), DateTimeKind.Unspecified);
+        var h0 = LiveClock.Now().Date.AddDays(-1);
         DateTime H(int n) => h0.AddHours(n);
 
         await InsertHoursAsync(connection, new[] { 0, 1, 2 }, H, ct);
@@ -732,7 +740,7 @@ public sealed class MaterializationHoleRepairLiveTests
 
         /* THE REPAIR: one forced refresh over [H3, H5) and nothing else. */
         var log = new CapturingTestLogger();
-        var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, log, DateTime.UtcNow, ct);
+        var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, log, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), ct);
 
         Assert.Equal(1, summary.HolesRepaired);
         Assert.Equal(2, summary.BucketsRepaired);
@@ -774,7 +782,7 @@ public sealed class MaterializationHoleRepairLiveTests
            carries the cost of proving it. A pass that fell silent here would read the same as one that never
            ran; a pass that returns this cannot. */
         var quietLog = new CapturingTestLogger();
-        var again = await TimescaleSupport.RepairMaterializationHolesAsync(connection, quietLog, DateTime.UtcNow, ct);
+        var again = await TimescaleSupport.RepairMaterializationHolesAsync(connection, quietLog, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), ct);
         Assert.Equal(0, again.HolesRepaired);
         Assert.Equal(0, again.Failures);
         Assert.Equal(0, again.HolesFound);
@@ -806,7 +814,7 @@ public sealed class MaterializationHoleRepairLiveTests
         Assert.Equal(new[] { H(1) }, await ScanAsync(connection, target, materialization.Value, H(0), H(10), ct));
 
         var forcedLog = new CapturingTestLogger();
-        var forcedSummary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, forcedLog, DateTime.UtcNow, ct);
+        var forcedSummary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, forcedLog, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), ct);
         Assert.Equal(1, forcedSummary.HolesRepaired);
         Assert.Equal(1, forcedSummary.HolesForced);
         Assert.Equal(0, forcedSummary.HolesRemaining);
@@ -884,10 +892,10 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
         /* H0 materialized (the floor), H1..H26 collected and never refreshed (26 buckets of hole, cap + 2),
            H27 collected and refreshed (the ceiling). H28 = now - 32 h sits below the policy window; H0 = now - 60 h
            sits well inside the 4-day raw horizon. */
-        var h0 = TimescaleSupport.AlignDown(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified), TimescaleSupport.HourlyBucket).AddHours(-60);
+        var h0 = TimescaleSupport.AlignDown(LiveClock.Now(), TimescaleSupport.HourlyBucket).AddHours(-60);
         DateTime H(int n) => h0.AddHours(n);
-        Assert.True(H(28) < DateTime.UtcNow - TimescaleSupport.HourlyRefreshStartSpan, "the whole plant must sit below the hourly policy window");
-        Assert.True(H(0) > DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, "the whole plant must sit inside the raw horizon");
+        Assert.True(H(28) < DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) - TimescaleSupport.HourlyRefreshStartSpan, "the whole plant must sit below the hourly policy window");
+        Assert.True(H(0) > DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc) - TimescaleSupport.RawRetentionSpan, "the whole plant must sit inside the raw horizon");
 
         await InsertHoursAsync(connection, new[] { 0 }, H, ct);
         await RefreshAsync(connection, view, H(0), H(1), ct);
@@ -903,7 +911,7 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
 
         /* PASS ONE: one hole found (26 buckets), 24 repaired, 2 deferred past the cap — on the same pass. */
         var log = new CapturingTestLogger();
-        var first = await TimescaleSupport.RepairMaterializationHolesAsync(connection, log, DateTime.UtcNow, ct);
+        var first = await TimescaleSupport.RepairMaterializationHolesAsync(connection, log, DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), ct);
 
         Assert.Equal(0, first.Failures);
         Assert.Equal(1, first.HolesFound);
@@ -929,7 +937,7 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
         Assert.Equal(new[] { H(25), H(26) }, await ScanAsync(connection, target, materialization.Value, H(0), H(27), ct));
 
         /* PASS TWO: the deferred remainder is the one hole now — found, repaired whole, nothing deferred. */
-        var second = await TimescaleSupport.RepairMaterializationHolesAsync(connection, new CapturingTestLogger(), DateTime.UtcNow, ct);
+        var second = await TimescaleSupport.RepairMaterializationHolesAsync(connection, new CapturingTestLogger(), DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), ct);
         Assert.Equal(0, second.Failures);
         Assert.Equal(1, second.HolesFound);
         Assert.Equal(2, second.BucketsFound);
@@ -941,7 +949,7 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
         Assert.Equal(Enumerable.Range(0, 28).Select(H).ToArray(), await MaterializedBucketsAsync(connection, view, ct));
 
         /* PASS THREE: the zero-hole walk, with the walk still in the tally. */
-        var third = await TimescaleSupport.RepairMaterializationHolesAsync(connection, new CapturingTestLogger(), DateTime.UtcNow, ct);
+        var third = await TimescaleSupport.RepairMaterializationHolesAsync(connection, new CapturingTestLogger(), DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), ct);
         Assert.Equal(0, third.HolesFound);
         Assert.Equal(0, third.BucketsFound);
         Assert.Equal(0, third.HolesRepaired);

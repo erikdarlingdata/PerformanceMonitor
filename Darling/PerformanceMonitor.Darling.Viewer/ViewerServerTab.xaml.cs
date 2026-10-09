@@ -100,6 +100,7 @@ public partial class ViewerServerTab : UserControl
     private List<SelectableItem> _databaseFilterItems = new();
     private bool _isUpdatingDatabaseFilterSelection;
     private int _databaseFilterTotalCount;
+    private List<string>? _databaseFilterCollectedNames;
     private bool _databaseFilterDirty;
 
     /// <summary>The database filter as a reader argument: null (= All, unfiltered) when nothing is selected.</summary>
@@ -128,6 +129,8 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
+        ColumnFilterScope.SetServer(this, _server.ServerName);
 
         /* Per-server toolbar identity label: the display name is static (it also heads the tab), while the
            freshness readout to its right is filled on the first (and every) refresh from the shared
@@ -202,14 +205,12 @@ public partial class ViewerServerTab : UserControl
            range handler no-ops while IsLoaded is false, and the checkbox handler no-ops while
            _autoRefreshTimer is still null — so seeding drives no premature reload or timer churn. */
         var toolbarDefaults = preferences ?? new ViewerPreferences();
-        TimeRangeCombo.SelectedIndex = toolbarDefaults.DefaultTimeRangeIndex;
+        InitializeRangePicker(toolbarDefaults);
         AutoRefreshCheckBox.IsChecked = toolbarDefaults.AutoRefreshEnabled;
         AutoRefreshIntervalCombo.SelectedIndex = toolbarDefaults.AutoRefreshIntervalIndex;
 
-        /* Per-server toolbar (this wave): populate the custom-range hour/minute combos and start the
-           auto-refresh timer at the toolbar's interval (seeded above). The settable window these controls
-           drive replaces the removed 24-hour s_dataWindow constant. */
-        InitializeTimeComboBoxes();
+        /* Per-server toolbar (this wave): start the auto-refresh timer at the toolbar's interval (seeded above). The
+           settable window the shared time range picker drives replaces the removed 24-hour s_dataWindow constant. */
         InitializeAutoRefreshTimer();
 
         /* Seed the toolbar's Server/Local/UTC picker from the persisted global mode (MainWindow set
@@ -252,6 +253,9 @@ public partial class ViewerServerTab : UserControl
             return;
         }
 
+        /* Compare works on three Queries sub-tabs only; off everywhere else (walk finding V10b). */
+        UpdateCompareDropdownState();
+
         /* A drill-down navigation switches the inner tab programmatically and runs its own targeted read;
            skip the generic loader so it doesn't race that (mirrors the sub-tab handlers' guard). */
         if (_suppressDrillDownAutoRefresh)
@@ -293,6 +297,10 @@ public partial class ViewerServerTab : UserControl
                Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab. */
             await UpdatePermissionDeniedBadgeAsync();
 
+            /* #5562: redraw the picker's resolved range from the clock (a range that slides with now) and refresh its
+               "collected every N minutes" note (set for the page on screen in the load loop below, before each tab's load). */
+            RefreshRangePicker();
+
             do
             {
                 _refreshRequested = false;
@@ -301,6 +309,9 @@ public partial class ViewerServerTab : UserControl
                 do
                 {
                     loadedTab = InnerTabs.SelectedIndex;
+                    /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
+                       at the top of the pass. */
+                    await UpdateSampleIntervalAsync();
                     await LoadInnerTabAsync(loadedTab);
                 }
                 while (InnerTabs.SelectedIndex != loadedTab);
@@ -372,6 +383,7 @@ public partial class ViewerServerTab : UserControl
 
     private async Task LoadInnerTabAsync(int tabIndex)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             switch (tabIndex)
@@ -383,7 +395,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadLatchSpinlockAsync();
                     break;
                 case QueriesInnerTabIndex:
-                    await LoadQueriesAsync();
+                    await LoadQueriesAsync(timer);
                     break;
                 case PlanViewerInnerTabIndex:
                     /* No data feed: plans are pushed into the host by OpenPlanTab (a "View Plan" click),
@@ -430,7 +442,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadSystemEventsAsync();
                     break;
                 case LongQueriesInnerTabIndex:
-                    await LoadLongQueriesAsync();
+                    await LoadLongQueriesAsync(timer);
                     break;
 
                 /* #2530: the PostgreSQL run. Explicit arms, never the default: falling through to
@@ -472,7 +484,25 @@ public partial class ViewerServerTab : UserControl
         {
             StatusChanged?.Invoke($"refresh failed: {ex.Message}");
         }
+        finally
+        {
+            /* Walk finding D15: a slow load (over ViewerLoadTimer.SlowLoadThresholdMs) names its tab and where the time went. */
+            var slow = timer.Finish(InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header));
+            /* #5555: this load's clock is a local handed down to the loaders this method calls (Walk finding D15: a loader wraps each
+               store read in Timed(timer, ...)), not a field. A read that starts outside this load (a Daily Summary drill into
+               Top Queries, a slicer drag) passes null, so it cannot append its phases to this load's line, finished or live, or
+               rename it. */
+            if (slow is not null)
+            {
+                ViewerLogger.Warn("SlowLoad", $"[{_server.DisplayName}] {slow}");
+            }
+        }
     }
+
+    /// <summary>The name a slow-load line gives a tab that sets no sub-surface of its own: the tab's header text, or its index
+    /// when the header is not plain text or the tab is unknown.</summary>
+    internal static string InnerTabLoadName(int tabIndex, object? header) =>
+        header is string text && !string.IsNullOrWhiteSpace(text) ? text.Trim() : $"inner tab {tabIndex}";
 
     private async Task LoadOverviewChartsAsync()
     {

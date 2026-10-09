@@ -168,6 +168,11 @@ public partial class MainWindow : Window
     /// </summary>
     private List<ServerSummaryItem> _overviewCards = new();
 
+    /// <summary>The fleet totals and registered fleet size of the last Overview refresh, held so the search box can
+    /// rebuild the roll-up from the cards it leaves without another store read (null before the first refresh).</summary>
+    private FleetTotals? _overviewTotals;
+    private int _overviewRegisteredCount;
+
     /// <summary>
     /// True while the Overview grid is filtered to servers that need attention (#2424) — the destination the
     /// "+N more need attention" line finally has. Deliberately NOT persisted to ViewerAppSettings the way
@@ -432,6 +437,20 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #5366: save the store's password key the first time it is seen and say so once. A read-only connection and a
+           store without a healthy key show nothing; a changed key is asked about when a password is saved. */
+        var passwordKeyNotice = await ViewerPasswordKey.CheckOnConnectAsync(_dataService);
+        if (passwordKeyNotice is not null)
+        {
+            StatusText.Text = passwordKeyNotice;
+            ViewerLogger.Info("App", passwordKeyNotice);
+        }
+
+        /* #4957: measure the rollup floors in the background now that the store has answered, so the first tab that
+           routes by them does not wait on the cold sort. Fire and forget: the warm never throws and changes nothing
+           else when it fails. */
+        _ = _dataService.WarmRollupCoverageAsync();
+
         /* A read-only seat cannot command the service, so "Generate now" (analyze_now) is disabled. */
         RecommendationsGenerateButton.IsEnabled = !_dataService.IsReadOnly;
 
@@ -453,7 +472,7 @@ public partial class MainWindow : Window
         /* The FinOps tab is a self-loading cross-server aggregate control with its own server selector; give
            it the store, surface its load/refresh outcomes on the shared status bar, and route its query grids'
            "View Plan" requests into the standalone Plan Viewer surface (it has no per-server plan host). */
-        FinOpsContent.Initialize(_dataService);
+        FinOpsContent.Initialize(_dataService, _serverStore);
         FinOpsContent.StatusChanged += OnServerTabStatusChanged;
         FinOpsContent.PlanRequested += OpenStoredPlanInPlanViewer;
 
@@ -935,6 +954,32 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Puts the sidebar back on <paramref name="row"/> after its list was rebuilt (a reload, the favorites
+    /// re-sort), then loads the visible tab once. A rebuild is not the user choosing a server, so the selection is
+    /// set under <see cref="_suppressSidebarSelection"/>: <see cref="ServerList_SelectionChanged"/> does not run,
+    /// and <see cref="SyncAggregateServerSelectors"/> does not move the Recommendations and FinOps pickers off the
+    /// servers they show. The guard also skips the handler's load of the visible tab, so this starts it, the way
+    /// the handler did. No row (an empty or fully filtered list) selects nothing and loads nothing, as before.
+    /// </summary>
+    private void RestoreSidebarSelection(FleetServerRow? row)
+    {
+        _suppressSidebarSelection = true;
+        try
+        {
+            ServerList.SelectedItem = row;
+        }
+        finally
+        {
+            _suppressSidebarSelection = false;
+        }
+
+        if (row is not null)
+        {
+            _ = RefreshVisibleAsync();
+        }
+    }
+
+    /// <summary>
     /// Lazy per-tab load: switching top-level tabs loads the newly visible one. SelectionChanged is a
     /// bubbling routed event, so selections inside the tab content (a findings grid, an inner server
     /// tab, the server list template) reach here too — only react to the top TabControl's own.
@@ -1026,33 +1071,43 @@ public partial class MainWindow : Window
 
         try
         {
-            var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
-
             /* The DESIRED-state managed set (config_monitored_servers), enriched with the observed
                collect.servers facts by the shared server_id, so a viewer add/remove/enable is reflected at
                once. Stamp the viewer's favorite pins (matched by server id) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
+
+            /* Read the servers to keep AFTER the await: a sidebar or picker change made while the list loads is
+               the user's latest choice, and the reload keeps it. */
+            var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
+            var previousRecoServer = (RecommendationsServerSelector.SelectedItem as DarlingServer)?.ServerId;
             _fleet.SetAll(servers);
             ServerList.ItemsSource = _fleet.Visible;
             UpdateServerCountText();
 
+            /* The sidebar's server after this load: the prior one after a server add/edit/remove
+               (preserveSelection), so the view doesn't jump back to the first server; the first one on the
+               initial load. Resolved by SERVER, never by index: once tag rows share this list, row 0 is a header
+               rather than a server. The two pickers below fall back to it. */
+            var sidebarRow = _fleet.ResolveSelection(preserveSelection ? previousSelection : null);
+            var sidebarServerId = sidebarRow?.Server.ServerId;
+
             /* The Recommendations tab has its OWN server selector, synced to the sidebar selection on a
                single-click (SyncAggregateServerSelectors) yet independently changeable while the tab is open.
-               Populate it from the same list; the guard suppresses its SelectionChanged during this initial
-               population so the first load comes from the sidebar-driven RefreshVisibleAsync below (which
-               reads the now-populated combo). */
+               Populate it from the same list. A reload keeps the server it shows while that server exists, and
+               the initial load starts it on the sidebar's server (PickerSelectionAfterReload). The guard
+               suppresses its SelectionChanged here, so the load comes from the RefreshVisibleAsync that
+               RestoreSidebarSelection starts below (which reads the now-populated combo). */
             _populatingRecoServers = true;
             RecommendationsServerSelector.ItemsSource = servers;
-            if (servers.Count > 0)
-            {
-                RecommendationsServerSelector.SelectedIndex = 0;
-            }
+            RecommendationsServerSelector.SelectedItem = ViewerServerSetSync.PickerSelectionAfterReload(
+                servers, preserveSelection ? previousRecoServer : null, sidebarServerId);
             _populatingRecoServers = false;
 
-            /* The FinOps aggregate tab has its OWN server selector too; hand it the same list. It suppresses
-               its selector's SelectionChanged during population (like the Recommendations selector above), so
-               the first FinOps load comes from tab activation, not this call. */
-            FinOpsContent.SetServers(servers);
+            /* The FinOps aggregate tab has its OWN server selector too; hand it the same list. It keeps or falls
+               back the same way, and suppresses its selector's SelectionChanged during population (like the
+               Recommendations selector above), so the first FinOps load comes from tab activation, not this
+               call. */
+            FinOpsContent.SetServers(servers, sidebarServerId, keepSelection: preserveSelection);
 
             var hasServers = servers.Count > 0;
             ServersHintText.Visibility = hasServers ? Visibility.Collapsed : Visibility.Visible;
@@ -1061,14 +1116,9 @@ public partial class MainWindow : Window
 
             if (hasServers)
             {
-                /* Triggers SelectionChanged, which loads the active aggregate tab. Restore the prior
-                   selection after a server add/edit/remove (preserveSelection) so the view doesn't jump
-                   back to the first server; the initial load selects the first.
-
-                   Resolved by SERVER, never by index: once tag rows share this list, row 0 is a header
-                   rather than a server, so a SelectedIndex = 0 fallback would select a non-server and the
-                   aggregate-tab sync would silently never run. */
-                ServerList.SelectedItem = _fleet.ResolveSelection(preserveSelection ? previousSelection : null);
+                /* Selects the sidebar's server and loads the visible tab once, under the suppression guard, so
+                   the restore does not move the two pickers populated above to the sidebar's server. */
+                RestoreSidebarSelection(sidebarRow);
 
                 /* Fold the fleet tags into the sidebar (opt-in: no tags => the list stays flat). Done after
                    the selectors are populated and the initial selection is set, so the tag re-projection
@@ -1181,12 +1231,15 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
                     /* The picker lists the servers known when LoadServersAsync last ran; a server added since
-                       (by another client) is picked up here, keeping the current selection. */
+                       (by another client) is picked up here, keeping the current selection, or taking the
+                       sidebar's server when the selected one is gone. */
                     if (_dataService is not null)
                     {
                         try
                         {
-                            FinOpsContent.SetServers(ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()));
+                            FinOpsContent.SetServers(
+                                ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()),
+                                (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
@@ -1307,17 +1360,17 @@ public partial class MainWindow : Window
     private void OnServerTabStatusChanged(string message) => StatusText.Text = message;
 
     /// <summary>
-    /// "Apply to All" from one server tab's toolbar: copy its selected range (and, for a custom range, the
-    /// held From/To as naive-UTC instants, which each tab draws in its own server's zone) to every OTHER open
-    /// server tab so they window on the same period. The source tab is skipped — it already holds the range.
+    /// "Apply to All" from one server tab's toolbar: copy its held range (a rolling length as it is; a fixed range
+    /// or calendar period as the naive-UTC instants it names, which each tab draws in its own server's zone) to every
+    /// OTHER open server tab so they window on the same period. The source tab is skipped — it already holds the range.
     /// </summary>
-    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, int index, DateTime? customFromUtc, DateTime? customToUtc)
+    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, PerformanceMonitor.Ui.TimeRangeSpec range)
     {
         foreach (var tab in _openServerTabs.Values)
         {
             if (tab.Content is ViewerServerTab serverTab && !ReferenceEquals(serverTab, source))
             {
-                serverTab.ApplyExternalTimeRange(index, customFromUtc, customToUtc);
+                serverTab.ApplyExternalTimeRange(range);
             }
         }
     }
@@ -1584,7 +1637,9 @@ public partial class MainWindow : Window
         /* #2753: TotalServers must be the registered fleet size (list.Count, the same source the sidebar's
            "Servers: N" reads), not cards.Count — cards silently drops any server whose per-server summary
            read failed this cycle, which made the Overview's total wobble against the stable sidebar count. */
-        ApplyFleetRollup(FleetRollup.Build(cards, totals, totalServerCount: list.Count));
+        _overviewTotals = totals;
+        _overviewRegisteredCount = list.Count;
+        ApplyFleetRollup(OverviewCardView.BuildRollup(cards, totals, list.Count, OverviewSearchBox?.Text));
 
         StatusText.Text = $"overview — refreshed {DateTime.Now:HH:mm:ss}";
     }
@@ -1615,6 +1670,7 @@ public partial class MainWindow : Window
     private void ClearOverviewCards()
     {
         _overviewCards = new List<ServerSummaryItem>();
+        _overviewTotals = null;
         OverviewItemsControl.ItemsSource = null;
         FleetRollupContainer.Visibility = Visibility.Collapsed;
         ApplyOverviewAttentionCount(shown: 0);
@@ -1627,19 +1683,32 @@ public partial class MainWindow : Window
     ///
     /// <para>The predicate is <see cref="FleetRollup.NeedsAttention"/>, the same banding the roll-up counted
     /// the "+N more" with, so the grid the link lands on holds exactly the servers the link was counting.</para>
+    ///
+    /// <para>#5352: the Overview search box narrows the same projection (name or tag, as in Lite), composed with
+    /// the toggle in <see cref="OverviewCardView.Project"/> so the two can never disagree about the grid.</para>
     /// </summary>
     private void ApplyOverviewCardFilter()
     {
-        var shown = _overviewAttentionOnly
-            ? FleetRollup.NeedsAttention(_overviewCards)
-            : _overviewCards;
+        var shown = OverviewCardView.Project(_overviewCards, _overviewAttentionOnly, OverviewSearchBox?.Text);
 
         OverviewItemsControl.ItemsSource = shown;
         ApplyOverviewAttentionCount(shown.Count);
+
+        /* D9: the roll-up above the grid (Needs Attention rows, band counts, "Monitoring N servers") follows the
+           search too, so it never counts servers the grid just hid. Before the first refresh there is no totals read
+           to rebuild from; the refresh builds it. */
+        if (_overviewTotals is { } totals)
+        {
+            ApplyFleetRollup(OverviewCardView.BuildRollup(_overviewCards, totals, _overviewRegisteredCount, OverviewSearchBox?.Text));
+        }
     }
 
+    /// <summary>Live name/tag filter over the Overview cards (#5352). A cheap in-memory pass over the held
+    /// card set, so running it per keystroke is fine; clearing the box restores every card.</summary>
+    private void OverviewSearchBox_TextChanged(object sender, TextChangedEventArgs e) => ApplyOverviewCardFilter();
+
     /// <summary>
-    /// Shows what the filter did, beside the toggle that did it. Only rendered while the filter is on: a grid
+    /// Shows what the filter did, beside the toggle that did it. Only rendered while the filter or the search is on: a grid
     /// showing every server needs no arithmetic, and a filtered one must never be mistakable for it.
     ///
     /// <para>The colour follows the sentence. This line has two of them — a count of servers wanting attention,
@@ -1649,11 +1718,18 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyOverviewAttentionCount(int shown)
     {
-        if (_overviewAttentionOnly)
+        var search = OverviewSearchBox?.Text;
+        var text = OverviewCardView.CountText(_overviewCards, shown, _overviewAttentionOnly, search);
+        if (text is not null)
         {
-            OverviewAttentionCountText.Text = FleetRollup.AttentionFilterCountText(shown, _overviewCards.Count);
+            OverviewAttentionCountText.Text = text;
+            /* A search's own sentence ("No server matches the search.") is neither a count of problems nor an
+               all-clear, so it is neutral; the attention sentences keep their colour-follows-the-sentence rule. */
             OverviewAttentionCountText.SetResourceReference(
-                ForegroundProperty, shown > 0 ? "WarningBrush" : "SuccessBrush");
+                ForegroundProperty,
+                OverviewCardView.IsSearchLine(shown, _overviewAttentionOnly, search, _overviewCards.Count)
+                    ? "ForegroundMutedBrush"
+                    : shown > 0 ? "WarningBrush" : "SuccessBrush");
             OverviewAttentionCountText.Visibility = Visibility.Visible;
             return;
         }
@@ -1766,13 +1842,16 @@ public partial class MainWindow : Window
             await _dataService.GetServerClocksAsync(server.ServerId, System.Threading.CancellationToken.None),
             server.ServerId, TimeZoneInfo.Local, DateTime.UtcNow);
 
+        /* #5558: the shared note when this server's node holds a secondary availability group copy of any database. */
+        var replicaNote = await _dataService.GetSecondaryReplicaNoteAsync(server.ServerId);
+
         ApplyRecommendationsViewModel(
             RecommendationsViewModel.FromFindings(
                 rows, server.DisplayName, serverClock,
                 insufficientData: analysisState?.InsufficientData == true,
                 insufficientDataMessage: analysisState?.Message,
                 windowEmpty: analysisState?.WindowEmpty == true,
-                windowEmptyMessage: analysisState?.Message));
+                windowEmptyMessage: analysisState?.Message).WithReplicaNote(replicaNote));
 
         /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
            the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display
@@ -1788,6 +1867,11 @@ public partial class MainWindow : Window
     /// <summary>Swaps the visible content region to match the view-model's state (mirrors Lite's ApplyViewModel).</summary>
     private void ApplyRecommendationsViewModel(RecommendationsViewModel vm)
     {
+        /* #5558: the availability group note rides with the list or the all-clear, never with a state that replaces them. */
+        var replicaNote = vm.State is RecommendationsState.Loaded or RecommendationsState.Empty ? vm.ReplicaNote : null;
+        RecommendationsReplicaNoteText.Text = replicaNote ?? string.Empty;
+        RecommendationsReplicaNoteText.Visibility = replicaNote is null ? Visibility.Collapsed : Visibility.Visible;
+
         switch (vm.State)
         {
             case RecommendationsState.Loading:

@@ -48,7 +48,18 @@ public partial class MainWindow : Window
     private SystemTrayService? _trayService;
     private WindowResumeGuard? _resumeGuard;
     private readonly Dictionary<string, TabItem> _openServerTabs = new();
-    private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<int> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
+
+    /* What the status bar says after the server's first collection ("Data loaded", or the collection error), by server id.
+       Switching to a server's tab words the status bar from this, so "Data loaded" is not lost on the way back (F19). */
+    private readonly Dictionary<string, string> _serverStatusSuffix = new();
+
+    /// <summary>
+    /// The status bar text for a connected server tab: "Connected to X", plus " - Data loaded" (or the collection error)
+    /// once the server's first collection has finished. One wording for the moment the tab opens and every later switch to it.
+    /// </summary>
+    internal static string ConnectedStatusText(string displayName, string? suffix) =>
+        string.IsNullOrEmpty(suffix) ? $"Connected to {displayName}" : $"Connected to {displayName} - {suffix}";
+    private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<PerformanceMonitor.Ui.TimeRangeSpec> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
     /* Server tab badge state for the non-blocking/deadlock conditions (#754/#749), keyed by the
        ServerConnection GUID (the same key as _openServerTabs). The alert sweep sets these; both the
        blocking/deadlock tab refresh and the sweep funnel through UpdateTabBadge, so the badge
@@ -145,7 +156,14 @@ public partial class MainWindow : Window
         // Coupling stays acyclic: ServerManager → IProfileLookup ← ProfileManager, ProfileManager → ServerManager.
         _profileManager = new ProfileManager(_serverManager, new AppLoggerAdapter<ProfileManager>());
         _serverManager.ProfileLookup = _profileManager;
-        _scheduleManager = new ScheduleManager(App.ConfigDirectory);
+        /* #4938: with the app's logger, a run time that is ignored (a value that is not HH:MM, or a time on an hourly collector)
+           is written to the log as a warning that names the collector, not dropped without a word. */
+        _scheduleManager = new ScheduleManager(App.ConfigDirectory, new AppLoggerAdapter<ScheduleManager>());
+        /* #4999: every LocalDataService judges a collector by the interval it is scheduled at on that server, whoever
+           builds it (the Collection Health tab builds its own, as do five other places), not only the MCP host's
+           instance. Wired once here, beside the managers it answers from, and read by each instance where it is used. */
+        LocalDataService.DefaultCollectorFrequencyMinutes = (serverId, collector) =>
+            _scheduleManager.GetFrequencyForStorageServer(_serverManager, serverId, collector);
 
         // Status bar update timer
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
@@ -211,7 +229,10 @@ public partial class MainWindow : Window
                 _databaseInitializer,
                 _serverManager,
                 _scheduleManager,
-                new AppLoggerAdapter<RemoteCollectorService>());
+                new AppLoggerAdapter<RemoteCollectorService>(),
+                /* #4961: the install id lives at the data root. The store resolves it on the first collector's
+                   first ask, so parallel first sweeps share one resolve. */
+                InstallIdStore.ForCurrentUser(App.DataDirectory));
 
             var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>());
             var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>());
@@ -239,6 +260,10 @@ public partial class MainWindow : Window
                have it; it is still the same single app-lifetime source, cancelled once in MainWindow_Closing. */
             _backgroundCts = new CancellationTokenSource();
             _ = Task.Run(() => sliceRepair.RepairOnStartupAsync(_backgroundCts.Token));
+
+            /* #5477: build the statement filter's first-call costs off the startup path, so the first alert with a
+               large report does not pay them. Never throws, logs nothing. */
+            _ = PerformanceMonitor.Alerting.AlertStatementFilter.WarmUpAsync();
 
             // Routes high-severity analysis findings to email/Slack/Teams; the background
             // service runs scheduled analysis and hands findings to it.
@@ -369,7 +394,7 @@ public partial class MainWindow : Window
                         s.DisplayNameWithIntent;
                 }
                 return map;
-            });
+            }, OpenTabClocks);
 
             // Availability Groups (#991): self-loading, and its tab stays hidden until a load finds AG rows.
             AvailabilityGroupsContent.Initialize(_dataService);
@@ -575,7 +600,8 @@ public partial class MainWindow : Window
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
             ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;
-            StatusText.Text = $"Connected to {serverTab.Server.DisplayNameWithIntent}";
+            _serverStatusSuffix.TryGetValue(serverTab.Server.Id, out var statusSuffix);
+            StatusText.Text = ConnectedStatusText(serverTab.Server.DisplayNameWithIntent, statusSuffix);
         }
 
         /* Refresh alerts tab when selected */
@@ -860,6 +886,8 @@ public partial class MainWindow : Window
         try
         {
             var summaries = new List<ServerSummaryItem>();
+            /* Each server's clock is read once per refresh, however many cards share its storage id. */
+            var refreshClocks = new Dictionary<int, ServerClock>();
             foreach (var server in servers)
             {
                 try
@@ -870,6 +898,7 @@ public partial class MainWindow : Window
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
+                        summary.Clock = await ReadOverviewClockAsync(serverId, refreshClocks);
                         summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
@@ -888,6 +917,12 @@ public partial class MainWindow : Window
             _overviewSummaries = summaries;
             ApplyOverviewView();
 
+            /* A FinOps tab left open while a collection for its server finishes reloads, as it does on a show. */
+            foreach (var summary in summaries)
+            {
+                FinOpsContent.NoteCollection(summary.ServerId, summary.LastCollectionTime);
+            }
+
             /* Alerts run over the WHOLE fleet, never the filtered view — a search box narrowing what's on
                screen must not silence alerts for the servers it hides. */
             foreach (var summary in summaries)
@@ -899,6 +934,35 @@ public partial class MainWindow : Window
         {
             AppLogger.Info("Overview", $"RefreshOverviewAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The clock one Overview card converts its Last Collect time on, so the card follows "Show timestamps in" like the
+    /// Alert History and Job History rows do: the server's own collected clock, else its open tab's, else the machine's
+    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>). A failed clock read leaves the card on
+    /// the next clock in the chain rather than dropping the card.
+    /// </summary>
+    private async Task<ServerClock> ReadOverviewClockAsync(int serverId, Dictionary<int, ServerClock> refreshClocks)
+    {
+        if (refreshClocks.TryGetValue(serverId, out var cached))
+        {
+            return cached;
+        }
+
+        ServerClock? collected = null;
+        try
+        {
+            var dataService = _dataService;
+            collected = dataService == null ? null : await Task.Run(() => dataService.GetServerClockAsync(serverId));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("Overview", $"Server clock read failed for server {serverId}, its card takes its open tab's or the machine's clock: {ex.Message}");
+        }
+
+        var clock = ServerTimeHelper.ClockForServer(collected, OpenTabClockFor(serverId));
+        refreshClocks[serverId] = clock;
+        return clock;
     }
 
     private void ServerListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
@@ -981,6 +1045,14 @@ public partial class MainWindow : Window
         OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
             filtered, App.OverviewSortMode,
             s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+
+        /* #5352: a search that matched nothing says so (same sentence as the viewer) rather than leaving a blank grid. */
+        var noMatch = _overviewSummaries.Count > 0 && filtered.Count == 0;
+        if (OverviewNoMatchText != null)
+        {
+            OverviewNoMatchText.Text = noMatch ? ServerOverviewFilter.NoMatchText : string.Empty;
+            OverviewNoMatchText.Visibility = noMatch ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     /// <summary>The fields a search term matches against for a card: its display and instance names, plus each
@@ -1008,8 +1080,14 @@ public partial class MainWindow : Window
 
         try
         {
-            _tags = await _dataService.GetServerTagsAsync();
-            var assignments = await _dataService.GetServerTagAssignmentsAsync();
+            /* #5457: both reads run off the UI thread, in one hop. This runs on every Overview refresh, and a read
+               takes the store read lock before it opens a connection: awaited on the dispatcher, it waited there
+               whenever archival or compaction was parked on the lock (a parked writer holds back new readers), and
+               then ran the query there. Task.Run keeps the lock enter and exit on one pool thread. */
+            var dataService = _dataService;
+            var (tags, assignments) = await Task.Run(async () =>
+                (await dataService.GetServerTagsAsync(), await dataService.GetServerTagAssignmentsAsync()));
+            _tags = tags;
 
             var map = new Dictionary<int, HashSet<int>>();
             foreach (var a in assignments)
@@ -1099,7 +1177,7 @@ public partial class MainWindow : Window
         {
             Dispatcher.Invoke(() => UpdateTabBadge(tabHeader, serverId, blockingCount, deadlockCount, latestEventTime));
         };
-        Action<int> timeRangeHandler = (selectedIndex) =>
+        Action<PerformanceMonitor.Ui.TimeRangeSpec> timeRangeHandler = (range) =>
         {
             Dispatcher.Invoke(() =>
             {
@@ -1107,7 +1185,7 @@ public partial class MainWindow : Window
                 {
                     if (tab.Content is ServerTab st && st != serverTab)
                     {
-                        st.SetTimeRangeIndex(selectedIndex);
+                        st.SetTimeRange(range);
                     }
                 }
             });
@@ -1142,6 +1220,11 @@ public partial class MainWindow : Window
 
         serverTab.AlertCountsChanged += alertHandler;
         serverTab.ApplyTimeRangeRequested += timeRangeHandler;
+        /* #5562: the picker's 'collected every N minutes' note names this server's ACTUAL cadence for the main collector of the
+           page on screen (ServerTab.CurrentMainCollector), read from the schedule each time (it can be edited while the tab is
+           open) and falling back to the shipped default when the schedule has no entry for it. */
+        serverTab.SetSampleIntervalSource(collector => PerformanceMonitorLite.Helpers.LiteTimeRange.SampleIntervalForCollector(
+            collector, _scheduleManager.GetScheduleForServer(server.Id, collector)));
         serverTab.ManualRefreshRequested += refreshHandler;
         /* #1319: persist the per-server view database filter (no credential side effects). The handler
            captures only the long-lived _serverManager, so it needs no explicit unsubscribe. */
@@ -1168,14 +1251,16 @@ public partial class MainWindow : Window
             try
             {
                 await Task.Run(() => _collectorService.RunAllCollectorsForServerAsync(server));
-                StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Data loaded";
+                _serverStatusSuffix[server.Id] = "Data loaded";
+                StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, "Data loaded");
                 serverTab.RefreshData();
                 UpdateCollectorHealth();
                 _ = RefreshOverviewAsync();
             }
             catch (Exception ex)
             {
-                StatusText.Text = $"Connected to {server.DisplayNameWithIntent} - Collection error: {ex.Message}";
+                _serverStatusSuffix[server.Id] = $"Collection error: {ex.Message}";
+                StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, _serverStatusSuffix[server.Id]);
             }
         }
         else
@@ -1413,6 +1498,25 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The clock of every open server tab, by server id (#4966): the snapshot the Job History tab hands its read, so a server with
+    /// no collected clock yet is windowed on its open tab's clock before the machine's, as <see cref="OpenTabClockFor"/> gives the
+    /// Alerts History list. Taken on the UI thread (the open tabs are UI objects) and read off it as a plain dictionary.
+    /// </summary>
+    private IReadOnlyDictionary<int, ServerClock> OpenTabClocks()
+    {
+        var clocks = new Dictionary<int, ServerClock>();
+        foreach (var tab in _openServerTabs.Values)
+        {
+            if (tab.Content is ServerTab st)
+            {
+                clocks[st.ServerId] = st.ServerClock;
+            }
+        }
+
+        return clocks;
+    }
+
+    /// <summary>
     /// When alerts are cleared from Alert History via "Dismiss All", acknowledge the matching
     /// server tab badge(s) so the at-a-glance indicator stays consistent with the cleared list
     /// (issue #1092). The argument is the DB server_id filter that was in effect; null means the
@@ -1482,6 +1586,7 @@ public partial class MainWindow : Window
 
             ServerTabControl.Items.Remove(tab);
             _openServerTabs.Remove(serverId);
+            _serverStatusSuffix.Remove(serverId);
 
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);
@@ -1681,30 +1786,11 @@ public partial class MainWindow : Window
                 }
             }
 
-            // Copy config files that don't already exist in the current install
-            var settingsFiles = new[] { "settings.json", "collection_schedule.json", "ignored_wait_types.json" };
-            int settingsCopied = 0;
-
-            foreach (var fileName in settingsFiles)
-            {
-                var source = System.IO.Path.Combine(oldConfigDir, fileName);
-                var target = System.IO.Path.Combine(App.ConfigDirectory, fileName);
-
-                if (System.IO.File.Exists(source) && !System.IO.File.Exists(target))
-                {
-                    System.IO.File.Copy(source, target);
-                    settingsCopied++;
-                }
-            }
-
-            // Copy alert_state.json from old root directory
-            var oldAlertState = System.IO.Path.Combine(dialog.FolderName, "alert_state.json");
-            var currentAlertState = System.IO.Path.Combine(App.DataDirectory, "alert_state.json");
-            if (System.IO.File.Exists(oldAlertState) && !System.IO.File.Exists(currentAlertState))
-            {
-                System.IO.File.Copy(oldAlertState, currentAlertState);
-                settingsCopied++;
-            }
+            /* Copy the config files and alert_state.json that don't already exist in the current install. The lists
+               live in SettingsImport (#4961), which a test reads: the previous install's install-id.json is never
+               among them, because two installs that shared an id would drop each other's Extended Events sessions. */
+            int settingsCopied = SettingsImport.CopyMissing(
+                oldConfigDir, dialog.FolderName, App.ConfigDirectory, App.DataDirectory);
 
             var message = $"Imported {imported} server connection(s).";
             if (skipped > 0)
@@ -1930,6 +2016,15 @@ public partial class MainWindow : Window
             {
                 AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");
             }
+        }
+
+        /* #4961: the server's long-query trace session is this install's, so it goes with the server. Awaited here, with the
+           tag clear, so the block below still awaits nothing: one attempt for the whole step, and a failure or the timeout
+           is logged by the drop and never stops the removal. */
+        if (_collectorService != null)
+        {
+            using var sessionDrop = new System.Threading.CancellationTokenSource(RemoteCollectorService.LongQueryTraceRemovalTimeout);
+            await _collectorService.DropLongQueryTraceOfRemovedServerAsync(server, sessionDrop.Token);
         }
 
         /* #4795: from the first drop to the delete nothing is awaited, so this runs on the UI thread without a

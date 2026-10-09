@@ -471,13 +471,14 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
             tab, StringComparison.Ordinal);
         Assert.DoesNotContain("$\"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}\"", tab, StringComparison.Ordinal);
 
+        /* The badge with no CPU sample is a dash with its own tooltip, not a partial score (FinOpsHealthBadgeNoCpuTests). */
         Assert.Contains(
-            "HealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;",
+            "HealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;",
             tab, StringComparison.Ordinal);
 
-        Assert.Contains(
-            "int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;",
-            tab, StringComparison.Ordinal);
+        /* The inventory grid's score comes with the collected overlay, the Utilization tab's own rule (FinOpsHealthCalculator.Score): a server
+           with no CPU sample has no score (a dash), not defaults alone. */
+        Assert.DoesNotContain("InventoryScore(", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("item.AvgCpuPct ?? 0m", tab, StringComparison.Ordinal);
     }
 

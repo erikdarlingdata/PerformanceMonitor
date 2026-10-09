@@ -239,20 +239,32 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
            "{percent} of {n}GB RAM". Its divisor is util.PhysicalMemoryMb, read from memory_stats through the utilization read,
            and the rules file reads no physical-memory column of its own. */
         var rules = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs");
+        var reader = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsRecommendationsReader.cs");
 
-        Assert.Contains("of {util.PhysicalMemoryMb / 1024}GB RAM", rules, StringComparison.Ordinal);
+        var figures = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
+
+        Assert.Contains("of {util.PhysicalMemoryMb / 1024}GB RAM", figures, StringComparison.Ordinal);
         Assert.False(
             Regex.IsMatch(rules, @"physical_memory_mb"),
             "the recommendation rules must not read a physical-memory column of their own");
+        Assert.False(
+            Regex.IsMatch(reader, @"physical_memory_mb"),
+            "the recommendation reader must not read a physical-memory column of its own");
+        Assert.False(
+            Regex.IsMatch(figures, @"physical_memory_mb"),
+            "the recommendation figures must not read a physical-memory column of their own");
     }
 
     [Fact]
     public void MemoryAndVmRules_OnAzureSqlDatabase_SayWhyTheyStandDown_AndDoNotCallTheMemoryTheHosts()
     {
-        var rules = Flatten(ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs"));
+        var rules = Flatten(ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsRecommendationsReader.cs"));
+        var viewerRules = Flatten(ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Recommendations.cs"));
 
         Assert.DoesNotContain("reports the HOST's memory", rules, StringComparison.Ordinal);
         Assert.DoesNotContain("its memory figure is the host's", rules, StringComparison.Ordinal);
+        Assert.DoesNotContain("reports the HOST's memory", viewerRules, StringComparison.Ordinal);
+        Assert.DoesNotContain("its memory figure is the host's", viewerRules, StringComparison.Ordinal);
         Assert.Contains("its memory comes with its service objective and cannot be resized on its own", rules, StringComparison.Ordinal);
         Assert.Contains("its cores and memory come with its service objective", rules, StringComparison.Ordinal);
     }

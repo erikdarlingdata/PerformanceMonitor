@@ -46,6 +46,14 @@ public partial class AlertsHistoryTab : UserControl
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
+
+    /// <summary>The read's row cap (D7): the newest 500 alerts. <see cref="LoadAlertsAsync"/> passes it to the read and
+    /// the count text (<see cref="JobHistoryCap.CountText(int, int, int, string)"/>) says "showing the newest 500" when
+    /// the read reached it.</summary>
+    internal const int RowCap = 500;
+
+    /// <summary>How many rows the last read returned, before any column filter: the cap belongs to the read.</summary>
+    private int _lastReadRowCount;
     private readonly DispatcherTimer _staleDataTimer;
 
     /// <summary>Raised with a short status message on load/dismiss/mute outcomes so the shell can show it.</summary>
@@ -54,6 +62,13 @@ public partial class AlertsHistoryTab : UserControl
     public AlertsHistoryTab()
     {
         InitializeComponent();
+        /* #5562: the shared picker; the old combo defaulted to the last 24 hours. */
+        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
+        /* #5562 R8: the old list's "All" is one choice again, the span the alert table keeps (90 days), not a year. */
+        TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.AlertHistoryLongestChoice, "All");
+        /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
+        ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
@@ -91,11 +106,10 @@ public partial class AlertsHistoryTab : UserControl
 
         try
         {
-            var hoursBack = GetSelectedHoursBack();
+            var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
-            var sinceUtc = DateTime.UtcNow.AddHours(-hoursBack);
 
-            var alerts = await _dataService.GetAlertHistoryAsync(sinceUtc, serverId);
+            var alerts = await _dataService.GetAlertHistoryWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId, RowCap);
 
             if (_filterManager != null)
             {
@@ -108,7 +122,10 @@ public partial class AlertsHistoryTab : UserControl
 
             var displayCount = AlertsDataGrid.Items.Count;
             NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AlertCountIndicator.Text = displayCount > 0 ? $"{displayCount} alert(s)" : "";
+            AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+            /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
+            _lastReadRowCount = alerts.Count;
+            AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -181,13 +198,16 @@ public partial class AlertsHistoryTab : UserControl
         ServerFilterComboBox.SelectionChanged += ServerFilterComboBox_SelectionChanged;
     }
 
+    /// <summary>The picker's window now (#5562): start, end and whether the end slides with now. Both the grid read and
+    /// Dismiss All use it, so Dismiss All touches exactly the rows the grid shows.</summary>
+    private (DateTime StartUtc, DateTime EndUtc, bool IsLive) GetSelectedWindow()
+        => ViewerTimeRangeWindow.Window(TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone());
+
+    /// <summary>The window's span as whole hours back (at least one), for the dismissal log line.</summary>
     private int GetSelectedHoursBack()
     {
-        if (TimeRangeComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
-        {
-            return int.TryParse(tagStr, out var hours) ? hours : 24;
-        }
-        return 24;
+        var (startUtc, endUtc, _) = GetSelectedWindow();
+        return ViewerTimeRangeWindow.HoursBack(startUtc, endUtc);
     }
 
     private int? GetSelectedServerId()
@@ -242,7 +262,7 @@ public partial class AlertsHistoryTab : UserControl
         }
 
         _filterManager?.SetFilter(e.FilterState);
-        AlertCountIndicator.Text = AlertsDataGrid.Items.Count > 0 ? $"{AlertsDataGrid.Items.Count} alert(s)" : "";
+        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert(s)");
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)
@@ -276,7 +296,7 @@ public partial class AlertsHistoryTab : UserControl
 
     #region Event Handlers
 
-    private async void TimeRangeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void TimeRangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (IsLoaded)
         {
@@ -362,8 +382,9 @@ public partial class AlertsHistoryTab : UserControl
         {
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
-            var sinceUtc = DateTime.UtcNow.AddHours(-hoursBack);
-            var affected = await _dataService.DismissAllVisibleAlertsAsync(sinceUtc, serverId);
+            /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
+            var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
+            var affected = await _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId);
             if (LogDismissals)
             {
                 var scope = serverId.HasValue ? $"server {serverId.Value}" : "all servers";

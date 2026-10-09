@@ -47,6 +47,8 @@ namespace Darling.Tests;
     Neither is needed to maintain the guard, both are useful only to someone working out where it
     does not look, and this file is public. Their absence is load-bearing, not an oversight.
 */
+[Trait("Stage", "Guard")]
+[Trait("Reads", "Lite")]
 public sealed class FleetIdentifierScrubTests
 {
     /* Greek letters and role words -- nothing here names a real customer. pgmonitor is a role
@@ -78,6 +80,8 @@ public sealed class FleetIdentifierScrubTests
     private static readonly HashSet<string> OrdinalRoleWords = new(StringComparer.OrdinalIgnoreCase)
     {
         "prod", "dev", "local", "sql", "aurora", "srv", "box", "web", "target", "bench", "gone",
+        // A zone offset in the time range picker's label and tests ("UTC-04:00", #5562): a clock offset, never a tenant.
+        "utc",
     };
 
     /*

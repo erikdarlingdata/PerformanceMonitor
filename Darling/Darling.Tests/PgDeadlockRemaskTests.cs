@@ -577,7 +577,11 @@ public sealed class PgDeadlockRemaskTests
         await PlantAlertAsync(connection, now.AddDays(-1), null, goneJson, ct);
         var behind = new PgDeadlockRemask.RemaskProgress();
         behind.Alerts.WalkRewritten = 1;
-        behind.AlertCursor = DateTime.Parse(await ScalarTextAsync(connection, "SELECT to_char(max(alert_time), 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_alert_log", ct), CultureInfo.InvariantCulture);
+        /* Just past every alert in the walk's order: the last server, its deadlock metric, the newest alert_time. */
+        behind.AlertCursor = new PgDeadlockRemask.AlertLogCursor(
+            int.Parse(await ScalarTextAsync(connection, "SELECT max(server_id)::text FROM config_alert_log", ct), CultureInfo.InvariantCulture),
+            AlertEngine.DeadlockWatermarkMetric,
+            DateTime.Parse(await ScalarTextAsync(connection, "SELECT to_char(max(alert_time), 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_alert_log", ct), CultureInfo.InvariantCulture));
         await PgDeadlockRemask.RunAsync(connection, behind, s_key, NullLoggerFor(), ct);
         Assert.True(behind.Alerts.Done);
         Assert.Equal(3, behind.Alerts.Walks);
@@ -667,6 +671,74 @@ public sealed class PgDeadlockRemaskTests
         Assert.True(progress.Done);
         Assert.All(progress.Stages, stage => Assert.False(stage.GaveUp, stage.Name));
         Assert.False(progress.Pending);
+    }
+
+    /// <summary>
+    /// #5634: a stage that fails twice and then succeeds logs ONE information line naming the stage and the two
+    /// failed passes; the warnings stop at the last failure, so without it nothing says the stage came back.
+    /// </summary>
+    [Fact]
+    public async Task AStageThatRecoversAfterFailures_LogsOneRecoveryLine_WithTheFailureCount()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        await PlantRawReportsAsync(connection, 5, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
+
+        /* The alert stage's table is away for two passes (the second waits one tick out), then back. */
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log RENAME TO config_alert_log_away", ct);
+        var logger = new CountingLogger();
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        Assert.Equal(2, progress.Alerts.ConsecutiveFailures);
+        Assert.DoesNotContain(logger.Informations, line => line.Contains("recovered", StringComparison.Ordinal));
+
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log_away RENAME TO config_alert_log", ct);
+        for (var tick = 0; tick < 6 && progress.Pending; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        }
+
+        Assert.Equal(0, progress.Alerts.ConsecutiveFailures);
+
+        /* The other two alert-table stages fail on the same missing table, so each logs its own line, once. */
+        var recovered = Assert.Single(logger.Informations, line => line.Contains("stored alert rows recovered", StringComparison.Ordinal));
+        Assert.Contains("2 earlier", recovered, StringComparison.Ordinal);
+        Assert.All(progress.Stages, stage => Assert.True(
+            logger.Informations.Count(line => line.Contains($"stored {stage.Name} rows recovered", StringComparison.Ordinal)) <= 1, stage.Name));
+    }
+
+    /// <summary>
+    /// #5634: a stage that never failed logs no recovery line on a clean pass.
+    /// </summary>
+    [Fact]
+    public async Task ACleanPassWithNoEarlierFailure_LogsNoRecoveryLine()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        await PlantRawReportsAsync(connection, 5, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
+
+        var logger = new CountingLogger();
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        for (var tick = 0; tick < 6 && progress.Pending; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        }
+
+        Assert.True(progress.Done);
+        Assert.Equal(0, logger.Warnings);
+        Assert.NotEmpty(logger.Informations);
+        Assert.DoesNotContain(logger.Informations, line => line.Contains("recovered", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -1068,7 +1140,8 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
         }
 
         Assert.DoesNotContain("unnest(", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$3", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
+        /* #5625: the slice is one server's ($1), after a time ($2), for a page size ($3); no fourth parameter carries a key. */
+        Assert.DoesNotContain("$4", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
         Assert.Contains("regexp_matches(p.context_json", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
     }
 
@@ -1393,7 +1466,7 @@ WHERE victim_pid = 10004", ct);
 
     /* A finding alert as the analysis sent it before #4005 for the legacy finding: the live context builder over
        that finding, so the flattened section, its note and the frozen prose carry what they carried then. */
-    private static (string Metric, string ContextJson) LegacyFindingAlert(
+    internal static (string Metric, string ContextJson) LegacyFindingAlert(
         string drillDown, string story, string storyPathHash, DateTime? windowStart = null, DateTime? windowEnd = null)
     {
         var finding = new AnalysisFinding
@@ -1429,10 +1502,12 @@ WHERE victim_pid = 10004", ct);
 
     private static Microsoft.Extensions.Logging.ILogger NullLoggerFor() => Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
-    /* Counts the warnings the driver logs, one per failure. */
+    /* Counts the warnings the driver logs, one per failure, and keeps the information lines it logs (#5634). */
     private sealed class CountingLogger : Microsoft.Extensions.Logging.ILogger
     {
         public int Warnings { get; private set; }
+
+        public List<string> Informations { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -1443,6 +1518,10 @@ WHERE victim_pid = 10004", ct);
             if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
             {
                 Warnings++;
+            }
+            else if (logLevel == Microsoft.Extensions.Logging.LogLevel.Information)
+            {
+                Informations.Add(formatter(state, exception));
             }
         }
     }
@@ -1545,8 +1624,6 @@ FROM generate_series(1, $6) AS g", connection);
         command.Parameters.AddWithValue(now.AddDays(-10));
         command.Parameters.AddWithValue(now);
         command.Parameters.AddWithValue(PgTargetDrillDownCollector.DeadlockExemplarCap);
-        command.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
-        command.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
         command.Parameters.AddWithValue(EventWindowFloor.For(now.AddDays(-10)));
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -1564,7 +1641,7 @@ FROM generate_series(1, $6) AS g", connection);
     private static async Task<(int Alerts, int Findings, int Reports, int Failed)> RunPassAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         int alerts = 0, findings = 0, reports = 0, failed = 0;
-        DateTime? alertCursor = null;
+        PgDeadlockRemask.AlertLogCursor? alertCursor = null;
         do
         {
             var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, alertCursor, s_key, true, null, ct);
@@ -1641,7 +1718,7 @@ FROM generate_series(1, $6) AS g", connection);
 
     /* A finding as the analysis stored it before #4005: the exemplar's statement, fingerprint and graph raw, the
        fingerprint in its prose, and a hash over the raw graph (PgTargetDeadlockDrillDownTests' shape). */
-    private static (string DrillDown, string Story) LegacyFinding()
+    internal static (string DrillDown, string Story) LegacyFinding()
     {
         var lastSeen = new DateTime(2026, 9, 1, 12, 30, 15, 250);
         var sentence = $"Exemplars: 1 report captured. The most frequent 2-participant shape involves ShareLock on transaction with the victim `{LegacyVictimStatement}`, seen 1 time.";
@@ -1674,7 +1751,7 @@ FROM generate_series(1, $6) AS g", connection);
         return section.GetProperty("exemplars").GetRawText() + "\n" + section.GetProperty("note").GetString();
     }
 
-    private static async Task PlantFindingAsync(
+    internal static async Task PlantFindingAsync(
         NpgsqlConnection connection, long findingId, DateTime analysisTime, string drillDown, string story, CancellationToken ct,
         string storyPath = PgTargetFactKeys.DeadlockRate, string storyPathHash = "h", double severity = 0.9,
         DateTime? windowStart = null, DateTime? windowEnd = null)

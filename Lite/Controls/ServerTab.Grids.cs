@@ -81,10 +81,10 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Computes per-interval deltas from cumulative history values.
+    /// Projects the history rows' per-collection deltas to the overlay's points (#5449).
     /// Picks the metric field based on the current slicer sort metric.
     /// </summary>
-    private static List<(DateTime TimeUtc, double Value)> ComputeQueryOverlayPoints(
+    internal static List<(DateTime TimeUtc, double Value)> ComputeQueryOverlayPoints(
         List<QueryStatsHistoryRow> history, string slicerMetric)
     {
         Func<QueryStatsHistoryRow, long> selector = slicerMetric switch
@@ -97,17 +97,20 @@ public partial class ServerTab : UserControl
         };
         bool isMicroseconds = slicerMetric is "TotalCpu" or "AvgCpu" or "TotalElapsed" or "AvgElapsed";
 
+        /* #5449: the history rows carry each collection's own delta (delta_*), so a row's delta IS its point. It used to
+           subtract the previous row's delta, which drew a point only where the work changed, dropped the first row, and
+           read differently on a store that keeps the idle rows and one that does not. Zero deltas are not drawn. */
         var points = new List<(DateTime TimeUtc, double Value)>();
-        for (int i = 1; i < history.Count; i++)
+        foreach (var row in history)
         {
-            var delta = selector(history[i]) - selector(history[i - 1]);
+            var delta = selector(row);
             if (delta > 0)
-                points.Add((history[i].CollectionTime, isMicroseconds ? delta / 1000.0 : delta));
+                points.Add((row.CollectionTime, isMicroseconds ? delta / 1000.0 : delta));
         }
         return points;
     }
 
-    private static List<(DateTime TimeUtc, double Value)> ComputeProcOverlayPoints(
+    internal static List<(DateTime TimeUtc, double Value)> ComputeProcOverlayPoints(
         List<ProcedureStatsHistoryRow> history, string slicerMetric)
     {
         Func<ProcedureStatsHistoryRow, long> selector = slicerMetric switch
@@ -120,12 +123,15 @@ public partial class ServerTab : UserControl
         };
         bool isMicroseconds = slicerMetric is "TotalCpu" or "AvgCpu" or "TotalElapsed" or "AvgElapsed";
 
+        /* #5449: the history rows carry each collection's own delta (delta_*), so a row's delta IS its point. It used to
+           subtract the previous row's delta, which drew a point only where the work changed, dropped the first row, and
+           read differently on a store that keeps the idle rows and one that does not. Zero deltas are not drawn. */
         var points = new List<(DateTime TimeUtc, double Value)>();
-        for (int i = 1; i < history.Count; i++)
+        foreach (var row in history)
         {
-            var delta = selector(history[i]) - selector(history[i - 1]);
+            var delta = selector(row);
             if (delta > 0)
-                points.Add((history[i].CollectionTime, isMicroseconds ? delta / 1000.0 : delta));
+                points.Add((row.CollectionTime, isMicroseconds ? delta / 1000.0 : delta));
         }
         return points;
     }

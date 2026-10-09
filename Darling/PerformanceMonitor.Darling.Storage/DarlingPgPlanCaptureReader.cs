@@ -22,7 +22,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// so the same plan is legitimately captured many times — and the overlapping window means the SAME
 /// execution can be seen twice. Returning raw captures would rank by how often the reader happened to look.
 /// Rows are grouped on <c>(query_id, plan_hash)</c>, which is what makes "this shape ran a lot and is slow"
-/// answerable at all.</para>
+/// answerable at all. The hash is of the plan's SHAPE (#5114), so captures whose estimates differ share a group, and
+/// the counts and durations sum over all of them.</para>
 ///
 /// <para><b>The plan JSON returned here is already redacted</b> — the collector strips it before storage, so
 /// there is no un-redacted copy anywhere for a read to leak. Nothing here needs to re-check that, and
@@ -36,7 +37,9 @@ public static class DarlingPgPlanCaptureReader
     /// <param name="Captures">How many times this shape was seen. A count of the CAPTURES, which the
     /// overlapping tail read can inflate — treat it as a frequency signal rather than an execution count;
     /// <c>pg_statement_stats.calls</c> is the authority on that.</param>
-    /// <param name="PlanJson">Redacted at collection. Literals and query text never reach the store.</param>
+    /// <param name="PlanJson">The JSON of the group's latest collection cycle, redacted at collection (literals and query text
+    /// never reach the store). Its estimates and counters are that capture's: the hash does not cover them, so
+    /// the group's other captures may carry different ones.</param>
     public sealed record PgPlanCaptureRow(
         long QueryId,
         string? PlanHash,
@@ -49,32 +52,59 @@ public static class DarlingPgPlanCaptureReader
         string? PlanJson,
         DateTime LastSeen);
 
-    /* DISTINCT ON inside the aggregate is not what is wanted here: the JSON is identical for a given
-       plan_hash by construction (the hash is OF the redacted JSON), so any row's copy will do and min()
-       avoids a second scan to pick one. */
+    /* The hash is of the plan's SHAPE (#5114), so the JSON of one group is NOT identical across its captures: they
+       differ in costs, row estimates and runtime counters. The group is ranked and cut first, without the JSON, and
+       the LATERAL then fetches the JSON of the group's latest collection cycle for the page only - a real capture's
+       own numbers, and kilobyte-sized text is read for the rows returned rather than aggregated over every group.
+       Two captures of one plan can share a cycle's timestamp, so max() picks one of them deterministically; the
+       lookup is an equality on that timestamp, bounded by the same (server_id, collection_time) index. The outer
+       LIMIT repeats the inner one, because the paged-read contract wants every such read to end in its bound. top_node_type and
+       node_count are shape properties, so min() and max() over a group are exact. */
     public const string PgPlanCaptureSql = """
         SELECT
-            query_id,
-            plan_hash,
-            min(top_node_type)          AS top_node_type,
-            max(node_count)             AS node_count,
-            count(*)                    AS captures,
-            sum(duration_ms)            AS total_duration_ms,
-            max(duration_ms)            AS max_duration_ms,
-            avg(duration_ms)            AS avg_duration_ms,
-            min(plan_json)              AS plan_json,
-            max(collection_time)        AS last_seen
-        FROM pg_plan_capture
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        /* The optional queryid pin, IN the SQL rather than filtered client-side over a page (#3533): the
-           ranking is by total duration, so a cheap-but-wanted query sits arbitrarily far below the top and
-           no page size makes it reachable — filtering a fetched page turned "ranked low" into "was never
-           captured". NULL leaves the read as the top-duration page. */
-        AND   ($4::bigint IS NULL OR query_id = $4)
-        GROUP BY query_id, plan_hash
-        ORDER BY sum(duration_ms) DESC
+            g.query_id,
+            g.plan_hash,
+            g.top_node_type,
+            g.node_count,
+            g.captures,
+            g.total_duration_ms,
+            g.max_duration_ms,
+            g.avg_duration_ms,
+            latest.plan_json,
+            g.last_seen
+        FROM (
+            SELECT
+                query_id,
+                plan_hash,
+                min(top_node_type)          AS top_node_type,
+                max(node_count)             AS node_count,
+                count(*)                    AS captures,
+                sum(duration_ms)            AS total_duration_ms,
+                max(duration_ms)            AS max_duration_ms,
+                avg(duration_ms)            AS avg_duration_ms,
+                max(collection_time)        AS last_seen
+            FROM pg_plan_capture
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            /* The optional queryid pin, IN the SQL rather than filtered client-side over a page (#3533): the
+               ranking is by total duration, so a cheap-but-wanted query sits arbitrarily far below the top and
+               no page size makes it reachable — filtering a fetched page turned "ranked low" into "was never
+               captured". NULL leaves the read as the top-duration page. */
+            AND   ($4::bigint IS NULL OR query_id = $4)
+            GROUP BY query_id, plan_hash
+            ORDER BY sum(duration_ms) DESC
+            LIMIT $5
+        ) AS g
+        LEFT JOIN LATERAL (
+            SELECT max(c.plan_json) AS plan_json
+            FROM pg_plan_capture AS c
+            WHERE c.server_id = $1
+            AND   c.collection_time = g.last_seen
+            AND   c.query_id IS NOT DISTINCT FROM g.query_id
+            AND   c.plan_hash IS NOT DISTINCT FROM g.plan_hash
+        ) AS latest ON true
+        ORDER BY g.total_duration_ms DESC
         LIMIT $5
         """;
 

@@ -39,6 +39,11 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
+    /* An install id and the session name this install makes from it (#4961). */
+    private const string TestId = "0a1b2c3d";
+    private const string OtherId = "ffffffff";
+    private static readonly string Session = LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, TestId);
+
     private static CollectorContext MakeContext(
         bool isAzureSqlDb = false,
         DateTime? watermark = null,
@@ -47,6 +52,7 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         {
             ServerId = 42,
             ServerName = "test-server",
+            LongQuerySessionName = Session,
             CollectionTime = collectionTime ?? new DateTime(2026, 7, 18, 12, 0, 0, DateTimeKind.Utc),
             Deltas = s_deltas,
             Target = new CollectorTargetInfo { IsAzureSqlDb = isAzureSqlDb },
@@ -60,7 +66,7 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.Equal("long_query_completions", LongQueryCompletionsCollector.Instance.TargetTable);
         Assert.Equal("event_time", LongQueryCompletionsCollector.Instance.WatermarkColumn);
         Assert.Equal("long_query_completion_id", LongQueryCompletionsCollector.Instance.PrefixIdColumnName);
-        Assert.Equal("PerformanceMonitor_LongQueryCompletions", LongQueryCompletionsCollector.XeSessionName);
+        Assert.Equal("PerformanceMonitor_LongQueryCompletions", LongQueryCompletionsCollector.LegacyXeSessionName);
         /* The Dashboard's SQL Trace default (install/30_collect_trace_management.sql): 2 seconds in µs. */
         Assert.Equal(2_000_000, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds);
     }
@@ -91,7 +97,8 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
 
         Assert.Contains("sys.dm_xe_session_targets AS xet", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("dm_xe_database_session_targets", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("N'PerformanceMonitor_LongQueryCompletions'", plan.Text, StringComparison.Ordinal);
+        Assert.Contains($"N'{Session}'", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("N'PerformanceMonitor_LongQueryCompletions'", plan.Text, StringComparison.Ordinal);
         Assert.Contains("event[@name=\"rpc_completed\" or @name=\"sql_batch_completed\" or @name=\"attention\"]", plan.Text, StringComparison.Ordinal);
         /* The time filter runs inside the XQuery; a .value() cast in WHERE shreds every event first. */
         Assert.Contains("WHERE evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", plan.Text, StringComparison.Ordinal);
@@ -257,7 +264,7 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
     [Fact]
     public void BuildCreateSessionSql_ServerScoped_PredicateOnCompletedOnly_AttentionUnfiltered()
     {
-        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: false, 2_000_000);
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped: false, 2_000_000);
 
         Assert.Contains("ON SERVER", sql, StringComparison.Ordinal);
         Assert.Contains("ADD EVENT sqlserver.rpc_completed", sql, StringComparison.Ordinal);
@@ -309,7 +316,7 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
            on-prem branch came through that refactor emitting exactly what it emitted before — all nine,
            in the same order, on each of the three events — and that the Azure stand-in did NOT leak into
            the on-prem DDL (on-prem keeps server_principal_name itself; sqlserver.username is Azure-only). */
-        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: false, 2_000_000);
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped: false, 2_000_000);
 
         foreach (var action in s_onPremActions)
         {
@@ -349,7 +356,7 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
     [Fact]
     public void BuildCreateSessionSql_Azure_DatabaseScoped_CarriesNoRejectedAction_SubstitutesUsername_AndOmitsPartitionMode()
     {
-        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(databaseScoped: true, 2_000_000);
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped: true, 2_000_000);
 
         Assert.Contains("ON DATABASE", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON SERVER", sql, StringComparison.Ordinal);
@@ -442,23 +449,215 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
     [Fact]
     public void BuildStartSessionSql_ScopeSelected()
     {
-        Assert.Equal("ALTER EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER STATE = START;",
-            LongQueryCompletionsCollector.BuildStartSessionSql(databaseScoped: false));
-        Assert.Equal("ALTER EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON DATABASE STATE = START;",
-            LongQueryCompletionsCollector.BuildStartSessionSql(databaseScoped: true));
+        Assert.Equal($"ALTER EVENT SESSION [{Session}] ON SERVER STATE = START;",
+            LongQueryCompletionsCollector.BuildStartSessionSql(Session, databaseScoped: false));
+        Assert.Equal($"ALTER EVENT SESSION [{Session}] ON DATABASE STATE = START;",
+            LongQueryCompletionsCollector.BuildStartSessionSql(Session, databaseScoped: true));
+    }
+
+    [Fact]
+    public void BuildStopSessionSql_StopsOnlyASessionThatRunsOnTheReplica_AndTakesOnlyAnInstallNameOrTheLegacyOne()
+    {
+        var stop = LongQueryCompletionsCollector.BuildStopSessionSql(Session);
+
+        Assert.Contains("FROM sys.dm_xe_database_sessions", stop, StringComparison.Ordinal);
+        Assert.Contains($"WHERE name = N'{Session}'", stop, StringComparison.Ordinal);
+        Assert.Contains($"ALTER EVENT SESSION [{Session}] ON DATABASE STATE = STOP;", stop, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP", stop, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON SERVER", stop, StringComparison.Ordinal);
+
+        /* The session older versions shared between installs is stopped the same way, before its drop. */
+        Assert.Contains(
+            $"ALTER EVENT SESSION [{LongQueryCompletionsCollector.LegacyXeSessionName}] ON DATABASE STATE = STOP;",
+            LongQueryCompletionsCollector.BuildStopSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName),
+            StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => LongQueryCompletionsCollector.BuildStopSessionSql("master'; DROP DATABASE x;--"));
     }
 
     [Fact]
     public void BuildDropSessionSql_IsIdempotentlyGuarded_PerScope()
     {
-        var serverDrop = LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: false);
+        var serverDrop = LongQueryCompletionsCollector.BuildDropSessionSql(Session, databaseScoped: false);
         Assert.Contains("sys.server_event_sessions", serverDrop, StringComparison.Ordinal);
-        Assert.Contains("DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;", serverDrop, StringComparison.Ordinal);
+        Assert.Contains($"DROP EVENT SESSION [{Session}] ON SERVER;", serverDrop, StringComparison.Ordinal);
         Assert.Contains("IF EXISTS", serverDrop, StringComparison.Ordinal);
 
-        var databaseDrop = LongQueryCompletionsCollector.BuildDropSessionSql(databaseScoped: true);
+        var databaseDrop = LongQueryCompletionsCollector.BuildDropSessionSql(Session, databaseScoped: true);
         Assert.Contains("sys.database_event_sessions", databaseDrop, StringComparison.Ordinal);
-        Assert.Contains("DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON DATABASE;", databaseDrop, StringComparison.Ordinal);
+        Assert.Contains($"DROP EVENT SESSION [{Session}] ON DATABASE;", databaseDrop, StringComparison.Ordinal);
         Assert.Contains("IF EXISTS", databaseDrop, StringComparison.Ordinal);
+    }
+
+    /* ── #4961: the session is one per install, named from the product and the install's id ── */
+
+    [Theory]
+    [InlineData("Lite", "0a1b2c3d", "PerformanceMonitor_Lite_0a1b2c3d_LongQueryCompletions")]
+    [InlineData("Darling", "ffffffff", "PerformanceMonitor_Darling_ffffffff_LongQueryCompletions")]
+    public void XeSessionNameFor_IsTheProductAndTheIdInTheName(string product, string id, string expected)
+    {
+        Assert.Equal(expected, LongQueryCompletionsCollector.XeSessionNameFor(product, id));
+        Assert.Equal(expected, LongQueryCompletionsCollector.TryXeSessionNameFor(product, id));
+        Assert.True(LongQueryCompletionsCollector.IsInstallSessionName(expected));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("0A1B2C3D")]
+    [InlineData("0a1b2c3")]
+    [InlineData("0a1b2c3d4")]
+    [InlineData("0a1b2c3g")]
+    [InlineData("0a1b2c3d\n")]
+    [InlineData("0a1b2c3]")]
+    public void XeSessionNameFor_WithoutAValidId_Throws_AndNeverFallsBackToTheLegacyName(string? id)
+    {
+        Assert.Throws<ArgumentException>(() => LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, id));
+        Assert.Null(LongQueryCompletionsCollector.TryXeSessionNameFor(LongQueryCompletionsCollector.DarlingProduct, id));
+    }
+
+    [Fact]
+    public void XeSessionNameFor_RefusesAProductThatIsNotLiteOrDarling()
+    {
+        Assert.Throws<ArgumentException>(() => LongQueryCompletionsCollector.XeSessionNameFor("lite", TestId));
+        Assert.Throws<ArgumentException>(() => LongQueryCompletionsCollector.XeSessionNameFor("Other", TestId));
+    }
+
+    [Theory]
+    [InlineData("PerformanceMonitor_LongQueryCompletions")]
+    [InlineData("PerformanceMonitor_Other_0a1b2c3d_LongQueryCompletions")]
+    [InlineData("PerformanceMonitor_Lite_0A1B2C3D_LongQueryCompletions")]
+    [InlineData("PerformanceMonitor_Lite_0a1b2c3d_LongQueryCompletions]; DROP EVENT SESSION [x] ON SERVER;--")]
+    [InlineData("PerformanceMonitor_Lite__LongQueryCompletions")]
+    [InlineData("")]
+    public void IsInstallSessionName_RefusesTheLegacyNameAndAnythingThatIsNotMadeFromAnId(string name)
+    {
+        Assert.False(LongQueryCompletionsCollector.IsInstallSessionName(name));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildCreateSessionSql_PerInstance_StartsOff_OnBothScopes(bool databaseScoped)
+    {
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped, 2_000_000);
+
+        Assert.Contains("STARTUP_STATE = OFF", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("STARTUP_STATE = ON", sql, StringComparison.Ordinal);
+        Assert.Contains($"CREATE EVENT SESSION [{Session}]", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheSharedDeadlockAndBlockedProcessDdl_KeepsStartupStateOn()
+    {
+        /* The server-scoped DDL is each host's own, inline in the ensure: one ON in each file, and no OFF. The
+           database-scoped DDL is shared, built in AlwaysOnXeSessions: ON for the shared names, and OFF only for this
+           install's own fallback sessions, so an orphan of one of them stops at the next restart. The always-on pair is
+           unchanged. */
+        var deadlocks = SourceText("Lite/Services/RemoteCollectorService.Deadlocks.cs");
+        var blocked = SourceText("Lite/Services/RemoteCollectorService.BlockedProcessReport.cs");
+
+        Assert.Equal(1, CountOf(deadlocks, "STARTUP_STATE = ON"));
+        Assert.Equal(1, CountOf(blocked, "STARTUP_STATE = ON"));
+        Assert.DoesNotContain("STARTUP_STATE = OFF", deadlocks, StringComparison.Ordinal);
+        Assert.DoesNotContain("STARTUP_STATE = OFF", blocked, StringComparison.Ordinal);
+
+        foreach (var kind in new[] { AlwaysOnXeSessionKind.Deadlock, AlwaysOnXeSessionKind.BlockedProcess })
+        {
+            var shared = AlwaysOnXeSessions.BuildAzureCreateSql(kind, AlwaysOnXeSessions.SharedNameFor(kind));
+            Assert.Contains("STARTUP_STATE = ON", shared, StringComparison.Ordinal);
+            Assert.DoesNotContain("STARTUP_STATE = OFF", shared, StringComparison.Ordinal);
+        }
+    }
+
+    private static string SourceText(string relative, [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>
+        System.IO.File.ReadAllText(System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(thisFile)!, "..", relative)));
+
+    [Fact]
+    public void BuildCreateAndStart_RefuseTheLegacyName_SoNothingCreatesIt()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            LongQueryCompletionsCollector.BuildCreateSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName, databaseScoped: false, 2_000_000));
+        Assert.Throws<ArgumentException>(() =>
+            LongQueryCompletionsCollector.BuildCreateSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName, databaseScoped: true, 2_000_000));
+        Assert.Throws<ArgumentException>(() =>
+            LongQueryCompletionsCollector.BuildStartSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName, databaseScoped: false));
+        Assert.Throws<ArgumentException>(() =>
+            LongQueryCompletionsCollector.BuildStartSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName, databaseScoped: true));
+    }
+
+    [Fact]
+    public void BuildDrop_TakesThisInstallsNameOrTheLegacyOne_AndNothingElse()
+    {
+        /* The legacy name is accepted so the one-time drop of the session older versions left can use the same builder. */
+        var legacy = LongQueryCompletionsCollector.BuildDropSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName, databaseScoped: false);
+        Assert.Contains("DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;", legacy, StringComparison.Ordinal);
+
+        Assert.Throws<ArgumentException>(() =>
+            LongQueryCompletionsCollector.BuildDropSessionSql("PerformanceMonitor_Lite_0A1B2C3D_LongQueryCompletions", databaseScoped: false));
+        Assert.Throws<ArgumentException>(() =>
+            LongQueryCompletionsCollector.BuildDropSessionSql("master'; DROP DATABASE x;--", databaseScoped: true));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TheLegacyDrop_NamesOnlyTheLegacySession_SoItLeavesEveryPerInstallSessionAlone(bool databaseScoped)
+    {
+        /* What an older install runs for the legacy name, at its own start or when its trace is off, on both scopes. */
+        var sql = LongQueryCompletionsCollector.BuildDropSessionSql(LongQueryCompletionsCollector.LegacyXeSessionName, databaseScoped);
+
+        /* Every name the statement mentions, in the existence check or in the DROP, is the legacy one, spelled out, and the
+           check is an equality: no pattern can reach a per-install session. */
+        var names = System.Text.RegularExpressions.Regex.Matches(sql, @"N'([^']*)'|\[([^\]]*)\]")
+            .Select(match => match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value)
+            .ToList();
+        Assert.Equal(2, names.Count);
+        Assert.All(names, name => Assert.Equal(LongQueryCompletionsCollector.LegacyXeSessionName, name));
+        Assert.Contains($"name = N'{LongQueryCompletionsCollector.LegacyXeSessionName}'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIKE", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("%", sql, StringComparison.Ordinal);
+
+        /* Neither product's per-install name is the legacy name or contains it, so an equality on the legacy name never matches. */
+        foreach (var product in new[] { LongQueryCompletionsCollector.LiteProduct, LongQueryCompletionsCollector.DarlingProduct })
+        {
+            var perInstall = LongQueryCompletionsCollector.XeSessionNameFor(product, "0a1b2c3d");
+            Assert.NotEqual(LongQueryCompletionsCollector.LegacyXeSessionName, perInstall);
+            Assert.DoesNotContain(perInstall, sql, StringComparison.Ordinal);
+            Assert.DoesNotContain(LongQueryCompletionsCollector.LegacyXeSessionName, perInstall, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void BuildQuery_WithNoSessionName_Throws_RatherThanReadingTheLegacySession()
+    {
+        var context = new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 7, 18, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+        };
+
+        Assert.Throws<InvalidOperationException>(() => LongQueryCompletionsCollector.Instance.BuildQuery(context));
+    }
+
+    [Fact]
+    public void BuildQuery_ReadsOnlyTheSessionOnTheContext()
+    {
+        var other = LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, OtherId);
+        var context = new CollectorContext
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            LongQuerySessionName = other,
+            CollectionTime = new DateTime(2026, 7, 18, 12, 0, 0, DateTimeKind.Utc),
+            Deltas = s_deltas,
+        };
+
+        var plan = LongQueryCompletionsCollector.Instance.BuildQuery(context);
+
+        Assert.Contains($"N'{other}'", plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(Session, plan.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("N'PerformanceMonitor_LongQueryCompletions'", plan.Text, StringComparison.Ordinal);
     }
 }

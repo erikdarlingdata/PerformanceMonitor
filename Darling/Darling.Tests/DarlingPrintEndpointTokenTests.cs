@@ -130,6 +130,43 @@ public class DarlingPrintEndpointTokenTests
         Assert.Contains("--configure-network", error.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>The warning before the payload says the token gates every client of the endpoint, local ones included,
+    /// and the Viewer's copy-MCP-command button tells the user how to add the header.</summary>
+    [Fact]
+    public void TheTokenText_SaysLocalClientsSendItToo_AndTheViewerButtonNamesTheHeaderAndTheVerb()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = DarlingCliCommands.PrintEndpointToken(
+            "mcp", "MCP bearer", "--print-mcp-token", "clients send it as a header",
+            elevated: true, configured: true, () => "s3cret-token-value", output, error);
+
+        Assert.Equal(0, exit);
+        Assert.Contains("local clients included", error.ToString(), StringComparison.Ordinal);
+
+        var cli = ReadRepoSource("PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs");
+        Assert.DoesNotContain("Remote MCP clients send it", cli, StringComparison.Ordinal);
+        Assert.Contains("Every MCP client sends it as the header", cli, StringComparison.Ordinal);
+
+        var viewer = ReadRepoSource("PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs");
+        Assert.Contains("Authorization: Bearer <token>", viewer, StringComparison.Ordinal);
+        Assert.Contains("--print-mcp-token", viewer, StringComparison.Ordinal);
+    }
+
+    private static string ReadRepoSource(string project, string fileName, [CallerFilePath] string thisFile = "")
+    {
+        var relative = Path.Combine("Darling", project, fileName);
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.True(dir is not null, $"{relative} not found above the test file");
+        return File.ReadAllText(Path.Combine(dir!, relative));
+    }
+
     /// <summary>A configured block whose token resolves empty is not a token — printing a blank line would
     /// have the operator paste nothing into a client and wonder why it is refused.</summary>
     [Fact]
@@ -369,7 +406,17 @@ public class DarlingNetworkBlockLifetimeTests
            that the nearest enclosing brace context is the start-up block, not the if/else — asserted here
            the cheap way: the call is after BOTH branches' log statements. */
         var loopbackLine = source.IndexOf("(loopback only)", StringComparison.Ordinal);
-        var exposedLine = source.IndexOf("loopback also bound", StringComparison.Ordinal);
+
+        /* Where the LAN start line is LOGGED. The web host writes its text inline ("loopback also bound ..."). The MCP
+           host builds it in DescribeNetworkStart (#5288: the line names the scheme it serves), so its log statement is
+           the call to that helper, which sits ahead of the lifetime call, while the helper's own text sits after the
+           whole start-up method and is not where the line is written. The pin still requires the lifetime to come
+           after the LAN start line's log statement. */
+        var exposedLine = source.IndexOf("DescribeNetworkStart(", StringComparison.Ordinal);
+        if (exposedLine < 0)
+        {
+            exposedLine = source.IndexOf("loopback also bound", StringComparison.Ordinal);
+        }
 
         Assert.True(loopbackLine >= 0, $"{fileName}'s loopback start line is gone — this pin needs rewriting");
         Assert.True(exposedLine >= 0, $"{fileName}'s LAN start line is gone — this pin needs rewriting");

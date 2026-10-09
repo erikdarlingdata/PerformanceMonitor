@@ -103,6 +103,48 @@ public partial class App : Application
     public static int DefaultTimeRangeHours { get; set; } = 4;
 
     /// <summary>
+    /// #5562: the default range as a picker id ("30m", "2d", "previous-week"), read from <c>default_time_range</c> when the
+    /// file names a preset or a calendar period the legacy hours key cannot spell. Null means "use
+    /// <see cref="DefaultTimeRangeHours"/>". <see cref="DefaultTimeRange"/> is the one place the two meet.
+    /// </summary>
+    public static string? DefaultTimeRangeId { get; set; }
+
+    /// <summary>The range a new server tab opens on: <see cref="DefaultTimeRangeId"/> when set, else <see cref="DefaultTimeRangeHours"/> (the old key, kept readable).</summary>
+    public static PerformanceMonitor.Ui.TimeRangeSpec DefaultTimeRange =>
+        Helpers.LiteTimeRange.FromSettings(DefaultTimeRangeId, DefaultTimeRangeHours);
+
+    /// <summary>Holds a chosen default in memory: a whole-hour range in the legacy hours value (clearing the id), anything else in the id.</summary>
+    internal static void ApplyDefaultTimeRange(string? rangeId, int? hours)
+    {
+        if (hours is { } h)
+        {
+            DefaultTimeRangeHours = h;
+            DefaultTimeRangeId = null;
+        }
+        else
+        {
+            DefaultTimeRangeId = rangeId;
+        }
+    }
+
+    /// <summary>Writes a chosen default into the settings document: the same split as <see cref="ApplyDefaultTimeRange"/>, so the two keys never disagree.</summary>
+    internal static void WriteDefaultTimeRange(System.Text.Json.Nodes.JsonNode root, string? rangeId, int? hours)
+    {
+        if (hours is { } h)
+        {
+            root["default_time_range_hours"] = h;
+            if (root is System.Text.Json.Nodes.JsonObject o)
+            {
+                o.Remove("default_time_range");
+            }
+        }
+        else
+        {
+            root["default_time_range"] = rangeId;
+        }
+    }
+
+    /// <summary>
     /// Whether the server-tab auto-refresh timer starts running (#3479). One preference across every
     /// tab, like <see cref="DefaultTimeRangeHours"/> above: the reporter's mental model is "the app's
     /// refresh setting", so a tab opened after the change and a tab restored at the next launch must
@@ -323,6 +365,12 @@ public partial class App : Application
     public static bool PagerDutyUseEuRegion { get; set; } = false;
     public static string PagerDutyProxyAddress { get; set; } = "";
 
+    /* Opt-in, PagerDuty-only (the interface member's DIM default false): the closing edge of an edge-type
+       alert pair is delivered as a resolve that CLOSES the PagerDuty incident its firing edge's trigger
+       opened. Off (the shipped default), the closing edge is an info-level trigger and the incident stays
+       open — the tool does not auto-resolve incidents with third parties unless the operator asks. */
+    public static bool PagerDutyAutoResolve { get; set; } = false;
+
     private const string TeamsWebhookCredentialKey = "TeamsWebhook";
     private const string SlackWebhookCredentialKey = "SlackWebhook";
     private const string GenericWebhookCredentialKey = "GenericWebhook";
@@ -447,7 +495,14 @@ public partial class App : Application
            harmless no-op (the window is about to show regardless). */
         _instanceSignal = new SingleInstanceSignal(ShowWindowEventName, OnSurfaceWindowRequested);
 
+        /* F17: tabs and column headers made of panels get an accessible name equal to their visible text. */
+        PerformanceMonitor.Ui.AccessibleNames.Register();
+
         base.OnStartup(e);
+
+        /* #5320 N1: the statement filter's judge takes 250-900 ms to build, and the first connection or AG alert
+           would build it on the UI thread. Build it now, off the UI thread (the in-process MCP server shares it). */
+        _ = Task.Run(SensitiveStatements.WarmUp);
 
         // Right-click selects the DataGrid row under the cursor app-wide, so context-menu actions
         // (e.g. View Plan) act on the clicked row even after an auto-refresh cleared the selection.
@@ -508,6 +563,7 @@ public partial class App : Application
 
         // Load settings. The log level goes first so it governs every line the loaders below buffer.
         LoadLogMinimumLevel();
+        LoadDuckDbMemoryLimit();
         LoadDefaultTimeRange();
         LoadAlertSettings();
 
@@ -526,6 +582,9 @@ public partial class App : Application
         // Initialize logging
         var logDirectory = Path.Combine(appDataRoot, "logs");
         AppLogger.Initialize(logDirectory);
+
+        /* #5565: the grids' column filters survive a restart, in a file beside settings.json. */
+        ColumnFilterStore.Install(Path.Combine(ConfigDirectory, "column-filters.json"), message => AppLogger.Warn("ColumnFilterStore", message));
 
         // #3577: re-apply the current theme when theme-overrides.json is edited outside the app.
         ThemeManager.WatchOverridesFile();
@@ -991,6 +1050,11 @@ public partial class App : Application
                 DefaultTimeRangeHours = val.WholeNumber(DefaultTimeRangeHours);
             }
 
+            if (read.TryGetProperty("default_time_range", out var rangeId))
+            {
+                DefaultTimeRangeId = rangeId.Text(DefaultTimeRangeId ?? "");
+            }
+
             /* #3479: written by ServerTab.PersistAutoRefresh when the toolbar controls change, read only
                here. No range check on the seconds — legality is the restore switch's job (a value the
                combo does not offer restores the XAML default), which is the same division of labor
@@ -1030,7 +1094,7 @@ public partial class App : Application
                EXPECTED lands here any more. Kept because an unexpected throw must not take startup down. */
             AppLogger.Warn("Settings",
                 $"settings.json tab-default keys could not be read ({ex.Message}); the defaults " +
-                $"({DefaultTimeRangeHours} hour range, auto-refresh {(AutoRefreshEnabled ? "on" : "off")} " +
+                $"({DefaultTimeRange.Id} range, auto-refresh {(AutoRefreshEnabled ? "on" : "off")} " +
                 $"at {AutoRefreshIntervalSeconds}s) are in use.");
         }
     }
@@ -1102,6 +1166,20 @@ public partial class App : Application
                 $"settings.json key 'log_minimum_level' could not be read ({ex.Message}); " +
                 $"{AppLogger.DefaultMinimumLevel} is in use.");
         }
+    }
+
+    /// <summary>
+    /// #5457: installs the user's DuckDB memory limit from settings.json before the first DuckDB connection is
+    /// created (<c>memory_limit</c> is per DuckDB instance, so it is read once at startup and a changed value
+    /// takes effect at the next start). A missing, unparsable or out-of-range value is the 2 GB default and
+    /// logs one line saying so. An unreadable settings.json is reported by LoadDefaultTimeRange, so this only
+    /// takes the default and logs the same line.
+    /// </summary>
+    private static void LoadDuckDbMemoryLimit()
+    {
+        var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
+        Services.DuckDbMemoryLimitSetting.LoadAtStartup(
+            settings.State == SettingsFileState.Unreadable ? null : settings.Text);
     }
 
     public static void LoadAlertSettings() => LoadAlertSettings(ConfigDirectory, GetWebhookUrl, SaveWebhookUrl);
@@ -1332,6 +1410,7 @@ public partial class App : Application
             if (read.TryGetProperty("pagerduty_webhook_enabled", out v)) PagerDutyWebhookEnabled = v.Bool(PagerDutyWebhookEnabled);
             if (read.TryGetProperty("pagerduty_use_eu_region", out v)) PagerDutyUseEuRegion = v.Bool(PagerDutyUseEuRegion);
             if (read.TryGetProperty("pagerduty_proxy_address", out v)) PagerDutyProxyAddress = v.Text(PagerDutyProxyAddress);
+            if (read.TryGetProperty("pagerduty_auto_resolve", out v)) PagerDutyAutoResolve = v.Bool(PagerDutyAutoResolve);
 
             /* Migrate webhook URLs from plaintext settings.json to Credential Manager. A legacy plaintext
                URL still wins over whatever the store held, matching the old order (save, then read back);

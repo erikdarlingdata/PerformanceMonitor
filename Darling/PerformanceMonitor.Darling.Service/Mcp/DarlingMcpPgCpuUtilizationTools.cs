@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -43,15 +44,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgCpuUtilizationTools
 {
-    [McpServerTool(Name = "get_pg_cpu_utilization"), Description("Gets instance-level CPU for a PostgreSQL/Aurora target from AWS Performance Insights, in time buckets (bucket_minutes) to as_of. Aurora only; RDS and self-hosted are not_collected. cpu_percent is percent of capacity CURRENTLY ALLOCATED, not a fixed ceiling - on Serverless v2 that moves, so 100% is often a scale-up, not saturation. acu_utilization_percent is percent of the CONFIGURED ceiling, the saturation figure; null ACU means no sample, never headroom. Host-memory bytes (since V136) are null when unmeasured; memory_samples_in_bucket is the count. <<GUIDE>> Gets instance-level CPU utilization over time for a PostgreSQL/Aurora target, from AWS Performance Insights, bucketed to a point budget the same way get_cpu_utilization is (#4193, the #3897 TrendBuckets contract) rather than one row per raw 1-minute sample. Aurora only - a plain RDS or self-hosted target has no route here and this is not_collected for it; Performance Insights could reach plain RDS too, but no monitored target is that shape yet. cpu_percent is os.cpuUtilization.total.avg, which is percent of the capacity CURRENTLY ALLOCATED: on Aurora Serverless v2 that allocation moves, so 100% is routinely a scale-up rather than saturation. acu_utilization_percent (os.general.acuUtilization.avg) is percent of the CONFIGURED ACU ceiling and is the saturation figure - band and alert on that one. Both are reported per bucket as the AVERAGE of the bucket's samples, with peak_cpu_percent/peak_acu_utilization_percent holding the single busiest sample, so a saturation minute is never averaged away by a wide bucket; a null ACU figure means no capacity sample in that bucket, never headroom. Since V136 the same row carries the HOST'S MEMORY from Performance Insights' os.memory.* counters, in bytes: memory_total_bytes, memory_cached_bytes, memory_buffers_bytes and configured_memory_bytes are the bucket's average; memory_free_bytes and memory_active_bytes are its WORST sample (minimum free, maximum active) rather than an average, so a brief pressure spike survives a wide bucket - the figures the PG_HOST_MEMORY_PRESSURE and CONFIG_PG_MEMORY_OVERCOMMIT facts are measured against (get_analysis_facts source=pg_memory). Every memory figure is null on a pre-V136 row or an endpoint without os.memory.*, and null means not measured, never zero memory; memory_samples_in_bucket says how many samples carried it.")]
+    [McpServerTool(Name = "get_pg_cpu_utilization"), Description("Gets instance-level CPU for a PostgreSQL/Aurora target from AWS Performance Insights, in time buckets (bucket_minutes) to as_of. Aurora only; RDS and self-hosted are not_collected. cpu_percent is percent of capacity CURRENTLY ALLOCATED, not a fixed ceiling - on Serverless v2 that moves, so 100% is often a scale-up, not saturation. acu_utilization_percent is percent of the CONFIGURED ceiling, the saturation figure; null ACU means no sample, never headroom. Host-memory bytes (since V136) are null when unmeasured; memory_samples_in_bucket is the count. <<GUIDE>> Gets instance-level CPU utilization over time for a PostgreSQL/Aurora target, from AWS Performance Insights, bucketed to a point budget the same way get_cpu_utilization is (#4193, the #3897 TrendBuckets contract) rather than one row per raw 1-minute sample. hours_back reaches 720 (30 days). Aurora only - a plain RDS or self-hosted target has no route here and this is not_collected for it; Performance Insights could reach plain RDS too, but no monitored target is that shape yet. cpu_percent is os.cpuUtilization.total.avg, which is percent of the capacity CURRENTLY ALLOCATED: on Aurora Serverless v2 that allocation moves, so 100% is routinely a scale-up rather than saturation. acu_utilization_percent (os.general.acuUtilization.avg) is percent of the CONFIGURED ACU ceiling and is the saturation figure - band and alert on that one. Both are reported per bucket as the AVERAGE of the bucket's samples, with peak_cpu_percent/peak_acu_utilization_percent holding the single busiest sample, so a saturation minute is never averaged away by a wide bucket; a null ACU figure means no capacity sample in that bucket, never headroom. Since V136 the same row carries the HOST'S MEMORY from Performance Insights' os.memory.* counters, in bytes: memory_total_bytes, memory_cached_bytes, memory_buffers_bytes and configured_memory_bytes are the bucket's average; memory_free_bytes and memory_active_bytes are its WORST sample (minimum free, maximum active) rather than an average, so a brief pressure spike survives a wide bucket - the figures the PG_HOST_MEMORY_PRESSURE and CONFIG_PG_MEMORY_OVERCOMMIT facts are measured against (get_analysis_facts source=pg_memory). Every memory figure is null on a pre-V136 row or an endpoint without os.memory.*, and null means not measured, never zero memory; memory_samples_in_bucket says how many samples carried it.")]
     public static Task<string> GetPgCpuUtilization(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4.")] int hours_back = 4,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetPgCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgCpuMaxPoints), cancellationToken);
+        GetPgCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgCpuMaxPoints), logger, cancellationToken);
 
     /// <summary>
     /// get_pg_cpu_utilization under an explicit <paramref name="budget"/> (#4193): the MCP tool passes its own,
@@ -59,12 +61,13 @@ public sealed class DarlingMcpPgCpuUtilizationTools
     /// </summary>
     internal static async Task<string> GetPgCpuUtilization(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
-        CancellationToken cancellationToken = default)
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+        /* #5562: reaches the raw table's 30-day retention (720 h); 65 ms at 30 days on a large store. The ceiling is the WebReadReach row. */
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, WebReadReach.MaxHoursFor("get_pg_cpu_utilization"), out var windowEnd);
         if (validation != null) return validation;
 
         var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
@@ -80,17 +83,34 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                 /* Not-collected first: a self-hosted target has no route at all (see
                    PgCpuUtilizationCollector's doc comment), so that is the likelier and more actionable
                    answer than a bare "no data in window". */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_cpu_utilization", cancellationToken)
-                    ?? McpHelpers.Status(
-                        "empty",
-                        $"No CPU utilization data for {resolved.ServerName} in the last {hours_back} hour(s).");
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_cpu_utilization", cancellationToken);
+                if (notCollected is not null)
+                {
+                    return notCollected;
+                }
+
+                /* #4966: the empty answer carries the window floor under hints. Samples are windowed on collection_time, the
+                   probe's own column; the web does not list this read, so the collector table is the source. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: true, logger, cancellationToken);
+                return McpHelpers.Status(
+                    "empty",
+                    $"No CPU utilization data for {resolved.ServerName} in the last {hours_back} hour(s).",
+                    emptyNotice.AsHints());
             }
 
-            return JsonSerializer.Serialize(new
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: false, logger, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
+
                 bucket = TrendBuckets.Word(bucketMinutes),
                 bucket_minutes = bucketMinutes,
                 aggregate_note = TrendBuckets.LevelNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints, firstAtWindowStart: false),
@@ -123,7 +143,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                     configured_memory_bytes = p.Memory?.ConfiguredBytes,
                     memory_samples_in_bucket = p.MemorySamples,
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

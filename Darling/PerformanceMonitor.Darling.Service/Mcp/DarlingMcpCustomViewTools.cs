@@ -243,13 +243,15 @@ public sealed class DarlingMcpCustomViewTools
     [McpServerTool(Name = "run_custom_view_panel"), Description(
         "Runs one composed (v2) panel and returns DATA: {sql, rows, annotations, notice?}, with no 'status' " +
         "field on success. Failures return {status, message}: \"invalid\" for a bad spec or panel, or a " +
-        "failed or timed-out query; \"error\" for an internal fault. notice means retention covered only " +
-        "part of the window, or the row cap truncated the result; absent means neither happened. Window ends " +
-        "now: 'hours' (default 24), unless ISO-8601 'windowStart'+'windowEnd' win instead (max 90 days; old " +
-        "windows read rollups). 'server' omitted or \"All\" runs the whole fleet. Only 'panel' is " +
-        "required. <<GUIDE>> " +
+        "failed or timed-out query; \"error\" for an internal fault. notice is a partial-window caveat: the " +
+        "tier's retention could not cover the window, or the panel's own data starts after the window does, " +
+        "or the row cap truncated the result; absent means the window was served whole. Window ends now: " +
+        "'hours' (default 24), unless ISO-8601 'windowStart'+'windowEnd' win. Only 'panel' is required. " +
+        "<<GUIDE>> " +
         "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations, notice?} " +
-        "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — " +
+        "(notice is a partial-window caveat: the tier's retention could not cover the window, or the panel's own " +
+        "data starts after the window does, or the row cap truncated the result; absent means the window was " +
+        "served whole) — " +
         "so a generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the " +
         "web composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and " +
         "executed against the collected store under a statement_timeout. The spec is a JSON object " +
@@ -283,11 +285,12 @@ public sealed class DarlingMcpCustomViewTools
 
             /* #4782: readLatency is a DI service (never in the advertised schema), the MCP host's read-latency
                seat; the shared runner records this run into it as one Compose sample. Optional, so a direct
-               caller (a test) records nothing. */
-            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None, readLatency);
+               caller (a test) records nothing. A client-timer timeout answers the statement-timeout text,
+               the same as the server's own 57014. */
+            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None, readLatency, remapClientTimeout: true);
             return outcome.Payload is not null
                 ? outcome.Payload.ToJsonString(McpHelpers.JsonOptions)
-                : Outcome(outcome.IsServerError ? "error" : "invalid", outcome.Error!);
+                : Outcome(outcome.IsNotFound ? "not_found" : outcome.IsServerError ? "error" : "invalid", outcome.Error!);
         }
         catch (Exception ex)
         {
@@ -319,7 +322,7 @@ public sealed class DarlingMcpCustomViewTools
         "measures (every field below, filtered to this source), dimensions (this source's filterable/groupable " +
         "columns), annotationSources, ...the same small vocabularies}. An unmatched source comes back with empty " +
         "measures/dimensions and a note, not an error. " +
-        "FULL_DETAIL=true (or full_detail with source: same, unfiltered): today's original shape, {measures, " +
+        "FULL DETAIL (full_detail=true without source; with a source, the drill-down above already carries every field): today's original shape, {measures, " +
         "dimensions, annotationSources, universalDimensions, unitFamilies, aggregates, timeBuckets, filterOps, " +
         "viz}, every measure/dimension/annotationSource at every field — the same shape web /api/catalog serves " +
         "the Custom Views editor (unrelated to this default; the editor always gets the full catalog). " +

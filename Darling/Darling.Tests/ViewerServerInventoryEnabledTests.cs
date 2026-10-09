@@ -31,7 +31,7 @@ namespace Darling.Tests;
 public class ViewerServerInventoryEnabledTests
 {
     private static string InventorySource => ReadRepoFile(Path.Combine(
-        "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Inventory.cs"));
+        "Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "DarlingFinOpsInventoryReader.cs"));
 
     /// <summary>
     /// The projection carries <c>is_enabled</c>, and it comes from the REGISTRY rather than from the properties
@@ -66,12 +66,12 @@ public class ViewerServerInventoryEnabledTests
     [Fact]
     public void TheReader_ReadsIsEnabledAt17_MonthlyCostAt18_AndLastCollectedAt19()
     {
-        Assert.Contains("IsEnabled = reader.IsDBNull(17)", InventorySource, StringComparison.Ordinal);
-        Assert.Contains("MonthlyCost = reader.IsDBNull(18)", InventorySource, StringComparison.Ordinal);
-        Assert.Contains("LastCollected = reader.IsDBNull(19)", InventorySource, StringComparison.Ordinal);
+        Assert.Contains("IsEnabled: reader.IsDBNull(17)", InventorySource, StringComparison.Ordinal);
+        Assert.Contains("MonthlyCost: reader.IsDBNull(18)", InventorySource, StringComparison.Ordinal);
+        Assert.Contains("LastCollectedUtc: reader.IsDBNull(19)", InventorySource, StringComparison.Ordinal);
 
         /* And nothing still reads the pre-shift position for the cost. */
-        Assert.DoesNotContain("MonthlyCost = reader.IsDBNull(17)", InventorySource, StringComparison.Ordinal);
+        Assert.DoesNotContain("MonthlyCost: reader.IsDBNull(17)", InventorySource, StringComparison.Ordinal);
     }
 
     /// <summary>

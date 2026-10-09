@@ -152,9 +152,31 @@ public sealed class ComposeParameterCoverageTests
     internal static int PredictedParameterCount(PanelPlan plan, bool serverScoped, ComposeRunContext context) =>
         2
         + (serverScoped ? 1 : 0)
+        + (serverScoped && context.UnregisteredServers is { Count: > 0 } ? 1 : 0)
         + (PredictsWideStartBind(plan, context) ? 1 : 0)
+        + (PredictsStampThroughBind(plan, context) ? 1 : 0)
+        + (PredictsHourlyEdgesBinds(plan, context) ? 2 : 0)
+        + (PredictsModuleOverlayFloorBind(plan, context) ? 1 : 0)
         + plan.Filters.Count
         + (plan.Mode is PanelMode.Ranked or PanelMode.RankedTimeSeries ? 1 : 0);
+
+    /// <summary>The hourly-raw-edges rule from intent alone: a verdict was supplied and it equals the router's
+    /// candidate for this run, so the compiler binds the two edge instants. Not read back from the compiler's parameters.</summary>
+    internal static bool PredictsHourlyEdgesBinds(PanelPlan plan, ComposeRunContext context) =>
+        context.HourlyEdges is { } verdict
+        && ComposeSourceRouter.HourlyRawEdgesCandidate(
+            plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage) is { } candidate
+        && ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage).Tier == ComposeSourceTier.Raw
+        && verdict.SourceTable == candidate.SourceTable
+        && verdict.HourStartUtc == candidate.HourStartUtc
+        && verdict.HourEndUtc == candidate.HourEndUtc;
+
+    /// <summary>The module-overlay rule from intent alone: the run takes the hourly-raw-edges route, the plan joins modules and a
+    /// module map watermark no later than the run's now was supplied, so the compiler binds the overlay floor. Not read back from the compiler's parameters.</summary>
+    internal static bool PredictsModuleOverlayFloorBind(PanelPlan plan, ComposeRunContext context) =>
+        context.ModuleMapThrough is { } through && through <= context.NowUtc
+        && plan.UsesModuleJoin
+        && PredictsHourlyEdgesBinds(plan, context);
 
     /// <summary>The #4689 rule from intent alone: a wide-eligible run whose common start is later than the
     /// window start, reading the Query Store table. Not read back from the compiler's parameters.</summary>
@@ -164,18 +186,28 @@ public sealed class ComposeParameterCoverageTests
         && wideStart > context.StartUtc
         && string.Equals(plan.Measure.SourceTable, "query_store_stats", StringComparison.Ordinal);
 
+    /// <summary>The #5582 part 3 rule from intent alone: a wide-eligible Query Store run whose stamp instant is later than the wide read's
+    /// start (the later of the window start and the common start), for an aggregate that decomposes, binds <c>$stampThrough</c> once.
+    /// Not read back from the compiler's parameters.</summary>
+    internal static bool PredictsStampThroughBind(PanelPlan plan, ComposeRunContext context) =>
+        context.QueryStoreWideEligible
+        && context.QueryStoreStampThrough is DateTime through
+        && through > (PredictsWideStartBind(plan, context) ? context.QueryStoreWideStart!.Value : context.StartUtc)
+        && string.Equals(plan.Measure.SourceTable, "query_store_stats", StringComparison.Ordinal)
+        && plan.Aggregate != ComposeAggregate.PercentileCont;
+
     /// <summary>
     /// The same prediction for an annotation query, whose parameter set is the window plus the optional
     /// server scope: the catalog supplies its table, time column and label column as compiler constants. A
     /// server-local source adds the four arrays of per-server offset stretches (#4821: server names, local
     /// start, local end, offset), and never binds the server list a second time.
     /// </summary>
-    internal static int PredictedAnnotationParameterCount(bool serverScoped, bool serverLocal = false) =>
-        2 + (serverScoped ? 1 : 0) + (serverLocal ? 4 : 0);
+    internal static int PredictedAnnotationParameterCount(bool serverScoped, bool serverLocal = false, bool unregistered = false) =>
+        2 + (serverScoped ? 1 : 0) + (serverScoped && unregistered ? 1 : 0) + (serverLocal ? 4 : 0);
 
     /// <summary>The server clock read that comes before a server-local annotation query binds only the
     /// optional server scope.</summary>
-    internal static int PredictedServerClockReadParameterCount(bool serverScoped) => serverScoped ? 1 : 0;
+    internal static int PredictedServerClockReadParameterCount(bool serverScoped, bool unregistered = false) => (serverScoped ? 1 : 0) + (serverScoped && unregistered ? 1 : 0);
 
     /* ───────────────────────── the corpus sweep ───────────────────────── */
 
@@ -333,13 +365,13 @@ public sealed class ComposeParameterCoverageTests
     /// <summary>
     /// <see cref="PredictedParameterCount"/> restates a rule that lives in another file, so it can be
     /// outgrown. This counts the <c>ParamList</c> call sites in <c>ComposeCompiler.cs</c> and pins the
-    /// total: twenty-one, which is the three window/scope binds and one <c>topN</c> per ranked arm in
-    /// <c>Compile</c>, the Query Store wide-start bind in <c>Compile</c> when the run reads the interval table
+    /// total: twenty-four, which is the three window/scope binds and one <c>topN</c> per ranked arm in
+    /// <c>Compile</c>, the two edge-instant binds in <c>Compile</c> when the run takes the hourly-raw-edges route, the module-overlay floor bind in <c>Compile</c> when that route joins modules from the module map, the Query Store wide-start bind in <c>Compile</c> when the run reads the interval table
     /// from a later start, the seven <c>BuildFilterClause</c> operator arms, the three window/scope binds in
     /// <c>CompileAnnotation</c>, the four offset-stretch arrays in <c>ServerLocalRangeJoin</c> and the server
     /// scope in <c>CompileServerClockRead</c> (#4821; both predicted above).
     ///
-    /// <para>A twenty-second is the "next site someone adds" case, and it reds HERE — where the fix is to decide
+    /// <para>A twenty-fifth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
     /// whether the prediction grows with it — rather than in the sweep, where it would read as a compiler
     /// bug. Comments and string literals are stripped first, because this file's reasoning names
     /// <c>p.AddTextArray</c> in prose.</para>
@@ -358,7 +390,8 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        Assert.Equal(21, sites);
+        /* 28: the 27 before #5582 part 3, plus the one $stampThrough bind, folded into the rule as PredictsStampThroughBind. */
+        Assert.Equal(28, sites);
     }
 
     /// <summary>
@@ -547,6 +580,97 @@ public sealed class ComposeParameterCoverageTests
             }
         }
 
+        /* #5582 part 3: the same Query Store statements with a stamp instant. One later than the wide read's start binds one more
+           timestamp ($stampThrough); one that is not later binds nothing extra. Wide starts of +2h (the common start is later than
+           the window), 0 and -1h (it is not) against instants of +1h and +5h make both outcomes occur. */
+        foreach (var measure in MeasureCatalog.Measures.Where(m => string.Equals(m.SourceTable, "query_store_stats", StringComparison.Ordinal)))
+        {
+            var keyword = measure.Kind == MeasureKind.Ratio ? "ratio" : "measure";
+            var aggregate = measure.Kind == MeasureKind.Ratio ? null : MeasureCatalog.WireName(measure.ValidAggs[0]);
+            var aggregateJson = aggregate is null ? "" : $",\"aggregate\":\"{aggregate}\"";
+            var head = $"{{\"source\":\"{measure.SourceTable}\",\"{keyword}\":\"{measure.Key}\"{aggregateJson}";
+            var dimension = measure.AllowedDimensions.Count > 0 ? measure.AllowedDimensions[0] : "server";
+
+            foreach (var wideStart in new DateTime?[] { WindowStart.AddHours(2), WindowStart, WindowStart.AddHours(-1) })
+            {
+                foreach (var stampThrough in new DateTime?[] { WindowStart.AddHours(1), WindowStart.AddHours(5) })
+                {
+                    foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+                    {
+                        Add(corpus, $"{head},\"timeBucket\":\"hour\",\"viz\":\"line\"}}", servers, measure.Key, wide: (true, wideStart), stampThrough: stampThrough);
+                        Add(corpus, $"{head},\"viz\":\"stat\"}}", servers, measure.Key, wide: (true, wideStart), stampThrough: stampThrough);
+                        Add(corpus, $"{head},\"topN\":5,\"groupBy\":[\"{dimension}\"],\"viz\":\"bar\"}}", servers, measure.Key, wide: (true, wideStart), stampThrough: stampThrough);
+                        Add(
+                            corpus,
+                            $"{head},\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"{dimension}\"],\"includeOther\":true,\"viz\":\"line\"}}",
+                            servers,
+                            measure.Key,
+                            wide: (true, wideStart),
+                            stampThrough: stampThrough);
+                    }
+                }
+            }
+        }
+
+        /* The hourly-raw-edges route: a window ending now, with a verdict equal to the router's candidate, binds the
+           two edge instants. Fleet and scoped, so the prediction's +2 is in the population. */
+        {
+            var edgeNow = new DateTime(2026, 7, 23, 12, 0, 0, DateTimeKind.Utc);
+            var edgeCoverage = new RollupCoverage(
+                new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = edgeNow.AddDays(-3) },
+                new Dictionary<string, DateTime>(StringComparer.Ordinal),
+                RollupAvailability.All,
+                new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsIntervalHourlyView] = edgeNow.AddMinutes(-20) });
+            var (edgePlan, edgeParseError) = ComposeSpec.TryParsePanel(
+                (JsonObject)JsonNode.Parse(
+                    "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,"
+                    + "\"groupBy\":[\"database_name\"],\"viz\":\"table\"}")!,
+                []);
+            Assert.True(edgeParseError is null, edgeParseError);
+            var edgeCandidate = ComposeSourceRouter.HourlyRawEdgesCandidate(
+                edgePlan!, edgeNow, edgeNow.AddHours(-24), edgeNow, RollupAvailability.All, edgeCoverage);
+            Assert.NotNull(edgeCandidate);
+
+            /* The same route joining modules: with a map watermark it binds the overlay floor too, so the prediction's +1
+               is in the population, and without one it binds nothing more. */
+            var (moduleEdgePlan, moduleEdgeParseError) = ComposeSpec.TryParsePanel(
+                (JsonObject)JsonNode.Parse(
+                    "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,"
+                    + "\"groupBy\":[\"database_name\",\"object_name\"],\"viz\":\"table\"}")!,
+                []);
+            Assert.True(moduleEdgeParseError is null, moduleEdgeParseError);
+
+            foreach (var (edgePanel, moduleMapThrough) in new[]
+            {
+                (edgePlan!, (DateTime?)null),
+                (moduleEdgePlan!, (DateTime?)null),
+                (moduleEdgePlan!, (DateTime?)edgeNow.AddMinutes(-30)),
+            })
+            {
+                foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+                {
+                    var edgeContext = new ComposeRunContext(
+                        servers, edgeNow.AddHours(-24), edgeNow, ComposeRunContext.NoVariables, RollupAvailability.All, edgeNow, edgeCoverage,
+                        HourlyEdges: new ComposeHourlyEdgesVerdict(edgeCandidate!.SourceTable, edgeCandidate.HourStartUtc, edgeCandidate.HourEndUtc, servers),
+                        ModuleMapThrough: moduleMapThrough);
+                    var (edgeCompiled, edgeError) = ComposeCompiler.Compile(edgePanel, edgeContext);
+                    Assert.True(edgeError is null, edgeError);
+                    Assert.Contains("UNION ALL", edgeCompiled!.Sql, StringComparison.Ordinal);
+                    corpus.Add(new Statement(
+                        $"query_worker_us Ranked ({(servers is null ? "fleet" : "scoped")}) hourly-raw-edges"
+                            + (edgePanel == moduleEdgePlan ? (moduleMapThrough is null ? " module join" : " module map overlay") : string.Empty),
+                        edgeCompiled,
+                        PredictedParameterCount(edgePanel, servers is not null, edgeContext),
+                        edgePanel.Mode,
+                        servers is not null,
+                        "query_worker_us",
+                        Annotation: null,
+                        FilterOp: null,
+                        UsesVariable: false));
+                }
+            }
+        }
+
         /* A variable-resolved filter value: the same bind, reached through the $var path rather than a
            literal, so a future divergence between the two resolutions is in the population. */
         Add(
@@ -611,7 +735,8 @@ public sealed class ComposeParameterCoverageTests
         string? filterOp = null,
         IReadOnlyDictionary<string, string?>? variables = null,
         string[]? declaredVariables = null,
-        (bool Eligible, DateTime? Start)? wide = null)
+        (bool Eligible, DateTime? Start)? wide = null,
+        DateTime? stampThrough = null)
     {
         var (plan, parseError) = ComposeSpec.TryParsePanel(
             (JsonObject)JsonNode.Parse(json)!,
@@ -624,7 +749,7 @@ public sealed class ComposeParameterCoverageTests
             return;
         }
 
-        var context = Context(servers, variables, wide);
+        var context = Context(servers, variables, wide, stampThrough);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, context);
         if (compileError is not null)
         {
@@ -634,6 +759,7 @@ public sealed class ComposeParameterCoverageTests
         corpus.Add(new Statement(
             $"{measureKey} {plan!.Mode} ({(servers is null ? "fleet" : "scoped")})"
             + (wide is null ? "" : $" wide:{wide.Value.Start:HH:mm}")
+            + (stampThrough is null ? "" : $" stamp:{stampThrough.Value:HH:mm}")
             + (filterOp is null ? "" : $" filter:{filterOp}"),
             compiled!,
             PredictedParameterCount(plan, servers is not null, context),
@@ -649,7 +775,8 @@ public sealed class ComposeParameterCoverageTests
     private static ComposeRunContext Context(
         IReadOnlyList<string>? servers,
         IReadOnlyDictionary<string, string?>? variables,
-        (bool Eligible, DateTime? Start)? wide = null) =>
+        (bool Eligible, DateTime? Start)? wide = null,
+        DateTime? stampThrough = null) =>
         new(
             servers,
             WindowStart,
@@ -659,7 +786,8 @@ public sealed class ComposeParameterCoverageTests
             WindowEnd,
             RollupCoverage.Unknown,
             QueryStoreWideEligible: wide?.Eligible ?? false,
-            QueryStoreWideStart: wide?.Start);
+            QueryStoreWideStart: wide?.Start,
+            QueryStoreStampThrough: stampThrough);
 
     /// <summary>The repository root, from this file's own compile-time path — the same anchor
     /// <c>StartupCommandTimeoutTests</c> and <c>ServerLocalReadFrameDisciplineTests</c> use, so the source

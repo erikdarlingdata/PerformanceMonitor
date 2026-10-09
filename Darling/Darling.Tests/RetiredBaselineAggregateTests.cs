@@ -145,7 +145,11 @@ FROM collect.cpu_utilization_stats
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA", ct);
         await ExecuteAsync(connection,
-            "SELECT add_continuous_aggregate_policy('collect.cpu_utilization_baseline', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+            /* #5416: initial_start a day out, so TimescaleDB's scheduler never runs this policy's refresh job while
+               the test is alive. A refresh job running at the moment of the sweep's DROP fails it with XX000
+               "tuple concurrently deleted" and left a test connection Closed (one CI flake, reproduced locally).
+               The policy still exists for the cascade assertions. */
+            "SELECT add_continuous_aggregate_policy('collect.cpu_utilization_baseline', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => now() + INTERVAL '1 day', if_not_exists => true)", ct);
         await ExecuteAsync(connection,
             "SELECT add_retention_policy('collect.cpu_utilization_baseline', drop_after => INTERVAL '35 days', if_not_exists => true)", ct);
         await ExecuteAsync(connection,
@@ -278,7 +282,8 @@ WITH NO DATA", ct);
             await ExecuteAsync(connection, TimescaleSupport.LegacyCreateWaitStatsBaselineSql, ct);
             await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsIntervalBaselineSql, ct);
             await ExecuteAsync(connection,
-                $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+                /* #5416: initial_start a day out, so no refresh job races the day-forty DROP (see the first test). */
+                $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => now() + INTERVAL '1 day', if_not_exists => true)", ct);
             await RefreshFromAsync(connection, legacy, hour1, ct);
             await RefreshFromAsync(connection, successor, hour2, ct);
 
@@ -363,15 +368,31 @@ WITH NO DATA", ct);
                asserts the outcome (the sweep removes the legacy), not that the first call does. */
             var sweepLog = new CapturingTestLogger();
             var sweepDropped = 0;
-            for (var attempt = 0;
-                 attempt < 5 && await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct);
-                 attempt++)
+            /* DropRetiredBaselineAggregatesAsync catches every non-cancel exception into its logger, so a drop
+               that broke the connection surfaced here as "Connection is not open" from the loop's next
+               statement while the real error sat in sweepLog, which only the assert below prints and a thrown
+               loop never reaches. Any failure in the loop, and a connection no longer open after a drop, now
+               fails with the sweep's log in the message. */
+            try
             {
-                if (attempt > 0)
+                for (var attempt = 0;
+                     attempt < 5 && await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct);
+                     attempt++)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    if (attempt > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    }
+                    sweepDropped += await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, sweepLog, dayForty, ct);
+                    if (connection.State != System.Data.ConnectionState.Open)
+                    {
+                        throw new InvalidOperationException($"the connection is {connection.State} after sweep attempt {attempt + 1}");
+                    }
                 }
-                sweepDropped += await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, sweepLog, dayForty, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new Xunit.Sdk.XunitException($"the sweep loop failed with {ex.GetType().Name}: {ex.Message} -- the sweep's log: {sweepLog.Joined}", ex);
             }
             Assert.True(sweepDropped >= 1, $"the sweep never dropped the legacy aggregate: {sweepLog.Joined}");
             Assert.False(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct), "the legacy aggregate must be gone");

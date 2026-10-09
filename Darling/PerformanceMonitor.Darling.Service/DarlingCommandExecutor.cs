@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -265,6 +266,14 @@ WHERE status = 'in_progress'
                     return new CommandOutcome(false, "invalid args_json", ErrorJson("test_connect args_json did not deserialize to a server definition"));
                 }
 
+                /* The test resolves a reference only for the server that already stores it, with the settings it stores it
+                   for. Asked BEFORE the probe, so a refused test resolves nothing and connects to nothing. */
+                if (await TestConnectReferenceRefusalAsync(server, StoredSettingsOfReferenceAsync, cancellationToken) is { } refusal)
+                {
+                    _logger?.LogInformation("Command {Id} (test_connect '{Server}') => refused", command.CommandId, server.DisplayName);
+                    return new CommandOutcome(false, "refused", ErrorJson(refusal));
+                }
+
                 var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken);
                 var (resultStatus, resultJson) = MapProbeResult(probe);
                 _logger?.LogInformation("Command {Id} (test_connect '{Server}') => {Result}", command.CommandId, server.DisplayName, resultStatus);
@@ -380,6 +389,9 @@ WHERE status = 'in_progress'
             case "disable_collector":
                 return ResolveCollectorToggle(command, enabled: false);
 
+            case "set_collector_run_at":
+                return ResolveCollectorRunAt(command);
+
             case "test_connect":
                 return string.IsNullOrWhiteSpace(command.ArgsJson)
                     ? Fail("test_connect requires args_json with the server definition")
@@ -483,10 +495,14 @@ WHERE status = 'in_progress'
             return Fail($"{verb} requires args_json.collector_name");
         }
 
-        if (!CollectorScheduleDefaults.All.ContainsKey(collectorName))
+        /* The catalog's own spelling is what gets bound: the table's unique indexes compare the name exactly, so a typed
+           'Wait_Stats' would become a second row beside the viewer's 'wait_stats'. */
+        if (DarlingCliCommands.CanonicalCollectorName(collectorName) is not string canonical)
         {
             return Fail($"{verb}: unknown collector '{collectorName}'");
         }
+
+        collectorName = canonical;
 
         var flag = enabled ? "TRUE" : "FALSE";
         var successStatus = enabled ? "collector enabled" : "collector disabled";
@@ -504,6 +520,93 @@ WHERE status = 'in_progress'
             "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES (NULL, $1, " + flag + ") " +
             "ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET enabled = EXCLUDED.enabled",
             new object?[] { collectorName }, successStatus + " (fleet-wide)");
+    }
+
+    /// <summary>
+    /// set_collector_run_at -> set or clear the time of day a once-a-day collector runs (a row of
+    /// <c>config.config_collector_run_times</c>, #4938) for the collector named in args_json.collector_name, scoped the way
+    /// <see cref="ResolveCollectorToggle"/> scopes it: <c>target_server_id</c>, else args_json.server_id, else the fleet-wide row.
+    /// args_json.run_at is a 24-hour <c>HH:MM</c> (the monitored server's own clock), <c>none</c> or <c>default</c>, in any letter case.
+    ///
+    /// <para>The run time has a table of its own, because the viewer's schedule Save deletes a scope's rows in
+    /// <c>config_collector_schedules</c> and inserts them again with a fixed column list, which would clear a run time kept on
+    /// those rows. So the plan never touches the schedule rows: a frequency, retention, databases or enabled value already on
+    /// one is neither read nor written, and a time set on a collector that has no schedule row creates none, so it cannot switch
+    /// a collector on or off (a collector that ships OFF stays off).</para>
+    ///
+    /// <para>A time, or <c>none</c> on a server, is one plain INSERT ... ON CONFLICT DO UPDATE of the scope's row; the table's
+    /// own statement-level trigger bumps <c>config_version</c>, so a running service reloads. <c>none</c> on a server writes -1,
+    /// which the service reads as "no fixed time on this server" and which stops the fleet's time for that server only.
+    /// On the fleet it deletes the fleet row, because the fleet has no time to stop (the table's CHECK refuses -1 there).
+    /// <c>default</c> deletes the scope's row so the next level applies again. A delete of a row that is not there changes
+    /// nothing.</para>
+    ///
+    /// <para>The interval rule (a time works only on a collector that runs once a day or less often) is not applied here, because
+    /// this plan is pure and cannot see the rows that decide a collector's interval. The CLI verb judges it against the store
+    /// before it executes this plan, and the service ignores a time on a collector that runs more often than daily.</para>
+    /// </summary>
+    private static CommandPlan ResolveCollectorRunAt(ClaimedCommand command)
+    {
+        const string Verb = "set_collector_run_at";
+        var collectorName = TryReadString(command.ArgsJson, "collector_name", "collectorName");
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            return Fail($"{Verb} requires args_json.collector_name");
+        }
+
+        /* The catalog's own spelling is what gets bound: the table's unique indexes compare the name exactly, so a typed
+           'Wait_Stats' would become a second row beside the viewer's 'wait_stats'. */
+        if (DarlingCliCommands.CanonicalCollectorName(collectorName) is not string canonical)
+        {
+            return Fail($"{Verb}: unknown collector '{collectorName}'");
+        }
+
+        collectorName = canonical;
+
+        var runAt = TryReadString(command.ArgsJson, "run_at", "runAt");
+        if (runAt is null)
+        {
+            return Fail($"{Verb} requires args_json.run_at (HH:MM, none or default)");
+        }
+
+        var word = runAt.Trim();
+        var useDefault = string.Equals(word, "default", StringComparison.OrdinalIgnoreCase);
+        var none = string.Equals(word, "none", StringComparison.OrdinalIgnoreCase);
+        var minute = 0;
+        if (!useDefault && !none && !CollectorRunTime.TryParse(runAt, out minute))
+        {
+            return Fail(CollectorRunTime.InvalidRunAtMessage);
+        }
+
+        var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
+
+        if (useDefault || (none && serverId is null))
+        {
+            var cleared = "collector run time cleared";
+            return serverId is int clearedId
+                ? StoreWrite(
+                    "DELETE FROM config.config_collector_run_times WHERE server_id = $1 AND collector_name = $2",
+                    new object?[] { clearedId, collectorName }, cleared)
+                : StoreWrite(
+                    "DELETE FROM config.config_collector_run_times WHERE server_id IS NULL AND collector_name = $1",
+                    new object?[] { collectorName }, cleared + " (fleet-wide)");
+        }
+
+        /* The stored value is a smallint (V160): -1 for "none" on a server, else the minute after midnight. Boxed as a
+           short so it binds as smallint and the plan's parameters say what the column holds. */
+        var stored = none ? (short)-1 : (short)minute;
+        if (serverId is int scopedId)
+        {
+            return StoreWrite(
+                "INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES ($1, $2, $3) " +
+                "ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute",
+                new object?[] { scopedId, collectorName, stored }, "collector run time set");
+        }
+
+        return StoreWrite(
+            "INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES (NULL, $1, $2) " +
+            "ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute",
+            new object?[] { collectorName, stored }, "collector run time set (fleet-wide)");
     }
 
     /// <summary>test_connect result mapping (pure): success carries the probe facts, failure the error.</summary>
@@ -589,6 +692,79 @@ WHERE status = 'in_progress'
             _logger?.LogWarning("Could not write result for command {Id}: {Message}", commandId, ex.Message);
         }
     }
+
+    /// <summary>What a <c>test_connect</c> answers when its password is a reference to a server that is not stored with
+    /// these connection settings: the plain ask for the password, with no value in it.</summary>
+    internal const string TestConnectPasswordNeededText =
+        "Enter the password again to test this server at a different address or with different connection settings: its stored password is only used for the server as it was saved.";
+
+    /// <summary>
+    /// PURE over the one store read it is given: null when a <c>test_connect</c> may go on to resolve its credential,
+    /// otherwise the sentence to answer with, before anything is resolved. A password typed as itself is not asked
+    /// about. A reference (<see cref="DarlingSecretSource.IsReference"/>, the resolver's own question) is let through only
+    /// when a stored server holds that exact text AND matches the test on every connection setting the edit core
+    /// compares (<see cref="ServerConnectionIdentity.Differ"/>:
+    /// host and instance, port, engine, database, read-only intent, auth, username, encrypt mode, certificate trust,
+    /// multi-subnet failover), so the stored password is never used anywhere else or with other trust settings. The plain
+    /// <c>password</c> slot never carries a reference from a command; no stored server has one.
+    /// </summary>
+    internal static async Task<string?> TestConnectReferenceRefusalAsync(
+        MonitoredServer server,
+        Func<string, CancellationToken, Task<IReadOnlyList<ServerConnectionIdentity>>> storedSettingsOfReference,
+        CancellationToken cancellationToken)
+    {
+        if (DarlingSecretSource.RequestReferenceRefusal(server.Password) is { } plainSlotRefusal)
+        {
+            return plainSlotRefusal;
+        }
+
+        var reference = server.EncryptedPassword;
+        if (!DarlingSecretSource.IsReference(reference))
+        {
+            return null;
+        }
+
+        /* The tested settings with the defaults a command's blank fields mean (SQL Server, integrated authentication,
+           mandatory encryption), read through the one mapping every stored row is read through. */
+        var tested = ServerConnectionIdentity.FromStoredColumns(
+            server.Host, server.Port, server.Engine ?? "sqlserver", server.Database, server.ReadOnlyIntent,
+            server.Auth ?? "integrated", server.Username, server.EncryptMode ?? "Mandatory", server.TrustServerCertificate,
+            server.MultiSubnetFailover);
+        foreach (var stored in await storedSettingsOfReference(reference!, cancellationToken))
+        {
+            if (!ServerConnectionIdentity.Differ(tested, stored))
+            {
+                return null;
+            }
+        }
+
+        return TestConnectPasswordNeededText;
+    }
+
+    /// <summary>The connection settings of every stored server that holds exactly this reference text.</summary>
+    private async Task<IReadOnlyList<ServerConnectionIdentity>> StoredSettingsOfReferenceAsync(string reference, CancellationToken cancellationToken)
+    {
+        var found = new List<ServerConnectionIdentity>();
+        await using var command = _postgres.CreateCommand(
+            "SELECT " + ServerConnectionIdentity.StoredColumns + " " +
+            "FROM config.config_monitored_servers WHERE encrypted_password = $1");
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reference });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* The one raw-row mapping; a NULL engine is SQL Server and a NULL authentication is integrated, as a test's
+               own blank fields are read above. */
+            found.Add(ServerConnectionIdentity.FromStoredColumns(
+                reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                reader.IsDBNull(2) ? "sqlserver" : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
+                !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? "integrated" : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? "Mandatory" : reader.GetString(7),
+                !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9)));
+        }
+
+        return found;
+    }
+
 
     private static MonitoredServer? DeserializeServer(string argsJson)
     {
