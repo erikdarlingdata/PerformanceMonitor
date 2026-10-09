@@ -78,7 +78,7 @@ public sealed class SharedDuckDbFixture : IAsyncLifetime
 
     public async ValueTask InitializeAsync()
     {
-        await DuckDb.InitializeAsync();
+        await DuckDb.InitializeFromTemplateAsync();
 
         /* Snapshot the base tables present after a fresh initialization. ResetData deletes rows
            from exactly this set; the two version-stamp tables are excluded so the schema keeps

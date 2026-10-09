@@ -940,6 +940,22 @@ public partial class DuckDbInitializer : IDisposable
         WarnIfDataVolumeLow(compactionNeedBytes: 0, atStartup: true);
     }
 
+    /// <summary>
+    /// Test seam (#5208): takes over a database file a test copied from one that <see cref="InitializeAsync"/>
+    /// had already built, instead of rebuilding the schema. <see cref="InitializeAsync"/> holds the one
+    /// process-wide write lock for its whole ~80-statement body, and a suite that runs it once per test class
+    /// or per test queues every other test's database read behind it. Only the sentinel is opened here, still
+    /// under the write lock, which is the last thing <see cref="InitializeAsync"/> does for a file that needs
+    /// no migration. Production never calls it.
+    /// </summary>
+    internal void AdoptInitializedFileForTests()
+    {
+        using var writeLock = AcquireWriteLock();
+        ReleaseSentinel();
+        ReopenSentinel();
+        BumpArchiveViewGeneration();
+    }
+
     private bool _identityReadFailed;
 
     /// <summary>
