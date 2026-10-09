@@ -9,6 +9,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -150,6 +151,146 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             Assert.NotEmpty(plan);
             Assert.Equal(hourNow.AddHours(-3), plan[0].Hour);
             Assert.All(plan, b => Assert.True(b.Hour <= hourNow.AddHours(-3), $"{b.Hour:O} is too young"));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AWriterThatBumpedThePairBeforeStep1AndHasNotCommitted_LeavesThePairStale_AndTheLookupRoutesTheHourToTheWideTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var hour = hourNow.AddHours(-3);
+            await using var writer = await OpenAsync(scratch, ct);
+            await using var builder = await source.OpenConnectionAsync(ct);
+            await using var open = await writer.BeginTransactionAsync(ct);
+
+            /* The writer bumps server 1's pair (a late row) and holds the bump uncommitted. Step 1, a plain read, sees the committed value;
+               the aggregation does not see the row; the build's upsert of that pair waits for the writer's row lock. */
+            await InsertRowAsync(writer, 1, hour.AddMinutes(20), 9_100_003, ct);
+            Assert.Equal(0, await StalePairsAsync(connection, ct));
+            var build = QueryStoreComposeStamp.BuildHourAsync(builder, hour, DateTime.UtcNow, ct);
+            Assert.True(await SomeoneWaitsOnALockAsync(connection, ct), "the build should reach its upsert of the pair and wait for the writer");
+            Assert.False(build.IsCompleted);
+            await open.CommitAsync(ct);
+            Assert.NotNull(await build);
+
+            /* The pair ends stale (late_seq is above the built_seq the build read), so the lookup stops the rollup at the hour and the
+               panel reads the wide table from it on: the answer is exact even though the rollup lacks the row. */
+            Assert.Equal(Pair(1, hour), await StaleListAsync(connection, ct));
+            Assert.True(await MismatchesAsync(connection, hour, hour.AddHours(1), ct) > 0, "the rollup does not hold the writer's row");
+            Assert.Equal(hour, await StampThroughAsync(connection, hour.AddHours(-2), hourNow.AddHours(-2), ct));
+
+            var tick = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
+            Assert.Equal(0, tick.Failed);
+            Assert.Equal(1, tick.BuiltStale);
+            Assert.Equal(0, await StalePairsAsync(connection, ct));
+            Assert.Equal(0, await MismatchesAsync(connection, hour, hour.AddHours(1), ct));
+            Assert.Equal(hourNow.AddHours(-2), await StampThroughAsync(connection, hour.AddHours(-2), hourNow.AddHours(-2), ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task TheTriggerMarksAPairOncePerTransaction_AndARollbackToASavepointUndoesTheMark()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct, build: false);
+        var bodySucceeded = false;
+        try
+        {
+            /* An hour the seed does not cover, so no pair exists yet. Every row is late (before the trigger's threshold). */
+            var hour = hourNow.AddHours(-40);
+            string LateSeq(int server) => $"SELECT coalesce(max(late_seq), 0) FROM collect.query_store_compose_stamp_built WHERE server_id = {server} AND hour = TIMESTAMP '{At(hour)}'";
+            await using var writer = await OpenAsync(scratch, ct);
+            await using (var open = await writer.BeginTransactionAsync(ct))
+            {
+                await InsertRowAsync(writer, 1, hour.AddMinutes(5), 9_200_001, ct);
+                await InsertRowAsync(writer, 1, hour.AddMinutes(10), 9_200_002, ct);
+                await InsertRowAsync(writer, 1, hour.AddMinutes(15), 9_200_003, ct);
+                Assert.Equal(1, await CountAsync(writer, LateSeq(1), ct));
+
+                await open.SaveAsync("sp", ct);
+                await InsertRowAsync(writer, 2, hour.AddMinutes(20), 9_200_004, ct);
+                await InsertRowAsync(writer, 2, hour.AddMinutes(25), 9_200_005, ct);
+                await InsertRowAsync(writer, 1, hour.AddMinutes(30), 9_200_006, ct);
+                Assert.Equal(1, await CountAsync(writer, LateSeq(2), ct));
+                Assert.Equal(1, await CountAsync(writer, LateSeq(1), ct));
+                Assert.Contains(",2:", await TextAsync(writer, "SELECT current_setting('darling.query_store_compose_stamp_marked')", ct), StringComparison.Ordinal);
+
+                /* The rollback takes server 2's pair row and its mark in the setting with it, and leaves server 1's, made before the savepoint. */
+                await open.RollbackAsync("sp", ct);
+                Assert.Equal(0, await CountAsync(writer, LateSeq(2), ct));
+                var marked = await TextAsync(writer, "SELECT current_setting('darling.query_store_compose_stamp_marked')", ct);
+                Assert.DoesNotContain(",2:", marked, StringComparison.Ordinal);
+                Assert.Contains(",1:", marked, StringComparison.Ordinal);
+                Assert.Equal(1, await CountAsync(writer, LateSeq(1), ct));
+
+                /* Server 2 is marked again, not skipped as already marked: the pair is back with its one bump. */
+                await InsertRowAsync(writer, 2, hour.AddMinutes(35), 9_200_007, ct);
+                Assert.Equal(1, await CountAsync(writer, LateSeq(2), ct));
+                await open.CommitAsync(ct);
+            }
+
+            Assert.Equal(1, await CountAsync(connection, LateSeq(1), ct));
+            Assert.Equal(1, await CountAsync(connection, LateSeq(2), ct));
+
+            /* The setting is transaction-local: the next transaction's first late row bumps the pair again. */
+            await InsertRowAsync(connection, 1, hour.AddMinutes(40), 9_200_008, ct);
+            Assert.Equal(2, await CountAsync(connection, LateSeq(1), ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task TwoBuildersOnTheSameHour_BuildItOnce_TheSecondWaitsForTheFirstAndTheHoursRowsAreNotDoubled()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var hour = hourNow.AddHours(-3);
+            await using var first = await source.OpenConnectionAsync(ct);
+            await using var second = await source.OpenConnectionAsync(ct);
+            Task<long?>? secondBuild = null;
+
+            /* The first build holds the hour's advisory lock and has not committed. The second must wait for it, and then redo the hour
+               on top of the first's committed rows: without the lock both delete nothing and both insert, which doubles the hour. */
+            await QueryStoreComposeStamp.BuildHourAsync(first, hour, DateTime.UtcNow, ct, async () =>
+            {
+                secondBuild = QueryStoreComposeStamp.BuildHourAsync(second, hour, DateTime.UtcNow, ct);
+                Assert.True(await SomeoneWaitsOnALockAsync(connection, ct), "the second build should wait on the hour's advisory lock");
+                Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted", ct));
+                Assert.False(secondBuild.IsCompleted);
+            });
+            Assert.NotNull(await secondBuild!);
+
+            var wideRows = await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_interval_wide WHERE collection_time >= TIMESTAMP '{At(hour)}' AND collection_time < TIMESTAMP '{At(hour.AddHours(1))}'", ct);
+            Assert.True(wideRows > 0);
+            Assert.Equal(wideRows, await CountAsync(connection, $"SELECT sum(wide_rows) FROM collect.query_store_compose_stamp WHERE collection_time >= TIMESTAMP '{At(hour)}' AND collection_time < TIMESTAMP '{At(hour.AddHours(1))}'", ct));
+            Assert.Equal(0, await CountAsync(connection, @"SELECT count(*) FROM (SELECT 1 FROM collect.query_store_compose_stamp
+                GROUP BY collection_time, server_id, database_name, module_name, query_hash HAVING count(*) > 1) AS d", ct));
+            Assert.Equal(0, await MismatchesAsync(connection, hour, hour.AddHours(1), ct));
+            Assert.Equal(1, await HourRowsAsync(connection, hour, ct));
             bodySucceeded = true;
         }
         finally

@@ -29,17 +29,20 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>Validity is per (server, hour).</b> <c>collect.query_store_compose_stamp_built</c> keeps one row per pair with
 /// <c>late_seq</c> (the number of transactions that landed a late row in the pair, bumped by the row triggers on the wide
-/// table, once per pair per transaction) and <c>built_seq</c> (the value the builder read under a row lock BEFORE it
+/// table, once per pair per transaction) and <c>built_seq</c> (the value the builder read BEFORE it
 /// aggregated). A pair is valid only while the two are equal. <c>collect.query_store_compose_stamp_hours</c> records which
 /// hours the builder has done. The keys are per server for V168's reason: each server's apply is its own transaction, and a
 /// fleet-wide hour row would queue 43 appliers on one tuple.</para>
 ///
 /// <para><b>The build, one transaction per hour</b> (<see cref="BuildHourAsync"/>): (0) a transaction advisory lock on the hour,
-/// so two services never build one hour at once; (1) <c>SELECT ... FOR UPDATE</c> the hour's pairs, which makes a late writer
-/// that needs to bump one wait, and reads each <c>late_seq</c>; (2) delete the hour's rollup rows; (3) insert them from the
+/// so two services never build one hour at once; (0b) the margin guard (<see cref="OpenWriterSql"/>), which defers the hour while
+/// a writing transaction that could hold an unmarked row of it is open; (1) a plain <c>SELECT</c> of each of the hour's pairs'
+/// <c>late_seq</c>, BEFORE the aggregation (that order is what keeps the rollup exact: see <see cref="ReadPairsSql"/>); (2) delete the hour's rollup rows; (3) insert them from the
 /// wide table; (4) upsert every pair of the hour with <c>built_seq</c> = the value read in (1), 0 for a pair that did not
-/// exist; (5) upsert the hour. A writer whose pair appears after (1) leaves the pair stale (its <c>late_seq</c> is bumped, or
-/// its row is inserted with <c>built_seq</c> NULL), which is safe: the next tick rebuilds the hour.</para>
+/// exist; (5) upsert the hour. A writer whose bump is not committed at (1), or whose pair appears after (1), leaves the pair
+/// stale (its <c>late_seq</c> ends above the <c>built_seq</c> written in (4), or its row is inserted with <c>built_seq</c>
+/// NULL), which is safe: the next tick rebuilds the hour. A writer that bumps a pair the build has already upserted waits for the
+/// build's commit on that row, from (4) on.</para>
 ///
 /// <para><b>Order:</b> stale hours first (a stale hour is one the compiler can no longer serve from the rollup), then the hours
 /// the builder has never done, newest first, so the default one-day window is servable after about 21 builds rather than after
@@ -208,7 +211,7 @@ AS $f$
 /* A (server, hour) is bumped at most once per transaction, for V168's reason: an apply is one statement, so tens of
    thousands of late rows would otherwise update the same validity row again and again, each update leaving another
    version of the tuple inside the one transaction, and the batch grows quadratically. One bump is enough: the builder
-   reads late_seq under a row lock before it aggregates, and the batch's rows commit together with the bump. The pairs
+   reads late_seq before it aggregates, and the batch's rows commit together with the bump. The pairs
    already bumped are kept in a transaction-local setting (set_config(.., true)), which a rolled-back savepoint undoes
    together with the bump it recorded. Each key is server_id:hour-number between commas (hour-number is whole hours since
    1970-01-01), so one lookup is a substring test. After a commit the setting reads back as an empty string, not NULL.
@@ -322,17 +325,19 @@ SELECT EXISTS
 );";
 
     /// <summary>
-    /// Locks the hour's validity rows and reads each <c>late_seq</c>: $1 the hour. <c>FOR UPDATE</c>: a late writer that has
-    /// to bump one of these rows waits for the build's commit and then bumps it, which leaves the pair stale; a writer that
-    /// already holds a bump makes this statement wait for its commit, and the build then reads the bumped value and, in step
-    /// 3, the writer's rows. Ordered by server so two builds never lock in different orders.
+    /// Reads each of the hour's pairs' <c>late_seq</c>: $1 the hour. A plain <c>SELECT</c>, with no row lock: the hour's advisory
+    /// lock already serializes builders, and what keeps the rollup exact is the ORDER, this read before the aggregation's
+    /// snapshot. A bump committed before this read has its rows committed with it, so the aggregation sees them. A bump not
+    /// committed at this read leaves <c>late_seq</c> above the <c>built_seq</c> the build writes (the upsert waits for that
+    /// writer's row lock, then updates <c>built_seq</c> only), so the pair ends stale and the next tick rebuilds it. A
+    /// <c>FOR UPDATE</c> here would save only that one rebuild, and would make every late writer that has to bump one of the
+    /// hour's pairs wait for the whole build, under the collector's 5 s lock timeout (#5582 review round 1).
     /// </summary>
-    public const string LockPairsSql = @"
+    public const string ReadPairsSql = @"
 SELECT server_id, late_seq
 FROM collect.query_store_compose_stamp_built
 WHERE hour = $1
-ORDER BY server_id
-FOR UPDATE;";
+ORDER BY server_id;";
 
     /// <summary>Clears the hour's rollup rows before they are rebuilt: $1 the hour. Served by the (collection_time, server_id) index.</summary>
     public const string DeleteHourSql = @"
@@ -598,10 +603,10 @@ WHERE hour < $1;";
 
         var servers = new List<int>();
         var lateSeqs = new List<long>();
-        await using (var lockPairs = new NpgsqlCommand(LockPairsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        await using (var readPairs = new NpgsqlCommand(ReadPairsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
-            lockPairs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
-            await using var reader = await lockPairs.ExecuteReaderAsync(cancellationToken);
+            readPairs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await using var reader = await readPairs.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 servers.Add(reader.GetInt32(0));
@@ -644,7 +649,8 @@ WHERE hour < $1;";
             await hours.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        /* Test seam: runs with every row lock of the build still held and nothing committed (a late write started here waits on a pair). */
+        /* Test seam: runs with the build's row locks still held and nothing committed (a late write that bumps a pair the build has
+           already upserted waits here for the commit). */
         if (beforeCommit is not null)
         {
             await beforeCommit();

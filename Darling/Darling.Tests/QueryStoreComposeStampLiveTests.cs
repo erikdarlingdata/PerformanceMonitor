@@ -297,7 +297,7 @@ WHERE ctid = (SELECT ctid FROM collect.query_store_interval_wide WHERE server_id
             await writer.OpenAsync(ct);
             Task? lateWrite = null;
 
-            /* Server 1's pair exists, so the writer's trigger has to bump a row the build holds FOR UPDATE: the writer waits for the commit. */
+            /* Server 1's pair exists, and the build has already upserted it (step 4), so the writer's trigger has to bump a row the build holds: the writer waits for the commit. */
             await QueryStoreComposeStamp.BuildHourAsync(builder, hour, DateTime.UtcNow, ct, async () =>
             {
                 lateWrite = InsertRowAsync(writer, 1, hour.AddMinutes(20), 9_000_002, ct);

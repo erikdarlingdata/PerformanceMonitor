@@ -182,18 +182,21 @@ public sealed class QueryStoreComposeStampTests
     }
 
     [Fact]
-    public void TheBuildOrder_InTheCode_IsLockRowsThenDeleteThenInsertThenBuiltThenHours()
+    public void TheBuildOrder_InTheCode_IsLockThenGuardThenReadPairsThenDeleteThenInsertThenBuiltThenHours()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreComposeStamp.cs");
         var body = source[source.IndexOf("public static async Task<long?> BuildHourAsync", StringComparison.Ordinal)..];
-        var order = new[] { "StatementTimeoutSql", "HourLockSql", "OpenWriterSql", "LockPairsSql", "DeleteHourSql", "BuildHourInsertSql", "SourceRowsSql", "UpsertBuiltSql", "UpsertHourSql", "CommitAsync" };
+        var order = new[] { "StatementTimeoutSql", "HourLockSql", "OpenWriterSql", "ReadPairsSql", "DeleteHourSql", "BuildHourInsertSql", "SourceRowsSql", "UpsertBuiltSql", "UpsertHourSql", "CommitAsync" };
         var at = order.Select(o => body.IndexOf(o, StringComparison.Ordinal)).ToArray();
         Assert.DoesNotContain(-1, at);
         Assert.Equal(at.OrderBy(i => i), at);
 
-        Assert.Contains("FOR UPDATE", QueryStoreComposeStamp.LockPairsSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY server_id", QueryStoreComposeStamp.LockPairsSql, StringComparison.Ordinal);
-        /* The pair's late_seq is never written by the build: built_seq is the value read under the lock. */
+        /* Step 1 is a plain read: the advisory lock serializes builders, and reading late_seq before the aggregation is what keeps it exact.
+           A row lock here would make a late writer wait for the whole build. */
+        Assert.DoesNotContain("FOR UPDATE", QueryStoreComposeStamp.ReadPairsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FOR ", QueryStoreComposeStamp.ReadPairsSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY server_id", QueryStoreComposeStamp.ReadPairsSql, StringComparison.Ordinal);
+        /* The pair's late_seq is never written by the build: built_seq is the value read before the aggregation. */
         Assert.DoesNotContain("late_seq =", QueryStoreComposeStamp.UpsertBuiltSql, StringComparison.Ordinal);
         Assert.Contains("built_seq = EXCLUDED.built_seq", QueryStoreComposeStamp.UpsertBuiltSql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(l.late_seq, 0)", QueryStoreComposeStamp.UpsertBuiltSql, StringComparison.Ordinal);
