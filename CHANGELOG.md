@@ -329,7 +329,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **A hung test shard names its test and keeps its logs** ([#5591])
 - **One-day Custom Views panels on Query Store data read an hourly rollup, or are refused up front** ([#5588], [#5610])
 - **Darling's hourly maintenance step over stored analysis findings no longer times out on a large store** ([#5626])
-- **Upgrade refusals no longer list the service's own files** ([#5627], [#5629])
+- **Upgrade refusals no longer list the service's own files** ([#5628])
 - **Darling's deadlock maintenance logs a line when a stage recovers after a failed pass** ([#5637])
 
 ## [3.9.0] - 2026-10-02
@@ -5194,6 +5194,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5610
 [#5626]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5626
 [#5627]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5627
-[#5629]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5629
 [#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
 [#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
+[#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
