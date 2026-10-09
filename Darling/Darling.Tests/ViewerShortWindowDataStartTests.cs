@@ -232,7 +232,7 @@ public sealed class ViewerShortWindowDataStartTests : IDisposable
     private static string? BannerFor(DateTime? coverageStartUtc, IEnumerable<DateTime> shownTimes, int? rowCap, DateTime? startUtc = null)
     {
         string? text = null;
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
             var banner = new TextBlock { Visibility = Visibility.Visible, Text = "stale" };
@@ -246,22 +246,4 @@ public sealed class ViewerShortWindowDataStartTests : IDisposable
     }
 
     /* WPF objects require STA; same shape as ViewerPlanCorrectionsDataStartTests. */
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// </summary>
 /* #1776 own-store: the dead-cluster cases never connect to a store, and the live case creates one scratch database
    through ScratchPostgres, so it does not read or write the shared store's tables. */
+[Collection("timing")]
 public sealed class ScratchPostgresExitDrainTests
 {
     /// <summary>A port nothing listens on: bind to port 0, read the port the OS chose, release it.</summary>

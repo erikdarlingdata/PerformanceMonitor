@@ -37,7 +37,7 @@ public sealed class DataStartBannerProbeFailureTests
         var tag = "probe-" + Guid.NewGuid().ToString("N")[..8];
         AppLogger.DrainBufferedLines();
 
-        var (visible, text, answer) = OnStaThread(() =>
+        var (visible, text, answer) = StaTestThread.Run(() =>
         {
             /* Seeded visible, with the last read's text, so a helper that never touched the banner cannot pass. */
             var banner = new System.Windows.Controls.TextBlock
@@ -67,7 +67,7 @@ public sealed class DataStartBannerProbeFailureTests
         var tag = "probe-" + Guid.NewGuid().ToString("N")[..8];
         AppLogger.DrainBufferedLines();
 
-        var (visible, text, answer) = OnStaThread(() =>
+        var (visible, text, answer) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             var floor = ServerTab.ProbeWindowFloorOrNullAsync(
@@ -96,7 +96,7 @@ public sealed class DataStartBannerProbeFailureTests
     public void AWindowNoLongerThanTheSlack_MakesNoProbeCall_AndHidesTheBanner(int windowMinutes)
     {
         var probeCalls = 0;
-        var (visible, text, answer) = OnStaThread(() =>
+        var (visible, text, answer) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock
             {
@@ -130,7 +130,7 @@ public sealed class DataStartBannerProbeFailureTests
     public void AWindowLongerThanTheSlack_StillCallsTheProbeOnce_AndWordsItsAnswer(int windowMinutes, string expectedText)
     {
         var probeCalls = 0;
-        var (visible, text, answer) = OnStaThread(() =>
+        var (visible, text, answer) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             var floor = ServerTab.ProbeWindowFloorOrNullAsync(
@@ -163,29 +163,6 @@ public sealed class DataStartBannerProbeFailureTests
 
         Assert.Single(Regex.Matches(source,
             @"private async System\.Threading\.Tasks\.Task RefreshWindowTruncatedBannerAsync\([^)]*\)\s*\{\s*var floor = await ProbeWindowFloorOrNullAsync\(\s*\(\) => Task\.Run\(\(\) => _dataService\.GetQueryWindowFloorAsync\(relation, _serverId, startUtc, endUtc, includeAlsoCovered: includeAlsoCovered, cancellationToken: ct\)\),\s*\$""[^""]*"",\s*startUtc,\s*endUtc,\s*ct\);\s*ApplyWindowFloorToBanner\(banner, EarlierOfFloorAndRowShown\(floor, earliestRowShownUtc\), startUtc, GetPickerZone\(\)\);"));
-    }
-
-    /// <summary>WPF objects require STA, and a probe that has already completed keeps the continuation on this thread.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
     }
 
     private static string ControlsFile(string name) =>

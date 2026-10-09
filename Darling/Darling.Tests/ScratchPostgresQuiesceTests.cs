@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// WITH (FORCE), so no TimescaleDB policy worker is mid-run in the database being dropped (CI saw a worker die with
 /// 0xC0000005 twice, both with such a drop in flight). It is best-effort: it never throws and never blocks the drop.
 /// </summary>
+[Collection("timing")]
 public sealed class ScratchPostgresQuiesceLiveTests
 {
     [Fact]

@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// collector query against the SAME state (the fix), rather than asserting against a canned fixture — the
 /// point of #4251 is that the two disagree.</para>
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class PgServerConfigPendingRestartLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

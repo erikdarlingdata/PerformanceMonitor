@@ -246,7 +246,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     [Fact]
     public void AProbeThatThrows_HidesTheBanner_IsLogged_AndLetsTheLoadGoOn()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var banner = new TextBlock { Visibility = Visibility.Visible, Text = "Showing since 2026-09-04 00:00:00" };
             var logged = new List<(string Source, string Message)>();
@@ -268,7 +268,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     [Fact]
     public void AProbeThatAnswers_PassesTheAnswerOn_AndLogsNothing()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var banner = new TextBlock();
             var logged = new List<(string Source, string Message)>();
@@ -296,7 +296,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
         try
         {
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-            OnStaThread(() =>
+            StaTestThread.Run(() =>
             {
                 CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(cultureName);
                 /* The premise: this culture's own formatting does not give the invariant text, so the pin is not vacuous. */
@@ -329,22 +329,4 @@ public sealed class ViewerDataStartBannerTests : IDisposable
     }
 
     /* WPF objects require STA; same shape as RawWindowFloorViewerPortTests. */
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

@@ -27,27 +27,6 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Reads", "Darling")]
 public class ServerTabEmptyStateAndNamesTests
 {
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
-
     private static string RepoFile(string relative, [CallerFilePath] string thisFile = "") =>
         File.ReadAllText(Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", relative)));
 
@@ -57,7 +36,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void EmptyState_ShowsItsTextOverAnEmptyGrid_AndHidesItWhenRowsArrive()
     {
-        var (shownEmpty, text, shownWithRows) = OnStaThread(() =>
+        var (shownEmpty, text, shownWithRows) = StaTestThread.Run(() =>
         {
             var host = new Grid();
             var dataGrid = new DataGrid();
@@ -81,7 +60,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void EmptyState_AGridThatNeverIsEmpty_GetsNoElement_AndAChartInABorderIsAnchoredOnTheBorder()
     {
-        var (neverEmptyCount, borderRow, borderBlockRow) = OnStaThread(() =>
+        var (neverEmptyCount, borderRow, borderBlockRow) = StaTestThread.Run(() =>
         {
             var host = new Grid();
             var rows = new DataGrid();
@@ -104,7 +83,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void EmptyState_LeavesASurfaceWithItsOwnNoDataMessageAlone()
     {
-        var count = OnStaThread(() =>
+        var count = StaTestThread.Run(() =>
         {
             var host = new Grid();
             var dataGrid = new DataGrid();
@@ -125,7 +104,7 @@ public class ServerTabEmptyStateAndNamesTests
     [InlineData("NoStorageGrowthMessage")]
     public void EmptyState_LeavesASurfaceWithAnyOtherOwnMessageAlone_SoTwoTextsAreNeverDrawnOverEachOther(string siblingName)
     {
-        var (sameCell, otherCell) = OnStaThread(() =>
+        var (sameCell, otherCell) = StaTestThread.Run(() =>
         {
             var host = new Grid();
             var dataGrid = new DataGrid();
@@ -163,7 +142,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void ASlicerWithNoDataShowsItsTextOnTheChartCanvas_NotOverTheHeader_AndDropsThePreviousBars()
     {
-        var (before, text, cleared) = OnStaThread(() =>
+        var (before, text, cleared) = StaTestThread.Run(() =>
         {
             var slicer = new PerformanceMonitorLite.Controls.TimeRangeSlicerControl();
             var start = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -191,7 +170,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void AccessibleNames_RecomputeAnAutoName_WhenTheHeaderTextChanges_ButNeverReplaceAHandSetOne()
     {
-        var (first, second, handSet) = OnStaThread(() =>
+        var (first, second, handSet) = StaTestThread.Run(() =>
         {
             var text = new TextBlock { Text = "SQL2022" };
             var panel = new StackPanel();
@@ -220,7 +199,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void AccessibleNames_GiveAColumnFilterButtonItsOwnName()
     {
-        var buttonName = OnStaThread(() =>
+        var buttonName = StaTestThread.Run(() =>
         {
             var panel = new StackPanel { Orientation = Orientation.Horizontal };
             var button = new Button();
@@ -237,7 +216,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void TheOverviewCard_HasAnAutomationPeerThatCarriesItsName()
     {
-        var (peerName, controlType) = OnStaThread(() =>
+        var (peerName, controlType) = StaTestThread.Run(() =>
         {
             var card = new PerformanceMonitorLite.Controls.OverviewCardBorder();
             AutomationProperties.SetName(card, "example-sql-01");
@@ -253,7 +232,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void EmptyState_ClearOfBaseline_PutsTheTextNearTheTop_AndTheDefaultStaysCentered()
     {
-        var (centered, clear) = OnStaThread(() =>
+        var (centered, clear) = StaTestThread.Run(() =>
         {
             var host = new Grid();
             var plain = new Border();
@@ -319,7 +298,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void AccessibleNames_NameAPanelHeaderFromItsTitle_NotFromItsFilterButton()
     {
-        var (tabName, headerName, handNamed) = OnStaThread(() =>
+        var (tabName, headerName, handNamed) = StaTestThread.Run(() =>
         {
             var panel = new StackPanel { Orientation = Orientation.Horizontal };
             panel.Children.Add(new Button());

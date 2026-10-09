@@ -546,9 +546,7 @@ internal static class QueryGridSeed
     public static string? ReadBanner(Func<TextBlock, Task> raise)
     {
         string? text = null;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
+        StaTestThread.Run(() =>
         {
             var savedMode = ViewerTimeHelper.CurrentDisplayMode;
             try
@@ -560,23 +558,11 @@ internal static class QueryGridSeed
 
                 text = banner.Visibility == Visibility.Visible ? banner.Text : null;
             }
-            catch (Exception ex)
-            {
-                error = ex;
-            }
             finally
             {
                 ViewerTimeHelper.CurrentDisplayMode = savedMode;
             }
         });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            ExceptionDispatchInfo.Capture(error).Throw();
-        }
 
         return text;
     }

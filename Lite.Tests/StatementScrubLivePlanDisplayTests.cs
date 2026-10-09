@@ -85,7 +85,7 @@ public sealed class StatementScrubLivePlanDisplayTests
     [Fact]
     public void APlanWithheldWhole_ShowsTheWithheldSentenceInTheViewer_NotAParseError()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var control = new PlanViewerControl();
             try
@@ -260,25 +260,6 @@ public sealed class StatementScrubLivePlanDisplayTests
         Assert.Contains("SaveXmlToFile(row.DeadlockGraphXml, $\"deadlock_{row.DeadlockTime:yyyyMMdd_HHmmss}.xml\", \"deadlock XML\", \"deadlock graph\")", plans, StringComparison.Ordinal);
         Assert.Contains("\"blocked process XML\", \"blocked process report\")", plans, StringComparison.Ordinal);
         Assert.DoesNotContain("File.WriteAllText", plans, StringComparison.Ordinal);
-    }
-
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

@@ -274,7 +274,7 @@ internal static class DataStartBannerReadout
         TimeDisplayMode mode = TimeDisplayMode.UTC, int? serverOffsetMinutes = null)
     {
         string? text = null;
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var savedMode = ViewerTimeHelper.CurrentDisplayMode;
             var savedClock = ViewerTimeHelper.ActiveServerClock;
@@ -330,23 +330,4 @@ internal static class DataStartBannerReadout
         }
     }
 
-    /// <summary>Runs <paramref name="body"/> on an STA thread (WPF objects require one) and rethrows what it threw.</summary>
-    public static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }
