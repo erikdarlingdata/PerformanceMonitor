@@ -223,6 +223,7 @@ public sealed class MigrationLockHolderLogTests
         var query = body.IndexOf("new NpgsqlCommand(LockHoldersSql, connection, lookup)", StringComparison.Ordinal);
         var commit = body.IndexOf("lookup.CommitAsync(", StringComparison.Ordinal);
         Assert.True(begin > 0 && limits > begin && query > limits && commit > query, "begin, set the limits, run the lookup, commit");
+        Assert.Contains("limits.ExecuteNonQueryAsync(", body[limits..query], StringComparison.Ordinal);
 
         var claim = body.IndexOf("TryClaimLockHolderLog(", StringComparison.Ordinal);
         Assert.True(claim > commit, "the ten minutes are claimed after the lookup worked, not before it runs");
