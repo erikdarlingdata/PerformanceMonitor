@@ -110,10 +110,26 @@ public sealed class MigrationLockHolderLogTests
             Assert.Contains("darling_schema_version (AccessShareLock)", line, StringComparison.Ordinal);
             Assert.DoesNotContain($"pid {observer.ProcessID} ", line, StringComparison.Ordinal);
 
-            /* A client session's query text is never logged. */
+            /* A client session's query text is never logged. The line also lists any autovacuum worker that holds a lock on a collect
+               table while the test runs, and that worker's entry carries its first 200 characters of query text by design (#5617), so
+               "query:" is checked per entry, not on the whole line. */
             Assert.DoesNotContain("5582 holder", line, StringComparison.Ordinal);
             Assert.DoesNotContain("5582 reader", line, StringComparison.Ordinal);
-            Assert.DoesNotContain("query:", line, StringComparison.Ordinal);
+            var entries = SplitHolderEntries(line);
+            Assert.Contains(entries, e => e.StartsWith($"pid {holderPid} ", StringComparison.Ordinal));
+            Assert.Contains(entries, e => e.StartsWith($"pid {readerPid} ", StringComparison.Ordinal));
+            foreach (var entry in entries)
+            {
+                if (entry.StartsWith($"pid {holderPid} ", StringComparison.Ordinal) || entry.StartsWith($"pid {readerPid} ", StringComparison.Ordinal))
+                {
+                    Assert.DoesNotContain("query:", entry, StringComparison.Ordinal);
+                }
+
+                if (entry.Contains("query:", StringComparison.Ordinal))
+                {
+                    Assert.Contains("(autovacuum worker)", entry, StringComparison.Ordinal);
+                }
+            }
 
             /* The lookup's SET LOCAL limits end with its transaction and do not leak into the caller's session. */
             await using (var show = new NpgsqlCommand("SHOW statement_timeout", observer))
@@ -146,6 +162,16 @@ public sealed class MigrationLockHolderLogTests
                 await readerTransaction.RollbackAsync(CancellationToken.None);
             });
         }
+    }
+
+    /// <summary>Splits the holders part of a lock-holder log line into its entries, one per session (#5617). An entry starts
+    /// <c>pid N (</c>; splitting on that start, not on every semicolon, keeps a semicolon inside an autovacuum query in its entry.</summary>
+    private static string[] SplitHolderEntries(string line)
+    {
+        const string Marker = "Sessions holding a lock on a collect table: ";
+        var at = line.IndexOf(Marker, StringComparison.Ordinal);
+        Assert.True(at >= 0, "the lock-holder log line lost its holders list");
+        return System.Text.RegularExpressions.Regex.Split(line[(at + Marker.Length)..], @"; (?=pid \d+ \()");
     }
 
     [Fact]
