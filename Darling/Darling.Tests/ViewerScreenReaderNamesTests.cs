@@ -32,27 +32,6 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerScreenReaderNamesTests
 {
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
-        }
-
-        return result;
-    }
-
     private static string ViewerDir([CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Viewer"));
 
@@ -88,7 +67,7 @@ public sealed class ViewerScreenReaderNamesTests
     [Fact]
     public void AServerBoxAndAnItemsList_ExposeTheServerName_ForEachItem()
     {
-        var names = OnStaThread(() =>
+        var names = StaTestThread.Run(() =>
         {
             /* A closed ComboBox builds no item peers: its drop-down list is a ListBox, which names its items the same way. */
             var combo = new ListBox { ItemsSource = new[] { new DarlingServer(1, "example-sql-01", "Example SQL 01", true, 16) } };
@@ -122,7 +101,7 @@ public sealed class ViewerScreenReaderNamesTests
     [Fact]
     public void AGridsPanelHeaders_FilterButtons_AndBlankCells_AreNamedInTheAutomationTree()
     {
-        var names = OnStaThread(() =>
+        var names = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var grid = new DataGrid { AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column };

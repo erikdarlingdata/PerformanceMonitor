@@ -44,6 +44,7 @@ public sealed class WebReadReachLiveTests
         {
             new("server_name", ServerName),
             new("hours_back", hours.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new("counter_name", "Batch Requests/sec"),
         });
         return await DarlingWebEndpoints.BuildReadDispatch()[read](context, postgres, null!);
     }
@@ -139,7 +140,7 @@ public sealed class WebReadReachLiveTests
             }
 
             /* The raw-table trends reach their table's 30 days (#5562 L4b): 720 is answered, 721 is refused, never clamped. */
-            foreach (var read in new[] { "get_tempdb_trend", "get_memory_trend", "get_cpu_utilization" })
+            foreach (var read in new[] { "get_tempdb_trend", "get_memory_trend", "get_cpu_utilization", "get_perfmon_trend" })
             {
                 /* No "error" key at all, not merely a message without the ceiling text: a read that failed for another reason must not pass (review L6). */
                 var answered = await WebReadAsync(postgres, read, WebReadReach.RawTrendHours);
@@ -152,7 +153,7 @@ public sealed class WebReadReachLiveTests
                 Assert.Contains("exceeds maximum of 720 hours (30 days)", refused);
             }
 
-            /* Raised-then-lowered (#5562 review r1): the perfmon trend (11.2 s cold at 30 days, #5574) and the heatmap (raw query_stats, four days on a TimescaleDB store) stay at 168. */
+            /* The perfmon trend joined the raised set with #5574 (re-grouped by counter: 11.2 s to 1.3 s cold at 30 days); the heatmap (raw query_stats, four days on a TimescaleDB store) stays at 168. */
             foreach (var read in new[] { "get_query_heatmap" })
             {
                 Assert.Contains("exceeds maximum of 168 hours (7 days)",

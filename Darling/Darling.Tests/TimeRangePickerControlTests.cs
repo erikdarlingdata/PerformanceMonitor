@@ -29,7 +29,7 @@ public sealed class TimeRangePickerControlTests
     [Fact]
     public void Constructs_WithTheShortPresetsAndTheCalendarPeriods()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var picker = Build();
             Assert.Equal(9, picker.RollingPanel.Children.Count);
@@ -44,7 +44,7 @@ public sealed class TimeRangePickerControlTests
     [Fact]
     public void Value_RendersWithoutRaisingTheEvent_AndSelectRaisesIt()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var picker = Build();
             var raised = 0;
@@ -67,7 +67,7 @@ public sealed class TimeRangePickerControlTests
     [Fact]
     public void Select_RefusesARangeUnderTheMinimum_AndHoldsTheOldOne()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var picker = Build();
             picker.NowProvider = () => new DateTime(2026, 10, 8, 4, 2, 0, DateTimeKind.Unspecified);
@@ -88,7 +88,7 @@ public sealed class TimeRangePickerControlTests
     [Fact]
     public void Resolve_FollowsTheZoneProvider()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var picker = Build();
             picker.Value = TimeRangeSpec.ForPeriod(CalendarPeriod.Yesterday);
@@ -104,7 +104,7 @@ public sealed class TimeRangePickerControlTests
     [Fact]
     public void Notes_ShowTheDataStartAndTheCollectorInterval()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var picker = Build();
             picker.Value = TimeRangePresets.Find("1w")!;
@@ -127,7 +127,7 @@ public sealed class TimeRangePickerControlTests
     [Fact]
     public void Compact_HidesTheDetailBesideTheButton_AndKeepsItInTheTooltip()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var picker = Build();
             picker.Compact = true;
@@ -141,7 +141,7 @@ public sealed class TimeRangePickerControlTests
     [Fact]
     public void TypingARange_PreviewsItBeforeApply_AndAnErrorDisablesApply()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var picker = Build();
             picker.InputBox.Text = "last month";
@@ -157,7 +157,7 @@ public sealed class TimeRangePickerControlTests
     [Fact]
     public void OpeningThePopup_ThemesTheCalendarFromTheHostBrushes_AndAPickedRangeFillsTheTextBox()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dark = new SolidColorBrush(Color.FromRgb(0x11, 0x12, 0x17));
             var light = new SolidColorBrush(Color.FromRgb(0xE4, 0xE6, 0xEB));
@@ -195,25 +195,5 @@ public sealed class TimeRangePickerControlTests
                 window.Close();
             }
         });
-    }
-
-    /// <summary>WPF objects require STA; same shape as AvailabilityGroupsTabRefreshTests.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
     }
 }

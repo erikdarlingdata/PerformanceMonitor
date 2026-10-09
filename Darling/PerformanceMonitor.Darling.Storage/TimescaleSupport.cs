@@ -316,16 +316,41 @@ public static partial class TimescaleSupport
     /// </summary>
     public const string CollectionLogSegmentBy = CompressionSegmentByColumn + ", collector_name";
 
+    /// <summary>The collector table the Performance Counters collector writes (the bare name, as
+    /// <c>hypertable_name</c> spells it).</summary>
+    public const string PerfmonStatsTable = "perfmon_stats";
+
+    /// <summary>
+    /// perfmon_stats's segmentby (#5574): by counter as well as by server. The one-counter trend read
+    /// (<c>get_perfmon_trend</c>, the Viewer's perfmon charts) filters <c>server_id = $1 AND counter_name = $2</c> and
+    /// nothing else by equality (its <c>object_name</c> test is a suffix match), and with <c>server_id</c> alone
+    /// every such read decompressed the counter and object names of every counter the server collects, to keep
+    /// one counter's rows (11.2 s cold on a large store, #5562). <c>object_name</c> and <c>instance_name</c> are
+    /// left out on purpose: no read asks for them by equality, and a finer grouping only adds batches that compress
+    /// worse. Spelled with ", " for the reason <see cref="CollectionLogSegmentBy"/> gives. The orderby is not set,
+    /// so it stays what the table already had (<c>collection_time DESC</c>).
+    /// </summary>
+    public const string PerfmonStatsSegmentBy = CompressionSegmentByColumn + ", counter_name";
+
     /// <summary>
     /// The segmentby the enable statement sets for <paramref name="table"/> and the convergence read compares
-    /// against: <see cref="CollectionLogSegmentBy"/> for collection_log, <see cref="CompressionSegmentByColumn"/>
-    /// for every other table. Keyed by the bare name, which is how both <see cref="CollectionLogTable"/> and the
-    /// read's <c>hypertable_name</c> spell it; a schema-qualified name (<c>collect.collection_log</c>) is matched by
+    /// against: <see cref="CollectionLogSegmentBy"/> for collection_log, <see cref="PerfmonStatsSegmentBy"/> for
+    /// perfmon_stats (#5574), <see cref="CompressionSegmentByColumn"/> for every other table. Keyed by the bare
+    /// name, which is how <see cref="CollectionLogTable"/>, <see cref="PerfmonStatsTable"/> and the read's
+    /// <c>hypertable_name</c> spell it; a schema-qualified name (<c>collect.collection_log</c>) is matched by
     /// its last part, so a statement built from that spelling sets the value the read compares against. One lookup
     /// for both halves, for the reason <see cref="CompressionSegmentByColumn"/> gives.
     /// </summary>
     public static string CompressionSegmentByFor(string table)
-        => table.AsSpan(table.LastIndexOf('.') + 1).Equals(CollectionLogTable, StringComparison.Ordinal) ? CollectionLogSegmentBy : CompressionSegmentByColumn;
+    {
+        var bare = table.AsSpan(table.LastIndexOf('.') + 1);
+        if (bare.Equals(CollectionLogTable, StringComparison.Ordinal))
+        {
+            return CollectionLogSegmentBy;
+        }
+
+        return bare.Equals(PerfmonStatsTable, StringComparison.Ordinal) ? PerfmonStatsSegmentBy : CompressionSegmentByColumn;
+    }
 
     /// <summary>
     /// One collector table's background compression policy — chunks older than
@@ -10817,6 +10842,15 @@ WHERE ca.view_schema = 'collect'
 
         /// <summary>A statement failed for another reason and the transaction rolled back; nothing changed.</summary>
         Failed,
+
+        /// <summary>The statement ran into its client timeout and rolled back; nothing changed. Returned only to a caller that
+        /// asked for it (<c>distinguishTimeoutAndMissing</c>), who gives a statement a long timeout and wants to know it was the
+        /// cap; every other caller keeps getting <see cref="Failed"/>.</summary>
+        TimedOut,
+
+        /// <summary>The relation the statement named is gone (42P01), and nothing changed. Returned only to a caller that asked
+        /// for it (<c>distinguishTimeoutAndMissing</c>); it costs a Debug line, not a Warning.</summary>
+        RelationMissing,
     }
 
     /// <summary>
@@ -10831,8 +10865,29 @@ WHERE ca.view_schema = 'collect'
     /// Warning and clears the streak. Neither throws, so the caller keeps its per-table
     /// isolation; cancellation still propagates.
     /// </summary>
-    internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
+    internal static Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
         NpgsqlConnection connection, IReadOnlyList<string> statements, ILogger? logger, string what, CancellationToken cancellationToken)
+        => TryRunBoundedDdlAsync(
+            connection,
+            async transaction =>
+            {
+                foreach (var statement in statements)
+                {
+                    using var command = new NpgsqlCommand(statement, connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
+                    await command.ExecuteNonQueryAsync(cancellationToken);
+                }
+            },
+            logger, what, cancellationToken);
+
+    /// <summary>
+    /// <see cref="TryRunBoundedDdlAsync(NpgsqlConnection, IReadOnlyList{string}, ILogger, string, CancellationToken)"/>
+    /// for a body that needs a statement's result (#5574: the chunk re-group counts its rows between the decompress and
+    /// the compress). <paramref name="body"/> runs in the same transaction, behind the same <c>SET LOCAL
+    /// lock_timeout</c>, and the same outcomes and log lines apply. The list overload is this one with a loop for a body.
+    /// </summary>
+    internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
+        NpgsqlConnection connection, Func<NpgsqlTransaction, Task> body, ILogger? logger, string what, CancellationToken cancellationToken,
+        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false)
     {
         try
         {
@@ -10842,11 +10897,7 @@ WHERE ca.view_schema = 'collect'
                 await timeout.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            foreach (var statement in statements)
-            {
-                using var command = new NpgsqlCommand(statement, connection, transaction) { CommandTimeout = SetupTimeoutSeconds };
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
+            await body(transaction);
 
             await transaction.CommitAsync(cancellationToken);
             if (BusyStreaks.Clear(what, out var busyPasses))
@@ -10864,7 +10915,10 @@ WHERE ca.view_schema = 'collect'
                 "TimescaleDB: {What} not changed this pass: another session held the table for {Timeout}, and waiting longer would hold up every collector's writes to it; the next hourly pass tries again",
                 what, HourlyDdlLockTimeout);
             var now = DateTime.UtcNow;
-            if (BusyStreaks.RecordBusy(what, now, out var passes, out var firstBusyUtc))
+
+            /* #5574: the compress half's in-call retries (three tries inside ten seconds) are not "passes", and counting
+               them would add a "busy for 3 passes in a row" Warning to the one the half logs itself. */
+            if (recordBusyStreak && BusyStreaks.RecordBusy(what, now, out var passes, out var firstBusyUtc))
             {
                 logger?.LogWarning(
                     "TimescaleDB: {What} has been busy for {Passes} passes in a row, since {Since:u} UTC ({Elapsed} ago); its settings stay as they are until another session releases the table",
@@ -10873,15 +10927,37 @@ WHERE ca.view_schema = 'collect'
 
             return BoundedDdlOutcome.LockBusy;
         }
+        catch (PostgresException ex) when (distinguishTimeoutAndMissing
+            && string.Equals(ex.SqlState, PostgresErrorCodes.UndefinedTable, StringComparison.Ordinal))
+        {
+            /* #5574: probably a chunk dropped (retention) between the candidates read and the statement; the caller re-reads the
+               chunk catalog to tell (ResolveMissingRelationAsync), because a chunk that still exists is a failure. */
+            BusyStreaks.Clear(what, out _);
+            logger?.LogDebug("TimescaleDB: {What} stopped: the server reported that a relation does not exist ({Message})", what, ex.Message);
+            return BoundedDdlOutcome.RelationMissing;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             BusyStreaks.Clear(what, out _);
             logger?.LogWarning(
                 "TimescaleDB: {What} could not be changed, so the change was rolled back and the table keeps its current settings: {Message}",
                 what, ex.Message);
-            return BoundedDdlOutcome.Failed;
+            return distinguishTimeoutAndMissing && IsStatementTimeout(ex, cancellationToken)
+                ? BoundedDdlOutcome.TimedOut
+                : BoundedDdlOutcome.Failed;
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="ex"/> is a statement that ran into its client <c>CommandTimeout</c> (and not the caller's
+    /// cancellation): Npgsql reports it as a <see cref="TimeoutException"/> (itself or inside an <see cref="NpgsqlException"/>),
+    /// or as the server's query-cancelled error (57014) its cancel request caused.
+    /// </summary>
+    internal static bool IsStatementTimeout(Exception ex, CancellationToken cancellationToken) =>
+        !cancellationToken.IsCancellationRequested
+        && (ex is TimeoutException
+            || ex.InnerException is TimeoutException
+            || (ex is PostgresException { SqlState: PostgresErrorCodes.QueryCanceled }));
 
     /// <summary>
     /// Enables compression and adds the <see cref="CompressAfterDays"/>-day background policy on
@@ -10949,6 +11025,14 @@ WHERE ca.view_schema = 'collect'
                 if (converged is not null && converged.Contains(schema.TargetTable))
                 {
                     enabledAlready++;
+                }
+                else if (!string.Equals(CompressionSegmentByFor(schema.TargetTable), CompressionSegmentByColumn, StringComparison.Ordinal)
+                    && await SettingsChangeBlockedAsync(connection, schema.TargetTable, logger, cancellationToken))
+                {
+                    /* #5574: a table with a grouping of its own (perfmon_stats) on a TimescaleDB that cannot change the
+                       settings while compressed chunks exist keeps compressing under the ones it has, exactly as
+                       collection_log does (#4951); the policy call below still runs. The other tables all want plain
+                       server_id, so they skip this read and attempt the ALTER as before. */
                 }
                 else
                 {
@@ -12108,13 +12192,14 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
     public static bool CompressionSettingsChangeBlocked(Version? timescaleVersion, bool hasCompressedChunks)
         => hasCompressedChunks && timescaleVersion is not null && timescaleVersion < CompressionSettingsChangeWithCompressedChunksFrom;
 
-    /// <summary>The TimescaleDB version and whether collection_log has a compressed chunk, in one round trip.</summary>
-    private const string CollectionLogSettingsChangeStateSql = @"
+    /// <summary>The TimescaleDB version and whether the <c>collect</c> table in $1 has a compressed chunk, in one round
+    /// trip (collection_log since #4951, perfmon_stats since #5574).</summary>
+    private const string SettingsChangeStateSql = @"
 SELECT (SELECT e.extversion FROM pg_extension AS e WHERE e.extname = 'timescaledb'),
        EXISTS (SELECT 1
                FROM timescaledb_information.chunks AS c
                WHERE c.hypertable_schema = 'collect'
-               AND   c.hypertable_name = 'collection_log'
+               AND   c.hypertable_name = $1
                AND   c.is_compressed)";
 
     /// <summary>
@@ -12123,13 +12208,23 @@ SELECT (SELECT e.extversion FROM pg_extension AS e WHERE e.extname = 'timescaled
     /// finds the settings differ, which is every hourly pass on such a store, so the line says what changes it. A read
     /// that fails is not a block: the ALTER is attempted, and its own failure line covers a store that refuses it.
     /// </summary>
-    private static async Task<bool> CollectionLogSettingsChangeBlockedAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    private static Task<bool> CollectionLogSettingsChangeBlockedAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+        => SettingsChangeBlockedAsync(connection, CollectionLogTable, logger, cancellationToken);
+
+    /// <summary>
+    /// <see cref="CollectionLogSettingsChangeBlockedAsync"/> for any <c>collect</c> table (#5574 asks it for
+    /// perfmon_stats): the same version floor, the same "a failed read is not a block" rule, the same line each pass.
+    /// Every table that asks wants a segmentby of its own on top of plain <c>server_id</c>, so "keeps compressing by
+    /// server_id" is true of each.
+    /// </summary>
+    private static async Task<bool> SettingsChangeBlockedAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
     {
         Version? version;
         bool hasCompressedChunks;
         try
         {
-            using var command = new NpgsqlCommand(CollectionLogSettingsChangeStateSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            using var command = new NpgsqlCommand(SettingsChangeStateSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            command.Parameters.AddWithValue(table);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
@@ -12141,7 +12236,7 @@ SELECT (SELECT e.extversion FROM pg_extension AS e WHERE e.extname = 'timescaled
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogDebug("Could not read the TimescaleDB version or collection_log's compressed chunks, so the compression settings change is attempted (#4951): {Message}", ex.Message);
+            logger?.LogDebug("Could not read the TimescaleDB version or {Table}'s compressed chunks, so the compression settings change is attempted (#4951): {Message}", table, ex.Message);
             return false;
         }
 
@@ -12151,9 +12246,459 @@ SELECT (SELECT e.extversion FROM pg_extension AS e WHERE e.extname = 'timescaled
         }
 
         logger?.LogInformation(
-            "TimescaleDB: collection_log keeps compressing by server_id: TimescaleDB {Version} cannot change compression settings while compressed chunks exist, and {Floor} and later can. Each hourly pass checks again, so the change applies after the extension is upgraded (#4951)",
-            version, CompressionSettingsChangeWithCompressedChunksFrom);
+            "TimescaleDB: {Table} keeps compressing by server_id: TimescaleDB {Version} cannot change compression settings while compressed chunks exist, and {Floor} and later can. Each hourly pass checks again, so the change applies after the extension is upgraded (#4951, #5574)",
+            table, version, CompressionSettingsChangeWithCompressedChunksFrom);
         return true;
+    }
+
+    /* ---------------- perfmon_stats chunk re-group (#5574) ---------------- */
+
+    /// <summary>
+    /// How many days back the perfmon chunk re-group reaches (#5574): the window the one-counter trend read can ask
+    /// for, so a chunk older than this is never read by it and ages out with retention, untouched. The same 30 days
+    /// as the web and MCP trend reads' raw reach.
+    /// </summary>
+    public const int PerfmonRegroupReachDays = 30;
+
+    /// <summary>
+    /// The least the re-group drain waits after a chunk (#5574). It waits as long as the chunk it just did took, so the
+    /// store is busy with the rewrite at most half the time, and never less than this, so a small chunk cannot turn the
+    /// drain into back-to-back rewrites. Measured on a 13.1 M-row chunk the rewrite takes about 90 s, so the wait there is
+    /// the chunk's own time and this floor only matters for the small chunks of a quiet store.
+    /// </summary>
+    public static readonly TimeSpan PerfmonRegroupMinPause = TimeSpan.FromSeconds(15);
+
+    /// <summary>Chunks in a row that fail (not a busy lock) before the drain stops: a condition that fails one chunk (a full
+    /// disk, a missing privilege) fails the next one too, and each attempt decompresses a whole chunk first. The next
+    /// hourly check starts it again.</summary>
+    internal const int PerfmonRegroupFailureLimit = 3;
+
+    /// <summary>
+    /// How many times the compress half of one chunk's re-group is tried (#5574). By then the decompress has committed, so
+    /// the chunk is uncompressed and a busy lock is worth a short retry; after the last try the chunk is left for the
+    /// compression policy, which compresses every uncompressed chunk past <see cref="CompressAfterDays"/> with the
+    /// hypertable's current grouping, which is the wanted one.
+    /// </summary>
+    internal const int PerfmonRegroupCompressAttempts = 3;
+
+    /// <summary>perfmon_stats's wanted segmentby as <c>timescaledb_information.chunk_compression_settings</c> spells it
+    /// (comma, no space), which is not how the hypertable-level view spells it.</summary>
+    internal static readonly string PerfmonStatsChunkSegmentBy = PerfmonStatsSegmentBy.Replace(", ", ",", StringComparison.Ordinal);
+
+    /// <summary>The first TimescaleDB release with <c>timescaledb_information.chunk_compression_settings</c> (#5574).
+    /// Settings can change with compressed chunks from 2.14.0
+    /// (<see cref="CompressionSettingsChangeWithCompressedChunksFrom"/>), but the per-chunk view that says which grouping
+    /// a chunk was compressed with arrived in 2.14.1 (<c>sql/updates/2.14.0--2.14.1.sql</c> creates it; the 2.14.0 views
+    /// file has no such view). Without it the re-group cannot tell an old chunk from a new one, so the gate reads the
+    /// view's presence, not a version number.</summary>
+    public static readonly Version PerChunkCompressionSettingsViewFrom = new(2, 14, 1);
+
+    /// <summary>The version, whether the per-chunk settings view exists, and perfmon_stats's own segmentby, in one round
+    /// trip. The view test is <c>to_regclass</c>, which answers NULL rather than raising on a store without it.</summary>
+    private const string PerfmonRegroupStateSql = @"
+SELECT (SELECT e.extversion FROM pg_extension AS e WHERE e.extname = 'timescaledb'),
+       to_regclass('timescaledb_information.chunk_compression_settings') IS NOT NULL,
+       (SELECT string_agg(cs.attname, ', ' ORDER BY cs.segmentby_column_index)
+        FROM timescaledb_information.compression_settings AS cs
+        WHERE cs.hypertable_schema = 'collect'
+        AND   cs.hypertable_name = 'perfmon_stats'
+        AND   cs.segmentby_column_index IS NOT NULL)";
+
+    /// <summary>
+    /// The compressed perfmon_stats chunks inside the reach that were compressed with another grouping, newest first:
+    /// $1 the reach in days, $2 the wanted grouping in the per-chunk view's spelling. Each chunk's OWN setting is read
+    /// (the view joins the chunk, not the hypertable), because the hypertable's setting says nothing about a chunk
+    /// compressed before it changed. <c>range_end</c> is the chunk's upper bound as a real instant (the view converts the
+    /// internal UTC microseconds), so it compares to <c>now()</c> without a time zone step. The result is empty on a
+    /// converged store, and the read costs one catalog join. The join is a LEFT JOIN (#5574): a compressed chunk with no
+    /// per-chunk settings row (one compressed before the extension moved to per-chunk settings) has no known grouping, so
+    /// it counts as the old one, and the drain's done-set stops any loop over a chunk that stays a candidate.
+    /// </summary>
+    private const string PerfmonRegroupCandidatesSql = @"
+SELECT format('%I.%I', c.chunk_schema, c.chunk_name), s.segmentby
+FROM timescaledb_information.chunks AS c
+LEFT JOIN timescaledb_information.chunk_compression_settings AS s
+  ON s.chunk = to_regclass(format('%I.%I', c.chunk_schema, c.chunk_name))
+WHERE c.hypertable_schema = 'collect'
+AND   c.hypertable_name = 'perfmon_stats'
+AND   c.is_compressed
+AND   c.range_end > now() - make_interval(days => $1)
+AND   s.segmentby IS DISTINCT FROM $2
+ORDER BY c.range_start DESC";
+
+    /// <summary>
+    /// Why the perfmon chunk re-group cannot run now, or <c>null</c> when it can (#5574). Pure, so the arms pin. Three
+    /// reasons, checked in this order: a TimescaleDB below
+    /// <see cref="CompressionSettingsChangeWithCompressedChunksFrom"/> (the settings never changed, so there is nothing to
+    /// re-group to), no per-chunk settings view (<see cref="PerChunkCompressionSettingsViewFrom"/>), and a hypertable that
+    /// does not yet carry the wanted grouping (the settings change was busy or failed this pass: compressing a chunk now
+    /// would write it with the OLD grouping again, and the next pass would find it again). An unknown version is not a
+    /// reason, for the reason <see cref="CompressionSettingsChangeBlocked"/> gives; the view test covers it.
+    /// </summary>
+    internal static string? PerfmonRegroupBlockedReason(Version? timescaleVersion, bool hasPerChunkSettingsView, string? hypertableSegmentBy)
+    {
+        if (timescaleVersion is not null && timescaleVersion < CompressionSettingsChangeWithCompressedChunksFrom)
+        {
+            return $"TimescaleDB {timescaleVersion} cannot change compression settings while compressed chunks exist, so perfmon_stats was never re-grouped";
+        }
+
+        if (!hasPerChunkSettingsView)
+        {
+            return $"this TimescaleDB has no timescaledb_information.chunk_compression_settings (added in {PerChunkCompressionSettingsViewFrom}), so a chunk's grouping cannot be read";
+        }
+
+        if (!string.Equals(hypertableSegmentBy, PerfmonStatsSegmentBy, StringComparison.Ordinal))
+        {
+            return $"perfmon_stats still has segmentby '{hypertableSegmentBy ?? "(none)"}', not '{PerfmonStatsSegmentBy}' (the settings change has not applied), and a chunk compressed now would get the old grouping again";
+        }
+
+        return null;
+    }
+
+    /// <summary>The wait between two tries of the compress half (see <see cref="PerfmonRegroupCompressAttempts"/>).</summary>
+    internal static readonly TimeSpan PerfmonRegroupCompressRetryDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>A compressed perfmon_stats chunk inside the reach that was compressed with another grouping.</summary>
+    internal readonly record struct PerfmonRegroupCandidate(string Chunk, string? OldSegmentBy);
+
+    /// <summary>What <see cref="RegroupPerfmonChunkAsync"/> did to one chunk.</summary>
+    internal enum PerfmonRegroupChunkResult
+    {
+        /// <summary>Decompressed and compressed again with the wanted grouping.</summary>
+        Regrouped,
+
+        /// <summary>The decompress could not get its lock in time, so nothing changed.</summary>
+        LockBusy,
+
+        /// <summary>The decompress failed and rolled back, so nothing changed.</summary>
+        Failed,
+
+        /// <summary>The decompress was cancelled, by its statement cap (<see cref="PerfmonRegroupStatementTimeoutSeconds"/>) or by
+        /// the server (a shorter <c>statement_timeout</c>, a cancel), and rolled back, so nothing changed. The drain does not try the chunk again while the process lives.</summary>
+        TimedOut,
+
+        /// <summary>The chunk was gone (retention dropped it; the chunk catalog confirmed it) when the decompress, or the
+        /// compress after it, asked for it, so nothing failed and there is nothing left to do.</summary>
+        Gone,
+
+        /// <summary>The decompress committed and the compress did not (a busy lock on every try, a failure, or the
+        /// service stopping): the chunk is uncompressed and the compression policy compresses it with the wanted grouping.</summary>
+        LeftUncompressed,
+    }
+
+    /// <summary>One chunk's result, the rows it held (-1 when the count failed) and how long it took.</summary>
+    internal readonly record struct PerfmonRegroupChunkOutcome(PerfmonRegroupChunkResult Result, long Rows, TimeSpan Elapsed);
+
+    /// <summary>The longest one re-group statement (the decompress, the compress) may run before the client gives up on it
+    /// (#5574): 30 minutes, far above the ~90-180 s a 13 M-row chunk takes, so only a chunk several times that size, or a
+    /// store that is struggling, reaches it. The service's stopping token cancels a statement long before.</summary>
+    internal const int PerfmonRegroupStatementTimeoutSeconds = 1800;
+
+    /// <summary>The state of the candidates read (#5574): which of the three things the old <c>null</c> stood for it was.</summary>
+    internal enum PerfmonRegroupReadStatus
+    {
+        /// <summary>The gate is open and the catalog was read; the list may be empty (converged).</summary>
+        Candidates,
+
+        /// <summary>The gate is closed (<see cref="PerfmonRegroupBlockedReason"/>); the reason is in the detail.</summary>
+        Blocked,
+
+        /// <summary>The catalog could not be read; the error message is in the detail.</summary>
+        ReadFailed,
+    }
+
+    /// <summary>One candidates read: its status, the chunks (empty unless <see cref="PerfmonRegroupReadStatus.Candidates"/>),
+    /// and the reason or error text for the other two.</summary>
+    internal readonly record struct PerfmonRegroupRead(PerfmonRegroupReadStatus Status, IReadOnlyList<PerfmonRegroupCandidate> Candidates, string? Detail);
+
+    /// <summary>The configured fleet retention of the perfmon collector in days, or <c>null</c> when it could not be read
+    /// (#5574). The drain clamps its reach to it.</summary>
+    internal static async Task<int?> ReadPerfmonRetentionDaysAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(
+                "SELECT retention_days FROM config.config_collector_schedules WHERE server_id IS NULL AND lower(collector_name) = $1 AND retention_days >= 1 LIMIT 1",
+                connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            command.Parameters.AddWithValue(PerfmonStatsTable);
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            return DarlingRetentionHorizons.ResolveFleetRetentionDays(PerfmonStatsTable, value is int days ? days : (int?)null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The compressed perfmon_stats chunks inside the reach that still have the old grouping, newest first (#5574), as a
+    /// <see cref="PerfmonRegroupRead"/> that says which of three things happened: the candidates (an empty list means
+    /// converged), the gate blocked the re-group (<see cref="PerfmonRegroupBlockedReason"/>; one Debug line, a normal state of
+    /// some store), or the catalog could not be read (the caller logs it).
+    ///
+    /// <para>This is the whole of the "is anything left" check, two catalog reads, and it is what the drain repeats
+    /// before every chunk: the gate (the hypertable's own setting is checked every time because compressing under the old
+    /// one would undo the work) and the candidates are read fresh, so a chunk the compression policy has meanwhile
+    /// compressed with the new grouping drops out of the list on its own.</para>
+    /// </summary>
+    internal static async Task<PerfmonRegroupRead> ReadPerfmonRegroupCandidatesAsync(
+        NpgsqlConnection connection, ILogger? logger, int reachDays, CancellationToken cancellationToken)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var candidates = new List<PerfmonRegroupCandidate>();
+        try
+        {
+            Version? version;
+            bool hasView;
+            string? current;
+            using (var state = new NpgsqlCommand(PerfmonRegroupStateSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds })
+            await using (var reader = await state.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    return new PerfmonRegroupRead(PerfmonRegroupReadStatus.ReadFailed, candidates, "the state query returned no row");
+                }
+
+                version = ParseTimescaleVersion(reader.IsDBNull(0) ? null : reader.GetString(0));
+                hasView = !reader.IsDBNull(1) && reader.GetBoolean(1);
+                current = reader.IsDBNull(2) ? null : reader.GetString(2);
+            }
+
+            var blocked = PerfmonRegroupBlockedReason(version, hasView, current);
+            if (blocked is not null)
+            {
+                logger?.LogDebug("TimescaleDB: perfmon_stats chunks are not re-grouped now: {Reason} (#5574)", blocked);
+                return new PerfmonRegroupRead(PerfmonRegroupReadStatus.Blocked, candidates, blocked);
+            }
+
+            using var find = new NpgsqlCommand(PerfmonRegroupCandidatesSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            find.Parameters.AddWithValue(reachDays);
+            find.Parameters.AddWithValue(PerfmonStatsChunkSegmentBy);
+            await using var chunks = await find.ExecuteReaderAsync(cancellationToken);
+            while (await chunks.ReadAsync(cancellationToken))
+            {
+                candidates.Add(new PerfmonRegroupCandidate(chunks.GetString(0), chunks.IsDBNull(1) ? null : chunks.GetString(1)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The drain logs this one (a Warning the first time in the process, then Debug), so it is not logged here. */
+            return new PerfmonRegroupRead(PerfmonRegroupReadStatus.ReadFailed, new List<PerfmonRegroupCandidate>(), ex.Message);
+        }
+
+        return new PerfmonRegroupRead(PerfmonRegroupReadStatus.Candidates, candidates, null);
+    }
+
+    /// <summary>
+    /// Re-groups ONE perfmon_stats chunk that was compressed by <c>server_id</c> alone, so a one-counter trend read over it
+    /// skips every other counter's batches the way it already does on a chunk compressed after the settings change
+    /// (#5574).
+    ///
+    /// <para><b>Why it exists.</b> The settings change (<see cref="PerfmonStatsSegmentBy"/>) reaches only chunks compressed
+    /// after it (<see cref="EnsureCollectionLogHypertableAsync"/> explains why), and collection_log can let its old chunks
+    /// age out. perfmon_stats cannot: its trend read reaches 30 days, and chunks compress after a day, so a store would
+    /// read old-shape chunks for the better part of a month. The drain (<see cref="PerfmonRegroupDrain"/>) calls this for
+    /// the chunks inside <see cref="PerfmonRegroupReachDays"/>; older ones are never read by that query and go with
+    /// retention.</para>
+    ///
+    /// <para><b>Two transactions, because of when the lock escalates.</b> <c>decompress_chunk</c> holds only an
+    /// EXCLUSIVE lock on the chunk, which lets reads go on, until the very end, where it takes ACCESS EXCLUSIVE to drop the
+    /// old compressed chunk (TimescaleDB 2.30.1, <c>tsl/src/compression/api.c</c>, <c>decompress_chunk_impl</c>);
+    /// <c>compress_chunk</c> holds EXCLUSIVE throughout. A lock is held to the end of its transaction, so
+    /// decompress and compress in ONE transaction (the first version of this) kept every read of the chunk waiting for the
+    /// whole compress half: 54 s of a 113 s re-group on a 13.1 M-row chunk. Two transactions put the ACCESS EXCLUSIVE at
+    /// the end of the first, so a read waits at most the <see cref="HourlyDdlLockTimeout"/> a busy lock is given, and
+    /// measured 0 waits and a slowest read of 2 s over a 94 s re-group (reads slow down from the disk work, not from
+    /// a lock). <c>compress_chunk(..., recompress =&gt; true)</c> does not help: with changed settings it runs the same two
+    /// halves inside one statement and measured a 34 s wait of 85 s.</para>
+    ///
+    /// <para><b>A crash between the two leaves an uncompressed chunk, not a broken one.</b> The compression policy compresses
+    /// every uncompressed chunk older than <see cref="CompressAfterDays"/> with the hypertable's current grouping, so the
+    /// chunk comes back compressed with the NEW grouping at the policy's next run. The compress half is retried
+    /// <see cref="PerfmonRegroupCompressAttempts"/> times first, and passes <c>if_not_compressed</c> so a policy run that got
+    /// there first is not an error. Between the two calls the chunk's rows are counted (a plain heap scan, for the log
+    /// line). Needs room for the whole chunk uncompressed plus its indexes, and writes it to the WAL, for the length of one
+    /// chunk.</para>
+    ///
+    /// <para>Never throws, except for cancellation.</para>
+    /// </summary>
+    internal static async Task<PerfmonRegroupChunkOutcome> RegroupPerfmonChunkAsync(
+        NpgsqlConnection connection, ILogger? logger, PerfmonRegroupCandidate candidate, CancellationToken cancellationToken,
+        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var chunk = candidate.Chunk;
+        var clock = Stopwatch.StartNew();
+        var decompressed = await TryRunBoundedDdlAsync(
+            connection,
+            async transaction =>
+            {
+                using var decompress = new NpgsqlCommand("SELECT decompress_chunk($1::regclass)", connection, transaction) { CommandTimeout = statementTimeoutSeconds };
+                decompress.Parameters.AddWithValue(chunk);
+                await decompress.ExecuteNonQueryAsync(cancellationToken);
+            },
+            logger, $"re-grouping perfmon_stats chunk {chunk} (decompress)", cancellationToken,
+            distinguishTimeoutAndMissing: true);
+
+        if (decompressed != BoundedDdlOutcome.Applied)
+        {
+            return new PerfmonRegroupChunkOutcome(
+                decompressed switch
+                {
+                    BoundedDdlOutcome.LockBusy => PerfmonRegroupChunkResult.LockBusy,
+                    BoundedDdlOutcome.TimedOut => PerfmonRegroupChunkResult.TimedOut,
+                    BoundedDdlOutcome.RelationMissing => await ResolveMissingRelationAsync(connection, logger, chunk, "decompress", cancellationToken),
+                    _ => PerfmonRegroupChunkResult.Failed,
+                },
+                0, clock.Elapsed);
+        }
+
+        long rows = -1;
+        try
+        {
+            /* The chunk's name came out of the catalog already quoted by format('%I.%I'), so it is safe to splice. */
+            using var count = new NpgsqlCommand($"SELECT count(*) FROM {chunk}", connection) { CommandTimeout = SetupTimeoutSeconds };
+            rows = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("TimescaleDB: could not count the rows of perfmon_stats chunk {Chunk} before compressing it again: {Message}", chunk, ex.Message);
+        }
+
+        var compressResult = await CompressRegroupedChunkAsync(connection, logger, chunk, PerfmonRegroupCompressAttempts, PerfmonRegroupCompressRetryDelay, cancellationToken, statementTimeoutSeconds);
+        if (compressResult == PerfmonRegroupChunkResult.Regrouped)
+        {
+            logger?.LogInformation(
+                "TimescaleDB: re-grouped perfmon_stats chunk {Chunk} ({Rows} rows) from '{Old}' to '{New}' in {ElapsedMs} ms (#5574)",
+                chunk, rows, candidate.OldSegmentBy ?? "(none)", PerfmonStatsChunkSegmentBy, clock.ElapsedMilliseconds);
+        }
+
+        return new PerfmonRegroupChunkOutcome(compressResult, rows, clock.Elapsed);
+    }
+
+    /// <summary>
+    /// What a "relation does not exist" (42P01) from either half of a chunk's re-group means (#5574): the chunk catalog is read
+    /// again, and only a chunk that is really gone (retention dropped it between the half before and this one) is
+    /// <see cref="PerfmonRegroupChunkResult.Gone"/>, which costs a Debug line and no failure. A chunk the catalog still lists did
+    /// not fail for that reason (a name or quoting bug, a catalog that disagrees with itself), so it is a
+    /// <see cref="PerfmonRegroupChunkResult.Failed"/> chunk with a Warning. A catalog that cannot be read is no proof of
+    /// anything and counts as Failed too.
+    /// </summary>
+    internal static async Task<PerfmonRegroupChunkResult> ResolveMissingRelationAsync(
+        NpgsqlConnection connection, ILogger? logger, string chunk, string half, CancellationToken cancellationToken)
+    {
+        bool? listed;
+        try
+        {
+            using var read = new NpgsqlCommand(
+                @"SELECT EXISTS (SELECT 1 FROM timescaledb_information.chunks AS c
+WHERE c.hypertable_schema = 'collect' AND c.hypertable_name = 'perfmon_stats'
+AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
+                connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            read.Parameters.AddWithValue(chunk);
+            listed = (bool?)await read.ExecuteScalarAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("TimescaleDB: could not re-read the chunk catalog for perfmon_stats chunk {Chunk}: {Message}", chunk, ex.Message);
+            listed = null;
+        }
+
+        if (listed == false)
+        {
+            logger?.LogDebug("TimescaleDB: perfmon_stats chunk {Chunk} no longer exists ({Half} half; retention dropped it), so it is not re-grouped (#5574)", chunk, half);
+            return PerfmonRegroupChunkResult.Gone;
+        }
+
+        logger?.LogWarning(
+            "TimescaleDB: the {Half} of perfmon_stats chunk {Chunk} reported that a relation does not exist, but {Catalog}, so this is a failure and not a chunk that retention dropped (#5574)",
+            half, chunk, listed == true ? "the chunk catalog still lists the chunk" : "the chunk catalog could not be read to tell");
+        return PerfmonRegroupChunkResult.Failed;
+    }
+
+    /// <summary>
+    /// The compress half of a chunk's re-group (#5574): the chunk was decompressed in a transaction that has committed,
+    /// so it is uncompressed now and a busy lock is worth <paramref name="attempts"/> tries, <paramref name="retryDelay"/>
+    /// apart, each behind the 3 s lock timeout. Returns <see cref="PerfmonRegroupChunkResult.Regrouped"/> when the chunk is compressed again,
+    /// <see cref="PerfmonRegroupChunkResult.Gone"/> when the chunk is really gone (retention dropped it between the halves),
+    /// and <see cref="PerfmonRegroupChunkResult.LeftUncompressed"/> otherwise. When every try failed the
+    /// chunk stays uncompressed, with one Warning, and the compression policy compresses it with the hypertable's grouping
+    /// at its next run. <c>if_not_compressed</c> makes a policy run that got there first a success, not an error.
+    /// A cancellation (the service stopping) leaves the chunk the same way, says so at Information, and propagates.
+    ///
+    /// <para><b>Only a busy lock is retried</b> (55P03, behind the 3 s lock timeout): any other error, a statement that ran
+    /// into its cap included, ends the tries at once, because a second try of a compression that just failed (or ran
+    /// 30 minutes) is another whole compression. The busy tries are not fed to <see cref="BusyStreaks"/>: three tries inside
+    /// ten seconds are not "three passes", and the Warning below is the one line an all-busy half logs.</para>
+    /// </summary>
+    internal static async Task<PerfmonRegroupChunkResult> CompressRegroupedChunkAsync(
+        NpgsqlConnection connection, ILogger? logger, string chunk, int attempts, TimeSpan retryDelay, CancellationToken cancellationToken,
+        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds)
+    {
+        try
+        {
+            for (var attempt = 1; attempt <= attempts; attempt++)
+            {
+                var compressed = await TryRunBoundedDdlAsync(
+                    connection,
+                    async transaction =>
+                    {
+                        using var compress = new NpgsqlCommand("SELECT compress_chunk($1::regclass, if_not_compressed => true)", connection, transaction) { CommandTimeout = statementTimeoutSeconds };
+                        compress.Parameters.AddWithValue(chunk);
+                        await compress.ExecuteNonQueryAsync(cancellationToken);
+                    },
+                    logger, $"re-grouping perfmon_stats chunk {chunk} (compress)", cancellationToken,
+                    recordBusyStreak: false, distinguishTimeoutAndMissing: true);
+
+                if (compressed == BoundedDdlOutcome.Applied)
+                {
+                    return PerfmonRegroupChunkResult.Regrouped;
+                }
+
+                if (compressed == BoundedDdlOutcome.RelationMissing
+                    && await ResolveMissingRelationAsync(connection, logger, chunk, "compress", cancellationToken) == PerfmonRegroupChunkResult.Gone)
+                {
+                    /* Retention dropped the chunk between the two halves: there is nothing for the policy to compress, and
+                       nothing failed (a chunk the catalog still lists is the Warning above, and stays uncompressed). */
+                    return PerfmonRegroupChunkResult.Gone;
+                }
+
+                if (compressed != BoundedDdlOutcome.LockBusy)
+                {
+                    /* Not a busy lock (an error, the cap, a relation error on a chunk that still exists): the line above says
+                       why, and the chunk is the compression policy's. */
+                    logger?.LogInformation(
+                        "TimescaleDB: perfmon_stats chunk {Chunk} was decompressed for re-grouping and compressing it again did not work ({Outcome}), so it stays uncompressed until the compression policy compresses it with '{New}' at its next run (#5574)",
+                        chunk, compressed, PerfmonStatsChunkSegmentBy);
+                    return PerfmonRegroupChunkResult.LeftUncompressed;
+                }
+
+                if (attempt < attempts)
+                {
+                    await Task.Delay(retryDelay, cancellationToken);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            logger?.LogInformation(
+                "TimescaleDB: the service is stopping with perfmon_stats chunk {Chunk} decompressed; the compression policy compresses it again with '{New}' at its next run (#5574)",
+                chunk, PerfmonStatsChunkSegmentBy);
+            throw;
+        }
+
+        logger?.LogWarning(
+            "TimescaleDB: perfmon_stats chunk {Chunk} was decompressed for re-grouping but could not be compressed again after {Attempts} tries, so it stays uncompressed until the compression policy compresses it with '{New}' at its next run; reads of it use the heap and its indexes meanwhile (#5574)",
+            chunk, attempts, PerfmonStatsChunkSegmentBy);
+        return PerfmonRegroupChunkResult.LeftUncompressed;
     }
 
     /* ---------------- compression-job self-heal (#1581) ---------------- */

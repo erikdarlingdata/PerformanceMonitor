@@ -32,7 +32,7 @@ namespace Darling.Tests;
 /// the schemas only (no REVOKE on a named database), so the test does not depend on the store's
 /// database name. Every object it creates is cleaned up.</para>
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class DarlingSecuritySplitLiveTests
 {
     /* #4981: a role belongs to the whole cluster, so a constant name made two runs on one cluster share a role: the

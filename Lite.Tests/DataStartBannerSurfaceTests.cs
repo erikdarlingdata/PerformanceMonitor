@@ -235,7 +235,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
         var rows = await read(service);
         var cappedSource = cappedSourceOldestUtc?.Invoke();
         var probedFloor = await service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc, ServerClock.Utc);
-        var (visible, text, probed) = OnStaThread(() =>
+        var (visible, text, probed) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             var probeStepRan = false;
@@ -268,7 +268,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc, ServerClock? clock = null)
     {
         var floor = await Service().GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc, clock ?? ServerClock.Utc);
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
@@ -1205,7 +1205,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
 
     /// <summary>What a chart draws, as (first X, last X) of each plotted line: the series drawn on a real chart.</summary>
     private static List<(double First, double Last)> DrawnSpans(IReadOnlyList<ServerTab.CollectorDurationSeries> series) =>
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var chart = new ScottPlot.WPF.WpfPlot();
             ServerTab.PlotCollectorDurationSeries(chart, null, series);
@@ -1331,7 +1331,7 @@ VALUES ({_nextId++}, {Literal(collectedUtc)}, {ServerId}, '{ServerName}', {Liter
         var rows = await service.GetRecentLongQueryCompletionsAsync(ServerId, fromDate: startUtc, toDate: endUtc);
         var probed = await service.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, ServerId, startUtc, endUtc, ServerClock.Utc);
         var floor = ServerTab.EarlierOfFloorAndRowShown(probed, ServerTab.EarliestRowShown(rows, ServerTab.LongQueryRowTimeUtc));
-        var (visible, text) = OnStaThread(() =>
+        var (visible, text) = StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
@@ -1383,29 +1383,6 @@ VALUES ({_nextId++}, {Literal(collectedUtc)}, {ServerId}, '{ServerName}', {Liter
 
     private static string StripComments(string lfSource) =>
         Regex.Replace(Regex.Replace(lfSource, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline), @"//[^\n]*", string.Empty);
-
-    /// <summary>WPF objects require STA; same shape as DataStartBannerTests.</summary>
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 
     private static string ControlsFile(string name) => RepoFile("Lite", "Controls", name);
 

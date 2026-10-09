@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// failed settings read.
 /// </summary>
 /* #1776 own-store: each live fact mints its own scratch database through ScratchPostgres. */
+[Collection("timing")]
 public sealed class BoundedCompressionDdlTests
 {
     private static string Storage() =>

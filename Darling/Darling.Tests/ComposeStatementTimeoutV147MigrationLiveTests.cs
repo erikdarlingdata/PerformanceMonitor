@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,8 +31,10 @@ namespace Darling.Tests;
 /// scope 2) the moment that rung landed.</para>
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Each fact mints its own scratch database
-   through ScratchPostgres and never touches the shared store's tables, so it cannot race the live collection
-   and serializing it would be pure slowdown. */
+   through ScratchPostgres and never touches the shared store's tables, so it cannot race the live collection.
+   #5602: the role re-assertion fact writes the cluster's FIXED viewer and mcp roles (CREATE ROLE, ALTER ROLE ... SET
+   statement_timeout), which every scratch database shares, so the class runs in the collection that runs alone. */
+[Collection("pg-cluster-roles")]
 public sealed class ComposeStatementTimeoutV147MigrationLiveTests
 {
     private const int RungVersion = 147;
@@ -199,13 +202,48 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
         var ct = TestContext.Current.CancellationToken;
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        /* #5602: viewer and mcp are the cluster's FIXED roles, shared with every scratch database. The ones this fact
+           makes it drops again: left behind, they made the later classes that provision the managed roles skip
+           ("a cluster-wide admin/viewer/mcp role already exists on this rig"). A role that was already there is not
+           ours to drop. */
+        var madeRoles = new List<string>();
+        var bodySucceeded = false;
+        try
+        {
+            await ReassertAndReadBackAsync(scratch, madeRoles, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var role in madeRoles)
+                {
+                    await ExecAsync(cleanup, cleanupCt, $"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role}");
+                }
+            });
+        }
+    }
+
+    private static async Task ReassertAndReadBackAsync(ScratchPostgres scratch, List<string> madeRoles, CancellationToken ct)
+    {
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
 
-            await ExecAsync(connection, ct, "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'viewer') THEN CREATE ROLE viewer LOGIN; END IF; END $$");
-            await ExecAsync(connection, ct, "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mcp') THEN CREATE ROLE mcp LOGIN; END IF; END $$");
+            foreach (var role in new[] { "viewer", "mcp" })
+            {
+                using var exists = new NpgsqlCommand("SELECT count(*) FROM pg_roles WHERE rolname = $1", connection);
+                exists.Parameters.AddWithValue(role);
+                if (Convert.ToInt64(await exists.ExecuteScalarAsync(ct)) == 0)
+                {
+                    await ExecAsync(connection, ct, $"CREATE ROLE {role} LOGIN");
+                    madeRoles.Add(role);
+                }
+            }
+
             /* Old shipped value, as if provisioning last ran before this build existed — the state the
                re-assertion must move forward. */
             await ExecAsync(connection, ct, "ALTER ROLE viewer SET statement_timeout = '15s'");

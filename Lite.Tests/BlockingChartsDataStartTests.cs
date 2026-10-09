@@ -110,7 +110,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
         await Task.CompletedTask;
         var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
         floor = ServerTab.EarlierOfFloorAndRowShown(floor, earliestDrawn);
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
@@ -201,7 +201,7 @@ VALUES ($1, $2, $2, $3, $4, 'db1', 1, 100)", _nextId++, Naive(at), ServerId, Ser
             ? await service.GetBlockingXeDataStartAsync(ServerId, startUtc, endUtc)
             : await service.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, ServerId, startUtc, endUtc, includeAlsoCovered: true);
         floor = ServerTab.EarlierOfFloorAndRowShown(floor, earliestDrawn);
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
@@ -521,27 +521,6 @@ FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
         var n = 0;
         for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = haystack.IndexOf(needle, i + 1, StringComparison.Ordinal)) { n++; }
         return n;
-    }
-
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
     }
 
     /// <summary>The wiring: each step calls each note with its relation, banner and drawn-point argument.</summary>

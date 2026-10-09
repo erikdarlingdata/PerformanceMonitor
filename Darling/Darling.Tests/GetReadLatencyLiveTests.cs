@@ -32,7 +32,10 @@ namespace Darling.Tests;
 /// pinned too, not just the reader.
 /// </summary>
 /* #1776 own-store: each fact mints its own scratch database through ScratchPostgres and never touches the
-   shared store's tables, so it cannot race the live collection. */
+   shared store's tables, so it cannot race the live collection.
+   #5602: the facts that connect as viewer and mcp create and drop those FIXED cluster-wide roles, so the class runs
+   in the collection that runs alone. */
+[Collection("pg-cluster-roles")]
 public sealed class GetReadLatencyLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

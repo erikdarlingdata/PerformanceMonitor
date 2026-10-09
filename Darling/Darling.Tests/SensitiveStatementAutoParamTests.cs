@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// string or binary literal; and <c>pwd=</c> as a connection-string key), with ASCII word boundaries. The real judge
 /// runs over the captured fixtures in the wiring wave.
 /// </summary>
+[Collection("timing")]
 public class SensitiveStatementAutoParamTests
 {
     private const string P = "<<P>>";

@@ -28,27 +28,6 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Reads", "Darling")]
 public class ScreenReaderRowNamesTests
 {
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
-        }
-
-        return result;
-    }
-
     private static void Settle(Window window)
     {
         window.Show();
@@ -121,7 +100,7 @@ public class ScreenReaderRowNamesTests
     [Fact]
     public void AGridRow_IsNamedFromItsFirstTwoVisibleColumns_NotFromItsDataTypeName()
     {
-        var names = OnStaThread(() =>
+        var names = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var grid = NewGrid(new DataGridColumn[] { TextColumn("Time", "Time"), TextColumn("Server", "Server"), TextColumn("Retries", "Retries") },
@@ -141,7 +120,7 @@ public class ScreenReaderRowNamesTests
     [Fact]
     public void AGridRow_SkipsHiddenColumnsAndReadsTemplatedColumns_AndFollowsTheDisplayOrder()
     {
-        var name = OnStaThread(() =>
+        var name = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var grid = NewGrid(new DataGridColumn[]
@@ -167,7 +146,7 @@ public class ScreenReaderRowNamesTests
     [Fact]
     public void ARowReusedForAnotherItem_IsRenamed_AndWatchersFollowTheRealizedCells_NotTheRowCount()
     {
-        var (mismatches, checkedRows, atTop, peak, realized) = OnStaThread(() =>
+        var (mismatches, checkedRows, atTop, peak, realized) = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var rows = Enumerable.Range(0, 3000).Select(i => new JobRow { Time = "T" + i, Server = "S" + i, Retries = i % 2 == 0 ? "" : "1" }).ToList();
@@ -217,7 +196,7 @@ public class ScreenReaderRowNamesTests
     [Fact]
     public void ATemplatedCellWithNothingVisible_IsNamedBlank_AndKeepsItsRealContent()
     {
-        var (blank, filled, withBox, withText) = OnStaThread(() =>
+        var (blank, filled, withBox, withText) = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var box = new DataTemplate { VisualTree = new FrameworkElementFactory(typeof(CheckBox)) };
@@ -253,7 +232,7 @@ public class ScreenReaderRowNamesTests
     [Fact]
     public void AfterTheFirstLook_TheSizeChangedHandlers_DoNoAllocationAndAddNoWatchers()
     {
-        var (bytes, before, after) = OnStaThread(() =>
+        var (bytes, before, after) = StaTestThread.Run(() =>
         {
             AccessibleNames.Register();
             var tabs = new TabControl();

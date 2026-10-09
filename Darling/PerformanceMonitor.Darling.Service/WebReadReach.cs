@@ -110,9 +110,10 @@ internal static class WebReadReach
         /* Raw-table bucketed trends: 720 hours where the large-store timing run measured a month under 10 s (#5562 L4b;
            each validator names its time). Left at 168: get_current_waits_trend (its waiting_tasks table keeps 7 days),
            get_server_trend (6 of its 11 metrics were never timed), get_pg_wait_trend (its timing table was empty),
-           get_pg_query_duration_trend (not timed), get_perfmon_trend (11.2 s cold at 30 days on a large store: the compressed data is
-           grouped by server only, so the read decodes every counter's name; #5574 tracks the fix) and get_query_heatmap (raw query_stats, which a TimescaleDB
-           store drops at four days, so a month is a window the table cannot fill). get_blocking_stats is uncapped on the MCP side (ValidateUncappedWindow). */
+           get_pg_query_duration_trend (not timed) and get_query_heatmap (raw query_stats, which a TimescaleDB
+           store drops at four days, so a month is a window the table cannot fill). get_perfmon_trend reaches 720 since #5574 re-grouped
+           the compressed perfmon_stats data by counter: the cold read at 30 days on a large store fell from 11.2 s to 1.3 s, inside the 10 s bar.
+           get_blocking_stats is uncapped on the MCP side (ValidateUncappedWindow). */
         ["get_blocking_trend"] = Trend("blocked_process_report", RawTrendHours),
         ["get_deadlock_trend"] = Trend("deadlocks", RawTrendHours),
         ["get_lock_wait_trend"] = Trend("wait_stats", RawTrendHours),
@@ -125,7 +126,7 @@ internal static class WebReadReach
         ["get_file_io_trend"] = Trend("file_io_stats", RawTrendHours),
         ["get_memory_trend"] = Trend("memory_stats", RawTrendHours),
         ["get_server_trend"] = Trend(null),
-        ["get_perfmon_trend"] = Trend("perfmon_stats"),
+        ["get_perfmon_trend"] = Trend("perfmon_stats", RawTrendHours),
         ["get_pg_cpu_utilization"] = Trend("pg_cpu_utilization", RawTrendHours),
         ["get_pg_wait_trend"] = Trend("pg_wait_sampling"),
         ["get_pg_query_duration_trend"] = Trend("pg_statement_stats"),

@@ -73,48 +73,13 @@ public sealed class ViewerCollectionHealthLoadTests : IDisposable
 
     private static readonly string[] AllFour = ["health", "log", "chart", "caveats"];
 
-    /// <summary>Runs <paramref name="body"/> on an STA thread with a dispatcher, as the tab's own load runs, and rethrows what it threw.</summary>
-    private static void OnDispatcher(Func<Task> body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
+    /// <summary>Runs <paramref name="body"/> on the shared STA thread, whose dispatcher resumes its awaits as the tab's own load does (#5602), with the viewer's display mode set to UTC.</summary>
+    private static void OnTabDispatcher(Func<Task> body) =>
+        StaTestThread.Run(async () =>
         {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            dispatcher.BeginInvoke(new Action(async () =>
-            {
-                try
-                {
-                    ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-                    await body();
-                }
-                catch (Exception ex)
-                {
-                    error = ex;
-                }
-                finally
-                {
-                    dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
-                }
-            }));
-            Dispatcher.Run();
-        })
-        {
-            IsBackground = true,
-        };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-
-        if (!thread.Join(TimeSpan.FromSeconds(60)))
-        {
-            throw new TimeoutException("the tab's step did not finish: it is waiting on something it should not wait for");
-        }
-
-        if (error is not null)
-        {
-            ExceptionDispatchInfo.Capture(error).Throw();
-        }
-    }
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+            await body();
+        });
 
     /* The chart's read fails (here a real read against a store nothing listens on): the wrapper answers an empty list and logs it, the
        join the load runs does not throw, and the grids, the caveats and the note all draw, with the chart drawn empty. The coverage
@@ -131,7 +96,7 @@ public sealed class ViewerCollectionHealthLoadTests : IDisposable
         await Task.WhenAll(logTask, trendTask);
 
         var drawn = new Drawn();
-        OnDispatcher(async () =>
+        OnTabDispatcher(async () =>
         {
             drawn.Start();
             await Step(drawn, logTask.Result, trendTask.Result, Task.FromResult<DateTime?>(RangeStart.AddDays(2)));
@@ -161,7 +126,7 @@ public sealed class ViewerCollectionHealthLoadTests : IDisposable
         var probe = new TaskCompletionSource<DateTime?>();
         var drawn = new Drawn();
 
-        OnDispatcher(async () =>
+        OnTabDispatcher(async () =>
         {
             drawn.Start();
             var step = Step(drawn, Runs(3, RangeStart.AddDays(3)), [], probe.Task);
@@ -187,7 +152,7 @@ public sealed class ViewerCollectionHealthLoadTests : IDisposable
         var probe = new TaskCompletionSource<DateTime?>();
         var drawn = new Drawn();
 
-        OnDispatcher(async () =>
+        OnTabDispatcher(async () =>
         {
             drawn.Start();
             var step = Step(drawn, Runs(ViewerDataService.CollectionLogRowCap, oldest), [], probe.Task);
@@ -208,7 +173,7 @@ public sealed class ViewerCollectionHealthLoadTests : IDisposable
         var probe = new TaskCompletionSource<DateTime?>();
         var warned = new List<string>();
 
-        OnDispatcher(async () =>
+        OnTabDispatcher(async () =>
         {
             var drawn = new Drawn();
             drawn.Start();

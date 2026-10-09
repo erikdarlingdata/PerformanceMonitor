@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// <para>Cluster-wide state (<c>ALTER SYSTEM</c> is not per-database), so this is serialized with the rest of
 /// the live-postgres collection and restores the setting in a <c>finally</c> that runs even on failure.</para>
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class PgSettingRedactionLivePostgresTests
 {
     /* #4981: a role belongs to the whole cluster, so the name is unique to the run (8 lowercase hex characters). */

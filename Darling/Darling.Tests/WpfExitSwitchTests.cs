@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// process checks its own runtime configuration.
 /// </para>
 /// </summary>
+[Collection("timing")] // #5602: the fastest-of-three exit time is a clock; the timing collection runs alone, after the parallel classes.
 public sealed class WpfExitSwitchTests
 {
     /// <summary>WindowsBase's name for the switch that makes the weak-event table's exit handler purge directly.</summary>
@@ -80,7 +81,7 @@ public sealed class WpfExitSwitchTests
         {
             object? table = null;
             Exception? error = null;
-            using (var staGate = WpfStaGate.Enter())
+            using (var staGate = StaTestThread.EnterExclusive())
             {
                 var thread = new Thread(() =>
                 {

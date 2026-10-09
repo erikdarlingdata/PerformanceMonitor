@@ -26,7 +26,7 @@ public sealed class AlertHistoryCountFilterTests
     [Fact]
     public void AColumnFilter_RebuildsTheCountTextFromWhatTheGridNowShows_AndKeepsTheCapLabel()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var tab = new AlertsHistoryTab();
             tab.Initialize(null!, _ => null);
@@ -48,23 +48,4 @@ public sealed class AlertHistoryCountFilterTests
         });
     }
 
-    /// <summary>WPF objects require STA; same shape as AvailabilityGroupsTabRefreshTests.</summary>
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
-        }
-    }
 }

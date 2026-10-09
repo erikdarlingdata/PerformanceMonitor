@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// <para><b>#1776 own-store</b> - mints its own scratch database (<see cref="ScratchPostgres"/>) rather than
 /// sharing the live fixture, so it is deliberately NOT in the <c>live-postgres</c> collection.</para>
 /// </summary>
+[Collection("timing")]
 public sealed class SensitiveStatementsParityLiveTests
 {
     [Fact]

@@ -509,24 +509,6 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
         public string? Detail { get; set; }
     }
 
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-            throw error;
-        return result;
-    }
-
     private static DataGrid NewGrid(string? name, string? server)
     {
         var grid = new DataGrid { AutoGenerateColumns = false };
@@ -555,7 +537,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_text_match_on_a_query_text_column_lasts_the_session_but_is_not_stored()
     {
-        var kept = OnStaThread(() =>
+        var kept = StaTestThread.Run(() =>
         {
             var store = NewStore();
             ColumnFilterStore.Current = store;
@@ -591,7 +573,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_filter_survives_a_refresh_and_a_value_that_first_appears_later_still_shows()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var grid = NewGrid("G", null);
             var manager = new DataGridFilterManager<LoginRow>(grid);
@@ -610,7 +592,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void The_value_list_comes_from_the_unfiltered_rows_not_the_ones_shown()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var grid = NewGrid("G", null);
             var manager = new DataGridFilterManager<LoginRow>(grid);
@@ -626,7 +608,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void Number_query_text_and_prose_columns_and_columns_the_row_lacks_get_no_list()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var grid = NewGrid("G", null);
             var manager = new DataGridFilterManager<LoginRow>(grid);
@@ -645,7 +627,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_text_column_that_sorts_by_another_member_gets_no_list()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var grid = NewGrid("G", null);
             ((DataGridTextColumn)grid.Columns[0]).SortMemberPath = "SessionId";
@@ -660,7 +642,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_column_with_a_value_over_256_characters_gets_no_list()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var grid = NewGrid("G", null);
             var manager = new DataGridFilterManager<LoginRow>(grid);
@@ -674,7 +656,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_filter_set_in_one_session_is_loaded_by_the_next_on_its_first_refresh()
     {
-        var shown = OnStaThread(() =>
+        var shown = StaTestThread.Run(() =>
         {
             var store = NewStore();
             ColumnFilterStore.Current = store;
@@ -700,7 +682,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_cross_server_list_under_the_all_servers_scope_keeps_its_filters_across_a_restart()
     {
-        var shown = OnStaThread(() =>
+        var shown = StaTestThread.Run(() =>
         {
             var store = NewStore();
             ColumnFilterStore.Current = store;
@@ -723,7 +705,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void Another_servers_filters_do_not_apply_and_a_grid_without_a_name_or_scope_is_not_stored()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var store = NewStore();
             ColumnFilterStore.Current = store;
@@ -757,7 +739,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_stored_filter_on_a_column_the_grid_no_longer_has_is_ignored()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var store = NewStore();
             store.Save("srv-a", "G", new[] { Hide("RetiredColumn", "x"), Hide("LoginName", "job_svc") });
@@ -776,7 +758,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void Clear_all_filters_clears_the_grid_and_the_stored_copy_but_a_server_switch_does_not()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var store = NewStore();
             ColumnFilterStore.Current = store;
@@ -806,7 +788,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_server_switch_loads_the_new_servers_own_filters()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var store = NewStore();
             store.Save("srv-b", "G", new[] { Hide("LoginName", "sa") });
@@ -828,7 +810,7 @@ public sealed class ColumnFilterPersistenceTests : IDisposable
     [Fact]
     public void A_store_that_fails_never_blocks_the_grid()
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             File.WriteAllText(FilePath, "garbage");
             ColumnFilterStore.Current = NewStore();

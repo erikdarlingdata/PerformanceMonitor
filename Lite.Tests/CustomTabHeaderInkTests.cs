@@ -59,7 +59,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("Light")]
     public void PlanSubTabHeader_SelectedUsesAccentInk_UnselectedUsesForegroundInk(string theme)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dict = Theme(theme);
             var tabs = new TabControl();
@@ -84,7 +84,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("CoolBreeze")]
     public void AddTabHeader_TextBlockAsHeader_UsesAccentInkWhenSelected(string theme)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dict = Theme(theme);
             var tabs = new TabControl();
@@ -106,7 +106,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("CoolBreeze")]
     public void Premise_BarePanelHeader_KeepsForegroundInkOnAccent(string theme)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var dict = Theme(theme);
             var header = new StackPanel();
@@ -152,7 +152,7 @@ public sealed class CustomTabHeaderInkTests
     [InlineData("broken", "CriticalTextBrush")]
     public void CollectorHealthInk_FollowsALiveThemeSwitch_WithoutAnotherPaint(string kind, string key)
     {
-        OnStaThread(() =>
+        StaTestThread.Run(() =>
         {
             var text = new TextBlock();
             var host = new Border { Child = text };
@@ -178,21 +178,4 @@ public sealed class CustomTabHeaderInkTests
         Assert.Contains("CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, \"ForegroundMutedBrush\")", src);
     }
 
-    private static void OnStaThread(Action body)
-    {
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
 }

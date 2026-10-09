@@ -82,7 +82,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
         var service = new LocalDataService(_duckDb);
         floorOf ??= relation => service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc);
         /* The real note step, end to end, on an STA thread: the banner is a WPF object. No sync context there, so the blocking wait is safe. */
-        return OnStaThread(() =>
+        return StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             LiteBlockingLaneDataStart.ShowAsync(banner, floorOf, startUtc, endUtc, blockingBars, deadlockBars, TimeZoneInfo.Utc).GetAwaiter().GetResult();
@@ -195,7 +195,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     private Task<(bool Visible, string Text)> LaneNoteWithSourceCheckAsync(DateTime startUtc, DateTime endUtc)
     {
         var service = new LocalDataService(_duckDb);
-        return Task.FromResult(OnStaThread(() =>
+        return Task.FromResult(StaTestThread.Run(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
             LiteBlockingLaneDataStart.ShowAsync(
@@ -351,25 +351,4 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)";
         Assert.Equal(0, probes);
     }
 
-    private static T OnStaThread<T>(Func<T> body)
-    {
-        T result = default!;
-        Exception? error = null;
-        using var staGate = WpfStaGate.Enter();
-        var thread = new Thread(() =>
-        {
-            try { result = body(); }
-            catch (Exception ex) { error = ex; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-
-        if (error is not null)
-        {
-            throw error;
-        }
-
-        return result;
-    }
 }
