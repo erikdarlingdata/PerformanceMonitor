@@ -143,6 +143,9 @@ public sealed class RepoFileAdoptionTests
            that follows it, so the CODE spelling is told apart from the same words inside the arms' own
            comments, which continue on the same line. */
         "DarlingPgOperationalAlertTests.cs",
+        /* #5627: its pins slice the workflow's `on:` and `jobs:` blocks and the nightly's job body by line break and
+           indent, which a CRLF checkout spells differently. */
+        "DarlingUpgradeShapesWorkflowTests.cs",
         "FinOpsPageShellTests.cs",
         "FinOpsTabLockingPageTests.cs",
         "FinOpsTabUtilizationRawPageTests.cs",
