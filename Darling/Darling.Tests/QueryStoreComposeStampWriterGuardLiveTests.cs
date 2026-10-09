@@ -122,6 +122,49 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
     }
 
     [Fact]
+    public async Task AWriterWhoseStartTimeIsNotReadable_HoldsEveryPlannedHourBack_AndAnUnrelatedWriterHoldsNone()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct, build: false);
+        var bodySucceeded = false;
+        try
+        {
+            Assert.NotEmpty((await QueryStoreComposeStamp.PlanAsync(connection, DateTime.UtcNow, RetentionDays, ct)).Builds);
+
+            await using (var other = await OpenWriterAsync(scratch, ct))
+            await using (var open = await other.BeginTransactionAsync(ct))
+            {
+                await ExecAsync(other, "CREATE TEMP TABLE scratch_5582 (i int); INSERT INTO scratch_5582 VALUES (1)", ct);
+                var plan = await QueryStoreComposeStamp.PlanAsync(connection, DateTime.UtcNow, RetentionDays, ct);
+                Assert.NotEmpty(plan.Builds);
+                Assert.Equal(0, plan.HeldBack);
+                await open.RollbackAsync(ct);
+            }
+
+            await using (var blind = await OpenWriterAsync(scratch, ct, "-c track_activities=off"))
+            await using (var open = await blind.BeginTransactionAsync(ct))
+            {
+                await InsertRowAsync(blind, 1, hourNow.AddMinutes(-50), 9_200_004, ct);
+                Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {blind.ProcessID} AND xact_start IS NULL", ct));
+
+                /* No start time to compare: every hour the plan could pick might be one the writer holds an unmarked row of. */
+                var plan = await QueryStoreComposeStamp.PlanAsync(connection, DateTime.UtcNow, RetentionDays, ct);
+                Assert.Empty(plan.Builds);
+                Assert.True(plan.HeldBack > 0);
+                await open.RollbackAsync(ct);
+            }
+
+            Assert.NotEmpty((await QueryStoreComposeStamp.PlanAsync(connection, DateTime.UtcNow, RetentionDays, ct)).Builds);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
     public async Task TheGuard_SeesAWriterOfAPlainWideTable_BeforeItIsPartitioned()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
