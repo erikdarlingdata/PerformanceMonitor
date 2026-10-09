@@ -25,8 +25,8 @@ namespace Darling.Tests;
 /// database in the cluster shares. A live test that ran that batch inside its own scratch database still took CONNECT
 /// away from PUBLIC on the cluster's <c>darling</c> database, and nothing gave it back. The next test that opened a
 /// connection as a freshly created role (a role has CONNECT only through PUBLIC) failed with 42501, and it was
-/// that victim, not the test that did it, whose name appeared in the nightly run. It took a day of measuring to find
-/// the cause. This puts the failure on the test that does it.</para>
+/// that victim, not the test that did it, whose name appeared in the nightly run. This puts the failure on the test
+/// that does it.</para>
 ///
 /// <para><b>What it compares.</b> PUBLIC's CONNECT on each database before the test against the same read after it,
 /// and fails only a change from granted to revoked. It does not demand that PUBLIC hold CONNECT: a developer's own
