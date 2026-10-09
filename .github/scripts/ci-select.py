@@ -882,41 +882,50 @@ def shadow_summary(result: dict) -> str:
 REPORT_ATTEMPT = re.compile(r"-a(\d+)\.xml$")
 
 
-def failed_classes(reports: str, attempt: "int | None" = None) -> "tuple[dict[str, set[str]], dict[str, int], int]":
+def failed_classes(reports: str) -> "tuple[dict[str, set[str]], dict[str, int], int]":
     """The classes with a failed test in the xunit reports under `reports`, one subfolder per uploaded artifact: the
     shards' `darling-tests-timing-N` and `lite-tests-timing-N`, and the Guard tests job's `guard-tests-timing-darling`
     and `guard-tests-timing-lite` (#5459). The suite is the one the folder name says.
 
-    `attempt` is the run attempt this check belongs to. A report named `...-a<N>.xml` was written by attempt N; one
-    from another attempt is left out and counted as stale: a shard that failed in attempt 1 and passed in attempt 2
-    must not list its attempt-1 class (#5459, run 37776652739). A report with no attempt in its name counts for any
-    attempt. Returns ({suite: {Class}}, {suite: report count}, stale report count)."""
+    A report named `...-a<N>.xml` was written by run attempt N. Staleness is decided per artifact folder: within a
+    folder, the reports of the highest attempt present are kept and the reports of a lower attempt are left out and
+    counted as stale. A shard that failed in attempt 1 and passed in attempt 2 uploads its artifact again with
+    `overwrite`, so the folder holds attempt 2 only; if an old attempt-1 file is still there, it must not list its
+    attempt-1 class (#5459, run 37776652739). A shard that passed in attempt 1 is not re-run by "Re-run failed jobs",
+    so its folder still holds only `-a1` files and they count in attempt 2. A report with no attempt in its name
+    always counts. Returns ({suite: {Class}}, {suite: report count}, stale report count)."""
     failed: dict[str, set[str]] = {"darling": set(), "lite": set()}
     seen: dict[str, int] = {"darling": 0, "lite": 0}
     stale = 0
     if not os.path.isdir(reports):
         return failed, seen, stale
+    # (artifact folder, path) of every report, with the attempt its name carries (None when it carries none).
+    found: list[tuple[str, str, "int | None"]] = []
     for dirpath, _, names in os.walk(reports):
-        rel = os.path.relpath(dirpath, reports).replace("\\", "/")
-        top = rel.split("/")[0]
+        top = os.path.relpath(dirpath, reports).replace("\\", "/").split("/")[0]
+        for name in names:
+            if name.endswith(".xml"):
+                written_by = REPORT_ATTEMPT.search(name)
+                found.append((top, os.path.join(dirpath, name), int(written_by.group(1)) if written_by else None))
+    latest: dict[str, int] = {}
+    for top, _, written_by in found:
+        if written_by is not None:
+            latest[top] = max(latest.get(top, written_by), written_by)
+    for top, path, written_by in found:
         suite = "darling" if "darling" in top else "lite" if "lite" in top else ""
         if not suite:
             continue
-        for name in names:
-            if not name.endswith(".xml"):
-                continue
-            written_by = REPORT_ATTEMPT.search(name)
-            if attempt is not None and written_by and int(written_by.group(1)) != attempt:
-                stale += 1
-                continue
-            seen[suite] += 1
-            try:
-                for _, el in ET.iterparse(os.path.join(dirpath, name), events=("end",)):
-                    if el.tag == "test" and (el.get("result") or "").lower() == "fail":
-                        failed[suite].add(re.split(r"[.+/]", el.get("type") or "")[-1])
-                    el.clear()
-            except (ET.ParseError, OSError):
-                seen[suite] -= 1  # an unreadable report counts as no report
+        if written_by is not None and written_by < latest[top]:
+            stale += 1
+            continue
+        seen[suite] += 1
+        try:
+            for _, el in ET.iterparse(path, events=("end",)):
+                if el.tag == "test" and (el.get("result") or "").lower() == "fail":
+                    failed[suite].add(re.split(r"[.+/]", el.get("type") or "")[-1])
+                el.clear()
+        except (ET.ParseError, OSError):
+            seen[suite] -= 1  # an unreadable report counts as no report
     return failed, seen, stale
 
 
@@ -952,7 +961,7 @@ def shadow_row(selection: "dict | None", failed: "dict[str, set[str]]", seen: "d
                stale: int = 0, jobs: "list[str] | None" = None) -> dict:
     """One JSONL row per run: the selection's size and the classes that failed although it would not have run them.
     A FULL (or missing) selection selects every class, so it can have no miss. `stale` counts the reports left out as
-    another attempt's; `jobs` is the latest attempt's failed jobs (None when unknown)."""
+    a lower attempt's in their artifact folder; `jobs` is the latest attempt's failed jobs (None when unknown)."""
     if isinstance(selection, dict):
         sel = selection
     else:
@@ -1037,8 +1046,9 @@ def main(argv: list[str]) -> int:
     sc.add_argument("--reports", required=True, help="a folder with one subfolder per timing artifact")
     sc.add_argument("--out", required=True, help="the one-row JSONL file to write")
     sc.add_argument("--meta", default="{}", help="JSON object merged into the row (run, sha, pr...)")
-    sc.add_argument("--attempt", type=int, help="the run attempt; reports another attempt wrote are ignored "
-                                                "(default: the `attempt` of --meta)")
+    sc.add_argument("--attempt", type=int, help="the run attempt; accepted for callers, but it no longer filters: "
+                                                "staleness is decided per artifact folder (the `attempt` of --meta "
+                                                "still lands in the row)")
     sc.add_argument("--jobs", help="the latest attempt's jobs, one {name, conclusion} JSON object per line; "
                                    "the row lists the failed ones")
 
@@ -1091,8 +1101,7 @@ def main(argv: list[str]) -> int:
         except ValueError:
             meta = {}
         meta = meta if isinstance(meta, dict) else {}
-        attempt = args.attempt if args.attempt is not None else int(meta["attempt"]) if str(meta.get("attempt", "")).isdigit() else None
-        failed, seen, stale = failed_classes(args.reports, attempt)
+        failed, seen, stale = failed_classes(args.reports)
         row = shadow_row(selection, failed, seen, meta, stale, failed_jobs(args.jobs))
         with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")

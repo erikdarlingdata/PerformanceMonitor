@@ -328,26 +328,39 @@ public sealed class TestMapShadowGuardTests : IDisposable
     }
 
     [Fact]
-    public void OnlyTheLatestAttemptsReports_Count()
+    public void AFolderKeepsItsHighestAttempt_AndCountsLowerOnesStale()
     {
         // #5459, run 37776652739: shard 0 failed in attempt 1 and passed in attempt 2. The check ran in attempt 2 and
-        // listed the attempt-1 class. A report names the attempt that wrote it; another attempt's is ignored.
+        // listed the attempt-1 class. Staleness is per artifact folder: the folder's highest attempt counts, a lower
+        // one in the same folder is stale. The run's own attempt is not the filter.
         WriteReport("lite-tests-timing-0", "Lite.Tests.ScreenReaderRowNamesTests", "Fail", "lite-timing-0-1-a1.xml");
         WriteReport("lite-tests-timing-0", "Lite.Tests.ScreenReaderRowNamesTests", "Pass", "lite-timing-0-1-a2.xml");
-        WriteReport("darling-tests-timing-1", "Darling.Tests.SomeTests", "Fail", "darling-timing-1-1-a1.xml");
+
+        foreach (var attempt in new[] { "1", "2" })
+        {
+            var row = ShadowCheck(OnePickedSelection, "{\"run\": \"1\", \"attempt\": \"" + attempt + "\"}");
+
+            Assert.Empty(row.GetProperty("failed").GetProperty("lite").EnumerateArray());
+            Assert.Empty(row.GetProperty("misses").EnumerateArray());
+            Assert.Equal(1, row.GetProperty("reports").GetProperty("lite").GetInt32());
+            Assert.Equal(1, row.GetProperty("stale_reports").GetInt32());
+        }
+    }
+
+    [Fact]
+    public void RerunFailedJobs_KeepsThePassingShardsAttempt1Reports()
+    {
+        // "Re-run failed jobs" does not re-run a shard that passed in attempt 1, so its artifact still holds -a1 files
+        // when the check runs in attempt 2. They belong to the run and must count, not be dropped as stale.
+        WriteReport("darling-tests-timing-0", "Darling.Tests.PickedTests", "Pass", "darling-timing-0-1-a1.xml");
+        WriteReport("darling-tests-timing-1", "Darling.Tests.OtherTests", "Pass", "darling-timing-1-1-a2.xml");
+        WriteReport("lite-tests-timing-0", "Lite.Tests.LiteOnlyTests", "Pass", "lite-timing-0-1-a1.xml");
 
         var row = ShadowCheck(OnePickedSelection, """{"run": "1", "attempt": "2"}""");
 
-        Assert.Empty(row.GetProperty("failed").GetProperty("lite").EnumerateArray());
-        Assert.Empty(row.GetProperty("failed").GetProperty("darling").EnumerateArray());
-        Assert.Empty(row.GetProperty("misses").EnumerateArray());
+        Assert.Equal(2, row.GetProperty("reports").GetProperty("darling").GetInt32());
         Assert.Equal(1, row.GetProperty("reports").GetProperty("lite").GetInt32());
-        Assert.Equal(2, row.GetProperty("stale_reports").GetInt32());
-
-        // The same attempt-1 report still counts when the check belongs to attempt 1.
-        var first = ShadowCheck(OnePickedSelection, """{"run": "1", "attempt": "1"}""");
-        Assert.Equal(new[] { "ScreenReaderRowNamesTests" }, first.GetProperty("failed").GetProperty("lite").EnumerateArray().Select(e => e.GetString()).ToArray());
-        Assert.Equal(1, first.GetProperty("stale_reports").GetInt32());
+        Assert.Equal(0, row.GetProperty("stale_reports").GetInt32());
     }
 
     [Fact]

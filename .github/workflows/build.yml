@@ -463,7 +463,7 @@ jobs:
               @{ Name = 'Lite.Tests'; Key = 'lite'; Project = 'Lite.Tests/Lite.Tests.csproj' }
           )
           # #5459: one xunit report per suite, uploaded below, so the shadow check can list the Guard classes that failed.
-          # The attempt is in the file name: a re-run of this job must not be read as the first run.
+          # The attempt is in the file name: within this artifact, a lower attempt's file is stale next to a higher one.
           New-Item -ItemType Directory -Force -Path TestResults | Out-Null
 
           foreach ($suite in $suites) {
@@ -2030,7 +2030,10 @@ jobs:
           path: TestResults/darling-timing-*.xml
           retention-days: 7
           # A re-run of this shard uploads the same name in a later attempt; without overwrite the upload fails and the
-          # attempt-1 report stays (the xml file names carry the attempt, which is how the shadow check tells them apart).
+          # attempt-1 report stays. With it the artifact is replaced whole, so a folder holds one attempt's files. The xml
+          # file names carry the attempt: the shadow check keeps, per artifact folder, the files of the highest attempt in
+          # it and counts lower ones as stale. A shard that passed in attempt 1 is not re-run by "Re-run failed jobs", so
+          # its folder keeps its -a1 files and they still count in attempt 2.
           overwrite: true
           if-no-files-found: ignore
 
@@ -3112,8 +3115,9 @@ jobs:
 
           meta=$(printf '{"run":"%s","attempt":"%s","pr":"%s","head":"%s","map_sha":"%s","selection_job":"%s"}' "${RUN_ID}" "${RUN_ATTEMPT}" "${PR_NUMBER}" "${HEAD_SHA}" "${MAP_SHA}" "${SELECTION_JOB}")
           mkdir -p shadow
-          # The latest attempt's jobs: the row lists the failed ones (a job can fail with no failed test), and the
-          # check reads only this attempt's reports (#5459). A failed call only leaves failed_jobs out of the row.
+          # The latest attempt's jobs: the row lists the failed ones (a job can fail with no failed test). The check
+          # does not filter reports by this attempt: it keeps each artifact folder's highest attempt (#5459). A failed call
+          # only leaves failed_jobs out of the row.
           gh api --paginate "repos/${GH_REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" --jq '.jobs[] | {name, conclusion}' > shadow/jobs.jsonl || rm -f shadow/jobs.jsonl
           if timeout 120 python .github/scripts/ci-select.py shadow-check --selection shadow/selection/selection.json --reports shadow/reports --out shadow/row.jsonl --meta "${meta}" --jobs shadow/jobs.jsonl; then
             { echo "### Test map shadow check (#5459)"; echo; echo '```json'; cat shadow/row.jsonl; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
