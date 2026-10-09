@@ -1,0 +1,82 @@
+name: Darling upgrade shapes
+
+# #5627: runs the install and upgrade scripts of THIS commit over installs that real releases made, on the two
+# hosted Windows images, and fails a leg when the outcome is not the expected one. Each leg installs a released
+# build with its own install script, lets its service extract pg-runtime, stops it, and then runs the script
+# under test:
+#   U1  the current release in C:\Program Files\PerformanceMonitorDarling                  must pass
+#   U2  as U1, the service logon changed to a non-default local account and run once on it must pass
+#   U3  as U1, the service deleted: install passes, upgrade says there is no service        see the leg's expectation
+#   U4  a release before 3.9 in C:\PerformanceMonitorDarling: install refuses, names only
+#       the folder's own write entry, and prints the move steps
+# U1, U2 and U3 run both install-darling.ps1 and upgrade-darling.ps1 as separate legs; U4 runs install-darling.ps1.
+#
+# Triggers: a pull request touching the scripts (or this check), the nightly (as a reusable workflow), and a
+# manual dispatch. `pull_request`, never `pull_request_target`: the legs run the pull request's own scripts,
+# so they must run with the pull request's read-only token and no secrets.
+on:
+  pull_request:
+    paths:
+      - 'Darling/tools/*.ps1'
+      - '.github/workflows/darling-upgrade-shapes.yml'
+      - '.github/scripts/darling-upgrade-shapes.ps1'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The released builds the legs install first. Change them here and nowhere else.
+env:
+  DARLING_CURRENT_RELEASE: '3.9.0'
+  DARLING_OLD_RELEASE: '3.7.1'
+
+concurrency:
+  group: darling-upgrade-shapes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shape:
+    name: ${{ matrix.os }} / ${{ matrix.leg }}
+    runs-on: ${{ matrix.os }}
+    # Measured on hosted runners (#5627 repro, 14 legs): 1.8 to 2.8 minutes per leg, install of the release,
+    # pg-runtime extraction and the script under test included. The script's own bounds add up to 6 + 15
+    # minutes (pg-runtime wait, script run), so 30 minutes bounds a hung service without cutting a slow leg.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-2022, windows-2025 ]
+        leg: [ U1-install, U1-upgrade, U2-install, U2-upgrade, U3-install, U3-upgrade, U4-install ]
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # The commit under test, not a branch name that can move while the run is queued.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run the leg
+        shell: pwsh
+        timeout-minutes: 25
+        run: ./.github/scripts/darling-upgrade-shapes.ps1 -Leg '${{ matrix.leg }}' -Workspace '${{ github.workspace }}' -CurrentVersion '${{ env.DARLING_CURRENT_RELEASE }}' -OldVersion '${{ env.DARLING_OLD_RELEASE }}'
+
+      - name: Service log tail
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem 'C:\ProgramData\PerformanceMonitorDarling\logs' -ErrorAction SilentlyContinue | Select-Object -Last 2 | ForEach-Object { "log $($_.FullName)"; Get-Content $_.FullName -Tail 30 }
+
+      - name: Upload the scripts' output
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-upgrade-shapes-${{ matrix.os }}-${{ matrix.leg }}
+          path: C:\darling-shapes-work\*.txt
+          retention-days: 7
+          if-no-files-found: ignore

@@ -50,6 +50,11 @@ darling:
   # parsed by Darling.Tests pins, so an edit to either has to reach the suite.
   - '.github/scripts/run-darling-pg-shard.ps1'
   - '.github/scripts/run-lite-shard.ps1'
+  # #5627: the Darling upgrade-shape workflow and its script. The workflow runs the install and upgrade scripts under
+  # Darling/tools (already covered above) over real releases, and Darling.Tests parses both files, so an edit to
+  # either has to reach the suite.
+  - '.github/workflows/darling-upgrade-shapes.yml'
+  - '.github/scripts/darling-upgrade-shapes.ps1'
 
 # Lite/** is deliberately ABSENT, though build.yml's own `darling` filter carries it. That entry
 # exists because Darling.Tests reads Lite source in its cross-app parity guards, and those guards run
