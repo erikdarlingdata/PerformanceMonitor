@@ -155,6 +155,30 @@ public sealed class PurgeContinuationTests
     }
 
     [Fact]
+    public async Task AStampLeftInTheFutureByAClockStepBack_IsPulledInToAnHourAfterTheEnd()
+    {
+        /* #4732: the pass launched while the clock read ten days ahead, so its daily stamp sits at +11 days; the clock then
+           stepped back to T0 and the sweep stopped on its budget there. The stamp is the later of the two, so the
+           continuation replaces it: due an hour after the end, not stranded for the size of the step and not due at once
+           (which would start the next drain with no gap for collection). */
+        var worker = MakeWorker(out _);
+        await LaunchAndFinishAsync(worker, T0.AddDays(10));
+
+        Assert.True(worker.NotePurgePassEnded(BudgetStopped, T0));
+        Assert.False(DueAt(worker, T0.AddMinutes(59)));
+        Assert.True(DueAt(worker, T0.AddMinutes(61)));
+    }
+
+    [Fact]
+    public void SoonerStamp_IsTheEarlierOfTwoAbsoluteTimes_AndTiesKeepTheFirst()
+    {
+        Assert.Equal(T0, DarlingWorker.SoonerStamp(T0, T0.AddHours(1)));
+        Assert.Equal(T0, DarlingWorker.SoonerStamp(T0.AddHours(1), T0));
+        Assert.Equal(T0, DarlingWorker.SoonerStamp(T0, T0));
+        Assert.Equal(DateTime.MinValue, DarlingWorker.SoonerStamp(DateTime.MinValue, T0));
+    }
+
+    [Fact]
     public async Task ACancelledOrFailedPass_ChangesNothing()
     {
         var worker = MakeWorker(out var log);
@@ -221,7 +245,7 @@ public sealed class PurgeContinuationTests
         var note = worker.IndexOf("internal bool NotePurgePassEnded(", StringComparison.Ordinal);
         Assert.True(note > 0);
         var body = System.Text.RegularExpressions.Regex.Replace(worker[note..(note + 900)], @"\s+", " ");
-        Assert.Contains("lock (_purgeTaskLock) { if (_nextPurgeUtc <= continueAtUtc)", body, StringComparison.Ordinal);
+        Assert.Contains("lock (_purgeTaskLock) { var sooner = SoonerStamp(_nextPurgeUtc, continueAtUtc); if (sooner == _nextPurgeUtc)", body, StringComparison.Ordinal);
 
         /* The note is the sweep's own result: not inside a catch or finally, which would also run on a failure. */
         Assert.DoesNotContain("finally\n        {\n            NotePurgePassEnded", worker.Replace("\r\n", "\n"), StringComparison.Ordinal);

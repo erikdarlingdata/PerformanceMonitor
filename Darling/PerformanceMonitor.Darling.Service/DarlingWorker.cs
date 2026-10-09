@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -11234,6 +11234,17 @@ AND   j.hypertable_name = '{relation}'", connection))
     internal static readonly TimeSpan PurgeContinuationDelay = TimeSpan.FromHours(1);
 
     /// <summary>
+    /// #5592 (#4732): the earlier of two absolute due times. Both arguments are stamps, not a stamp and the clock, so a
+    /// wall clock that stepped backwards cannot strand the work here the way a raw compare of a stamp against now does:
+    /// a stamp left far in the future by a step back is simply the later one and is replaced, so the continuation is
+    /// still due within <see cref="PurgeContinuationDelay"/> of the pass's end (the stamp is not read as due at once,
+    /// which would start the next drain with no gap for collection). A stamp already sooner, or equal, is returned as it
+    /// is. Internal so a test can pin the table.
+    /// </summary>
+    internal static DateTime SoonerStamp(DateTime firstUtc, DateTime secondUtc) =>
+        firstUtc <= secondUtc ? firstUtc : secondUtc;
+
+    /// <summary>
     /// #5592: called by the scheduled pass and by <c>purge_now</c> when the retention sweep returns. When the sweep
     /// stopped on its wall budget with tables left, the next scheduled pass becomes due at most
     /// <see cref="PurgeContinuationDelay"/> after <paramref name="endUtc"/>: <c>_nextPurgeUtc</c> moves to the sooner of
@@ -11252,12 +11263,13 @@ AND   j.hypertable_name = '{relation}'", connection))
         var continueAtUtc = endUtc + PurgeContinuationDelay;
         lock (_purgeTaskLock)
         {
-            if (_nextPurgeUtc <= continueAtUtc)
+            var sooner = SoonerStamp(_nextPurgeUtc, continueAtUtc);
+            if (sooner == _nextPurgeUtc)
             {
                 return false;
             }
 
-            _nextPurgeUtc = continueAtUtc;
+            _nextPurgeUtc = sooner;
         }
 
         _logger.LogInformation(
