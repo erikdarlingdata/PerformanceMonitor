@@ -57,7 +57,7 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
 
     private static string Script() => Path.Combine(ParitySource.RepoRoot(), ".github", "scripts", "ci-select.py");
 
-    private string WriteMap(int schema = 1, string? builtAt = null)
+    private string WriteMap(int schema = 1, string? builtAt = null, string textPatterns = "\"install/**/*.sql\"")
     {
         var path = Path.Combine(_dir, "map-" + Guid.NewGuid().ToString("N") + ".json");
         builtAt ??= DateTime.UtcNow.ToString("o");
@@ -70,14 +70,15 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
                 "OwnTests":   {"own": 2, "files": [0], "seconds": 1.5},
                 "CoverTests": {"own": 4, "files": [1, 3], "seconds": 2.5},
                 "TextTests":  {"own": 5, "files": [], "seconds": 4.0}}},
-             "text_patterns": {"TextTests": ["install/**/*.sql"]}}
+             "text_patterns": {"TextTests": [@PATTERNS@]}}
             """.Replace("@SCHEMA@", schema.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal)
-                .Replace("@BUILT@", builtAt, StringComparison.Ordinal));
+                .Replace("@BUILT@", builtAt, StringComparison.Ordinal)
+                .Replace("@PATTERNS@", textPatterns, StringComparison.Ordinal));
         return path;
     }
 
     private (int ExitCode, JsonElement Result) MapSelect(string map, string[] files, string[]? drift = null,
-        string eventName = "pull_request")
+        string eventName = "pull_request", string? root = null)
     {
         var psi = new ProcessStartInfo("python")
         {
@@ -92,7 +93,7 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
         psi.ArgumentList.Add("--map");
         psi.ArgumentList.Add(map);
         psi.ArgumentList.Add("--root");
-        psi.ArgumentList.Add(Path.Combine(_dir, "tree"));
+        psi.ArgumentList.Add(root ?? Path.Combine(_dir, "tree"));
         psi.ArgumentList.Add("--event");
         psi.ArgumentList.Add(eventName);
         psi.ArgumentList.Add("--drift-file");
@@ -249,11 +250,59 @@ public sealed class CiSelectMapSelectGuardTests : IDisposable
     }
 
     [Fact]
-    public void KeepFullFile_InTheDrift_RunsEverything()
+    public void KeepFullFile_OnlyInTheDrift_GoesThroughTheClassLinks_AndIsNotFull()
+    {
+        // #5459: build.yml changed on dev after the map, and the pull request never touched it. A class that reads it
+        // as text is selected; the rest are not, and the run is not FULL.
+        var map = WriteMap(textPatterns: "\"install/**/*.sql\", \".github/workflows/build.yml\"");
+
+        var (_, r) = MapSelect(map, new[] { "Lite.Tests/Own.cs" }, new[] { ".github/workflows/build.yml" });
+
+        Assert.False(r.GetProperty("full").GetBoolean(), r.ToString());
+        var why = Why(r);
+        Assert.Equal("text pattern", why["TextTests"]);
+        Assert.Equal("own file changed", why["OwnTests"]);
+        Assert.DoesNotContain("CoverTests", why.Keys);
+    }
+
+    [Fact]
+    public void KeepFullFile_InTheDrift_ThatNoClassKnows_IsFullForThatReason_NotAsAKeepFullFile()
     {
         var (_, r) = MapSelect(WriteMap(), new[] { "Lite.Tests/Own.cs" }, new[] { "Directory.Packages.props" });
 
-        AssertFull(r, "keep-full");
+        AssertFull(r, "Directory.Packages.props is in no class");
+    }
+
+    [Fact]
+    public void KeepFullFile_InBoth_TheDriftAndThePullRequest_IsFullBecauseOfThePullRequest()
+    {
+        var map = WriteMap(textPatterns: "\".github/workflows/build.yml\"");
+
+        var (_, r) = MapSelect(map, new[] { ".github/workflows/build.yml" }, new[] { ".github/workflows/build.yml" });
+
+        AssertFull(r, ".github/workflows/build.yml is a keep-full file");
+    }
+
+    [Fact]
+    public void ANewTestClass_AddedSinceTheMap_AlwaysRuns_EvenWhenOnlyDriftBroughtIt()
+    {
+        // The drift holds the new test file; the pull request's own change is unrelated. The class is not in the map
+        // and the tree has it, so it runs as a "new class" and nothing else about the run is FULL.
+        var (_, r) = MapSelect(WriteMap(), new[] { "Lite.Tests/Own.cs" }, new[] { "Lite.Tests/Fresh.cs" });
+
+        Assert.False(r.GetProperty("full").GetBoolean(), r.ToString());
+        Assert.Equal("new class", Why(r)["FreshTests"]);
+    }
+
+    [Fact]
+    public void ATreeScan_ThatFindsNoClass_RunsEverything_SoNoNewClassIsLeftOutSilently()
+    {
+        var empty = Path.Combine(_dir, "empty-tree");
+        Directory.CreateDirectory(empty);
+
+        var (_, r) = MapSelect(WriteMap(), new[] { "Lite.Tests/Own.cs" }, root: empty);
+
+        AssertFull(r, "no test class was found in the tree for suite lite");
     }
 
     [Fact]

@@ -659,6 +659,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     A class is selected when it carries Stage=Guard, its own file changed, it covers a changed file, a text pattern
     of it matches a changed file, it reads the whole tree and any non-documentation file changed, or the map has
     never seen it. A file changed since the map counts as changed too (it may have grown new call edges).
+    A keep-full file forces FULL only when the pull request's own change holds it: one that changed on dev since
+    the map goes through the class links like any other drifted file.
 
     Returns `{"full": bool, "reason": str, "selected": {suite: [Class, ...]}, "why": {suite: {Class: reason}},
     "seconds": {suite: float}, "total": {suite: int}}`. FULL (never "nothing") whenever the map cannot be trusted:
@@ -692,10 +694,13 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     if len(drift) > max_drift:
         return _full(f"{len(drift)} files changed since the map (over {max_drift})")
 
-    effective = list(dict.fromkeys(list(changed) + list(drift)))
-    for f in effective:
+    # Keep-full is about THIS pull request's own change (merge base to head). A keep-full file that only changed on dev
+    # since the map's commit is not this pull request's doing and the dev run that merged it already tested it, so it
+    # goes through the class links like any other drifted file (#5459: ten pull requests were FULL for that alone).
+    for f in changed:
         if any(matches(p, f) for p in keep_full):
             return _full(f"{f} is a keep-full file")
+    effective = list(dict.fromkeys(list(changed) + list(drift)))
     live = [f for f in effective if not any(matches(p, f) for p in doc_patterns)]
     live_names = set(live)
 
@@ -742,6 +747,12 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                 continue  # a new test file: its classes are found through `discovered`
             return _full(f"new file not in the map: {f}")
         return _full(f"{f} is in no class, no text pattern and not in the map")
+
+    # A class the map has never seen runs because `discovered` lists it. If the tree scan found no class at all for a
+    # suite the map has classes for, the scan itself is broken and every new class would be silently left out.
+    for suite, entries in parsed.items():
+        if entries and not discovered.get(suite):
+            return _full(f"no test class was found in the tree for suite {suite}")
 
     live_set = set(live)
     selected: dict[str, list[str]] = {}
@@ -868,45 +879,110 @@ def shadow_summary(result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def failed_classes(reports: str) -> "tuple[dict[str, set[str]], dict[str, int]]":
-    """The classes with a failed test in the shards' xunit reports under `reports`, one subfolder per uploaded
-    artifact (`darling-tests-timing-N`, `lite-tests-timing-N`). Returns ({suite: {Class}}, {suite: report count})."""
+REPORT_ATTEMPT = re.compile(r"-a(\d+)\.xml$")
+
+
+def failed_classes(reports: str) -> "tuple[dict[str, set[str]], dict[str, int], int]":
+    """The classes with a failed test in the xunit reports under `reports`, one subfolder per uploaded artifact: the
+    shards' `darling-tests-timing-N` and `lite-tests-timing-N`, and the Guard tests job's `guard-tests-timing-darling`
+    and `guard-tests-timing-lite` (#5459). The suite is the one the folder name says.
+
+    A report named `...-a<N>.xml` was written by run attempt N. Staleness is decided per artifact folder: within a
+    folder, the reports of the highest attempt present are kept and the reports of a lower attempt are left out and
+    counted as stale. A shard that failed in attempt 1 and passed in attempt 2 uploads its artifact again with
+    `overwrite`, so the folder holds attempt 2 only; if an old attempt-1 file is still there, it must not list its
+    attempt-1 class (#5459, run 37776652739). A shard that passed in attempt 1 is not re-run by "Re-run failed jobs",
+    so its folder still holds only `-a1` files and they count in attempt 2. A report with no attempt in its name
+    always counts. Returns ({suite: {Class}}, {suite: report count}, stale report count)."""
     failed: dict[str, set[str]] = {"darling": set(), "lite": set()}
     seen: dict[str, int] = {"darling": 0, "lite": 0}
+    stale = 0
     if not os.path.isdir(reports):
-        return failed, seen
+        return failed, seen, stale
+    # (artifact folder, path) of every report, with the attempt its name carries (None when it carries none).
+    found: list[tuple[str, str, "int | None"]] = []
     for dirpath, _, names in os.walk(reports):
-        rel = os.path.relpath(dirpath, reports).replace("\\", "/")
-        suite = "darling" if rel.startswith("darling") else "lite" if rel.startswith("lite") else ""
+        top = os.path.relpath(dirpath, reports).replace("\\", "/").split("/")[0]
+        for name in names:
+            if name.endswith(".xml"):
+                written_by = REPORT_ATTEMPT.search(name)
+                found.append((top, os.path.join(dirpath, name), int(written_by.group(1)) if written_by else None))
+    latest: dict[str, int] = {}
+    for top, _, written_by in found:
+        if written_by is not None:
+            latest[top] = max(latest.get(top, written_by), written_by)
+    for top, path, written_by in found:
+        suite = "darling" if "darling" in top else "lite" if "lite" in top else ""
         if not suite:
             continue
-        for name in names:
-            if not name.endswith(".xml"):
-                continue
-            seen[suite] += 1
+        if written_by is not None and written_by < latest[top]:
+            stale += 1
+            continue
+        seen[suite] += 1
+        try:
+            for _, el in ET.iterparse(path, events=("end",)):
+                if el.tag == "test" and (el.get("result") or "").lower() == "fail":
+                    failed[suite].add(re.split(r"[.+/]", el.get("type") or "")[-1])
+                el.clear()
+        except (ET.ParseError, OSError):
+            seen[suite] -= 1  # an unreadable report counts as no report
+    return failed, seen, stale
+
+
+def failed_jobs(path: "str | None") -> "list[str] | None":
+    """Names of the jobs that concluded `failure`, from the latest attempt's job list (`gh api .../attempts/N/jobs`: one
+    `{"name", "conclusion"}` object per line, or the API's own `{"jobs": [...]}` object). None when it cannot be read.
+    A job that failed without a failed test (the whole-tree guards job ending on a leaked foreground thread) shows up
+    here and nowhere else."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    items: list = []
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            items = data["jobs"] if isinstance(data.get("jobs"), list) else [data]
+        elif isinstance(data, list):
+            items = data
+    except ValueError:
+        for line in text.splitlines():
             try:
-                for _, el in ET.iterparse(os.path.join(dirpath, name), events=("end",)):
-                    if el.tag == "test" and (el.get("result") or "").lower() == "fail":
-                        failed[suite].add(re.split(r"[.+/]", el.get("type") or "")[-1])
-                    el.clear()
-            except (ET.ParseError, OSError):
-                seen[suite] -= 1  # an unreadable report counts as no report
-    return failed, seen
+                items.append(json.loads(line))
+            except ValueError:
+                continue
+    return sorted({str(j.get("name")) for j in items if isinstance(j, dict) and j.get("conclusion") == "failure"})
 
 
-def shadow_row(selection: "dict | None", failed: "dict[str, set[str]]", seen: "dict[str, int]", meta: dict) -> dict:
+def shadow_row(selection: "dict | None", failed: "dict[str, set[str]]", seen: "dict[str, int]", meta: dict,
+               stale: int = 0, jobs: "list[str] | None" = None) -> dict:
     """One JSONL row per run: the selection's size and the classes that failed although it would not have run them.
-    A FULL (or missing) selection selects every class, so it can have no miss."""
-    sel = selection if isinstance(selection, dict) else _full("no selection was written")
+    A FULL (or missing) selection selects every class, so it can have no miss. `stale` counts the reports left out as
+    a lower attempt's in their artifact folder; `jobs` is the latest attempt's failed jobs (None when unknown)."""
+    if isinstance(selection, dict):
+        sel = selection
+    else:
+        # No selection file. When the selection job itself did not finish (a newer push cancels the run), say so: that
+        # is expected, not a script fault (#5459, run 37832135291).
+        job = str(meta.get("selection_job") or "")
+        sel = _full(f"the selection job ended {job}, so no selection was written" if job and job != "success"
+                    else "no selection was written")
     misses: list[dict] = []
     if not sel.get("full"):
         for suite in sorted(failed):
             chosen = set(sel.get("selected", {}).get(suite, []))
             misses += [{"suite": suite, "class": c} for c in sorted(failed[suite]) if c not in chosen]
-    return {"v": 1, **meta, "full": bool(sel.get("full")), "reason": sel.get("reason", ""),
-            "selected": {s: len(v) for s, v in sel.get("selected", {}).items()},
-            "total": sel.get("total", {}), "seconds": sel.get("seconds", {}),
-            "reports": seen, "failed": {s: sorted(v) for s, v in failed.items()}, "misses": misses}
+    row = {"v": 1, **meta, "full": bool(sel.get("full")), "reason": sel.get("reason", ""),
+           "selected": {s: len(v) for s, v in sel.get("selected", {}).items()},
+           "total": sel.get("total", {}), "seconds": sel.get("seconds", {}),
+           "reports": seen, "stale_reports": stale, "failed": {s: sorted(v) for s, v in failed.items()},
+           "misses": misses}
+    if jobs is not None:
+        row["failed_jobs"] = jobs
+    return row
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -970,6 +1046,11 @@ def main(argv: list[str]) -> int:
     sc.add_argument("--reports", required=True, help="a folder with one subfolder per timing artifact")
     sc.add_argument("--out", required=True, help="the one-row JSONL file to write")
     sc.add_argument("--meta", default="{}", help="JSON object merged into the row (run, sha, pr...)")
+    sc.add_argument("--attempt", type=int, help="the run attempt; accepted for callers, but it no longer filters: "
+                                                "staleness is decided per artifact folder (the `attempt` of --meta "
+                                                "still lands in the row)")
+    sc.add_argument("--jobs", help="the latest attempt's jobs, one {name, conclusion} JSON object per line; "
+                                   "the row lists the failed ones")
 
     args = ap.parse_args(argv)
     if args.replay:
@@ -1015,12 +1096,13 @@ def main(argv: list[str]) -> int:
                     selection = json.load(fh)
             except (OSError, ValueError):
                 selection = None
-        failed, seen = failed_classes(args.reports)
         try:
             meta = json.loads(args.meta)
         except ValueError:
             meta = {}
-        row = shadow_row(selection, failed, seen, meta if isinstance(meta, dict) else {})
+        meta = meta if isinstance(meta, dict) else {}
+        failed, seen, stale = failed_classes(args.reports)
+        row = shadow_row(selection, failed, seen, meta, stale, failed_jobs(args.jobs))
         with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
         for m in row["misses"]:

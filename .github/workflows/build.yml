@@ -459,9 +459,12 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           $failed = @()
           $suites = @(
-              @{ Name = 'Darling.Tests'; Project = 'Darling/Darling.Tests/Darling.Tests.csproj' },
-              @{ Name = 'Lite.Tests'; Project = 'Lite.Tests/Lite.Tests.csproj' }
+              @{ Name = 'Darling.Tests'; Key = 'darling'; Project = 'Darling/Darling.Tests/Darling.Tests.csproj' },
+              @{ Name = 'Lite.Tests'; Key = 'lite'; Project = 'Lite.Tests/Lite.Tests.csproj' }
           )
+          # #5459: one xunit report per suite, uploaded below, so the shadow check can list the Guard classes that failed.
+          # The attempt is in the file name: within this artifact, a lower attempt's file is stale next to a higher one.
+          New-Item -ItemType Directory -Force -Path TestResults | Out-Null
 
           foreach ($suite in $suites) {
               $lines = @(dotnet run --project $suite.Project -c Release --no-build -- -list classes/json -trait Stage=Guard)
@@ -475,7 +478,7 @@ jobs:
 
               # -failSkips: this job has no PostgreSQL, so a tagged test that needs a store would SKIP, and a skip
               # exits 0. Failing skips turns that into a red job (#5471 review M1). Both suites skip none today.
-              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard -failSkips
+              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard -failSkips -xml "TestResults/guard-$($suite.Key)-a${{ github.run_attempt }}.xml"
               if ($LASTEXITCODE -ne 0) {
                   Write-Host "::error title=Guard tests failed::$($suite.Name) failed its Stage=Guard classes (exit $LASTEXITCODE). The shards were skipped on this pull request."
                   $failed += $suite.Name
@@ -483,6 +486,30 @@ jobs:
           }
 
           if ($failed.Count -gt 0) { throw "Guard classes failed in: $($failed -join ', ')" }
+
+      # #5459: the Guard classes' xunit reports, whatever the step above did, for the shadow check (which lists the
+      # failed classes of every report). Informational: a failed upload never turns the job red.
+      - name: Upload the Guard darling report
+        if: steps.decide.outputs.run == 'true' && always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: guard-tests-timing-darling
+          path: TestResults/guard-darling-*.xml
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Upload the Guard lite report
+        if: steps.decide.outputs.run == 'true' && always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: guard-tests-timing-lite
+          path: TestResults/guard-lite-*.xml
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
 
   build:
     needs: [gate, guard-tests]
@@ -1937,7 +1964,7 @@ jobs:
               Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
               # -xml: per-test durations for the darling-tests-timing artifact (#5459 change 4: the test map's
               # selection estimates need a per-class Darling time, and none was recorded before).
-              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @chunkArgs -trx TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx -xml TestResults/darling-timing-${{ matrix.shard }}-$chunkNumber.xml -longRunning 300 | Tee-Object -FilePath TestResults/darling-runner-${{ matrix.shard }}.log -Append
+              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @chunkArgs -trx TestResults/darling-pr-${{ matrix.shard }}-$chunkNumber.trx -xml TestResults/darling-timing-${{ matrix.shard }}-$chunkNumber-a${{ github.run_attempt }}.xml -longRunning 300 | Tee-Object -FilePath TestResults/darling-runner-${{ matrix.shard }}.log -Append
               if ($LASTEXITCODE -ne 0) {
                   $failedChunks++
                   Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
@@ -2002,6 +2029,12 @@ jobs:
           name: darling-tests-timing-${{ matrix.shard }}
           path: TestResults/darling-timing-*.xml
           retention-days: 7
+          # A re-run of this shard uploads the same name in a later attempt; without overwrite the upload fails and the
+          # attempt-1 report stays. With it the artifact is replaced whole, so a folder holds one attempt's files. The xml
+          # file names carry the attempt: the shadow check keeps, per artifact folder, the files of the highest attempt in
+          # it and counts lower ones as stale. A shard that passed in attempt 1 is not re-run by "Re-run failed jobs", so
+          # its folder keeps its -a1 files and they still count in attempt 2.
+          overwrite: true
           if-no-files-found: ignore
 
       # #5587: the runner output, kept when the shard fails, is cancelled or its test step times out. The job's own
@@ -2920,7 +2953,7 @@ jobs:
               $chunkLength = ($chunk | ForEach-Object { '-class'.Length + 1 + $_.Length + 1 } | Measure-Object -Sum).Sum
               Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count): $($chunk.Count) classes, $chunkLength characters"
               # -xml: per-test durations for the lite-tests-timing artifact (#5208).
-              dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs -xml TestResults/lite-timing-${{ matrix.shard }}-$chunkNumber.xml -longRunning 300 | Tee-Object -FilePath TestResults/lite-runner-${{ matrix.shard }}.log -Append
+              dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @chunkArgs -xml TestResults/lite-timing-${{ matrix.shard }}-$chunkNumber-a${{ github.run_attempt }}.xml -longRunning 300 | Tee-Object -FilePath TestResults/lite-runner-${{ matrix.shard }}.log -Append
               if ($LASTEXITCODE -ne 0) {
                   $failedChunks++
                   Write-Host "shard ${{ matrix.shard }} chunk $chunkNumber of $($chunks.Count) failed with exit code $LASTEXITCODE"
@@ -2945,6 +2978,7 @@ jobs:
             TestResults/lite-timing-*.xml
             TestResults/lite-timing-*.xml.cpu.json
           retention-days: 7
+          overwrite: true
           if-no-files-found: ignore
 
       # #5587: the runner output, uploaded whatever the test step did (see the note on the test step).
@@ -3027,6 +3061,7 @@ jobs:
           name: test-map-shadow-selection
           path: shadow/selection.json
           retention-days: 7
+          overwrite: true
           if-no-files-found: ignore
 
   # The second half of shadow mode: after every shard has finished, list each class that FAILED although the map
@@ -3036,13 +3071,14 @@ jobs:
   # continue-on-error like the job above: it can lengthen the run by its own thirty seconds and cannot redden it.
   shadow-check:
     name: Test map shadow check
-    needs: [gate, test-map-shadow, darling-pg, lite-tests]
+    needs: [gate, guard-tests, test-map-shadow, darling-pg, lite-tests]
     if: always() && github.event_name == 'pull_request' && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7
         continue-on-error: true
@@ -3071,12 +3107,19 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           MAP_SHA: ${{ needs.gate.outputs.test_map_sha }}
+          SELECTION_JOB: ${{ needs.test-map-shadow.result }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
 
-          meta=$(printf '{"run":"%s","attempt":"%s","pr":"%s","head":"%s","map_sha":"%s"}' "${RUN_ID}" "${RUN_ATTEMPT}" "${PR_NUMBER}" "${HEAD_SHA}" "${MAP_SHA}")
+          meta=$(printf '{"run":"%s","attempt":"%s","pr":"%s","head":"%s","map_sha":"%s","selection_job":"%s"}' "${RUN_ID}" "${RUN_ATTEMPT}" "${PR_NUMBER}" "${HEAD_SHA}" "${MAP_SHA}" "${SELECTION_JOB}")
           mkdir -p shadow
-          if timeout 120 python .github/scripts/ci-select.py shadow-check --selection shadow/selection/selection.json --reports shadow/reports --out shadow/row.jsonl --meta "${meta}"; then
+          # The latest attempt's jobs: the row lists the failed ones (a job can fail with no failed test). The check
+          # does not filter reports by this attempt: it keeps each artifact folder's highest attempt (#5459). A failed call
+          # only leaves failed_jobs out of the row.
+          gh api --paginate "repos/${GH_REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" --jq '.jobs[] | {name, conclusion}' > shadow/jobs.jsonl || rm -f shadow/jobs.jsonl
+          if timeout 120 python .github/scripts/ci-select.py shadow-check --selection shadow/selection/selection.json --reports shadow/reports --out shadow/row.jsonl --meta "${meta}" --jobs shadow/jobs.jsonl; then
             { echo "### Test map shadow check (#5459)"; echo; echo '```json'; cat shadow/row.jsonl; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
           else
             echo "::notice title=Test map shadow check::The check script failed, so this run has no shadow row."
@@ -3090,6 +3133,7 @@ jobs:
           name: test-map-shadow-row
           path: shadow/row.jsonl
           retention-days: 30
+          overwrite: true
           if-no-files-found: ignore
 
   # The one result branch protection can require. Four matrix legs cannot each be a required check
