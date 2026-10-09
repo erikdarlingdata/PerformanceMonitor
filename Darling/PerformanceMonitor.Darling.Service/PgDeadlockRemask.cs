@@ -1816,6 +1816,14 @@ AND   xmin = $3::xid";
                         page = (next is null, e);
                     }
 
+                    if (stage.ConsecutiveFailures > 0)
+                    {
+                        /* #5634: the failure warnings end at the last failure; without this line nothing says the stage came back. */
+                        logger.LogInformation(
+                            "PostgreSQL deadlocks: re-masking stored {Stage} rows recovered; {Failures} earlier pass(es) in a row had failed, and this one succeeded",
+                            stage.Name, stage.ConsecutiveFailures);
+                    }
+
                     stage.ConsecutiveFailures = 0;
                     examined += page.Examined;
                     if (page.End)

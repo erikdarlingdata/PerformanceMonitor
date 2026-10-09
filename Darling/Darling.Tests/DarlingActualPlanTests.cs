@@ -262,6 +262,7 @@ public sealed class ActualPlanDispatchTests
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time = $2", sql, StringComparison.Ordinal);
         Assert.Contains("session_id = $3", sql, StringComparison.Ordinal);
+        Assert.Contains("database_name IS NOT DISTINCT FROM $4", sql, StringComparison.Ordinal);
         AssertReadOnlyResolver(sql);
     }
 

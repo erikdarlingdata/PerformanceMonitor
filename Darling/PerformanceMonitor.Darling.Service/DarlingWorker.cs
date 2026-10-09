@@ -13684,14 +13684,17 @@ LIMIT 1";
 
     /// <summary>The <c>query_snapshots</c> resolver — the Wait drill-down surface's identifier (server_id +
     /// collection_time + session_id) to that captured request's query text, plan (live preferred), and isolation
-    /// level. $1 server_id, $2 collection_time, $3 session_id. The exact-timestamp match keys the one snapshot
-    /// the row represents.</summary>
+    /// level. $1 server_id, $2 collection_time, $3 session_id, $4 database_name. The exact-timestamp match keys the
+    /// one snapshot the row represents, and the row must also be in the database the request names (the other two
+    /// resolvers match the database the same way; a row stored with no database matches a request with none), so
+    /// the text that is re-executed is the text of the named database's session.</summary>
     public const string ResolveStoredSnapshotForActualPlanSql = @"
 SELECT query_text, COALESCE(live_query_plan, query_plan), transaction_isolation_level, NULL::bytea AS query_plan_gz
 FROM query_snapshots
 WHERE server_id = $1
 AND   collection_time = $2
 AND   session_id = $3
+AND   database_name IS NOT DISTINCT FROM $4
 AND   query_text IS NOT NULL
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -13845,9 +13848,9 @@ LIMIT 1";
     };
 
     /// <summary>Binds the store-resolution parameters ($1 server_id, then the identifier's $2/$3) for the request's
-    /// identifier kind. The snapshot's collection_time binds as a naive-UTC timestamp (Unspecified), matching how
-    /// the collector stores it.</summary>
-    private static void BindActualPlanResolveParameters(NpgsqlCommand command, int serverId, ActualPlanRequest request)
+    /// identifier kind (a snapshot also binds $4, the database name). The snapshot's collection_time binds as a
+    /// naive-UTC timestamp (Unspecified), matching how the collector stores it.</summary>
+    internal static void BindActualPlanResolveParameters(NpgsqlCommand command, int serverId, ActualPlanRequest request)
     {
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         switch (request.Source)
@@ -13866,6 +13869,12 @@ LIMIT 1";
                     TypedValue = DateTime.SpecifyKind(request.SnapshotCollectionTime!.Value, DateTimeKind.Unspecified),
                 });
                 command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = request.SnapshotSessionId!.Value });
+                // $4 is nullable text: a stored row with no database matches a request with none (IS NOT DISTINCT FROM).
+                command.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text,
+                    Value = request.DatabaseName is null ? DBNull.Value : request.DatabaseName,
+                });
                 break;
             default:
                 throw new InvalidOperationException($"no store resolver for actual-plan source {request.Source}");

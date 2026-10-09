@@ -366,7 +366,9 @@
   // three can run on one machine.
   //
   // OPT-IN NETWORK EXPOSURE for MCP (managed mode only) — omit "network" for the secure default
-  // (loopback-only, tokenless HTTP, today's behavior). When present with a non-loopback "listen", the
+  // (loopback-only, tokenless HTTP, today's behavior). A "token" or "encryptedToken" with no non-loopback
+  // "listen" keeps it loopback-only and gates the loopback listener on that token too: every local client
+  // presents "Authorization: Bearer <token>". When present with a non-loopback "listen", the
   // MCP host binds the LAN interface behind a REQUIRED bearer token + an in-app CIDR check, fail-closed
   // (any missing precondition — token / valid allowFrom / managed mode — keeps it loopback-only).
   // THREAT MODEL: the token gates the whole read surface AND analyze_server, which opens LIVE outbound
@@ -433,7 +435,8 @@
   // ?token=, which is exchanged for an HMAC-signed session cookie (then the token is stripped from the URL).
   // LOOPBACK is exempt from the CIDR check ONLY -- while exposed it presents the token like anyone else
   // (#1649: the Custom Views composer is a write path, so a tokenless local process could mutate views).
-  // A dashboard with NO "network" block registers no auth middleware at all and stays tokenless.
+  // A dashboard with NO token configured registers no auth middleware at all and stays tokenless. A "token" or
+  // "encryptedToken" with no non-loopback "listen" keeps it loopback-only and puts the same token gate on it.
   // Fail-closed: any missing precondition (token / valid allowFrom / managed mode) keeps it loopback-only.
   // TLS is OPT-IN via the "tls" block (#2562) and applies to the network listener only -- loopback stays
   // plain HTTP, because the certificate names the LAN address rather than "localhost". WITHOUT it the token

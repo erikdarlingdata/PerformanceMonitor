@@ -158,6 +158,8 @@ public static class ViewerActualPlanFlow
         prompt.AppendLine($"The service will EXECUTE this query against {serverDisplayName} in database {db} to capture its actual plan.");
         prompt.AppendLine();
         prompt.AppendLine("It runs as the service's stored monitoring login, with SET STATISTICS XML ON. All data results are discarded — only the plan is returned.");
+        prompt.AppendLine();
+        prompt.AppendLine(QueryModificationDetector.CapturedQueryNotice);
 
         var result = MessageBox.Show(
             owner,

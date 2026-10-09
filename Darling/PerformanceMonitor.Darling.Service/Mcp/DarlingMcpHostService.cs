@@ -44,14 +44,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para><b>Network exposure — off by default, secure by default (darling-network-endpoints, D3):</b>
 /// with no <c>mcp.network</c> block the server binds loopback only and is TOKENLESS — byte-for-byte
-/// today's local MCP, so existing local clients are unaffected. An opt-in <c>mcp.network</c> block
+/// today's local MCP, so existing local clients are unaffected. A token the operator configured
+/// (<c>mcp.network.encryptedToken</c> / <c>token</c>) gates the loopback-only listener too, whatever the bind mode
+/// (<see cref="ResolveLoopbackOnlyToken"/>). An opt-in <c>mcp.network</c> block
 /// (MANAGED MODE ONLY) binds the specified LAN interface (plus both loopback families) behind two
-/// middlewares installed FIRST in the pipeline, before any MCP handler/handshake: an in-app CIDR check on
+/// middlewares installed in the pipeline before the JSON-only POST check, any MCP handler or the handshake: an in-app CIDR check on
 /// <c>RemoteIpAddress</c> (loopback always allowed, Round-4 #2) and an unconditional constant-time bearer
 /// token (NO loopback exemption — the loopback guard). The effective bind is decided by the pure
 /// <see cref="ResolveMcpBind"/>; the caller maps its reason to a severity — LogCritical on a missing
 /// precondition (token / valid allowFrom CIDR) and LogWarning in BYO mode — and degrades to loopback-only
-/// either way. Fail-closed, enforced HERE (the MCP host), NEVER in the all-fatal
+/// either way. A token that is configured but blank or cannot be decrypted is a different case: it stops the start. Fail-closed, enforced HERE (the MCP host), NEVER in the all-fatal
 /// <see cref="DarlingConfig.Validate"/> (the worker's abort would not stop this host). The scoped, idempotent
 /// firewall rule is created by the ELEVATED installer (#1771 — this account cannot); here it is only CHECKED
 /// and reported (defense-in-depth; the token + CIDR are the boundary, not the firewall).</para>
@@ -63,9 +65,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// proxy in front of the endpoint is the other answer). The two loopback listeners stay plain HTTP either way,
 /// because the certificate names the LAN address and that surface never leaves the machine; on a wildcard listen
 /// there is ONE listener and it serves HTTPS to loopback too. A certificate that cannot be used (unreadable,
-/// invalid, expired, not yet valid) degrades to loopback-only with a Critical line, as an unreadable token does,
-/// never to plain HTTP on the LAN. Unlike an unreadable token, a refused certificate leaves the token resolved,
-/// so the loopback-only server it degrades to keeps the bearer-token gate (and has no CIDR check: only the
+/// invalid, expired, not yet valid) degrades to loopback-only with a Critical line, never to plain HTTP on the
+/// LAN. Unlike a token that cannot be used (which stops the start in every mode), a refused certificate leaves the
+/// token resolved, so the loopback-only server it degrades to keeps the bearer-token gate (and has no CIDR check: only the
 /// loopback binds exist). The certificate's expiry reaches the worker's alert sweep through
 /// <see cref="McpTlsCertificateState"/>. Like the rest of <c>mcp.network</c>, the block is read once at start
 /// and a change takes a service restart.</para>
@@ -408,9 +410,9 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* In network mode ResolveMcpBind has already validated the listen IP, the allowFrom CIDR list (#5288),
                AND every entry's address-family agreement with the listen, so these two parses cannot throw; only
-               resolving the token can still fail (a corrupt DPAPI blob), which fail-closes to loopback-only
-               rather than exposing tokenless. The list type's default admits nobody, so the value the loopback
-               mode never reads fails closed too. */
+               resolving the token can still fail (a corrupt DPAPI blob), and a token that is blank or cannot be
+               decrypted stops the start, as it does in loopback-only mode. The list type's default admits nobody,
+               so the value the loopback mode never reads fails closed too. */
             IPAddress? networkListenIp = null;
             CidrAllowList allowedCidr = default;
             string bearerToken = "";
@@ -425,8 +427,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                     if (string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
-                            "MCP network token resolved to empty after decryption — refusing to expose; binding loopback-only.");
-                        networkMode = false;
+                            "MCP network token resolved to empty after decryption; MCP server not started.");
+                        await DisposeFailedStartAsync();
+                        return false;
                     }
                     else
                     {
@@ -442,16 +445,34 @@ public sealed class DarlingMcpHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogCritical(
-                        "MCP network token could not be decrypted ({Message}) — refusing to expose; binding loopback-only.",
+                        "MCP network token could not be decrypted ({Message}); MCP server not started.",
                         ex.Message);
-                    networkMode = false;
+                    await DisposeFailedStartAsync();
+                    return false;
                 }
+            }
+            else
+            {
+                /* A loopback-only start (no mcp.network.listen, or one the ladder refused) resolves a token the operator
+                   configured too, and the pipeline then gates the loopback listener on it exactly as it gates a
+                   degraded one. No token configured leaves bearerToken empty and the listener open to local clients,
+                   as it has always been. A configured token that cannot be used stops this start, because serving
+                   the listener open would drop the credential the operator asked every client to present. */
+                var loopbackToken = ResolveLoopbackOnlyToken(config.Mcp.Network, _logger);
+                if (loopbackToken.Refuse)
+                {
+                    await DisposeFailedStartAsync();
+                    return false;
+                }
+
+                bearerToken = loopbackToken.Token;
             }
 
             /* TLS for the network listener (#5288). Resolved HERE, in network mode only, for the reason the web host
                resolves its own here: loading a certificate reads files and a clock, and the pure bind ladder
-               (ResolveMcpBind) is kept free of both. A certificate failure therefore degrades exactly as the token
-               failure above does, Critical and then loopback-only, rather than needing a bind reason of its own. It
+               (ResolveMcpBind) is kept free of both. A certificate failure therefore degrades to loopback-only after a
+               Critical line (the token stays resolved and keeps gating the loopback listener), rather than needing a
+               bind reason of its own. It
                sits BEFORE primaryBind and before the Host-name decision further down, because a refusal changes the
                final mode and both read it.
 
@@ -708,19 +729,21 @@ public sealed class DarlingMcpHostService : BackgroundService
             _app = builder.Build();
 
             /* The Host guard also admits mcp.network.hostName (#5288), in NETWORK mode only (review F2). networkMode
-               is final by here (an unreadable token above has already made it loopback-only), and a loopback-only
+               is final by here (a token that cannot be used stops the start before this point), and a loopback-only
                server admits no extra name. This deliberately differs from the web host (#4220), which admits
                web.publicBaseUrl's host in both modes: MCP has no link builder that needs the name, and its
-               loopback surface is tokenless, so one more admitted name there would widen the very surface the
+               loopback surface is tokenless unless a token is configured, so one more admitted name there would widen the very surface the
                guard exists to protect and buy nothing. A name that is set but refused logs one Warning inside
                ResolveAllowedHostName and is not admitted (fail closed). */
             var allowedHostName = ResolveAllowedHostName(config.Mcp.Network?.HostName, networkMode, _logger);
 
             /* #5288: a start that was asked to expose and fell back to loopback-only AFTER its token resolved (the
                TLS block above refused) keeps the token gate on the loopback server, because the operator's config
-               said every client presents it. bearerToken is only ever assigned inside the network branch, once the
-               token resolved, so "not network mode, token set" is exactly that state. A start with no network block
-               and a start whose token could not be resolved both leave it empty, and stay tokenless as before. */
+               said every client presents it. bearerToken holds the resolved token in both branches above (the network
+               branch, and the loopback-only branch via ResolveLoopbackOnlyToken), so "not network mode, token set"
+               covers that state and a loopback-only start whose configured token resolved. A start with no token
+               configured leaves it empty and stays tokenless; a configured token that cannot be used never gets here,
+               the start stops in every mode. */
             var requireTokenWhenLoopbackOnly = !networkMode && bearerToken.Length > 0;
 
             /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
@@ -743,12 +766,12 @@ public sealed class DarlingMcpHostService : BackgroundService
             else
             {
                 _logger.LogInformation(
-                    "Starting MCP server on http://localhost:{Port} (loopback only) — enabled/port from {Origin}",
-                    effectivePort, origin);
+                    "Starting MCP server on http://localhost:{Port} (loopback only){TokenNote} — enabled/port from {Origin}",
+                    effectivePort, requireTokenWhenLoopbackOnly ? ", token required" : "", origin);
                 if (requireTokenWhenLoopbackOnly)
                 {
                     _logger.LogInformation(
-                        "The MCP loopback listener still requires the mcp.network token: the network block is configured, so local clients present it too.");
+                        "The MCP loopback listener requires the mcp.network token: local clients present it too.");
                 }
             }
 
@@ -984,7 +1007,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                any handler, and Darling registers no fallback CallToolHandler, so a tools/call for a tool
                outside the closure gets the SDK's own "unknown tool" error on /core. Security posture is
                inherited for free: this callback runs from inside the MCP transport, AFTER every _app.Use
-               middleware below (Host-header guard, bearer token, CIDR) — a /core request is refused there
+               middleware below (the Host guard, the CIDR check in network mode, the token gate when one is in force, and the JSON check) — a /core request is refused there
                exactly as a / request would be, before this callback, or MapMcp, ever runs.
                The subset holds only in Stateless mode, where this callback runs on every request. A stateful
                session is looked up by its id alone, not by route, so one opened on / could call any tool on
@@ -1370,10 +1393,10 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>
     /// The ONE extra Host the guard admits beside the names it always admits (#5288): the normalized
     /// <c>mcp.network.hostName</c>, or null for none. NETWORK mode only (review F2): in loopback-only mode, and in
-    /// every mode that degraded to it (an unreadable token, a refused certificate), it returns null even for a
-    /// valid name, because that surface is tokenless and the name exists for the network listener's clients. This
+    /// every mode that degraded to it (a refused certificate), it returns null even for a
+    /// valid name, because that surface is tokenless unless a token was configured and the name exists for the network listener's clients. This
     /// deliberately differs from the web host (#4220), which admits <c>web.publicBaseUrl</c>'s host in both
-    /// modes: MCP has no link builder, and its loopback surface is tokenless.
+    /// modes: MCP has no link builder, and its loopback surface is tokenless unless a token is configured.
     ///
     /// <para>A value that is SET but is not a bare DNS name (<see cref="McpNetworkConfig.NormalizeHostName"/>
     /// returns null for it while the raw value is not blank) logs ONE Warning and admits nothing: fail closed,
@@ -1406,8 +1429,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>
     /// The listen address the Host guard admits beside the loopback names (#5288): the parsed
     /// <c>mcp.network.listen</c> while the server is network-exposed, and null on a loopback-only server, which then
-    /// admits loopback names only. That includes a start that network mode degraded out of (a refused certificate, an
-    /// unreadable token): the address was parsed before the degrade and is still in hand, but nothing listens on it
+    /// admits loopback names only. That includes a start that network mode degraded out of (a refused certificate): the address was parsed before the degrade and is still in hand, but nothing listens on it
     /// any more, so a request that names it is not one this server was meant to answer. PURE;
     /// <paramref name="networkMode"/> must be the FINAL mode, after every degrade, because that is the whole rule.
     /// Both hosts hand <c>ConfigurePipeline</c> this answer, and the gate tests build their pipelines through it for
@@ -1415,6 +1437,56 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// </summary>
     internal static IPAddress? ResolveHostGuardListenIp(bool networkMode, IPAddress? networkListenIp)
         => networkMode ? networkListenIp : null;
+
+    /// <summary>The answer of <see cref="ResolveLoopbackOnlyToken"/>: the token the loopback-only listener's bearer gate
+    /// compares against (empty when none is configured, which leaves the listener open to local clients), and whether
+    /// the start must stop because a token that IS configured cannot be used.</summary>
+    internal readonly record struct LoopbackTokenResolution(bool Refuse, string Token);
+
+    /// <summary>
+    /// The bearer token for a loopback-only start (no <c>mcp.network.listen</c>, or one the bind ladder refused). A
+    /// token the operator configured gates the loopback listener whatever the bind mode: every client presents it,
+    /// exactly as on a network-exposed start. No token configured is <c>(false, "")</c> and the listener serves local
+    /// clients without one, as it always has. A configured token that resolves to nothing or cannot be decrypted
+    /// returns <c>Refuse</c> with one Critical line shaped like the network-mode token lines, because serving the
+    /// listener open would drop the credential the operator asked every client to present. The caller owns what a
+    /// refusal does (it fails the start). Reads the configured values only, never logs the token.
+    /// </summary>
+    internal static LoopbackTokenResolution ResolveLoopbackOnlyToken(McpNetworkConfig? network, ILogger logger)
+    {
+        if (network is null
+            || (string.IsNullOrWhiteSpace(network.EncryptedToken) && string.IsNullOrWhiteSpace(network.Token)))
+        {
+            return new LoopbackTokenResolution(false, "");
+        }
+
+        try
+        {
+            var token = network.ResolveToken(out var usedPlaintext);
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                logger.LogCritical(
+                    "MCP network token resolved to empty after decryption — refusing to serve the loopback listener without it; MCP server not started.");
+                return new LoopbackTokenResolution(true, "");
+            }
+
+            if (usedPlaintext)
+            {
+                logger.LogWarning(
+                    "mcp.network.token is set in plaintext (dev convenience) — prefer mcp.network.encryptedToken " +
+                    "(produced by --encrypt-password). This token gates ALL MCP access, loopback included.");
+            }
+
+            return new LoopbackTokenResolution(false, token);
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical(
+                "MCP network token could not be decrypted ({Message}) — refusing to serve the loopback listener without it; MCP server not started.",
+                ex.Message);
+            return new LoopbackTokenResolution(true, "");
+        }
+    }
 
     /// <summary>
     /// The end of the log line the Host guard writes for a refused name (#5288): it names the settings that decide the
@@ -1429,7 +1501,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <summary>
     /// Everything AFTER <c>builder.Build()</c>: the Host-allowlist/DNS-rebinding guard (both modes), the
     /// network-mode CIDR check, the bearer token (network mode, and a loopback-only server that kept it, see
-    /// <paramref name="requireTokenWhenLoopbackOnly"/>), then <c>MapMcp()</c> and <c>MapMcp("/core")</c>.
+    /// <paramref name="requireTokenWhenLoopbackOnly"/>), the JSON-only POST check, then <c>MapMcp()</c> and <c>MapMcp("/core")</c>.
     /// Extracted (#4128) so a live-HTTP test can build the SAME pipeline against a <c>TestServer</c> instead
     /// of a second, hand-copied one that could silently drift from production. The production call site
     /// passes exactly these values, in exactly this order — see <c>TryStartServerAsync</c>. Instance method,
@@ -1445,9 +1517,10 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// <para><paramref name="requireTokenWhenLoopbackOnly"/> (#5288) keeps the bearer-token gate on a loopback-only
     /// server, with no CIDR check beside it. The host passes true when network mode was configured and its token
     /// resolved, and the start then fell back to loopback-only (a refused TLS certificate): the operator's config
-    /// said every client presents the token, so a lapsed certificate does not leave the local listener open. A
-    /// loopback-only server that never had a network block, or whose token could not be resolved, passes false and
-    /// stays tokenless as before. Optional, so every other caller is unchanged.</para>
+    /// said every client presents the token, so a lapsed certificate does not leave the local listener open. It is
+    /// also true for a loopback-only start with a configured token (<see cref="ResolveLoopbackOnlyToken"/>). A
+    /// loopback-only server with no token configured passes false and stays tokenless as before. Optional, so every
+    /// other caller is unchanged.</para>
     /// </summary>
     internal void ConfigurePipeline(
         WebApplication app,
@@ -1488,15 +1561,11 @@ public sealed class DarlingMcpHostService : BackgroundService
         }
 
         /* DNS-rebinding guard (#1648) — the FIRST middleware, in BOTH modes, mirroring the web host's
-           #1576 fix. The loopback bind is tokenless by design (the network gates below install only in
-           network mode, plus the token on a degraded one), so a browser ON this host that loads attacker content could be rebound to
-           127.0.0.1:5152 and reach the MCP surface same-origin — and that surface is no longer read-only
-           (custom-view CRUD, add_servers/remove_server, alert-config writes). The application/json content
-           type does NOT save us: under a rebind the browser treats the request as same-origin, so no CORS
-           preflight applies. Require the Host header to name an address we actually bind — a loopback
-           name/IP or, in network mode, the configured listen IP. networkListenIp is null in loopback mode,
-           so ONLY loopback Hosts pass there; a rebound foreign hostname is rejected 400 before the bearer
-           check, the CIDR check, MapMcp, or any tool handler.
+           #1576 fix. The loopback bind is tokenless unless the operator configured a token (the CIDR check installs only in
+           network mode; the token gate installs in network mode and wherever a token was configured). The Host header
+           must name an address we actually bind: a loopback name/IP or, in network mode, the configured listen IP.
+           networkListenIp is null in loopback mode, so ONLY loopback Hosts pass there; any other Host is answered 400
+           before the bearer check, the CIDR check, MapMcp, or any tool handler.
 
            #5288: allowedHostName admits ONE more exact name (mcp.network.hostName, case-insensitive, no port),
            the standard AllowedHosts pattern: a rebind needs a hostname the ATTACKER chooses, and this admits
@@ -1530,9 +1599,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                 client must present the token; that IS the loopback guard against SSRF/sandboxed sockets). It is
                 installed in network mode, and also on a loopback-only server that network mode fell back to after
                 its token resolved (requireTokenWhenLoopbackOnly): the operator's config said every client presents
-                the token, so a refused certificate does not turn the local listener into a tokenless one.
+                the token, so a refused certificate does not turn the local listener into a tokenless one. It is
+                also installed on any loopback-only server whose operator configured mcp.network.token or
+                mcp.network.encryptedToken (ResolveLoopbackOnlyToken).
 
-           A loopback-only server with no network block stays byte-for-byte today's tokenless local MCP, so
+           A loopback-only server with no token configured stays byte-for-byte today's tokenless local MCP, so
            existing local clients keep working. */
         if (networkMode)
         {
@@ -1596,6 +1667,31 @@ public sealed class DarlingMcpHostService : BackgroundService
                 await next(context);
             });
         }
+
+        /* A POST must carry a JSON Content-Type; any other type is answered 415. This sits after the Host guard,
+           the CIDR check and the token gate, so a caller that fails a gate is answered 403 or 401 first, and
+           just above MapMcp, in both modes. The transport reads the body as JSON anyway. The check is the web
+           dashboard's own (DarlingWebEndpoints.IsJsonContentType), not a second parser. GET (the event stream)
+           and DELETE (session close) carry no body to type and pass. */
+        app.Use(async (context, next) =>
+        {
+            if (HttpMethods.IsPost(context.Request.Method)
+                && !DarlingWebEndpoints.IsJsonContentType(context.Request.ContentType))
+            {
+                var presentedType = context.Request.ContentType;
+                refusals.Report(
+                    _logger, "MCP", DarlingRefusalGate.JsonContentType, StatusCodes.Status415UnsupportedMediaType,
+                    context.Connection.RemoteIpAddress,
+                    string.IsNullOrEmpty(presentedType)
+                        ? "a POST with no Content-Type; this endpoint reads a JSON body"
+                        : $"a POST with the media type '{DarlingHttpRefusalLog.Sanitize(presentedType)}'; this endpoint reads a JSON body",
+                    DateTime.UtcNow);
+                context.Response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
+                return;
+            }
+
+            await next(context);
+        });
 
         app.MapMcp();
 
@@ -1817,7 +1913,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             case McpBindReason.ManagedModeRequired:
                 _logger.Log(level.Value,
                     "mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container, #1804) " +
-                    "only and is ignored; your own PostgreSQL/reverse proxy governs uncontained BYO exposure. Binding loopback-only.");
+                    "only, so listen and allowFrom are ignored; your own PostgreSQL/reverse proxy governs uncontained BYO exposure. " +
+                    "Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.");
                 break;
 
             default:

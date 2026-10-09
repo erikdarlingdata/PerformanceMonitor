@@ -1384,6 +1384,17 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # #5627: the Darling install and upgrade scripts of this commit, run over installs that real releases
+  # made, on windows-2022 and windows-2025 (darling-upgrade-shapes.yml, the same workflow a pull request
+  # touching Darling/tools runs). Gated like the other jobs here. It is NOT in publish's needs: a hosted-image
+  # change must not stop a nightly from publishing, and the job's own red status is the signal. The called
+  # workflow runs at this run's commit (github.sha), like every checkout in this file (#5616).
+  darling-upgrade-shapes:
+    name: Darling upgrade shapes
+    needs: check
+    if: needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true
+    uses: ./.github/workflows/darling-upgrade-shapes.yml
+
   # ── Linux artifact + container image (#1804) ─────────────────────────────────────────────────────
   # Runs in parallel with the windows build job — it shares only the check job's nightly stamp,
   # not any windows artifact. Publishes the linux-x64 service tar.gz with its own checksum file

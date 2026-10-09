@@ -144,6 +144,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 
 ### Changed
 
+- **Darling web sends browser security headers, the actual-plan confirmation says where the query came from, and connection-test errors carry less detail, and a configured token gates the loopback endpoints** ([#5636])
 - **Microsoft.Data.SqlClient moves to 7.1.1** ([#4963])
 - **Fleet Custom Views Query Store panels read the store's chunk floors once** ([#5001])
 - **Web System Events grids show the desktop's columns** ([#5118])
@@ -329,6 +330,7 @@ Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
 - **One-day Custom Views panels on Query Store data read an hourly rollup, or are refused up front** ([#5588], [#5610])
 - **Darling's hourly maintenance step over stored analysis findings no longer times out on a large store** ([#5626])
 - **Upgrade refusals no longer list the service's own files** ([#5627], [#5629])
+- **Darling's deadlock maintenance logs a line when a stage recovers after a failed pass** ([#5637])
 
 ## [3.9.0] - 2026-10-02
 
@@ -5193,3 +5195,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5626]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5626
 [#5627]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5627
 [#5629]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5629
+[#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
+[#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
