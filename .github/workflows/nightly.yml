@@ -12,7 +12,7 @@ on:
         required: false
         default: false
       publish:
-        description: 'Publish the release artifacts (gh release, the ghcr image push) once build, linux and the Darling PostgreSQL tests all succeed. Set false for a diagnostic re-run that should build and test without publishing.'
+        description: 'Publish the release artifacts (gh release, the ghcr image push) once build, linux, the Darling PostgreSQL tests and the Lite tests all succeed, on a run of the dev ref only. Set false for a diagnostic re-run that should build and test without publishing.'
         type: boolean
         required: false
         default: true

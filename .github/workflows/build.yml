@@ -641,6 +641,9 @@ jobs:
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
+              # #5616: the Lite shard script and its packer are test inputs (Lite.Tests CrossAppGuardCiGateTests parses the script), so an edit to either has to reach the Lite suite.
+              - '.github/scripts/run-lite-shard.ps1'
+              - '.github/scripts/lite-shard-pack.py'
               # #2489, changed by Erik's 2026-09-24 ruling that docs-only changes skip CI:
               # README.md and Lite/README.md used to sit here so LiteRuntimePrerequisiteDocsTests
               # (which reads these two READMEs against the built runtimeconfig and this file's
@@ -725,6 +728,9 @@ jobs:
               - 'Lite.Tests/LiteTimeRangeGapTests.cs'
               # #5596: Darling.Tests' WpfExitSwitchPinTests reads this project file for the WPF exit switch, so an edit to it has to reach the Darling suite.
               - 'Lite.Tests/Lite.Tests.csproj'
+              # #5616: the two shard scripts are run by the shard jobs and parsed by Darling.Tests pins.
+              - '.github/scripts/run-darling-pg-shard.ps1'
+              - '.github/scripts/run-lite-shard.ps1'
             # #5459 cut 3a: the part of `darling` that is NOT a Lite file. A diff that reaches `darling` through
             # these (or core, root, a release) runs the whole Darling suite; a diff that reaches it only through the
             # Lite entries above runs the Stage=Guard classes and the classes tagged Reads=Lite, which are the ones
@@ -733,6 +739,9 @@ jobs:
             darling_full:
               - 'Darling/**/!(*.md)'
               - '.github/workflows/nightly.yml'
+              # #5616: the two shard scripts are run by the shard jobs and parsed by Darling.Tests pins.
+              - '.github/scripts/run-darling-pg-shard.ps1'
+              - '.github/scripts/run-lite-shard.ps1'
             # The DOCUMENTATION allowlist: files that cannot affect a build under any
             # job in this workflow. Deliberately an allowlist of non-executable content,
             # not a "everything that isn't code" subtraction — a new file type defaults
@@ -2588,6 +2597,9 @@ jobs:
             lite_shard:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
+              # #5616: the Lite shard script and its packer are test inputs (Lite.Tests CrossAppGuardCiGateTests parses the script), so an edit to either has to reach the Lite suite.
+              - '.github/scripts/run-lite-shard.ps1'
+              - '.github/scripts/lite-shard-pack.py'
             # The rest of the build job's `lite` set: the three Darling trees Lite.Tests reads as source.
             # A diff that reaches ONLY these (no lite_shard, core_shard or root_shard entry) runs just the
             # Lite.Tests classes tagged [Trait("Reads", "Darling")], in one shard; see the scope step below.

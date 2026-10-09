@@ -1420,6 +1420,31 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>
+    /// The Lite shard script and its packer are test inputs, so every filter that gates a Lite run names them
+    /// (#5616). Without the entries a pull request that edits only one of them ran no shard at all.
+    /// </summary>
+    [Fact]
+    public void TheLiteFilters_NameTheShardScriptAndItsPacker()
+    {
+        var yaml = ReadBuildYaml(RepoRoot());
+
+        foreach (var filter in new[] { "lite", "lite_shard", "darling", "darling_full" })
+        {
+            var patterns = FilterPatterns(yaml, filter);
+            Assert.True(patterns.Count > 0, $"build.yml's '{filter}' filter is gone");
+            Assert.Contains(".github/scripts/run-lite-shard.ps1", patterns);
+            if (filter.StartsWith("lite", StringComparison.Ordinal))
+            {
+                Assert.Contains(".github/scripts/lite-shard-pack.py", patterns);
+            }
+            else
+            {
+                Assert.Contains(".github/scripts/run-darling-pg-shard.ps1", patterns);
+            }
+        }
+    }
+
+    /// <summary>
     /// The suite that reads the whole tree has to run on the whole tree.
     ///
     /// <para><see cref="EveryCrossAppSourceRead_IsReachableByTheFilterThatGatesItsSuite"/> above covers reads

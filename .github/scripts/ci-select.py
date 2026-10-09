@@ -382,13 +382,15 @@ def class_selected(suite: str, traits: set[str], d: dict) -> bool:
 #   * a .js/.mjs/.css/.html file, and a class whose source names a .js or .mjs file (the Node-driven classes load
 #     scripts through a harness that imports others);
 #   * any non-.cs file inside the class's own test project (a csproj, a fixture, a harness), or a build input
-#     (the workflow, this script, a props/csproj/lock file, global.json).
+#     (the workflow, this script, the shard scripts, a props/csproj/lock file, global.json).
 # When the changed file list is unknown (the API call failed, or it came back empty) nothing is skipped.
 
 SLOW_TRAIT = "Cost=Slow"
 _BUILD_INPUT_NAMES = {"directory.build.props", "directory.build.targets", "directory.packages.props", "global.json",
                       "nuget.config", "packages.lock.json"}
-_BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.py", ".github/darling-paths-filter.yml"}
+_BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.py", ".github/darling-paths-filter.yml",
+                      ".github/scripts/run-darling-pg-shard.ps1", ".github/scripts/run-lite-shard.ps1",
+                      ".github/scripts/lite-shard-pack.py"}
 _BUILD_INPUT_SUFFIXES = (".csproj", ".props", ".targets", ".sln", ".slnx")
 _WEB_SUFFIXES = (".js", ".mjs", ".css", ".html")
 

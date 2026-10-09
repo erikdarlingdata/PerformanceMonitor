@@ -225,6 +225,21 @@ public sealed class DarlingPathFilterGateTests
     }
 
     /// <summary>
+    /// The two CI shard scripts reach the Darling gate (#5616). The Darling PostgreSQL shard job runs
+    /// run-darling-pg-shard.ps1, and Darling.Tests parses both it and run-lite-shard.ps1, so a pull request
+    /// that edits only a script must not be waved through with every shard skipped.
+    /// </summary>
+    [Fact]
+    public void TheDarlingGate_CoversTheTwoShardScripts()
+    {
+        var patterns = FilterPatterns(ReadRepoFileLf(s_gateSegments), "darling");
+
+        Assert.NotEmpty(patterns);
+        Assert.Contains(".github/scripts/run-darling-pg-shard.ps1", patterns, StringComparer.Ordinal);
+        Assert.Contains(".github/scripts/run-lite-shard.ps1", patterns, StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// The coverage check reports an injected gap, the same shape as
     /// <see cref="TheCoverageCheck_ReportsAnInjectedGap"/> above and for the same reason: a parser that
     /// matched nothing would report this gate complete too, which is the failure this test would otherwise
