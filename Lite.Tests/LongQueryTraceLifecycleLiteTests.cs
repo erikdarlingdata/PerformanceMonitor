@@ -153,7 +153,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
-        await duckDb.InitializeFromTemplateAsync();
+        await duckDb.InitializeAsync();
 
         var servers = new ServerManager(_configDir);
         servers.AddServer(server);
@@ -173,7 +173,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
-        await duckDb.InitializeFromTemplateAsync();
+        await duckDb.InitializeAsync();
 
         var after = WireRig(duckDb, before.Servers, before.Schedules, before.Server, withInstallId: true);
         after.Listed = before.Listed.ToList();

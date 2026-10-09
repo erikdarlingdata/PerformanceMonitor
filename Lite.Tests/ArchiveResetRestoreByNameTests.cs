@@ -47,7 +47,7 @@ public sealed class ArchiveResetRestoreByNameTests : IDisposable
 
     private async Task SeedAsync(params string[] statements)
     {
-        await _duckDb.InitializeFromTemplateAsync();
+        await _duckDb.InitializeAsync();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
         foreach (var sql in statements)

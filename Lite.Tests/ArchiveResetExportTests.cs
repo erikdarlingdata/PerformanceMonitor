@@ -88,7 +88,7 @@ public sealed class ArchiveResetExportTests : IDisposable
     {
         var initializer = new DuckDbInitializer(_dbPath);
         _initializers.Add(initializer);
-        await initializer.InitializeFromTemplateAsync();
+        await initializer.InitializeAsync();
 
         await ExecAsync(@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)

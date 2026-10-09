@@ -100,7 +100,7 @@ public sealed class ArchiveWatermarkGreaterOfTests : IDisposable
 
     private async Task ExecuteAsync(params string[] statements)
     {
-        await _duckDb.InitializeFromTemplateAsync();
+        await _duckDb.InitializeAsync();
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         foreach (var sql in statements)
