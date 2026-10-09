@@ -339,14 +339,11 @@ FROM generate_series(1, 450) AS i", connection))
     /// <c>Analysis: </c> alerts that need nothing (97 metric names on every server, a tenth of the rows older than the
     /// finding-alert section); current deadlock alerts; and raw deadlock alerts on four servers, twelve at a time tied
     /// on one instant per server.</summary>
-    /// <summary>The finding-alert stage counts every probe against <see cref="PgDeadlockRemask.MaxAlertStepsPerPage"/>,
-    /// whatever a metric is called (#5625). 150 servers hold four ordinary metrics each (600 pairs, one alert apiece) and
-    /// the only <c>Analysis: </c> alerts are two at the last server: a page that counted only the steps onto an
-    /// Analysis metric would run all 600 probes in one statement chain. Each page here ends at its cap with a cursor
-    /// that moved, the cursor may rest on an ordinary metric (whose rows are not read: its name says it is no
-    /// Analysis one), and the walk still reaches the two alerts and ends.</summary>
+    /// <summary>The step caps, server ids below one, the cancel cursors and a server with thousands of alerts, one
+    /// scenario after another in one database (each empties the log first): they are small, and a database for each
+    /// would cost the class more than the checks do.</summary>
     [Fact]
-    public async Task FindingAlerts_TheStepCap_CountsEveryProbe_AndAnOrdinaryMetricCursorReadsNoRows()
+    public async Task TheGuardsOfTheTwoAlertStages_HoldOnTheirOwnData()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -357,6 +354,22 @@ FROM generate_series(1, 450) AS i", connection))
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+
+        await FindingAlerts_TheStepCap_CountsEveryProbe_AndAnOrdinaryMetricCursorReadsNoRows(connection, ct);
+        await TheStepCap_EndsADeadlockPage_AndServerIdsBelowOneAreWalkedByBothStages(connection, ct);
+        await ACancelMidPage_AcrossTwoServersOrTwoMetrics_LosesNoRowAndRepeatsNone(connection, ct);
+        await APageOnAServerWithThousandsOfAlerts_StopsAtThePageSize(connection, ct);
+    }
+
+    /// <summary>The finding-alert stage counts every probe against <see cref="PgDeadlockRemask.MaxAlertStepsPerPage"/>,
+    /// whatever a metric is called (#5625). 150 servers hold four ordinary metrics each (600 pairs, one alert apiece) and
+    /// the only <c>Analysis: </c> alerts are two at the last server: a page that counted only the steps onto an
+    /// Analysis metric would run all 600 probes in one statement chain. Each page here ends at its cap with a cursor
+    /// that moved, the cursor may rest on an ordinary metric (whose rows are not read: its name says it is no
+    /// Analysis one), and the walk still reaches the two alerts and ends.</summary>
+    private static async Task FindingAlerts_TheStepCap_CountsEveryProbe_AndAnOrdinaryMetricCursorReadsNoRows(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await ExecuteAsync(connection, "TRUNCATE config_alert_log", ct);
 
         var (drillDown, story) = PgDeadlockRemaskTests.LegacyFinding();
         var (metric, rawContext) = PgDeadlockRemaskTests.LegacyFindingAlert(drillDown, story, "5625abcd00000001");
@@ -397,18 +410,9 @@ FROM generate_series(0, 599) AS g", ct);
     /// servers with nothing to read (200 servers between two that hold deadlock alerts), and a server id of -1 or 0 is
     /// walked like any other: the walk starts below every id, not at 0 (#5625). The finding-alert stage meets the same
     /// ids.</summary>
-    [Fact]
-    public async Task TheStepCap_EndsADeadlockPage_AndServerIdsBelowOneAreWalkedByBothStages()
+    private static async Task TheStepCap_EndsADeadlockPage_AndServerIdsBelowOneAreWalkedByBothStages(NpgsqlConnection connection, CancellationToken ct)
     {
-        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert paging test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "TRUNCATE config_alert_log", ct);
 
         var (drillDown, story) = PgDeadlockRemaskTests.LegacyFinding();
         var (metric, rawContext) = PgDeadlockRemaskTests.LegacyFindingAlert(drillDown, story, "5625abcd00000002");
@@ -470,18 +474,9 @@ FROM generate_series(-1, 250) AS g", ct);
     /// told from the next row's by its server (deadlock alerts) or its server and metric (finding alerts), not by its
     /// time alone (#5625): rows of two servers, or two metrics, can carry the same <c>alert_time</c>. The row after the
     /// cancel is read again by the resumed page, and no row before it is.</summary>
-    [Fact]
-    public async Task ACancelMidPage_AcrossTwoServersOrTwoMetrics_LosesNoRowAndRepeatsNone()
+    private static async Task ACancelMidPage_AcrossTwoServersOrTwoMetrics_LosesNoRowAndRepeatsNone(NpgsqlConnection connection, CancellationToken ct)
     {
-        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert paging test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "TRUNCATE config_alert_log", ct);
 
         var at = new DateTime(2026, 10, 6, 12, 0, 0, DateTimeKind.Unspecified);
 
@@ -541,18 +536,9 @@ FROM generate_series(-1, 250) AS g", ct);
     /// <summary>A server (and metric) with thousands of alerts: a page reads the page size and the rows tied with its
     /// last, an ordered range of the index that stops there, not the server's whole set (#5625). Both stages, and the
     /// plans, on 6,000 alerts of one server.</summary>
-    [Fact]
-    public async Task APageOnAServerWithThousandsOfAlerts_StopsAtThePageSize()
+    private static async Task APageOnAServerWithThousandsOfAlerts_StopsAtThePageSize(NpgsqlConnection connection, CancellationToken ct)
     {
-        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live alert paging test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "TRUNCATE config_alert_log", ct);
 
         const int Alerts = 6_000;
         await using (var seed = new NpgsqlCommand(@"
