@@ -1409,6 +1409,7 @@ function Get-CimInstance {
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine(ConfirmProbeAclFunction);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
             $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4043-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -1427,6 +1428,7 @@ function Get-CimInstance {
                 $c.SetAccessRuleProtection($true, $false)
                 foreach ($s in $trusted) { $c.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
                 Set-Acl -LiteralPath $root -AclObject $c
+                Confirm-ProbeAcl 'rootHardened' $root $null @($trusted)
                 'lockedDownCount=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
 
                 # Phase 3: root stays clean, but the SERVICE EXE ALONE carries a broad grant - must still fire,
@@ -1438,6 +1440,7 @@ function Get-CimInstance {
                 foreach ($s in $trusted) { $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
                 $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'Allow')))
                 Set-Acl -LiteralPath "$root\svc.exe" -AclObject $x
+                Confirm-ProbeAcl 'exeGrantsAuthenticatedUsers' "$root\svc.exe" $null @($auth)
                 $exeFound = @(Get-UntrustedWriteGrantees "$root\svc.exe" $trusted)
                 'exeOnlyCount=' + $exeFound.Count
                 'exeNamesAuthUsers=' + (($exeFound -join ';') -match 'Authenticated Users')
@@ -1456,6 +1459,7 @@ function Get-CimInstance {
             """);
 
         var answers = RunWindowsPowerShell(probe.ToString());
+        AssertProbeSetupTook(answers);
 
         var inherited = int.Parse(answers.Find(a => a.StartsWith("inheritedCount=", StringComparison.Ordinal))!.Substring("inheritedCount=".Length));
         Assert.True(inherited > 0, "a folder made directly under the system drive root must inherit at least one write grant outside SYSTEM/Administrators/TrustedInstaller/the admin - if this box's C:\\ no longer grants one, the pre-lock check has nothing to prove here: " + string.Join(" | ", answers));
@@ -1496,6 +1500,7 @@ function Get-CimInstance {
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine(ConfirmProbeAclFunction);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
 
@@ -1561,6 +1566,7 @@ function Get-CimInstance {
                     $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'InheritOnly', 'Allow')))
                 }
                 Set-Acl -LiteralPath $tRoot -AclObject $sec
+                Confirm-ProbeAcl 'templateAces' $tRoot $null @($templates | ForEach-Object { New-Object System.Security.Principal.SecurityIdentifier($_, $null) })
                 'caseC_count=' + @(Get-UntrustedWriteGrantees $tRoot $trusted).Count
             }
             finally {
@@ -1570,6 +1576,7 @@ function Get-CimInstance {
             """);
 
         var answers = RunWindowsPowerShell(probe.ToString());
+        AssertProbeSetupTook(answers);
 
         Assert.Contains("caseA_fixedCount=0", answers);
         var oldCount = int.Parse(answers.Find(a => a.StartsWith("caseA_oldCount=", StringComparison.Ordinal))!.Substring("caseA_oldCount=".Length));
@@ -1770,6 +1777,7 @@ function Get-CimInstance {
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ConfirmProbeAclFunction);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
             $root = Join-Path $env:TEMP ('pm4043-m2-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -1788,6 +1796,8 @@ function Get-CimInstance {
                 foreach ($s in $trusted) { $rootSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
                 Set-Acl -LiteralPath $root -AclObject $rootSec
                 Set-Acl -LiteralPath "$root\clean" -AclObject $rootSec
+                Confirm-ProbeAcl 'rootHardened' $root $null @($trusted)
+                Confirm-ProbeAcl 'cleanChildHardened' "$root\clean" $null @($trusted)
                 icacls.exe "$root\clean\a.txt" /reset /Q 2>&1 | Out-Null
 
                 # Explicit write grant to Authenticated Users on a child file, root untouched.
@@ -1796,6 +1806,7 @@ function Get-CimInstance {
                 foreach ($s in $trusted) { $fileSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
                 $fileSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'Allow')))
                 Set-Acl -LiteralPath "$root\owned\evil.dll" -AclObject $fileSec
+                Confirm-ProbeAcl 'evilGrantsAuthenticatedUsers' "$root\owned\evil.dll" $null @($auth)
 
                 # A junction below the root - never descended, but reported on sight.
                 & cmd.exe /c mklink /J "$root\link" "$root\clean" | Out-Null
@@ -1817,6 +1828,7 @@ function Get-CimInstance {
             """);
 
         var answers = RunWindowsPowerShell(probe.ToString());
+        AssertProbeSetupTook(answers);
 
         Assert.Contains("cleanTreeOnlyCount=0", answers);
         var full = int.Parse(answers.Find(a => a.StartsWith("fullTreeCount=", StringComparison.Ordinal))!.Substring("fullTreeCount=".Length));
@@ -2128,6 +2140,7 @@ function Get-CimInstance {
         var probe = new StringBuilder();
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Lock-DarlingInstallTree"));
+        probe.AppendLine(ConfirmProbeAclFunction);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
             $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4034-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -2155,6 +2168,7 @@ function Get-CimInstance {
                 foreach ($s in @($system, $admins, $service)) { $j.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
                 $j.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactive, 'Read', 'Allow')))
                 Set-Acl -LiteralPath "$root\darling.json" -AclObject $j
+                Confirm-ProbeAcl 'configAces' "$root\darling.json" $null @($system, $admins, $service, $interactive)
                 # #4038 round 2's High: a child an ordinary user owns and grants to itself behind its own
                 # protection, as one who re-created it while an older install was open would leave it.
                 $p = New-Object System.Security.AccessControl.DirectorySecurity
@@ -2162,10 +2176,12 @@ function Get-CimInstance {
                 $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
                 $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
                 Set-Acl -LiteralPath "$root\planted" -AclObject $p
+                Confirm-ProbeAcl 'plantedAces' "$root\planted" $null @($me, $auth)
                 $x = New-Object System.Security.AccessControl.FileSecurity
                 $x.SetAccessRuleProtection($true, $false)
                 $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
                 Set-Acl -LiteralPath "$root\svc.exe" -AclObject $x
+                Confirm-ProbeAcl 'exeAce' "$root\svc.exe" $null @($me)
                 # A junction inside the tree (to the tree's own pg-runtime, so cleanup never leaves it).
                 & cmd.exe /c mklink /J "$root\planted-junction" "$root\pg-runtime" | Out-Null
 
@@ -2238,6 +2254,7 @@ function Get-CimInstance {
             """);
 
         var answers = RunWindowsPowerShell(probe.ToString());
+        AssertProbeSetupTook(answers);
 
         Assert.Contains("phase1Protected=True", answers);
         Assert.Contains("phase1Service=0", answers);
