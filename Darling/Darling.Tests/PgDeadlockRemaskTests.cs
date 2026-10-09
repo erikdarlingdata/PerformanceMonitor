@@ -577,7 +577,11 @@ public sealed class PgDeadlockRemaskTests
         await PlantAlertAsync(connection, now.AddDays(-1), null, goneJson, ct);
         var behind = new PgDeadlockRemask.RemaskProgress();
         behind.Alerts.WalkRewritten = 1;
-        behind.AlertCursor = DateTime.Parse(await ScalarTextAsync(connection, "SELECT to_char(max(alert_time), 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_alert_log", ct), CultureInfo.InvariantCulture);
+        /* Just past every alert in the walk's order: the last server, its deadlock metric, the newest alert_time. */
+        behind.AlertCursor = new PgDeadlockRemask.AlertLogCursor(
+            int.Parse(await ScalarTextAsync(connection, "SELECT max(server_id)::text FROM config_alert_log", ct), CultureInfo.InvariantCulture),
+            AlertEngine.DeadlockWatermarkMetric,
+            DateTime.Parse(await ScalarTextAsync(connection, "SELECT to_char(max(alert_time), 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_alert_log", ct), CultureInfo.InvariantCulture));
         await PgDeadlockRemask.RunAsync(connection, behind, s_key, NullLoggerFor(), ct);
         Assert.True(behind.Alerts.Done);
         Assert.Equal(3, behind.Alerts.Walks);
@@ -1068,7 +1072,8 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
         }
 
         Assert.DoesNotContain("unnest(", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$3", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
+        /* #5625: the slice is one server's ($1), after a time ($2), for a page size ($3); no fourth parameter carries a key. */
+        Assert.DoesNotContain("$4", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
         Assert.Contains("regexp_matches(p.context_json", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
     }
 
@@ -1393,7 +1398,7 @@ WHERE victim_pid = 10004", ct);
 
     /* A finding alert as the analysis sent it before #4005 for the legacy finding: the live context builder over
        that finding, so the flattened section, its note and the frozen prose carry what they carried then. */
-    private static (string Metric, string ContextJson) LegacyFindingAlert(
+    internal static (string Metric, string ContextJson) LegacyFindingAlert(
         string drillDown, string story, string storyPathHash, DateTime? windowStart = null, DateTime? windowEnd = null)
     {
         var finding = new AnalysisFinding
@@ -1562,7 +1567,7 @@ FROM generate_series(1, $6) AS g", connection);
     private static async Task<(int Alerts, int Findings, int Reports, int Failed)> RunPassAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         int alerts = 0, findings = 0, reports = 0, failed = 0;
-        DateTime? alertCursor = null;
+        PgDeadlockRemask.AlertLogCursor? alertCursor = null;
         do
         {
             var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, alertCursor, s_key, true, null, ct);
@@ -1639,7 +1644,7 @@ FROM generate_series(1, $6) AS g", connection);
 
     /* A finding as the analysis stored it before #4005: the exemplar's statement, fingerprint and graph raw, the
        fingerprint in its prose, and a hash over the raw graph (PgTargetDeadlockDrillDownTests' shape). */
-    private static (string DrillDown, string Story) LegacyFinding()
+    internal static (string DrillDown, string Story) LegacyFinding()
     {
         var lastSeen = new DateTime(2026, 9, 1, 12, 30, 15, 250);
         var sentence = $"Exemplars: 1 report captured. The most frequent 2-participant shape involves ShareLock on transaction with the victim `{LegacyVictimStatement}`, seen 1 time.";
@@ -1672,7 +1677,7 @@ FROM generate_series(1, $6) AS g", connection);
         return section.GetProperty("exemplars").GetRawText() + "\n" + section.GetProperty("note").GetString();
     }
 
-    private static async Task PlantFindingAsync(
+    internal static async Task PlantFindingAsync(
         NpgsqlConnection connection, long findingId, DateTime analysisTime, string drillDown, string story, CancellationToken ct,
         string storyPath = PgTargetFactKeys.DeadlockRate, string storyPathHash = "h", double severity = 0.9,
         DateTime? windowStart = null, DateTime? windowEnd = null)
