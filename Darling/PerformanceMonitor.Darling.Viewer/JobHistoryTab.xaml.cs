@@ -48,6 +48,12 @@ public partial class JobHistoryTab : UserControl
     public JobHistoryTab()
     {
         InitializeComponent();
+        /* #5562: the shared picker; the old combo defaulted to the last 24 hours and offered 7, 30 and 90 days, which are
+           one click away in the picker's presets (1w, 1mo) and a typed "90d". */
+        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
+        /* R8: the old "Last Year" (365 days). The parser has no year unit, so "1y" cannot be typed; this choice is the way to a year. */
+        TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.JobHistoryLongestChoice, "Last Year");
         /* #5565: a cross-server list has one fixed filter scope, so its filters survive a restart. */
         ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
@@ -88,6 +94,16 @@ public partial class JobHistoryTab : UserControl
     internal static Task ShowJobHistoryDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<ViewerJobHistoryRow> read) =>
         ViewerServerTab.ShowEventDataStartAsync(banner, probe, "Job History", startUtc, read.Select(r => r.RunDateTimeUtc), RowCap);
 
+    /// <summary>Sets the picker's "Data starts ..." note from the data-start probe the tab already awaited (#5562 R7): the floor its
+    /// "Showing since" banner reads, fed by <see cref="ViewerServerTab.UpdateTruncationBanner"/>. No query of its own.</summary>
+    internal void RecordDataStart(DateTime? floor)
+    {
+        if (TimeRangePickerControl.DataStartUtc != floor)
+        {
+            TimeRangePickerControl.DataStartUtc = floor;
+        }
+    }
+
     private async Task LoadJobsAsync()
     {
         if (_dataService == null)
@@ -102,18 +118,20 @@ public partial class JobHistoryTab : UserControl
 
         try
         {
-            var hoursBack = GetSelectedHoursBack();
+            var (windowStartUtc, windowEndUtc, windowIsLive) = ViewerTimeRangeWindow.Window(
+                TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone());
             int? serverId = GetSelectedServerId();
             /* #4966: the window's start is worked out once, and the read and the data-start probe both take it. The probe starts
                beside the read; its answer is awaited only after the rows are on screen, so a probe that fails costs the note and
                never the grid. */
-            var nowUtc = DateTime.UtcNow;
-            var sinceUtc = nowUtc.AddHours(-hoursBack);
+            var nowUtc = windowEndUtc;
+            var sinceUtc = windowStartUtc;
             /* The read and the data-start probe run together: priced as two. */
             using var readFanOut = ViewerReadFanOut.Of(2);
             var dataStartTask = _dataService.GetJobHistoryDataStartAsync(serverId, sinceUtc, nowUtc);
 
-            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap);
+            /* #5562 R6: a range that ended in the past sends its end to the read, so the end bound is applied before the row cap. */
+            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc);
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
             readFanOut.Release();
@@ -330,14 +348,6 @@ public partial class JobHistoryTab : UserControl
         CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
     }
 
-    private int GetSelectedHoursBack()
-    {
-        if (TimeRangeComboBox.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
-        {
-            return int.TryParse(tagStr, out var hours) ? hours : 24;
-        }
-        return 24;
-    }
 
     private int? GetSelectedServerId()
     {
@@ -451,6 +461,14 @@ public partial class JobHistoryTab : UserControl
     #endregion
 
     #region Event Handlers
+
+    private async void TimeRangePicker_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
+    {
+        if (IsLoaded)
+        {
+            await LoadJobsAsync();
+        }
+    }
 
     private async void Filter_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {

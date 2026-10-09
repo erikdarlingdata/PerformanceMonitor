@@ -21,6 +21,7 @@ using System.Windows.Navigation;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Mcp;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
@@ -489,15 +490,9 @@ public partial class SettingsWindow : Window
 
     private void LoadDefaultTimeRange()
     {
-        DefaultTimeRangeCombo.SelectedIndex = App.DefaultTimeRangeHours switch
-        {
-            1 => 0,
-            4 => 1,
-            12 => 2,
-            24 => 3,
-            168 => 4,
-            _ => 1
-        };
+        /* The default is a preset or a calendar period: default_time_range, else the legacy hours key through
+           FromLegacyHours (#5562). The picker's zone is this machine's, since no server is in play here. */
+        DefaultTimeRangePicker.Value = App.DefaultTimeRange;
     }
 
     /* The local WriteSetting alias is gone with #2433: every Save* below now mutates the one document
@@ -507,19 +502,16 @@ public partial class SettingsWindow : Window
 
     private void SaveDefaultTimeRange(JsonNode root)
     {
-        var hours = DefaultTimeRangeCombo.SelectedIndex switch
+        /* A typed or picked fixed range is not a default (it would reopen on a window that has moved on): the saved
+           default is left as it was. Everything else follows the one split the toolbar uses, so the two keys never disagree. */
+        var (rangeId, hours) = LiteTimeRange.SettingsFor(DefaultTimeRangePicker.Value);
+        if (rangeId == null && hours == null)
         {
-            0 => 1,
-            1 => 4,
-            2 => 12,
-            3 => 24,
-            4 => 168,
-            _ => 4
-        };
+            return;
+        }
 
-        App.DefaultTimeRangeHours = hours;
-
-        root["default_time_range_hours"] = hours;
+        App.ApplyDefaultTimeRange(rangeId, hours);
+        App.WriteDefaultTimeRange(root, rangeId, hours);
     }
 
     private void CopyMcpCommandButton_Click(object sender, RoutedEventArgs e)

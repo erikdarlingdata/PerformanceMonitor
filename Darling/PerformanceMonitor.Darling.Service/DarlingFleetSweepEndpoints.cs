@@ -97,10 +97,12 @@ internal static class DarlingFleetSweepEndpoints
         if (rawHours is not null
             && !int.TryParse(rawHours, NumberStyles.Integer, CultureInfo.InvariantCulture, out hours))
         {
-            return McpHelpers.Refusal("hours", $"Invalid hours value '{rawHours}'. Expected a whole number of hours (1-{McpHelpers.MaxHoursBack}).");
+            return McpHelpers.Refusal("hours", $"Invalid hours value '{rawHours}'. Expected a whole number of hours (1-{WebReadReach.All["get_sweep_reports"].MaxHours}).");
         }
 
-        return McpHelpers.ValidateWindow(hours, asOf, out endUtc);
+        /* The ceiling is get_sweep_reports' WebReadReach row, the number the sweeps page reads from the catalog, so the page and this
+           endpoint share one source (#5562 review r1 L7). The row stays at the default, so this is not an opted-in validator. */
+        return McpHelpers.ValidateWindow(hours, asOf, WebReadReach.All["get_sweep_reports"].MaxHours, out endUtc);
     }
 
     /// <summary>

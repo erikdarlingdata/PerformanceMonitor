@@ -67,22 +67,31 @@ public sealed class FinOpsWindowPickerBehaviourTests
 
         var first = t.GetProperty("first");
         Assert.Equal(new[] { "24" }, Hours(first));
-        Assert.Equal("1,4,12,24,168", string.Join(",", first.GetProperty("options").EnumerateArray().Select(e => e.GetString())));
+        // #5562 R5: the shared picker in its Compact, rolling-only form. Every FinOps read is hours back from now, so it offers
+        // no calendar period and no start-and-end boxes, nothing under an hour, and no length past the read's 7 day reach.
+        Assert.Equal("Past hour,Past 4 hours,Past day,Past 2 days,Past week", string.Join(",", first.GetProperty("options").EnumerateArray().Select(e => e.GetString())));
+        Assert.Equal("Quick ranges,Type a length", string.Join(",", first.GetProperty("shape").GetProperty("headings").EnumerateArray().Select(e => e.GetString())));
+        Assert.Equal(0, first.GetProperty("shape").GetProperty("dateBoxes").GetInt32());
+        var refused = first.GetProperty("refused");
+        Assert.Equal("This page reads at least 1h back from now.", refused.GetProperty("subHour").GetString());
+        Assert.Equal("This page reads a length back from now, so pick a rolling length such as 24h or 7d.", refused.GetProperty("calendar").GetString());
+        Assert.Equal("This page reads whole hours back from now, such as 6h or 3d.", refused.GetProperty("fractional").GetString());
+        Assert.Equal("This page's reads reach at most 7 days back.", refused.GetProperty("tooLong").GetString());
 
         // A pick reads again with the chosen hours.
         var picked = t.GetProperty("picked");
         Assert.Equal(new[] { "24", "4" }, Hours(picked));
-        Assert.Equal("4", picked.GetProperty("select").GetString());
+        Assert.Equal("Past 4 hours", picked.GetProperty("select").GetString());
 
         // The poll rebuilds the tab: same server, same window, one read with it.
         var rebuilt = t.GetProperty("rebuilt");
         Assert.Equal(new[] { "4" }, Hours(rebuilt));
-        Assert.Equal("4", rebuilt.GetProperty("select").GetString());
+        Assert.Equal("Past 4 hours", rebuilt.GetProperty("select").GetString());
 
         // Another server starts at the default.
         var other = t.GetProperty("other");
         Assert.Equal(new[] { "24" }, Hours(other));
-        Assert.Equal("24", other.GetProperty("select").GetString());
+        Assert.Equal("Past day", other.GetProperty("select").GetString());
     }
 
     [Fact]

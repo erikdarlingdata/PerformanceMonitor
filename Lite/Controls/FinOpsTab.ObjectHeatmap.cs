@@ -17,6 +17,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -44,13 +45,9 @@ public partial class FinOpsTab : UserControl
     private TextBlock? _objHeatmapPopupText;
     private DateTime _lastObjHeatmapHover;
 
-    private int GetObjectHeatmapDaysBack() => ObjectHeatmapWindowCombo?.SelectedIndex switch
-    {
-        0 => 7,
-        1 => 30,
-        2 => 90,
-        _ => 30
-    };
+    /// <summary>The heatmap reads whole days (#5562): the picker's range rounded up to days, at least 1; 30 when it cannot be used right now.</summary>
+    private int GetObjectHeatmapDaysBack() =>
+        Math.Max(1, (int)Math.Ceiling(LiteTimeRange.HoursBackOf(ObjectHeatmapWindowPicker, 720) / 24.0));
 
     /// <summary>Resets the Storage Growth drill back to the per-database parent view (server change / refresh).</summary>
     private void ResetStorageDrill()
@@ -68,7 +65,7 @@ public partial class FinOpsTab : UserControl
 
         StorageBackButton.Visibility = level == StorageDrillLevel.Parent ? Visibility.Collapsed : Visibility.Visible;
         var windowVisible = level == StorageDrillLevel.Objects ? Visibility.Visible : Visibility.Collapsed;
-        ObjectHeatmapWindowCombo.Visibility = windowVisible;
+        ObjectHeatmapWindowPicker.Visibility = windowVisible;
         ObjectHeatmapWindowLabel.Visibility = windowVisible;
 
         StorageBreadcrumb.Text = level switch
@@ -105,7 +102,7 @@ public partial class FinOpsTab : UserControl
             ShowStorageView(StorageDrillLevel.Parent);
     }
 
-    private async void ObjectHeatmapWindow_Changed(object sender, SelectionChangedEventArgs e)
+    private async void ObjectHeatmapWindow_RangeChanged(object? sender, TimeRangeChangedEventArgs e)
     {
         if (!IsLoaded || _dataService == null) return;
         if (_storageLevel != StorageDrillLevel.Objects || string.IsNullOrEmpty(_objDrillDb)) return;

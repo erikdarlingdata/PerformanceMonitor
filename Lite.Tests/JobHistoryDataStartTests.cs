@@ -217,7 +217,7 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         Assert.Equal(2000, JobHistoryTab.RowCap);
 
         var tab = StripComments(File.ReadAllText(RepoFile("Lite", "Controls", "JobHistoryTab.xaml.cs")).Replace("\r\n", "\n"));
-        Assert.Single(Regex.Matches(tab, @"GetJobHistoryWithClocksAsync\(startUtc, RowCap, serverId, openTabClocks\)"));
+        Assert.Single(Regex.Matches(tab, @"GetJobHistoryWithClocksAsync\(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc\)"));
         Assert.Single(Regex.Matches(tab, @"ServerTab\.CappedGridBannerAsync\(runTimes, RowCap,"));
     }
 
@@ -560,10 +560,10 @@ VALUES ($1, $2, $3, 'job_history', $4, 12, 'SUCCESS', 0)";
         var load = LoadJobsBody(tab);
 
         Assert.Single(Regex.Matches(load, @"var nowUtc = DateTime\.UtcNow;"));
-        Assert.Single(Regex.Matches(load, @"var startUtc = nowUtc\.AddHours\(-hoursBack\);"));
+        Assert.Single(Regex.Matches(load, @"var \(startUtc, rangeEndUtc\) = LiteTimeRange\.BoundsOf\(RangePicker, 24, nowUtc\);"));
         Assert.Empty(Regex.Matches(load, @"DateTime\.UtcNow\.AddHours"));
-        Assert.Single(Regex.Matches(load, @"_dataService\.GetJobHistoryWithClocksAsync\(startUtc,\s*RowCap,\s*serverId,\s*openTabClocks\)"));
-        Assert.Single(Regex.Matches(load, @"ShowDataStartNoteAsync\(serverId,\s*readClocks,\s*startUtc,\s*nowUtc,\s*all,\s*gen\)"));
+        Assert.Single(Regex.Matches(load, @"_dataService\.GetJobHistoryWithClocksAsync\(startUtc,\s*RowCap,\s*serverId,\s*openTabClocks,\s*rangeEndUtc\)"));
+        Assert.Single(Regex.Matches(load, @"ShowDataStartNoteAsync\(serverId,\s*readClocks,\s*startUtc,\s*rangeEndUtc \?\? nowUtc,\s*all,\s*gen\)"));
         Assert.Single(Regex.Matches(tab, @"service\.GetJobHistoryDataStartAsync\(serverId,\s*startUtc,\s*endUtc\)"));
         Assert.Single(Regex.Matches(tab, @"var openTabClocks = _openTabClocks\?\.Invoke\(\);"));
     }
