@@ -18,6 +18,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Tests;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -83,7 +84,7 @@ public class DeadlocksAzureLoopStateLiteTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
 
         var serverManager = new ServerManager(_configDir);
         /* A restart reads the same persisted config, so reuse the registered server rather than adding it twice. */

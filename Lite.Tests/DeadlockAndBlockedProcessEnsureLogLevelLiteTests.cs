@@ -119,7 +119,7 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
 
         var server = NewServer();
         var servers = new ServerManager(_configDir);

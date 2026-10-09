@@ -73,7 +73,7 @@ public sealed class WatermarkReadFailureLogTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
         _stores.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
         return duckDb;
     }
 

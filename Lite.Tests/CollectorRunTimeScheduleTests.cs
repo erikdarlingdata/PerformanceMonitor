@@ -907,7 +907,7 @@ public sealed class CollectorRunTimeStartupSeedTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(Path.Combine(_dir, "pm.duckdb"));
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
         var servers = new ServerManager(_dir);
         var server = new ServerConnection { ServerName = "seed-test", DisplayName = "seed-test" };
         servers.AddServer(server);

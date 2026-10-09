@@ -689,7 +689,7 @@ public sealed class CollectorRunHistoryArchiveTests : IDisposable
     public async Task ALoadTimeCollectorsLogRow_ThatArchivalMovedOutOfTheHotTable_StillReadsAsRan()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         var tenDaysAgo = DateTime.UtcNow.AddDays(-10).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
         var oneMinuteAgo = DateTime.UtcNow.AddMinutes(-1).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);

@@ -87,7 +87,7 @@ public sealed class StatementScrubDerivedStoreTests : IDisposable
     [Fact]
     public async Task AFindingBuiltFromARawPlantedRowStoresTheMarker()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var store = new FindingStore(_duckDb);
         var plainDrill = DrillDown(StatementScrubCanary.PlainStatement);
         var context = new AnalysisContext
@@ -136,7 +136,7 @@ public sealed class StatementScrubDerivedStoreTests : IDisposable
     [Fact]
     public async Task AnAlertBuiltFromARawPlantedRowStoresTheMarker()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var store = new DuckDbAlertHistoryStore(_duckDb);
         var serverKey = ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var contextJson = JsonSerializer.Serialize(new { dedup = "abc123", query_text = StatementScrubCanary.CanaryStatement });

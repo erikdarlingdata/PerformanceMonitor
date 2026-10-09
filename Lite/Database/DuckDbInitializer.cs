@@ -944,14 +944,27 @@ public partial class DuckDbInitializer : IDisposable
     /// Test seam (#5208): takes over a database file a test copied from one that <see cref="InitializeAsync"/>
     /// had already built, instead of rebuilding the schema. <see cref="InitializeAsync"/> holds the one
     /// process-wide write lock for its whole ~80-statement body, and a suite that runs it once per test class
-    /// or per test queues every other test's database read behind it. Only the sentinel is opened here, still
-    /// under the write lock, which is the last thing <see cref="InitializeAsync"/> does for a file that needs
-    /// no migration. Production never calls it.
+    /// or per test queues every other test's database read behind it. Only the identity row is renewed and the
+    /// sentinel opened here, still under the write lock, which is what <see cref="InitializeAsync"/> ends with
+    /// for a file that needs no migration. Production never calls it.
+    ///
+    /// <para>The copy gets its own <c>store_identity</c> row, as a file a real <see cref="InitializeAsync"/>
+    /// builds would: the template's row is copied with the file, so without this every copy would claim the
+    /// same identity and a test that compares two stores (or the interrupted-reset recovery's marker check)
+    /// would see them as one. The one-row UPDATE runs on a connection that closes before the sentinel opens,
+    /// so the change is checkpointed into the main file.</para>
     /// </summary>
     internal void AdoptInitializedFileForTests()
     {
         using var writeLock = AcquireWriteLock();
         ReleaseSentinel();
+        using (var connection = new DuckDBConnection(ConnectionString))
+        {
+            connection.Open();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "UPDATE store_identity SET id = CAST(uuid() AS VARCHAR)";
+            cmd.ExecuteNonQuery();
+        }
         ReopenSentinel();
         BumpArchiveViewGeneration();
     }

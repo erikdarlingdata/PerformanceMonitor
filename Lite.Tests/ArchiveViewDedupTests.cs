@@ -88,7 +88,7 @@ public class ArchiveViewDedupTests : IDisposable
     public async Task VJobHistory_DedupsReCollectedRowsOnServerAndInstanceId()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         using (var connection = await OpenAsync())
         {
@@ -144,7 +144,7 @@ VALUES
     public async Task VJobHistory_CollapsesAnArchivedAndALiveCopyOfOneRunWithTheSameRunDatetime()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         const string Columns = @"
     (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name,
@@ -194,7 +194,7 @@ VALUES
     public async Task VJobHistory_RunDatetimeFilterRunsBelowTheDedupAndReachesBothScans()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         const string Columns = @"
     (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name,
@@ -273,7 +273,7 @@ SELECT * FROM v_job_history WHERE run_datetime >= TIMESTAMP '2025-12-01 00:00:00
     public async Task VDefaultTraceEvents_DedupsReCollectedRowsOnEventTimeAndSequence()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         using (var connection = await OpenAsync())
         {
@@ -316,7 +316,7 @@ VALUES
     private async Task<int> StageDeadlocksAsync(string archived, string live)
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         using (var connection = await OpenAsync())
         {
             await StageArchiveAndRecollectAsync(connection, "deadlocks", archived, live);
@@ -336,7 +336,7 @@ VALUES
         var live = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
     (11, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>')";
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
         using (var connection = await OpenAsync())
         {
             await StageArchiveAndRecollectAsync(connection, "deadlocks", archived, live);

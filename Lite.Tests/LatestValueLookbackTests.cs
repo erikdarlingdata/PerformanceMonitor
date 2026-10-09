@@ -373,7 +373,7 @@ public sealed class LatestValueLookbackArchiveTests : IDisposable
     public async Task AGhostInTheArchive_IsNotCounted_AndALiveSeriesArchivedMinutesAgoStillIs()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))

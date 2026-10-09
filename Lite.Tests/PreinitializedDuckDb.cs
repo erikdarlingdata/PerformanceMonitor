@@ -22,9 +22,10 @@ namespace PerformanceMonitorLite.Tests;
 /// <para><b>What a copy is.</b> A byte copy of the file a real <c>InitializeAsync</c> built and closed,
 /// with the empty <c>archive</c> folder next to it. The archive views it carries read the live table alone (no
 /// Parquet file existed when they were built), so they hold no path and stay valid at any location. A test
-/// that adds Parquet files rebuilds the views through the code under test, as before. The schema stamps and
-/// the per-file <c>store_identity</c> row are copied too; two copies share one identity, which only a test
-/// that compares identities across files would notice, and none of the classes that use this does.</para>
+/// that adds Parquet files rebuilds the views through the code under test, as before. The schema stamps are
+/// copied too. The per-file <c>store_identity</c> row is copied with the file, then renewed by
+/// <see cref="DuckDbInitializer.AdoptInitializedFileForTests"/>, so every copy has its own identity as a
+/// freshly initialized store does.</para>
 /// </summary>
 internal static class PreinitializedDuckDb
 {
@@ -40,6 +41,16 @@ internal static class PreinitializedDuckDb
         var initializer = new DuckDbInitializer(path);
         try { initializer.InitializeAsync().GetAwaiter().GetResult(); }
         finally { initializer.Dispose(); }
+
+        /* The copy takes the main file only. A WAL left beside the template would hold committed work the
+           copies would silently lack. */
+        var wal = path + ".wal";
+        if (File.Exists(wal))
+        {
+            throw new InvalidOperationException(
+                $"The template database at {path} still has a WAL file after its initializer was disposed; "
+                + "a copy of the main file alone would miss it.");
+        }
 
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {

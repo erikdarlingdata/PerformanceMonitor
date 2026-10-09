@@ -138,7 +138,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [InlineData(QueryWindowRelation.Deadlocks)]
     public async Task RangeStartsBeforeTheOldestStoredRow_ShowsTheBanner(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var oldest = end.AddDays(-2);
         await SeedEventAsync(relation, oldest);
@@ -160,7 +160,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [InlineData(QueryWindowRelation.Deadlocks)]
     public async Task ServerAddedTwoDaysAgo_SaysSinceItsFirstCollection_NotItsFirstRow(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddDays(-2);
         await SeedLogRunsAsync(relation, added, end, 30);
@@ -181,7 +181,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [InlineData(QueryWindowRelation.Deadlocks)]
     public async Task QuietStart_StoreCoveredTheRange_FirstRowComesLate_ShowsNoBanner(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync(relation, end.AddDays(-9), end, 30);
         await SeedEventAsync(relation, end.AddDays(-7).AddHours(5));
@@ -202,7 +202,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [InlineData(QueryWindowRelation.Deadlocks)]
     public async Task QuietStart_WithAnOlderRowBeforeTheRange_ShowsNoBanner(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedEventAsync(relation, end.AddDays(-27));
         await SeedEventAsync(relation, end.AddHours(-2));
@@ -219,7 +219,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [InlineData(QueryWindowRelation.Deadlocks)]
     public async Task NothingInTheRange_ShowsNoBanner(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedEventAsync(relation, end.AddDays(-20));
 

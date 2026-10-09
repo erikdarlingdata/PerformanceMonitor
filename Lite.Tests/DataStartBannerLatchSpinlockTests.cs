@@ -123,7 +123,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [InlineData(QueryWindowRelation.SpinlockStats)]
     public async Task DataStartsInsideTheWindow_ShowsTheNote_AtTheFirstCollection(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         var added = end.AddDays(-2);
         await SeedLogRunsAsync(relation, added, end, 30);
@@ -141,7 +141,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
     [InlineData(QueryWindowRelation.SpinlockStats)]
     public async Task QuietStart_WindowIsCovered_FirstPointComesLate_ShowsNoNote(QueryWindowRelation relation)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync(relation, end.AddDays(-9), end, 30);
         await SeedRowAsync(relation, end.AddDays(-7).AddHours(5));

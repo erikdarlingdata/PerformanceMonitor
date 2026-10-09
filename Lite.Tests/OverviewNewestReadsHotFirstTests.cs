@@ -71,7 +71,7 @@ public sealed class OverviewNewestReadsHotFirstTests : IDisposable
     {
         var ct = TestContext.Current.CancellationToken;
         using var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         var hotNewest = new DateTime(2026, 9, 22, 21, 0, 0);
         var archivedNewest = new DateTime(2026, 8, 31, 23, 0, 0);

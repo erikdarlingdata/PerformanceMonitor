@@ -360,7 +360,7 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     {
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
 
         var server = new ServerConnection { ServerName = "alwayson.database.windows.net", DisplayName = "alwayson-" + Guid.NewGuid().ToString("N")[..8] };
         var servers = new ServerManager(_configDir);

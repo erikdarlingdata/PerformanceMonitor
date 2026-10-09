@@ -134,7 +134,7 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
 
         var duckDb = new DuckDbInitializer(_dbPath);
         _initializers.Add(duckDb);
-        await duckDb.InitializeAsync();
+        await duckDb.InitializeFromTemplateAsync();
 
         var servers = new ServerManager(_configDir);
         servers.AddServer(server);

@@ -90,7 +90,7 @@ public sealed class DatabaseStateNoVerdictTests : IDisposable
 
     private async Task SeedAsync(params string[] statements)
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await ExecAsync(statements);
     }
 

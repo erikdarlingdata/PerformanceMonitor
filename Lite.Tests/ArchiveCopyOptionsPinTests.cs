@@ -208,7 +208,7 @@ public sealed class ArchiveWriterRowGroupTests : IDisposable
     {
         var initializer = new DuckDbInitializer(_dbPath);
         _initializers.Add(initializer);
-        await initializer.InitializeAsync();
+        await initializer.InitializeFromTemplateAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
         {

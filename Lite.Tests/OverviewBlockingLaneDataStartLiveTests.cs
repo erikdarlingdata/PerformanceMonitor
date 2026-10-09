@@ -94,7 +94,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     [Fact]
     public async Task Notice_NamesTheLaterOfTheTwoSeriesStarts()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var blockingFrom = End.AddDays(-2);
         await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, blockingFrom, End);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-3), End);
@@ -109,7 +109,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     [Fact]
     public async Task QuietStart_BothCollectorsCoveredTheRange_ShowsNoNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, End.AddDays(-9), End);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
 
@@ -124,7 +124,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     [Fact]
     public async Task OneSeriesCovered_TheOtherStartedLate_NamesTheLateOne()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var lateFrom = End.AddDays(-2);
         await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, End.AddDays(-9), End);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, lateFrom, End);
@@ -139,7 +139,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     [Fact]
     public async Task AFailedProbe_CostsOnlyItsSeries()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var from = End.AddDays(-2);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, from, End);
         var service = new LocalDataService(_duckDb);
@@ -157,7 +157,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     [Fact]
     public async Task AFailedProbe_WithALateBar_AndACoveredOtherSeries_ShowsNoNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
         var service = new LocalDataService(_duckDb);
 
@@ -174,7 +174,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)";
     [Fact]
     public async Task AThrowingThresholdRead_KeepsTheXeOnlyAnswer_NotAFailedSeries()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var from = End.AddDays(-3);
         await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, from, End);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
@@ -250,7 +250,7 @@ VALUES ($1, $2, $3, $4, $2)";
     [Fact]
     public async Task DmvCoversTheRange_XeStartsMidway_NamesTheXeStart()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var xeFrom = End.AddDays(-2);
         await SeedDmvCoverageAsync(End.AddDays(-9), End);
         await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, xeFrom, End);
@@ -284,7 +284,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)";
     [Fact]
     public async Task ThresholdWentOnMidway_NamesTheFirstNonzeroSnapshot()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, End.AddDays(-9), End);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
         await SeedThresholdAsync(End.AddDays(-8), 0);
@@ -301,7 +301,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)";
     [Fact]
     public async Task NoServerConfigRows_IsAsBefore_ShowsNoNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, End.AddDays(-9), End);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
         await SeedXeReportAsync(End.AddDays(-2));
@@ -315,7 +315,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)";
     [Fact]
     public async Task XeCoversTheRange_ShowsNoNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedLogRunsAsync(QueryWindowRelation.BlockedProcessReports, End.AddDays(-9), End);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
         await SeedXeReportAsync(End.AddDays(-7).AddHours(5));
@@ -329,7 +329,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)";
     [Fact]
     public async Task DmvOnly_IsAsBefore_ShowsNoNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         await SeedDmvCoverageAsync(End.AddDays(-9), End);
         await SeedLogRunsAsync(QueryWindowRelation.Deadlocks, End.AddDays(-9), End);
 
@@ -342,7 +342,7 @@ VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)";
     [Fact]
     public async Task AShortWindow_StartsNoProbe_AndShowsNoNote()
     {
-        await _duckDb.InitializeAsync();
+        await _duckDb.InitializeFromTemplateAsync();
         var probes = 0;
 
         var (visible, _) = await NoteAsync(End.AddMinutes(-90), End, [], [], relation => { probes++; return Task.FromResult<DateTime?>(End); });
