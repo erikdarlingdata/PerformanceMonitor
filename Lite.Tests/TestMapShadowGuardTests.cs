@@ -471,7 +471,7 @@ public sealed class TestMapShadowGuardTests : IDisposable
             Assert.Contains("!cancelled()", Regex.Match(job, @"\n    if: [^\n]*").Value, StringComparison.Ordinal);
             var step = job[job.IndexOf("- name: Download the test map selection", StringComparison.Ordinal)..];
             step = step[..step.IndexOf("\n\n", StringComparison.Ordinal)];
-            Assert.Equal(1, Regex.Matches(job, "- name: Download the test map selection").Count);
+            Assert.Single(Regex.Matches(job, "- name: Download the test map selection"));
             Assert.Contains("id: map-selection", step, StringComparison.Ordinal);
             Assert.Contains("if: github.event_name == 'pull_request' && needs.test-map-select.result == 'success'", step, StringComparison.Ordinal);
             Assert.Contains("continue-on-error: true", step, StringComparison.Ordinal);
