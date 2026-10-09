@@ -184,8 +184,10 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
 
         var hourNow = ThisHour();
         await SeedAsync(connection, hourNow, ct);
+        await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Built, ct);
         var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         Assert.Equal(28, await BuildAllAsync(source, ct));
+        await ComposeStampLiveSupport.AssertPrecisionRowsHaveTeethAsync(connection, ct);
         return (scratch, connection, source, hourNow);
     }
 

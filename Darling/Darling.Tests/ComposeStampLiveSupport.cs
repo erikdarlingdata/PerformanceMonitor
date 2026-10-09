@@ -85,6 +85,85 @@ CROSS JOIN generate_series(1, 6) AS q
 CROSS JOIN generate_series(1, 3) AS p
 CROSS JOIN LATERAL (SELECT TIMESTAMP '{At(hourNow)}' - interval '30 hours' + h * interval '1 hour' + m * interval '5 minutes' AS ct) AS t", ct);
 
+    /// <summary>Where <see cref="SeedPrecisionRowsAsync"/> puts its rows: in hours the build covers (the rollup arm), after the
+    /// StampThrough of the 28-hour-to-40-minute window (the tail arm), or as late rows into a built hour (the stale arm, once the build
+    /// has run).</summary>
+    internal enum PrecisionSpot
+    {
+        Built = 0,
+        Tail = 1,
+        Stale = 2,
+    }
+
+    /// <summary>
+    /// #5582 part 3, lane 4c: rows a weighted sum built as <c>double precision</c> cannot hold. <c>avg_duration_us</c>, <c>avg_cpu_time_us</c>
+    /// and <c>execution_count</c> are all <c>bigint</c> in the wide table, so a stored average has no fraction; the loss shows in the
+    /// PRODUCT instead. Two kinds of rows, on servers 1 and 2:
+    /// <list type="bullet">
+    /// <item><b>63-bit rows</b> (<c>modP</c>): both products odd and near 6e18, so a double (53 bits) rounds each one; six stamps, and each
+    /// group (one stamp and server) holds 40 rows with different values, so its sum passes 2e20 and a running double sum rounds at every
+    /// step where a numeric sum rounds nowhere.</item>
+    /// <item><b>Tie rows</b> (<c>modT</c>): <c>execution_count</c> 1 and both averages 2^53 + 1, three rows to a group. A double holds 2^53
+    /// but not 2^53 + 1, so each product is rounded down to 2^53 (a tie), the group's double sum is 3 x 2^53 where the exact one is
+    /// 3 x 2^53 + 3, and the two final doubles differ. Rounding errors of a few hundred in the 63-bit sums can stay under half the ulp of
+    /// the final value and hide; this error cannot. Their maxima are 1, so the group ranks last in every Top N of a maximum and cannot move a tie at the Top N boundary.</item>
+    /// </list>
+    /// The seed's own products are all exact in a double (multiples of a large power of two), which is why it alone let a double-precision
+    /// weighted sum pass (lane 4b, red-plant 3). The spots matter because the three arms of the stamp relation build their partials
+    /// differently: the builder (rollup), <c>ComposeCompiler.PerRowPartial</c> (stale and tail). <c>Built</c> and <c>Tail</c> go in before
+    /// the build; <c>Stale</c> after it, and turns the pairs of the hour stale. <see cref="AssertPrecisionRowsHaveTeethAsync"/> checks the
+    /// built rows.
+    /// </summary>
+    internal static Task SeedPrecisionRowsAsync(NpgsqlConnection connection, DateTime hourNow, PrecisionSpot spot, CancellationToken ct)
+    {
+        /* (63-bit rows start, step minutes, tie rows start, step minutes): every stamp of the spot lies inside one hour. */
+        var (bigStart, bigStep, tieStart, tieStep) = spot switch
+        {
+            PrecisionSpot.Built => (hourNow.AddHours(-12), 7, hourNow.AddHours(-9), 5),
+            PrecisionSpot.Tail => (hourNow.AddMinutes(-110), 7, hourNow.AddMinutes(-95), 4),
+            _ => (hourNow.AddHours(-6).AddMinutes(8), 3, hourNow.AddHours(-6).AddMinutes(30), 2),
+        };
+        var salt = (int)spot;
+        return ExecAsync(connection, $@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
+SELECT TIMESTAMP '{At(bigStart)}' + g * {bigStep} * interval '1 minute', s, 'db1', {salt}0000 + 700 + g * 100 + k, {salt}0000 + 700 + g * 100 + k, 'Regular',
+       TIMESTAMP '{At(bigStart)}' - interval '1 hour', TIMESTAMP '{At(bigStart)}',
+       'modP', 'hashP', 2000001 + (g * 40 + k) * 2, 3000000000001 + (g * 40 + k) * 2 + k * k, 3000000000003 + (g * 40 + k) * 2 + k * 3,
+       5000 + g, 6000 + g, 7000000 + {salt}000000 + ((g * 2 + s) * 100 + k)
+FROM generate_series(1, 6) AS g CROSS JOIN generate_series(1, 2) AS s CROSS JOIN generate_series(1, 40) AS k;
+
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
+SELECT TIMESTAMP '{At(tieStart)}' + g * {tieStep} * interval '1 minute', s, 'db0', {salt}0000 + 5000 + g * 10 + k, {salt}0000 + 5000 + g * 10 + k, 'Regular',
+       TIMESTAMP '{At(tieStart)}' - interval '1 hour', TIMESTAMP '{At(tieStart)}',
+       'modT', 'hashT', 1, 9007199254740993, 9007199254740993, 1, 1, 9000000 + {salt}000000 + ((g * 2 + s) * 10 + k)
+FROM generate_series(0, 10) AS g CROSS JOIN generate_series(1, 2) AS s CROSS JOIN generate_series(1, 3) AS k", ct);
+    }
+
+    /// <summary>
+    /// The precision rows really are beyond a double: some weighted sum of a group (over the wide table) does not survive a round trip through
+    /// <c>double precision</c>, and some is past a bigint. Without this a changed seed could quietly stop testing precision.
+    /// </summary>
+    internal static async Task AssertPrecisionRowsHaveTeethAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        /* Over the WIDE table, never the rollup: a rollup built wrongly must not be able to satisfy its own seed check. */
+        const string Groups = @"
+SELECT sum(avg_duration_us * execution_count) AS d, sum(avg_cpu_time_us * execution_count) AS c, count(*) AS n
+FROM collect.query_store_interval_wide WHERE module_name = 'modP' GROUP BY collection_time, server_id";
+        Assert.True(await CountAsync(connection, $"SELECT count(*) FROM ({Groups}) AS g WHERE d::double precision::numeric <> d", ct) > 0, "no duration weighted sum is beyond a double");
+        Assert.True(await CountAsync(connection, $"SELECT count(*) FROM ({Groups}) AS g WHERE c::double precision::numeric <> c", ct) > 0, "no cpu weighted sum is beyond a double");
+        Assert.True(await CountAsync(connection, $"SELECT count(*) FROM ({Groups}) AS g WHERE d > 9223372036854775807", ct) > 0, "no duration weighted sum is past a bigint");
+        Assert.True(await CountAsync(connection, $"SELECT min(n) FROM ({Groups}) AS g", ct) >= 40, "the precision groups must hold many rows each");
+        const string Ties = @"
+SELECT sum(avg_duration_us * execution_count) AS d, sum(avg_cpu_time_us * execution_count) AS c, count(*) AS n
+FROM collect.query_store_interval_wide WHERE module_name = 'modT' GROUP BY collection_time, server_id";
+        Assert.Equal(0, await CountAsync(connection, $"SELECT count(*) FROM ({Ties}) AS g WHERE n <> 3 OR d <> 3 * 9007199254740993::numeric OR d::double precision::numeric = d", ct));
+        Assert.True(await CountAsync(connection, $"SELECT count(*) FROM ({Ties}) AS g", ct) > 0, "no rounding-tie groups");
+    }
+
     /// <summary>Builds every hour that is due, tick by tick, and returns how many hours were built.</summary>
     internal static async Task<int> BuildAllAsync(NpgsqlDataSource source, CancellationToken ct)
     {
