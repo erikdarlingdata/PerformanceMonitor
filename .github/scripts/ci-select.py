@@ -590,6 +590,7 @@ DOC_PATTERNS = (
     ".gitignore",
     ".gitattributes",
     "llms.txt",
+    "tools/changelog/archive-census.txt",
     "docs/**/*.{md,svg,png,jpg,jpeg,gif}",
     "Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}",
 )
