@@ -240,6 +240,20 @@ public sealed class DarlingPathFilterGateTests
     }
 
     /// <summary>
+    /// The upgrade-shape workflow and its script reach the Darling gate (#5627). Darling.Tests parses both
+    /// (DarlingUpgradeShapesWorkflowTests), so a pull request that edits only one of them must not be waved
+    /// through with every shard skipped.
+    /// </summary>
+    [Fact]
+    public void TheDarlingGate_CoversTheUpgradeShapeWorkflowAndItsScript()
+    {
+        var patterns = FilterPatterns(ReadRepoFileLf(s_gateSegments), "darling");
+
+        Assert.Contains(".github/workflows/darling-upgrade-shapes.yml", patterns, StringComparer.Ordinal);
+        Assert.Contains(".github/scripts/darling-upgrade-shapes.ps1", patterns, StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// The coverage check reports an injected gap, the same shape as
     /// <see cref="TheCoverageCheck_ReportsAnInjectedGap"/> above and for the same reason: a parser that
     /// matched nothing would report this gate complete too, which is the failure this test would otherwise
