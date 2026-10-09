@@ -77,12 +77,24 @@ internal static class PreinitializedDuckDb
     /// The copy of <see cref="DuckDbInitializer.InitializeAsync"/> a test uses when it wants a database with
     /// the current schema and nothing else: copies the initialized file to the initializer's own path and
     /// opens the initializer's sentinel on it.
+    ///
+    /// <para>It is exactly as safe to call again as <see cref="DuckDbInitializer.InitializeAsync"/> is. When
+    /// the file is already there, the store exists and may hold the test's own rows, so this calls the real
+    /// <c>InitializeAsync</c> on it (what every converted call site did before #5208): identity, migration and
+    /// sentinel behavior on a repeat call stay what they were, and the identity is not renewed. Only a path
+    /// with no file gets the copy. <see cref="CopyTo"/> still refuses an existing file, so any other caller
+    /// fails loudly (#5612: a helper that initialized once per call threw "already exists" 38 times).</para>
     /// </summary>
-    public static Task InitializeFromTemplateAsync(this DuckDbInitializer duckDb)
+    public static async Task InitializeFromTemplateAsync(this DuckDbInitializer duckDb)
     {
+        if (File.Exists(duckDb.DatabasePath))
+        {
+            await duckDb.InitializeAsync();
+            return;
+        }
+
         CopyTo(duckDb.DatabasePath);
         Adopt(duckDb);
-        return Task.CompletedTask;
     }
 
     /// <summary>Opens <paramref name="duckDb"/>'s sentinel on a file <see cref="CopyTo"/> put at its path.</summary>
