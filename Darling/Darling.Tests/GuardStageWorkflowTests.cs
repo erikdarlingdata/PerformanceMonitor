@@ -152,6 +152,55 @@ public sealed class GuardStageWorkflowTests
             Regex.Matches(guard, "\n            ([a-z_]+):\n").Select(m => m.Groups[1].Value).OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
 
+    /* #5614: a changelog splice rewrites exactly CHANGELOG.md, docs/changelog/<version>.md and
+       tools/changelog/archive-census.txt. The census is not markdown, so unless its exact path is on the docs
+       allowlist the splice paid the full Guard tests and whole-tree guards run (about 17 minutes) instead of the
+       docs fast path. The path is exact, never a bare *.txt glob: the MCP budget pins are .txt test inputs. */
+    [Fact]
+    public void AChangelogSplice_IsDocsOnly_InBothBuildYmlCopiesAndCiSelect()
+    {
+        var yaml = Yaml();
+        var splice = new[] { "CHANGELOG.md", "docs/changelog/3.10.md", "tools/changelog/archive-census.txt" };
+        const string census = "tools/changelog/archive-census.txt";
+
+        var lists = new Dictionary<string, List<string>>
+        {
+            ["build job"] = FilterPatterns(JobBlock(yaml, "build"), "docs"),
+            ["guard-tests job"] = FilterPatterns(JobBlock(yaml, "guard-tests"), "docs"),
+        };
+
+        /* ci-select.py's DOC_PATTERNS: the fallback when no live list is passed, which must not drift from build.yml. */
+        var script = RepoFile.ReadRepoFileLf(".github", "scripts", "ci-select.py");
+        var start = script.IndexOf("\nDOC_PATTERNS = (\n", StringComparison.Ordinal);
+        Assert.True(start >= 0, "ci-select.py has no DOC_PATTERNS tuple");
+        var tuple = script[start..];
+        tuple = tuple[..tuple.IndexOf("\n)\n", StringComparison.Ordinal)];
+        lists["ci-select.py DOC_PATTERNS"] = Regex.Matches(tuple, @"^\s*""([^""]+)"",\s*$", RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .ToList();
+
+        var buildList = lists["build job"];
+        foreach (var (name, patterns) in lists)
+        {
+            Assert.NotEmpty(patterns);
+            Assert.Equal(buildList, patterns);
+
+            /* The two markdown files ride on the markdown glob; the census needs its own exact entry. */
+            Assert.Contains("**/*.md", patterns);
+            Assert.Contains(census, patterns);
+            Assert.DoesNotContain("**/*.txt", patterns);
+            Assert.DoesNotContain("tools/**", patterns);
+
+            foreach (var path in splice)
+            {
+                Assert.True(
+                    patterns.Contains(path, StringComparer.Ordinal)
+                    || (path.EndsWith(".md", StringComparison.Ordinal) && patterns.Contains("**/*.md", StringComparer.Ordinal)),
+                    $"{name}: a changelog splice file is not documentation, so the splice runs the full path: {path}");
+            }
+        }
+    }
+
     [Fact]
     public void ADocsOnlyChange_LeavesTheGuardJobGreenHavingBuiltNothing()
     {
