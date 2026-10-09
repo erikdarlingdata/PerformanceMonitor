@@ -113,13 +113,8 @@
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                     <TextBlock Text="Default time range:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                    <ComboBox x:Name="DefaultTimeRangeCombo" Width="140" VerticalAlignment="Center">
-                        <ComboBoxItem Content="Last 1 hour"/>
-                        <ComboBoxItem Content="Last 4 hours"/>
-                        <ComboBoxItem Content="Last 12 hours"/>
-                        <ComboBoxItem Content="Last 24 hours"/>
-                        <ComboBoxItem Content="Last 7 days"/>
-                    </ComboBox>
+                    <!-- #5562: the shared picker. A typed or picked fixed range is not a default; it is not saved. -->
+                    <ui:TimeRangePicker x:Name="DefaultTimeRangePicker" VerticalAlignment="Center"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                     <TextBlock Text="Connection timeout:" VerticalAlignment="Center"

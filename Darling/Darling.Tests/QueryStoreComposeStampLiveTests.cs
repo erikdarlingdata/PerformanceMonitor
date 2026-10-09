@@ -127,7 +127,7 @@ CROSS JOIN LATERAL (SELECT TIMESTAMP '{At(hourNow)}' - interval '30 hours' + h *
     /// Rows where the rollup and the same aggregates over the wide table differ, for the built window. The wide side's select list is the
     /// map's FactExpression, so a map entry cannot drift from the builder; the comparison is as TEXT, so a numeric that lost a digit shows.
     /// </summary>
-    private static async Task<long> MismatchesAsync(NpgsqlConnection connection, DateTime from, DateTime to, CancellationToken ct)
+    internal static async Task<long> MismatchesAsync(NpgsqlConnection connection, DateTime from, DateTime to, CancellationToken ct)
     {
         var map = QueryStoreComposeStamp.PartialColumnMap;
         var select = string.Join(", ", map.Select((c, i) => c.FactExpression + " AS c" + i.ToString(CultureInfo.InvariantCulture)));
@@ -153,18 +153,18 @@ WHERE w.collection_time IS NULL OR r.collection_time IS NULL OR {diffs}";
         return await CountAsync(connection, sql, ct);
     }
 
-    private static Task<long> StalePairsAsync(NpgsqlConnection connection, CancellationToken ct) => CountAsync(connection, @"
+    internal static Task<long> StalePairsAsync(NpgsqlConnection connection, CancellationToken ct) => CountAsync(connection, @"
 SELECT count(*) FROM collect.query_store_compose_stamp_built AS b
 JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
 WHERE b.built_seq IS DISTINCT FROM b.late_seq", ct);
 
-    private static Task<string> StaleListAsync(NpgsqlConnection connection, CancellationToken ct) => TextAsync(connection, @"
+    internal static Task<string> StaleListAsync(NpgsqlConnection connection, CancellationToken ct) => TextAsync(connection, @"
 SELECT COALESCE(string_agg(b.server_id || '@' || to_char(b.hour, 'YYYY-MM-DD HH24'), ',' ORDER BY b.server_id, b.hour), '')
 FROM collect.query_store_compose_stamp_built AS b
 JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
 WHERE b.built_seq IS DISTINCT FROM b.late_seq", ct);
 
-    private static string Pair(int server, DateTime hour) => server.ToString(CultureInfo.InvariantCulture) + "@" + hour.ToString("yyyy-MM-dd HH", CultureInfo.InvariantCulture);
+    internal static string Pair(int server, DateTime hour) => server.ToString(CultureInfo.InvariantCulture) + "@" + hour.ToString("yyyy-MM-dd HH", CultureInfo.InvariantCulture);
 
     private static Task InsertRowAsync(NpgsqlConnection connection, int serverId, DateTime collectionTime, long interval, CancellationToken ct) => ExecAsync(connection, $@"
 INSERT INTO collect.query_store_interval_wide

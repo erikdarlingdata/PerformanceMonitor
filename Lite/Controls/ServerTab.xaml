@@ -207,29 +207,9 @@
                             </Grid>
                         </Border>
                     </Popup>
-                    <ComboBox x:Name="TimeRangeCombo" AutomationProperties.Name="Time range" SelectedIndex="1" Width="120" Margin="0,0,8,0"
-                              SelectionChanged="TimeRangeCombo_SelectionChanged">
-                        <ComboBoxItem Content="Last 1 hour"/>
-                        <ComboBoxItem Content="Last 4 hours"/>
-                        <ComboBoxItem Content="Last 12 hours"/>
-                        <ComboBoxItem Content="Last 24 hours"/>
-                        <ComboBoxItem Content="Last 7 days"/>
-                        <ComboBoxItem Content="Custom Range"/>
-                    </ComboBox>
-                    <DatePicker x:Name="FromDatePicker" Width="120" Margin="4,0,0,0" Visibility="Collapsed"
-                                SelectedDateChanged="CustomDateRange_Changed" CalendarOpened="DatePicker_CalendarOpened"/>
-                    <ComboBox x:Name="FromHourCombo" Width="70" Margin="2,0,0,0" Visibility="Collapsed"
-                              SelectionChanged="CustomTimeCombo_Changed" ToolTip="Hour"/>
-                    <ComboBox x:Name="FromMinuteCombo" Width="52" Margin="2,0,0,0" Visibility="Collapsed"
-                              SelectionChanged="CustomTimeCombo_Changed" ToolTip="Minute"/>
-                    <TextBlock x:Name="ToLabel" Text="to" VerticalAlignment="Center" Margin="6,0" Visibility="Collapsed"
-                               Foreground="{DynamicResource ForegroundBrush}"/>
-                    <DatePicker x:Name="ToDatePicker" Width="120" Margin="0,0,0,0" Visibility="Collapsed"
-                                SelectedDateChanged="CustomDateRange_Changed" CalendarOpened="DatePicker_CalendarOpened"/>
-                    <ComboBox x:Name="ToHourCombo" Width="70" Margin="2,0,0,0" Visibility="Collapsed"
-                              SelectionChanged="CustomTimeCombo_Changed" ToolTip="Hour"/>
-                    <ComboBox x:Name="ToMinuteCombo" Width="52" Margin="2,0,4,0" Visibility="Collapsed"
-                              SelectionChanged="CustomTimeCombo_Changed" ToolTip="Minute"/>
+                    <!-- #5562: the shared picker replaces the preset combo and the From/To date, hour and minute pickers. -->
+                    <ui:TimeRangePicker x:Name="RangePicker" AutomationProperties.Name="Time range" Margin="0,0,8,0" VerticalAlignment="Center"
+                                        RangeChanged="RangePicker_RangeChanged"/>
                     <Button Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,0"
                             ToolTip="Apply this time range to all open server tabs"/>
                     <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,0"

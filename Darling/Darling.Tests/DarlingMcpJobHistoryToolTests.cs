@@ -299,7 +299,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             var since = AsOf.AddHours(-24);
 
             await using var viewer = new ViewerDataService(Cs!);
-            var viewerRows = await viewer.GetJobHistoryAsync(since, null, 2000, ct);
+            var viewerRows = await viewer.GetJobHistoryAsync(since, null, 2000, cancellationToken: ct);
             var storage = await DarlingJobHistoryReader.GetAsync(postgres, since, null, 2000, 60, cancellationToken: ct);
 
             /* D5: the viewer stamps each row with its own server's clock, which the storage reader's row does not carry, and

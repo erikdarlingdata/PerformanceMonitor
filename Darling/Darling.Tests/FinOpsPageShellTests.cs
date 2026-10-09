@@ -168,7 +168,8 @@ public sealed class FinOpsPageShellTests
             .Select(Path.GetFileNameWithoutExtension)
             // database-box.js is the shared Database box the Index Analysis and Locking tabs import (#5231), not a tab.
             // gate.js is the helper the tabs share for their empty and not-collected states on a PostgreSQL target, also not a tab.
-            .Where(name => name != "database-box" && name != "gate")
+            // window.js is the rolling-only time range picker the windowed tabs share (#5562), also not a tab.
+            .Where(name => name != "database-box" && name != "gate" && name != "window")
             .OrderBy(x => x, StringComparer.Ordinal).ToArray();
         Assert.Equal(TabIds.OrderBy(x => x, StringComparer.Ordinal).ToArray(), onDisk);
 

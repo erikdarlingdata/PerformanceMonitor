@@ -45,28 +45,54 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGetFleet, bandClass, loadingStrip, setActiveRange, setActiveDatabaseFilter, localTime } from "../util.js";
+import { el, mount, apiGetFleet, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
+import { timeRangePicker, DEFAULT_REACH_HOURS } from "../time-range-picker.js";
+import { serverCatalog, collectorIntervalFromCatalog, readsReachHours, offerReach } from "../page-range.js";
+import { browserZone, resolveSpec, relativeSpec, fixedSpec, specName, wholeHours, readWindow, reachText, ROLLING_PRESETS, MINIMUM_SPAN_MS } from "../time-range.js";
 
-/** The page time range: the desktop viewers' presets, which stop at 7 days. All but three ranged reads on these
- *  tabs (the collection log, current waits and blocking stats) take at most McpHelpers.MaxHoursBack (168) hours, so
- *  a wider choice was never served: those panels asked again for 7 days and said so. Custom Views offer longer
- *  windows: their composed panels read the store directly, through rollups for the query tables.
- *  WebServerPageRangeTests runs every option through every tab of both registries. */
-const RANGE_OPTIONS = [
-  { hours: 1, label: "last hour" },
-  { hours: 4, label: "last 4 hours" },
-  { hours: 12, label: "last 12 hours" },
-  { hours: 24, label: "last 24 hours" },
-  { hours: 24 * 7, label: "last 7 days" },
-];
+/* How far back the tab on screen reaches (#5562 review r1 M4, ruling R2). Each tab lists the windowed reads it makes (`reachReads` in
+   server-tabs.js: names, never hours), and its reach is the smallest `max_hours` the catalog gives them (tabReach below), so a tab
+   made of reads that take 30 days offers 30 days, and a tab that also shows a list that takes 7 stays at 7. A read with no catalog
+   row, a tab that lists none and a catalog that cannot be read all give the common DEFAULT_REACH_HOURS (168): the page never offers
+   a range a read has not said it takes. The picker greys out a longer range and says why, and a range carried over from a tab that
+   reads further is read at this tab's reach with a notice saying so (reachNoteText), never silently (#2802 did the same per panel).
+   WebServerPageRangeTests runs every offered range through every tab of both registries. */
 
-/** The widest preset. A tab note that names the longest window this page shows (the Blocking tab's) is given it. */
-const WIDEST_RANGE_HOURS = Math.max(...RANGE_OPTIONS.map((o) => o.hours));
+/** The short presets that are a whole number of hours: the ranges the reads take as `hours` alone, with no trimming. Every other
+ *  range (30 minutes, Yesterday, 2 days 3 hours, a typed pair) is fetched as whole hours back from its end and trimmed to the exact
+ *  pair, the custom path below. A tab takes the ones within its own reach. */
+const RANGE_OPTIONS = ROLLING_PRESETS.map((spec) => wholeHours(spec))
+  .filter((hours) => hours != null)
+  .map((hours) => rangeOption(hours));
+
+function rangeOption(hours) {
+  return { hours, label: hours === 1 ? "last hour" : hours > 24 && hours % 24 === 0 ? "last " + hours / 24 + " days" : "last " + hours + " hours" };
+}
+
+/* The catalog each server answered with, or null where it could not be read: the answer, not the promise, so a tab's reach is a plain
+   function (tabReach) that holds until the catalog is known. The reads' reach belongs to the read, not the server, so one answer per
+   server is enough for the page's life. A catalog that could not be read is not kept: the next tab or range change asks again. */
+const catalogsRead = new Map();
+/* Servers whose catalog could not be read when a wide range waited for it: they read at the common reach, and do not wait again. */
+const catalogGaveUp = new Set();
+/* The servers whose catalog is being read for the panels' wait below: one wait and one redraw per server, whatever redraws meanwhile
+   (#5562 review r2 L2). */
+const catalogWaits = new Set();
+
+/** How far back a tab's reads all reach, in hours (the smallest catalog `max_hours` among its `reachReads`). */
+function tabReach(tab = current.tab, server = current.server) {
+  return readsReachHours(server ? catalogsRead.get(server) : null, tab && tab.reachReads);
+}
+
+/** The refusal for a span past the tab's reach, or null. */
+function tabReachRefusal(spanMs, reach = tabReach()) {
+  return spanMs > reach * HOUR_MS ? "This tab reads up to " + reachText(reach) + "." : null;
+}
 
 /* Module state, deliberately not persisted — see the header comment. `gridNode` + the current server/tab let the
    range control redraw only the panels, so changing the window does not flash the header or refetch /api/fleet. */
@@ -102,11 +128,11 @@ let panelAbort = null;
    matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
 const lastCard = new Map();
 
-/* The custom start/end, keyed by server (module scope, so the 60s poll's rebuild keeps it and another server starts on
-   the presets). Each value is `{ startMs, endMs, live, spanMs }`. A range whose end is within LIVE_SLACK_MS of now when
-   it is applied is LIVE: it keeps its width and slides to end at "now" on every rebuild, so the poll keeps refreshing
-   it. Any other end is a fixed historical window: its data cannot change, so the poll leaves the panels on screen
-   instead of reading the same hours again. */
+/* The range the reader picked that is not one of RANGE_OPTIONS, keyed by server (module scope, so the 60s poll's rebuild keeps it and
+   another server starts on the presets). Each value is `{ spec, live }`: the range as the picker names it (a length, a calendar
+   period, a typed pair) and whether its end slides with now. A LIVE range keeps its meaning and slides to end at "now" on every
+   rebuild, so the poll keeps refreshing it. Any other end is a fixed historical window: its data cannot change, so the poll leaves
+   the panels on screen instead of reading the same hours again. */
 const customRanges = new Map();
 const LIVE_SLACK_MS = 60000;
 const HOUR_MS = 3600000;
@@ -114,20 +140,37 @@ const HOUR_MS = 3600000;
 /**
  * Check a picked start and end and map them onto the reads' window (an end, `as_of`, and a whole number of `hours`).
  * The start rounds EARLIER to a whole hour for the fetch (`hours` is an integer of at least 1); the page trims what comes
- * back to the exact pair. Returns `{ error }` for an unusable pair, else `{ hours, asOf, live, startMs, endMs }`; `asOf`
+ * back to the exact pair, so a range of 15 minutes is fetched as the hour that holds it. Returns `{ error }` for an unusable
+ * pair (under 5 minutes, reversed, in the future, past the reach), else `{ hours, asOf, live, startMs, endMs }`; `asOf`
  * is null for a live range, whose reads are anchored at the server's own clock.
  */
-export function resolveCustomRange(startMs, endMs, nowMs) {
+export function resolveCustomRange(startMs, endMs, nowMs, reach = tabReach()) {
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return { error: "Enter both a start and an end." };
   if (endMs <= startMs) return { error: "The end must be after the start." };
   if (endMs > nowMs + LIVE_SLACK_MS) return { error: "The end cannot be in the future." };
   const span = endMs - startMs;
-  if (span < HOUR_MS) return { error: "Pick at least one hour. Drag across a chart to look at a shorter span." };
-  if (span > WIDEST_RANGE_HOURS * HOUR_MS) {
-    return { error: "The range can be at most " + WIDEST_RANGE_HOURS / 24 + " days, the widest preset." };
-  }
+  if (span < MINIMUM_SPAN_MS) return { error: "The shortest range is 5 minutes. Drag across a chart to look at a shorter span." };
+  const tooLong = tabReachRefusal(span, reach);
+  if (tooLong) return { error: tooLong };
   const live = endMs >= nowMs - LIVE_SLACK_MS;
-  return { hours: Math.ceil(span / HOUR_MS), asOf: live ? null : new Date(endMs).toISOString(), live, startMs, endMs };
+  return { hours: Math.max(1, Math.ceil(span / HOUR_MS)), asOf: live ? null : new Date(endMs).toISOString(), live, startMs, endMs };
+}
+
+/** Hold a picked range for a server: a whole-hour preset is the page's own range (the reads take it as `hours` alone), anything
+ *  else is this server's custom range. Returns the error text when the range cannot be held, else null. */
+function holdSpec(server, spec, nowMs) {
+  const resolved = resolveSpec(spec, nowMs, browserZone());
+  if (!resolved.ok) return resolved.error.message;
+  const tooLong = tabReachRefusal(resolved.range.spanMs);
+  if (tooLong) return tooLong;
+  const hours = wholeHours(spec);
+  if (hours != null && RANGE_OPTIONS.some((o) => o.hours === hours)) {
+    customRanges.delete(server);
+    pageHours = hours;
+  } else {
+    customRanges.set(server, { spec, live: resolved.range.live || resolved.range.endMs >= nowMs });
+  }
+  return null;
 }
 
 /** Apply a custom range to a server and redraw. Returns the error text, or null when the range was taken. `redraw: false`
@@ -137,7 +180,8 @@ export function resolveCustomRange(startMs, endMs, nowMs) {
 export function applyCustomRange(server, startMs, endMs, nowMs = Date.now(), { redraw = true } = {}) {
   const r = resolveCustomRange(startMs, endMs, nowMs);
   if (r.error) return r.error;
-  customRanges.set(server, { startMs, endMs, live: r.live, spanMs: endMs - startMs });
+  /* A range that ends now keeps its width and slides; any other end is a fixed pair. */
+  customRanges.set(server, { spec: r.live ? relativeSpec(endMs - startMs) : fixedSpec(startMs, endMs), live: r.live });
   if (redraw) redrawPanels();
   return null;
 }
@@ -146,23 +190,53 @@ export function applyCustomRange(server, startMs, endMs, nowMs = Date.now(), { r
  *  every read of this server inside it is anchored and trimmed there. */
 export function rangeContext(nowMs = Date.now()) {
   const custom = current.server ? customRanges.get(current.server) : null;
+  const reach = tabReach();
   if (custom) {
-    const endMs = custom.live ? nowMs : custom.endMs;
-    const startMs = custom.live ? nowMs - custom.spanMs : custom.startMs;
-    const r = resolveCustomRange(startMs, endMs, nowMs);
-    if (!r.error) {
-      setActiveRange({ server: current.server, hours: r.hours, startMs, endMs, asOf: r.asOf });
+    const resolved = resolveSpec(custom.spec, nowMs, browserZone());
+    if (resolved.ok) {
+      /* A range carried over from a tab that reads further is read at THIS tab's reach: the last stretch of it, ending where it ends.
+         The range stays held (the next tab may take all of it), and reachNoteText says what happened (#5562 review r1 M4). */
+      const cut = tabReachRefusal(resolved.range.spanMs, reach) != null;
+      const range = cut ? { ...resolved.range, startMs: resolved.range.endMs - reach * HOUR_MS, spanMs: reach * HOUR_MS } : resolved.range;
+      const w = readWindow(range, nowMs);
+      setActiveRange({ server: current.server, hours: w.hours, startMs: range.startMs, endMs: range.endMs, asOf: w.asOf });
       /* Totals and rankings are read over whole hours back from the end, so they can begin earlier than the picked start:
          when the span is not a whole number of hours the label says where they begin. */
-      const aggregateFrom = endMs - r.hours * HOUR_MS;
-      const rounded = aggregateFrom < startMs ? "; totals and rankings aggregate from " + localTime(new Date(aggregateFrom).toISOString()) : "";
-      return { hours: r.hours, label: "custom: " + localTime(new Date(startMs).toISOString()) + " to " + (custom.live ? "now" : localTime(new Date(endMs).toISOString())) + rounded, custom: true };
+      const aggregateFrom = w.endMs - w.hours * HOUR_MS;
+      const rounded = aggregateFrom < range.startMs ? "; totals and rankings aggregate from " + localTime(new Date(aggregateFrom).toISOString()) : "";
+      const times = localTime(new Date(range.startMs).toISOString()) + " to " + (range.live ? "now" : localTime(new Date(range.endMs).toISOString()));
+      const picked = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom";
+      const named = cut ? "last " + reachText(reach) + " of " + picked : picked;
+      return { hours: w.hours, label: named + ": " + times + rounded, custom: true };
     }
-    customRanges.delete(current.server);
   }
   setActiveRange(null);
-  const opt = RANGE_OPTIONS.find((o) => o.hours === pageHours) || RANGE_OPTIONS[3];
+  /* A held preset longer than this tab reads is read at the tab's reach (reachNoteText says so). */
+  const held = RANGE_OPTIONS.find((o) => o.hours === pageHours) || RANGE_OPTIONS.find((o) => o.hours === 24) || RANGE_OPTIONS[0];
+  const opt = held.hours > reach ? rangeOption(reach) : held;
+  /* A held range that cannot resolve right now (a calendar period that ends at or before its start, Today at exactly midnight, R9) is
+     kept, not dropped: the label says so and names the window shown instead, and the range reads again once it can (#5562 review r1 L3). */
+  if (custom) {
+    const unresolved = resolveSpec(custom.spec, nowMs, browserZone());
+    if (!unresolved.ok) return { hours: opt.hours, label: specName(custom.spec).toLowerCase() + " cannot be read yet (" + unresolved.error.message + "); showing " + opt.label };
+  }
   return { hours: opt.hours, label: opt.label };
+}
+
+/** The sentence for a range the reader picked that is longer than the tab on screen reads, or null when the tab takes all of it. The
+ *  tab reads its own reach instead, so the page says so beside the panels, never silently (#5562 review r1 M4, ruling R2). */
+export function reachNoteText(nowMs = Date.now()) {
+  const reach = tabReach();
+  const custom = current.server ? customRanges.get(current.server) : null;
+  let spanMs = pageHours * HOUR_MS;
+  let picked = rangeOption(pageHours).label;
+  const resolved = custom ? resolveSpec(custom.spec, nowMs, browserZone()) : null;
+  if (resolved && resolved.ok) {
+    spanMs = resolved.range.spanMs;
+    picked = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom range";
+  }
+  if (tabReachRefusal(spanMs, reach) == null) return null;
+  return "The range you picked (" + picked + ") is longer than this tab reads. This tab reads up to " + reachText(reach) + ", so it shows the last " + reachText(reach) + " of that range.";
 }
 
 /* Set when the poll ticks over a fixed custom range: the panels the previous render drew stay on screen (see
@@ -209,8 +283,10 @@ export function renderServer(main, server, tabId, opts) {
 
   /* The bar and the note share one slot because both are decided by the same card. */
   const tabsSlot = el("div", { class: "subtabs-slot" }, [loadingStrip()]);
+  /* The notice for a carried-over range this tab reads only part of (reachNoteText), between the tab bar and the panels. */
+  reachSlot = el("div", { class: "reach-note-slot" });
   if (!keep) gridNode = el("div", { class: "panel-grid" });
-  mount(main, [head, whySlot, tabsSlot, gridNode]);
+  mount(main, [head, whySlot, tabsSlot, reachSlot, gridNode]);
 
   /* Seen this server before? Then its engine is already known and the page paints now — no loading strip, and
      the tab's panels start fetching in this tick, which is what keeps the 60s poll and a sub-tab click feeling
@@ -266,17 +342,63 @@ function paintTabs(tabsSlot, server, tabId, card) {
   const tab = findServerTab(tabId, tabs);
   current = { server, tab };
   gridKey = server + "|" + (tabId || "");
-  mount(tabsSlot, [subtabBar(server, tab, tabs), tabNote(tab, WIDEST_RANGE_HOURS)]);
+  tabNoteSlot = el("div", { class: "tab-note-slot" }, [tabNote(tab, tabReach())]);
+  mount(tabsSlot, [subtabBar(server, tab, tabs), tabNoteSlot]);
   redrawPanels();
   return tabs;
+}
+
+/* The two slots the tab's reach decides: its note (which names how far back the page shows) and the carried-over-range notice. */
+let tabNoteSlot = null;
+let reachSlot = null;
+
+/** Show the reach the catalog gave the tab on screen: the picker's longest choice, the tab note's number and the carried-over-range
+ *  notice. Run on every redraw and again when the catalog arrives. */
+function applyTabReach() {
+  const tab = current.tab;
+  if (!tab || !current.server) return;
+  const reach = tabReach();
+  if (rangePicker && rangePicker.reachHours() !== reach) {
+    rangePicker.setReach(reach);
+    offerReach(rangePicker);
+  }
+  if (tabNoteSlot) mount(tabNoteSlot, [tabNote(tab, reach)]);
+  if (reachSlot) {
+    const note = reachNoteText();
+    mount(reachSlot, note ? [noticeStrip(note)] : []);
+  }
 }
 
 /** (Re)fill the panel grid for the current server + tab at the current range. No refetch of anything else. */
 function redrawPanels() {
   if (!gridNode || !current.tab || !current.server) return;
 
+  /* Before the keepGrid return: a poll that keeps the panels still built a new picker, which needs its reach and its note. */
+  applyTabReach();
+  applySampleNote();
+
   if (keepGrid) {
     keepGrid = false;
+    return;
+  }
+
+  /* A range longer than the common reach cannot be read until the tab's reach is known (it may take the whole range, or only the
+     last 7 days of it), so the panels wait for the catalog rather than read twice. A held range within the common reach reads now. */
+  if (!catalogsRead.has(current.server) && !catalogGaveUp.has(current.server) && heldSpanMs() > DEFAULT_REACH_HOURS * HOUR_MS) {
+    const server = current.server;
+    if (panelAbort) panelAbort.abort();
+    mount(gridNode, [loadingStrip()]);
+    /* A range change or the 60 second refresh during the wait lands here again: it keeps the loading strip and adds no second wait, or
+       two redraws would run when the catalog arrives and send the panels' reads twice (#5562 review r2 L2). The one redraw reads the
+       tab and range held at that moment, so a change made during the wait is read once. */
+    if (catalogWaits.has(server)) return;
+    catalogWaits.add(server);
+    serverCatalog(server).catch(() => null).then((catalog) => {
+      catalogWaits.delete(server);
+      if (catalog) catalogsRead.set(server, catalog);
+      else catalogGaveUp.add(server);
+      if (server === current.server) redrawPanels();
+    });
     return;
   }
 
@@ -335,62 +457,58 @@ function subtabBar(server, active, tabs) {
   );
 }
 
-/** The time-range picker: the presets, and "Custom…" for a start and end. Changing it redraws the panels in place, exactly
- *  like the fleet page's sort. The start and end are typed in the browser's zone, the zone every time on this page uses. */
+/** The time-range picker (time-range-picker.js): the short presets, the calendar periods, a typed range and a date pick, in the
+ *  browser's zone, the zone every time on this page uses. Changing it redraws the panels in place, exactly like the fleet page's
+ *  sort. A range longer than the tab's reads take (tabReach) is greyed out with the reason. */
 function rangeControl() {
-  const CUSTOM = "custom";
   const server = current.server;
-  const sel = el(
-    "select",
-    { class: "range-select-inline", "aria-label": "Time range" },
-    [...RANGE_OPTIONS.map((o) => el("option", { value: String(o.hours), text: o.label })), el("option", { value: CUSTOM, text: "Custom…" })]
-  );
   const saved = customRanges.get(server);
-  sel.value = saved ? CUSTOM : String(pageHours);
-
-  const input = (label, ms) => {
-    const box = el("input", { type: "datetime-local", class: "range-custom-input", "aria-label": label, step: "60" });
-    if (ms != null) box.value = localInputValue(ms);
-    return box;
-  };
-  const start = input("Range start", saved ? saved.startMs : null);
-  const end = input("Range end", saved ? (saved.live ? Date.now() : saved.endMs) : null);
-  /* An end the form filled in as "now" stays "now" however long the form sits open: Apply then reads the clock again.
-     Typing in the end box makes it the reader's own. */
-  let endIsNow = !saved || saved.live;
-  end.addEventListener("input", () => { endIsNow = false; });
-  const message = el("span", { class: "range-custom-error", role: "alert" });
-  const apply = el("button", { type: "button", class: "btn range-custom-apply", text: "Apply" });
-  const form = el("span", { class: "range-custom" }, [start, el("span", { text: "to" }), end, apply, message]);
-  form.hidden = sel.value !== CUSTOM;
-
-  apply.addEventListener("click", () => {
-    const err = applyCustomRange(server, new Date(start.value).getTime(), endIsNow ? Date.now() : new Date(end.value).getTime());
-    message.textContent = err || "";
+  const picker = timeRangePicker({
+    spec: saved ? saved.spec : relativeSpec(pageHours * HOUR_MS),
+    reachHours: tabReach(null, server),
+    reachMessage: (hours) => "This tab reads up to " + reachText(hours) + ".",
+    label: "Time range",
+    onChange: (spec) => {
+      if (holdSpec(server, spec, Date.now()) == null) redrawPanels();
+    },
   });
-  sel.addEventListener("change", () => {
-    if (sel.value === CUSTOM) {
-      form.hidden = false;
-      if (!end.value) {
-        end.value = localInputValue(Date.now());
-        endIsNow = true;
-      }
-      if (!start.value) start.value = localInputValue(Date.now() - 24 * HOUR_MS);
-      return;
-    }
-    form.hidden = true;
-    message.textContent = "";
-    customRanges.delete(server);
-    pageHours = Number(sel.value) || 24;
-    redrawPanels();
-  });
-  return el("div", { class: "range-control" }, [el("span", { text: "Range" }), sel, form]);
+  rangePicker = picker;
+  return el("div", { class: "range-control" }, [el("span", { text: "Range" }), picker.node]);
 }
 
-/* A UTC-epoch instant as a datetime-local value in the browser's zone ("2026-01-02T03:04"). */
-function localInputValue(ms) {
-  const d = new Date(ms - new Date(ms).getTimezoneOffset() * 60000);
-  return d.toISOString().slice(0, 16);
+/* The picker on screen, so the tab on screen can tell it how often its data is collected (#5562 R3). */
+let rangePicker = null;
+
+/** The "collected every N minutes" note for the tab on screen (#5562 R3). Each tab declares its main collector (`collector` in
+ *  server-tabs.js); the server's catalog gives that collector's ACTUAL interval (a per-server schedule row over the fleet's over the
+ *  shipped default) as `collector_interval_minutes`. The picker shows the note when the chosen span holds fewer than 3 samples at that
+ *  interval, and never widens the range. A tab with no single main collector, or a catalog that cannot be read, shows no note. */
+function applySampleNote() {
+  const picker = rangePicker;
+  const tab = current.tab;
+  const server = current.server;
+  if (!picker) return;
+  if (!tab || !server) {
+    picker.setSampleInterval(null);
+    return;
+  }
+  /* The same catalog answer gives the tab its reach (M4) and its collector's interval (R3), so it is read for every tab. */
+  serverCatalog(server).then((catalog) => {
+    if (catalog) catalogsRead.set(server, catalog);
+    if (picker !== rangePicker || tab !== current.tab || server !== current.server) return;
+    applyTabReach();
+    picker.setSampleInterval(tab.collector ? collectorIntervalFromCatalog(catalog, tab.collector) : null);
+  }).catch(() => {
+    /* A catalog that cannot be read shows no note (#5562 review r1 L2) and leaves the common reach; the next tab or range change asks again. */
+    if (picker === rangePicker) picker.setSampleInterval(null);
+  });
+}
+
+/** The length of the range the reader holds for the server on screen, in milliseconds (the preset, or the custom range's span). */
+function heldSpanMs(nowMs = Date.now()) {
+  const custom = current.server ? customRanges.get(current.server) : null;
+  const resolved = custom ? resolveSpec(custom.spec, nowMs, browserZone()) : null;
+  return resolved && resolved.ok ? resolved.range.spanMs : pageHours * HOUR_MS;
 }
 
 /* This server's fleet card, plus the reason sentence the fleet's worst-first ranking computed for it. ONE

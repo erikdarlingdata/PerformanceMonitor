@@ -165,9 +165,12 @@ public sealed class QueryStoreComposeStampTests
     {
         var plan = QueryStoreComposeStamp.PlanSql;
         Assert.Contains("ORDER BY p.stale DESC, p.hour DESC", plan, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $3", plan, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $2", plan, StringComparison.Ordinal);
         Assert.Contains("b.built_seq IS DISTINCT FROM b.late_seq", plan, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', $1::timestamp - interval '3 hours')", plan, StringComparison.Ordinal);
+        /* The build lag is read off the STORE's clock, the one the row trigger's WHEN uses; the service's clock is only the retention floor. */
+        Assert.Contains("date_trunc('hour', (now() AT TIME ZONE 'UTC') - interval '3 hours')", plan, StringComparison.Ordinal);
+        Assert.DoesNotContain("$1::timestamp - interval", plan, StringComparison.Ordinal);
+        Assert.Contains("greatest($1::timestamp,", plan, StringComparison.Ordinal);
         Assert.Contains("filled_since", plan, StringComparison.Ordinal);
         Assert.Contains("sv.is_enabled", plan, StringComparison.Ordinal);
 
@@ -182,8 +185,8 @@ public sealed class QueryStoreComposeStampTests
     public void TheBuildOrder_InTheCode_IsLockRowsThenDeleteThenInsertThenBuiltThenHours()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreComposeStamp.cs");
-        var body = source[source.IndexOf("public static async Task<long> BuildHourAsync", StringComparison.Ordinal)..];
-        var order = new[] { "StatementTimeoutSql", "HourLockSql", "LockPairsSql", "DeleteHourSql", "BuildHourInsertSql", "SourceRowsSql", "UpsertBuiltSql", "UpsertHourSql", "CommitAsync" };
+        var body = source[source.IndexOf("public static async Task<long?> BuildHourAsync", StringComparison.Ordinal)..];
+        var order = new[] { "StatementTimeoutSql", "HourLockSql", "OpenWriterSql", "LockPairsSql", "DeleteHourSql", "BuildHourInsertSql", "SourceRowsSql", "UpsertBuiltSql", "UpsertHourSql", "CommitAsync" };
         var at = order.Select(o => body.IndexOf(o, StringComparison.Ordinal)).ToArray();
         Assert.DoesNotContain(-1, at);
         Assert.Equal(at.OrderBy(i => i), at);
@@ -194,6 +197,19 @@ public sealed class QueryStoreComposeStampTests
         Assert.DoesNotContain("late_seq =", QueryStoreComposeStamp.UpsertBuiltSql, StringComparison.Ordinal);
         Assert.Contains("built_seq = EXCLUDED.built_seq", QueryStoreComposeStamp.UpsertBuiltSql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(l.late_seq, 0)", QueryStoreComposeStamp.UpsertBuiltSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheOpenWriterGuard_IsTheWritingTransactionsOfThisDatabase_ThatBeganBeforeTheTriggerMarginEnded()
+    {
+        var sql = QueryStoreComposeStamp.OpenWriterSql;
+        Assert.Contains("FROM pg_stat_activity", sql, StringComparison.Ordinal);
+        Assert.Contains("datname = current_database()", sql, StringComparison.Ordinal);
+        Assert.Contains("backend_xid IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("pid <> pg_backend_pid()", sql, StringComparison.Ordinal);
+        Assert.Contains("(xact_start AT TIME ZONE 'UTC') < $1 + interval '2 hours'", sql, StringComparison.Ordinal);
+        /* The 2 hours are the build lag less the trigger's offset: a row of hour H is unmarked only before H + 3 h - 1 h. */
+        Assert.Equal(TimeSpan.FromHours(2), QueryStoreComposeStamp.BuildLag - QueryStoreComposeStamp.WhenOffset);
     }
 
     [Fact]

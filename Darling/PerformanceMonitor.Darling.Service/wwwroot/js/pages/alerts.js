@@ -24,9 +24,11 @@
  */
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
+         ALERT_STATE_LABELS, alertDeliveryState, parseUtc } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
+import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
+import { relativeSpec, specName } from "../time-range.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { orderServers } from "../server-order.js";
 import { getSession } from "../views-api.js";
@@ -409,31 +411,47 @@ function reconcileRows(tbody, rows, rowMap) {
 }
 
 /* The four read choices, kept at module scope so the 60 s poll (which calls renderAlerts again) and a visit to
- * another page and back keep them. The windows are the desktop Alert History's, less "All": the tool refuses
- * more than 168 hours, and a choice it would refuse is not offered. The row limits stop at the dispatch
- * layer's 1000-row ceiling. The server is the registry's server_name ("" = the whole fleet). */
-const WINDOW_CHOICES = [
-  { hours: 1, label: "Last 1 Hour" },
-  { hours: 4, label: "Last 4 Hours" },
-  { hours: 24, label: "Last 24 Hours" },
-  { hours: 168, label: "Last 7 Days" },
-];
+ * another page and back keep them. The range is the shared time range picker's spec (#5562), read as of each read so a
+ * rolling range slides. The picker takes the reach from the catalog (get_alert_history reaches 2160 hours, 90 days: the
+ * alert table's retention, DarlingRetention.AlertHistoryRetentionDays, ruling R8, #5562 L4b), so a longer range is greyed
+ * out with the reason, never clamped, and there is no All. The row limits stop at the dispatch layer's 1000-row ceiling. The server is the registry's server_name ("" = the whole fleet). */
+const DEFAULT_HOURS = 24;
 const LIMIT_CHOICES = [200, 500, 1000];
-const choices = { hours: 24, limit: 200, server: "", dismissed: false };
+const choices = { spec: relativeSpec(DEFAULT_HOURS * 3600000), limit: 200, server: "", dismissed: false };
 
-/* The get_alert_history parameters the current choices ask for. server_name and include_dismissed are left out
- * (buildQuery drops empty values) when they are at their defaults. */
-function readParams() {
+/* The get_alert_history request the current choices ask for: `{ params, startMs }`, or `{ error }` when the range cannot be read right now
+ * (Today at exactly midnight, zero length) - the page shows that reason, never a different window (#5562 review r1 L3). server_name and
+ * include_dismissed are left out (buildQuery drops empty values) when they are at their defaults, and as_of when the range ends now.
+ * The read takes whole hours, so `startMs` is the range's exact start: the page trims the reply to it (review r1 H2). */
+function readRequest() {
+  const r = windowResultOfSpec(choices.spec);
+  if (r.error) return { error: r.error };
+  const w = r.window;
   return {
-    hours_back: choices.hours,
-    limit: choices.limit,
-    server_name: choices.server || null,
-    include_dismissed: choices.dismissed ? "true" : null,
+    startMs: w.startMs,
+    params: {
+      hours_back: w.hours,
+      as_of: w.asOf,
+      limit: choices.limit,
+      server_name: choices.server || null,
+      include_dismissed: choices.dismissed ? "true" : null,
+    },
   };
 }
 
+/* Keeps the alerts at or after the range start. The newest-first reply and the row cap mean the cut cannot hide an in-range row (the
+ * rows it drops are the oldest), the same argument job-history.js makes for its runs. An unreadable time is kept.
+ * alert_time is the store's naive UTC with no zone suffix, and Date.parse would read that as the browser's LOCAL time, shifting every
+ * alert by the browser's offset, so parseUtc (util.js) reads it as UTC (#5570 review round 2, H1). */
+export function trimAlertsToStart(alerts, startMs) {
+  return alerts.filter((a) => {
+    const d = parseUtc(a && a.alert_time);
+    return d === null || d.getTime() >= startMs;
+  });
+}
+
 function windowLabel() {
-  return (WINDOW_CHOICES.find((w) => w.hours === choices.hours) || WINDOW_CHOICES[2]).label.toLowerCase();
+  return specName(choices.spec).toLowerCase();
 }
 
 /* The server names list_servers reported on the last successful read; the picker keeps the chosen server in the
@@ -589,8 +607,16 @@ export async function renderAlerts(main) {
     "aria-label": "Filter alerts by server",
   });
 
-  const windowSel = picker("Time range", WINDOW_CHOICES.map((w) => ({ value: w.hours, label: w.label })), choices.hours);
-  windowSel.setAttribute("title", "The web reads at most 7 days of alert history, so there is no All choice.");
+  const rangePicker = pageRangePicker({
+    read: "get_alert_history",
+    spec: choices.spec,
+    label: "Time range",
+    /* No collector feeds the alert log, so there is no "collected every N minutes" note. */
+    useCatalogInterval: false,
+    /* The longest choice is the alert table's retention (90 days, ruling R8), not only a typed "90d". */
+    offerReach: true,
+    onChange: (spec) => { choices.spec = spec; changed(); },
+  }).picker;
   const limitSel = picker("Row limit", LIMIT_CHOICES.map((n) => ({ value: n, label: n + " rows" })), choices.limit);
   const serverSel = picker("Server", serverItems(), choices.server);
   const dismissedBox = el("input", { type: "checkbox", "aria-label": "Show dismissed alerts" });
@@ -603,7 +629,7 @@ export async function renderAlerts(main) {
     el("h2", { text: "Alert History" }),
     meta,
     el("div", { class: "spacer" }),
-    control("Range", windowSel),
+    el("div", { class: "range-control" }, [el("span", { text: "Range" }), rangePicker.node]),
     control("Rows", limitSel),
     control("Server", serverSel),
     el("label", { class: "range-control" }, [dismissedBox, el("span", { text: "Show dismissed" })]),
@@ -615,7 +641,6 @@ export async function renderAlerts(main) {
   /* A changed choice refetches and reconciles the table that is already drawn, the same path a poll tick takes.
      It also drops the checked rows: they were picked from the list the old choice showed. */
   const changed = () => { clearSelection(live); return refreshAlerts(live); };
-  windowSel.addEventListener("change", () => { choices.hours = Number(windowSel.value); changed(); });
   limitSel.addEventListener("change", () => { choices.limit = Number(limitSel.value); changed(); });
   serverSel.addEventListener("change", () => { choices.server = serverSel.value; changed(); });
   dismissedBox.addEventListener("change", () => { choices.dismissed = !!dismissedBox.checked; changed(); });
@@ -636,7 +661,8 @@ export async function renderAlerts(main) {
  * in order. A reply that arrives after a newer request was made is dropped. */
 async function refreshAlerts(state) {
   const seq = ++state.seq;
-  const res = await readTool("get_alert_history", readParams());
+  const req = readRequest();
+  const res = req.error ? { kind: "error", message: "This range cannot be read yet: " + req.error } : await readTool("get_alert_history", req.params);
   if (seq !== state.seq) return;
   state.meta.textContent = (choices.server ? choices.server : "fleet-wide") + " · " + windowLabel();
   mount(state.noticeBox, []);
@@ -650,7 +676,7 @@ async function refreshAlerts(state) {
     mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
     return;
   }
-  state.alerts = res.data.alerts || [];
+  state.alerts = trimAlertsToStart(res.data.alerts || [], req.startMs);
   state.truncated = res.data.truncated === true;
   /* A checked row that is no longer listed (dismissed elsewhere, aged out) is no longer selected. */
   const listed = new Set(state.alerts.filter(dismissable).map(alertKey));

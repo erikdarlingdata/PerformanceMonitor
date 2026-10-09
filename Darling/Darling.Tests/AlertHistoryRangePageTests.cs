@@ -32,8 +32,13 @@ public sealed class AlertHistoryRangePageTests
         var page = Page();
         Assert.DoesNotContain("hours_back: 24", page);
         Assert.DoesNotContain("limit: 200 }", page);
-        Assert.Contains("readTool(\"get_alert_history\", readParams())", page);
-        Assert.Contains("hours_back: choices.hours", page);
+        Assert.Contains("readTool(\"get_alert_history\", req.params)", page);
+        // #5562: the range is the shared picker's spec, read as of each read; a finished range also sends its end.
+        Assert.Contains("windowResultOfSpec(choices.spec);", page);
+        Assert.Contains("hours_back: w.hours", page);
+        Assert.Contains("as_of: w.asOf", page);
+        // Review r1 H2: the reply is trimmed to the range start, since the read takes whole hours.
+        Assert.Contains("trimAlertsToStart(res.data.alerts || [], req.startMs)", page);
         Assert.Contains("limit: choices.limit", page);
         Assert.Contains("server_name: choices.server || null", page);
         Assert.Contains("include_dismissed: choices.dismissed ? \"true\" : null", page);
@@ -45,9 +50,14 @@ public sealed class AlertHistoryRangePageTests
     public void NoWindowOrLimitIsOfferedThatTheToolOrTheDispatchLayerRefuses()
     {
         var page = Page();
-        var hours = System.Text.RegularExpressions.Regex.Matches(page, "\\{ hours: (\\d+), label").Select(m => int.Parse(m.Groups[1].Value)).ToList();
-        Assert.Equal(new[] { 1, 4, 24, 168 }, hours);
-        Assert.True(hours.Max() <= PerformanceMonitor.Common.McpHelpers.MaxHoursBack);
+        // #5562 R8: no hand-listed windows and no "All". The picker takes its reach from the catalog's max_hours for the read, which is
+        // the 2160 hours (90 days) the read's validator accepts, so a longer range is greyed out with the reason and never clamped. That
+        // is the alert table's retention (AlertHistoryRetentionDays, DarlingRetention.cs), the longest choice the Viewer offers (R8, L4b).
+        Assert.DoesNotContain("WINDOW_CHOICES", page);
+        Assert.Contains("read: \"get_alert_history\"", page);
+        Assert.Contains("pageRangePicker({", page);
+        Assert.Equal(24 * PerformanceMonitor.Darling.Storage.DarlingRetentionHorizons.AlertHistoryRetentionDays, PerformanceMonitor.Darling.Service.WebReadReach.All["get_alert_history"].MaxHours);
+        Assert.Equal(90, PerformanceMonitor.Darling.Storage.DarlingRetentionHorizons.AlertHistoryRetentionDays);
 
         var limits = System.Text.RegularExpressions.Regex.Match(page, "const LIMIT_CHOICES = \\[([0-9, ]+)\\]").Groups[1].Value
             .Split(',').Select(s => int.Parse(s.Trim())).ToList();
@@ -63,12 +73,17 @@ public sealed class AlertHistoryRangePageTests
         Assert.DoesNotContain("/api/alerts/dismiss", page);
     }
 
-    private static JsonElement Run(string scenario)
+    private static JsonElement Run(string scenario, string? timeZone = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "alert-history-range-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
         psi.ArgumentList.Add(scenario);
+        if (timeZone is not null)
+        {
+            psi.ArgumentList.Add(timeZone);
+        }
+
         Process proc;
         try
         {
@@ -118,7 +133,15 @@ public sealed class AlertHistoryRangePageTests
         Assert.Equal("1000", Get(dismissed, "limit"));
         Assert.Equal("srv-b", Get(dismissed, "server_name"));
 
-        Assert.Equal("1,4,24,168", string.Join(",", r.GetProperty("windowOptions").EnumerateArray().Select(e => e.GetString())));
+        // The popup offers every preset and calendar period within the catalog's 90 days; the longer ones are greyed out, never clamped.
+        Assert.Equal("Past 5 minutes,Past 15 minutes,Past 30 minutes,Past hour,Past 4 hours,Past day,Past 2 days,Past week,Past 30 days,Past 90 days,Today,Yesterday,Week to Date,Previous Week,Month to Date,Previous Month",
+            string.Join(",", r.GetProperty("windowOptions").EnumerateArray().Select(e => e.GetString())));
+        Assert.Equal("Year to Date,Previous Year",
+            string.Join(",", r.GetProperty("windowGreyed").EnumerateArray().Select(e => e.GetString())));
+        Assert.Equal("This page's reads reach at most 90 days back.", r.GetProperty("refused").GetString());
+        // A finished range sends its end as as_of; a shorter-than-an-hour range reads the whole hour.
+        Assert.EndsWith("Z", Get(r.GetProperty("finished"), "as_of"));
+        Assert.Equal("1", Get(r.GetProperty("thirtyMinutes"), "hours_back"));
         Assert.Equal("200,500,1000", string.Join(",", r.GetProperty("limitOptions").EnumerateArray().Select(e => e.GetString())));
         Assert.Equal(",srv-a,srv-b", string.Join(",", r.GetProperty("serverOptions").EnumerateArray().Select(e => e.GetString())));
     }
@@ -138,7 +161,7 @@ public sealed class AlertHistoryRangePageTests
         }
 
         var shown = r.GetProperty("shown");
-        Assert.Equal("4", shown.GetProperty("window").GetString());
+        Assert.Equal("Past 4 hours", shown.GetProperty("window").GetString());
         Assert.Equal("500", shown.GetProperty("limit").GetString());
         Assert.Equal("srv-a", shown.GetProperty("server").GetString());
         Assert.True(shown.GetProperty("dismissed").GetBoolean());
@@ -182,9 +205,13 @@ public sealed class AlertHistoryRangePageTests
     }
 
     [Fact]
-    public void TheRangePickerSaysTheWebReadsAtMostSevenDays()
+    public void TheRangePickerTakesItsReachFromTheCatalog_NinetyDays()
     {
-        Assert.Contains("The web reads at most 7 days", Page());
+        // #5562: the picker greys out what the read cannot reach and says why (the catalog's max_hours), so the page needs no hand-written
+        // tooltip; the reach is the read's own 2160 hours, the alert table's retention (L4b).
+        Assert.DoesNotContain("The web reads at most 7 days of alert history, so there is no All choice.", Page());
+        Assert.DoesNotContain("the web read stops at the common 7 day reach", Page());
+        Assert.Contains("get_alert_history reaches 2160 hours, 90 days", Page());
     }
 
     [Fact]
@@ -195,6 +222,25 @@ public sealed class AlertHistoryRangePageTests
         Assert.Equal("High CPU 0,High CPU 1,High CPU 2,High CPU 3", string.Join(",", r.GetProperty("after").EnumerateArray().Select(e => e.GetString())));
         Assert.True(r.GetProperty("keptNode").GetBoolean(), "an unchanged row keeps its DOM node across a window change");
         Assert.Equal("High CPU 3", string.Join(",", r.GetProperty("shrunk").EnumerateArray().Select(e => e.GetString())));
+    }
+
+    // Review r2 H1: alert_time is naive UTC with no zone suffix, which the browser reads as LOCAL time unless the page parses it as UTC. The
+    // harness rows carry the server's real shape, and the same scenario runs in zones that are not UTC (and in UTC) because a UTC-only run
+    // passes the old Date.parse code. The offset check proves Node honoured the zone, so the test cannot pass by running in UTC every time.
+    [Theory]
+    [InlineData("UTC", 0)]
+    [InlineData("Europe/Berlin", -1)]
+    [InlineData("America/New_York", 1)]
+    [InlineData("Asia/Tokyo", -1)]
+    public void ARangeShorterThanTheWholeHoursItFetches_ListsOnlyTheAlertsInsideIt(string zone, int offsetSign)
+    {
+        var r = Run("trim", zone);
+        Assert.Equal(offsetSign, Math.Sign(r.GetProperty("tzOffsetMinutes").GetInt32()));
+        string[] Names(string key) => r.GetProperty(key).EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(new[] { "High CPU 0", "High CPU 19", "High CPU 89" }, Names("day"));
+        Assert.Equal(new[] { "High CPU 0" }, Names("fiveMinutes"));
+        Assert.Equal(new[] { "High CPU 0", "High CPU 19" }, Names("thirtyMinutes"));
+        Assert.Equal(new[] { "High CPU 0", "High CPU 19", "High CPU 89" }, Names("fourHours"));
     }
 
     [Fact]
