@@ -207,7 +207,11 @@ public sealed class ForcePlanFailuresAccessPathTests
                100 ns, so a raw UtcNow does not survive the round trip and the #3579 stamp assertion below
                (tick-equality against what was seeded) would fail on any clock that is not itself
                microsecond-aligned — Windows' is not; the first CI run proved it by three ticks. */
-            var rawNow = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
+            /* #5608: the real clock on purpose, not LiveClock. GetForcePlanFailuresAsync below takes its two-hour
+               window from the product's own clock, so a seed placed by DARLING_TEST_CLOCK_UTC falls outside it and
+               the read comes back empty (five of five runs at a 00:30 override, with every plan assertion above
+               already passed). The plan assertions hold across a chunk boundary, so the seed needs no anchor. */
+            var rawNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Utc);
             var utcNow = DateTime.SpecifyKind(new DateTime(rawNow.Ticks - (rawNow.Ticks % 10)), DateTimeKind.Unspecified);
             for (var pass = 7; pass >= 0; pass--)
             {

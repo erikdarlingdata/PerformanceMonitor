@@ -46,8 +46,6 @@ public sealed class LiveClockCensusTests
         // says why the count cannot depend on where a chunk boundary falls.
     };
 
-    private const string E2Audits = "e2 audits this file (#5608): lane e2 replaces this entry with its verdict or removes it when it converts the file.";
-
     /// <summary>
     /// Live files that touch a plan or the chunk catalog and read the clock directly, with the reason each is safe as it is.
     /// Every other such file goes through <see cref="LiveClock"/>.
@@ -62,29 +60,30 @@ public sealed class LiveClockCensusTests
         ["DarlingDeltaSeederTests.cs"] = "SeedFromStoreAsync reads a window back from the product's own real clock, so a seed placed by an override falls outside it (the two live tests failed under 00:30Z). The rows sit minutes before now, and the assertions are delta values, not plan shape or chunk membership.",
         ["DarlingModuleMapGroupedSourceLiveTests.cs"] = "The daily refresh statement reads now() - 2 days with no bound parameter, so the product reads the real clock and a seed placed by an override falls outside its window (the refresh test failed under 12:00Z). The rows sit three hours before now, far inside the window, and the assertions are the newest name per handle, not chunk layout.",
         ["DarlingStoreUpgradeTests.cs"] = "The only clock read is a 30 second polling deadline for a marker file. No row is seeded from it.",
-        ["PerfmonRegroupLiveTests.cs"] = "The only direct clock reads are a poll deadline. The chunk-window question the class documents (the day-3 chunk dropping out of the count at midnight UTC) is audited by lane e2 together with PerfmonRegroupLiveSupport.cs.",
-        ["PayloadDimensionLiveTests.cs"] = E2Audits,
-        ["PerfmonRegroupLiveSupport.cs"] = E2Audits,
-        ["PgDeadlockRemaskTests.cs"] = E2Audits,
-        ["PgPlanCaptureCsvLiveTests.cs"] = E2Audits,
-        ["PgPlanCaptureLiveTests.cs"] = E2Audits,
-        ["PgServerConfigToolBoundTests.cs"] = E2Audits,
-        ["PgTargetSeqScanTests.cs"] = E2Audits,
-        ["PlanRegressionDailyBuilderLiveTests.cs"] = E2Audits,
-        ["QueryStoreBackfillCutChunkLiveTests.cs"] = E2Audits,
-        ["QueryStoreBackgroundIndexesLiveTests.cs"] = E2Audits,
-        ["QueryStoreIntervalPurgeRowCappedTests.cs"] = E2Audits,
-        ["QueryStoreIntervalWideBelowFloorLiveTests.cs"] = E2Audits,
-        ["QueryStoreIntervalWideGridLiveTests.cs"] = E2Audits,
-        ["QueryStoreTopLiteralEndStraddleLiveTests.cs"] = E2Audits,
-        ["QueryStoreTopMcpLiveTests.cs"] = E2Audits,
-        ["RawPurgeTriggerGateErrorTests.cs"] = E2Audits,
-        ["RawPurgeTriggerLiveTests.cs"] = E2Audits,
-        ["RawTablesLeaveCatalogSweepLiveTests.cs"] = E2Audits,
-        ["ServerListAndSummaryPlanShapeTests.cs"] = E2Audits,
-        ["StoreMetricsLatestSkipScanLiveTests.cs"] = E2Audits,
-        ["StoreSelfMetricsTests.cs"] = E2Audits,
-        ["TimescaleSupportTests.cs"] = E2Audits,
+        ["PerfmonRegroupLiveTests.cs"] = "The only direct clock reads are a poll deadline. Seeds are whole UTC days from the run start date, the policy test seeds three to five days back (the two-days-back version was #5579's 00:00 to 03:00 failure), and the reach test counts chunks from the database clock, so the day-3 chunk cannot drop out of a count at midnight UTC.",
+        ["ForcePlanFailuresAccessPathTests.cs"] = "The shipped read takes its two-hour window from the product's own real clock, so a seed placed by the test clock override falls outside it and the read comes back empty (it failed five of five runs at a 00:30 override). The plan assertions hold across a chunk boundary: at that override they all passed before the read, so the real-clock seed needs no anchor.",
+        ["PayloadDimensionLiveTests.cs"] = "Seeds dates 45 and 400 days back, mid-chunk, and asserts on dimension rows, not on chunk or block counts. The clock is only a stamp.",
+        ["PerfmonRegroupLiveSupport.cs"] = "Every seed is a whole UTC day taken from the run start date, and the compress reach is read from the database clock, which a test override cannot move. The window does not move with the hour (#5579's two-days-back seed was the 00:00 to 03:00 defect; the policy test now seeds three to five days back).",
+        ["PgDeadlockRemaskTests.cs"] = "Seeds midday of a date or fixed dates, so no seeded window straddles a day boundary.",
+        ["PgPlanCaptureCsvLiveTests.cs"] = "The clock is only the collection stamp. The class needs an external target and skips on a rig without one.",
+        ["PgPlanCaptureLiveTests.cs"] = "The clock is only the collection stamp. The class needs an external target and skips on a rig without one.",
+        ["PgServerConfigToolBoundTests.cs"] = "The chunk-scan asserts are written as ranges, so they hold for any layout, and the reader's own read takes the real clock, so an override cannot reach it.",
+        ["PgTargetSeqScanTests.cs"] = "No EXPLAIN or chunks (the 'Seq Scan' is planted plan JSON), and the analyze tool rejects an end ahead of the real clock, so the test must stay on the real clock (an override at 12:00Z made it fail).",
+        ["PlanRegressionDailyBuilderLiveTests.cs"] = "Fixed March dates on plain tables, including the block count. The one real-clock fact seeds five whole days back and its trigger reads the database clock.",
+        ["QueryStoreBackfillCutChunkLiveTests.cs"] = "Fixed June dates. The one test that follows the real clock waits until the floor is 3 minutes clear of a boundary.",
+        ["QueryStoreBackgroundIndexesLiveTests.cs"] = "Seeds from SQL now() and compares the same store before and after the indexes, so the chunk layout is the same on both sides.",
+        ["QueryStoreIntervalPurgeRowCappedTests.cs"] = "Plain tables, fixed dates for the plan asserts, and whole-day margins around the retention horizon.",
+        ["QueryStoreIntervalWideBelowFloorLiveTests.cs"] = "Anchored to the date (6 days back); the clock is only a stamp.",
+        ["QueryStoreIntervalWideGridLiveTests.cs"] = "Fixed 15 September window; the clock is only a write stamp.",
+        ["QueryStoreTopLiteralEndStraddleLiveTests.cs"] = "Fixed 15 September window; the clock is only a write stamp.",
+        ["QueryStoreTopMcpLiveTests.cs"] = "Fixed 15 September window; the clock is only a write stamp.",
+        ["RawPurgeTriggerGateErrorTests.cs"] = "Seeds from the database clock one to ten days back, and its asserts are relative (chunks before greater than 0, after less than before, equal before and after).",
+        ["RawPurgeTriggerLiveTests.cs"] = "Seeds from the database clock one to ten days back, and its asserts are relative (chunks before greater than 0, after less than before, equal before and after).",
+        ["RawTablesLeaveCatalogSweepLiveTests.cs"] = "Seeds from the database clock one to ten days back, and its asserts are relative (chunks before greater than 0, after less than before, equal before and after).",
+        ["ServerListAndSummaryPlanShapeTests.cs"] = "The newest row is one minute old and the assert is at most two chunks visited, true on either side of midnight. No time goes to the product.",
+        ["StoreMetricsLatestSkipScanLiveTests.cs"] = "A plain table; it asserts index names, not chunks.",
+        ["StoreSelfMetricsTests.cs"] = "Seeds are placed at midday of a date (#1972); the clock is only a stamp.",
+        ["TimescaleSupportTests.cs"] = "Seeds are placed at midday of a date (#1972); the clock is only a stamp.",
     };
 
     private static readonly Regex s_clock = new(@"\bDateTime(?:Offset)?\s*\.\s*(?:UtcNow|Now)\b", RegexOptions.Compiled);
