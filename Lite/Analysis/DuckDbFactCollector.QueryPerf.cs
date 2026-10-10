@@ -299,6 +299,8 @@ ORDER BY worker_ratio DESC";
     /// no fact when Query Store is not enabled on the monitored databases.
     /// Unlike other collectors this windows on last_execution_time (14-day comparison
     /// window), NOT collection_time — see plan note.
+    /// #5630: a candidate whose statement carries OPTION (RECOMPILE), or whose two plans were compiled for
+    /// different parameter values, is dropped before the fact (<see cref="VerifyPlanRegressionInputsAsync"/>).
     /// </summary>
     private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -308,12 +310,14 @@ ORDER BY worker_ratio DESC";
 
         try
         {
-            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
-            using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync(context.CancellationToken);
+            var candidates = new List<PlanRegressionCandidate>();
+            {
+                using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+                using var connection = _duckDb.CreateConnection();
+                await connection.OpenAsync(context.CancellationToken);
 
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = @"
 WITH deduped AS
 (
     -- Collapse incremental re-collections of the same open runtime-stats interval:
@@ -340,6 +344,7 @@ WITH deduped AS
         last_execution_time,
         is_forced_plan,
         force_failure_count,
+        query_text,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
@@ -368,7 +373,8 @@ plan_agg AS
         SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
-        MAX(force_failure_count) AS force_failure_count
+        MAX(force_failure_count) AS force_failure_count,
+        any_value(query_text) AS query_text
     FROM deduped
     WHERE rn = 1
     GROUP BY database_name, query_id, plan_id, replica_role
@@ -387,7 +393,15 @@ plan_dedup AS
         SUM(dur_per_exec * execs) / NULLIF(SUM(execs), 0) AS dur_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
-        MAX(force_failure_count) AS force_failure_count
+        MAX(force_failure_count) AS force_failure_count,
+        -- #5630: one representative plan_id per plan group, for the compiled-inputs check. The latest group's is
+        -- the plan that ran last; the best group's is the one that ran most. Their XML is fetched live, for
+        -- candidates only.
+        -- Ties break on plan_id (the struct orders by its second field), as Darling's read does, so the pick is the
+        -- same on every pass and in both products.
+        arg_max(plan_id, (last_exec, plan_id)) AS newest_plan_id,
+        arg_max(plan_id, (execs, plan_id)) AS busiest_plan_id,
+        any_value(query_text) AS query_text
     FROM plan_agg
     GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execs) >= 25
@@ -436,7 +450,12 @@ compared AS
         l.database_name,
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
-        b.last_exec AS best_last_exec
+        b.last_exec AS best_last_exec,
+        -- #5630: the statement text and the two groups' representative plans, for the OPTION (RECOMPILE) and
+        -- compiled-inputs checks the C# side makes before it reports.
+        l.query_text AS query_text,
+        l.newest_plan_id AS latest_plan_id,
+        b.busiest_plan_id AS best_plan_id
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -459,7 +478,11 @@ SELECT
     -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
     database_name,
     -- #3953: appended for the same reason.
-    best_last_exec
+    best_last_exec,
+    -- #5630: appended for the same reason.
+    query_text,
+    latest_plan_id,
+    best_plan_id
 FROM compared
 WHERE regression_factor >= 2
 -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
@@ -467,15 +490,42 @@ WHERE regression_factor >= 2
 -- regression_factor and the scorer.
 AND   latest_total_cpu_us >= 10000000
 ORDER BY regression_factor DESC
-LIMIT 20";
+-- #5630: more rows than the fact keeps. The C# side drops the rows whose two plans were compiled for different
+-- inputs and keeps the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave
+-- the fact one offender short.
+LIMIT 100";
 
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
-            /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
-               primary stay in the window, so the read skips those databases. */
-            cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 3);
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
+                /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
+                   primary stay in the window, so the read skips those databases. */
+                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 3);
 
-            var offenderCount = 0;
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    candidates.Add(new PlanRegressionCandidate(
+                        QueryId: reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0)),
+                        LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
+                        LatestIsForced: (!reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3))) ? 1 : 0,
+                        ForceFailureCount: reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
+                        BestCpu: reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)),
+                        RegressionFactor: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
+                        DatabaseName: reader.GetString(8),
+                        BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
+                        QueryText: reader.IsDBNull(10) ? null : reader.GetString(10),
+                        LatestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
+                        BestPlanId: reader.IsDBNull(12) ? null : ToInt64(reader.GetValue(12))));
+                }
+            }
+
+            /* #5630: the lock and the connection are released before any plan is fetched: a fetch is a network
+               call to the monitored server and must not hold the store's read lock. */
+            var verification = await VerifyPlanRegressionInputsAsync(context, candidates);
+            var kept = verification.Kept;
+
+            var offenderCount = kept.Count;
+            var offenders = new List<PlanRegressionOffender>();
             var worstFactor = 0.0;
             var worstQueryId = 0L;
             var worstLatestCpu = 0.0;
@@ -484,35 +534,31 @@ LIMIT 20";
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
             DateTime? worstBestLastExec = null;
-            var offenders = new List<PlanRegressionOffender>();
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            while (await reader.ReadAsync(context.CancellationToken))
+            for (var i = 0; i < kept.Count; i++)
             {
-                // Rows arrive ordered by regression_factor DESC — the first row is the worst offender.
-                if (offenderCount == 0)
-                {
-                    worstQueryId = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-                    var latestCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-                    worstLatestForced = (!reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3))) ? 1 : 0;
-                    worstForceFailures = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-                    var bestCpu = reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5));
-                    worstFactor = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7));
+                var row = kept[i];
 
-                    worstLatestCpu = latestCpu;
-                    worstBestCpu = bestCpu;
-                    worstBestLastExec = reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9));
-                    // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
+                // Rows arrive ordered by regression_factor DESC — the first kept row is the worst offender.
+                if (i == 0)
+                {
+                    worstQueryId = row.QueryId;
+                    worstLatestForced = row.LatestIsForced;
+                    worstForceFailures = row.ForceFailureCount;
+                    worstFactor = row.RegressionFactor;
+                    worstLatestCpu = row.LatestCpu;
+                    worstBestCpu = row.BestCpu;
+                    worstBestLastExec = row.BestLastExec;
+                    // Which CASE branch fired, not which raw ratio is larger (#2138):
                     // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
                     // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
-                    var cpuRatio = bestCpu > 0 ? latestCpu / bestCpu : 0.0;
+                    var cpuRatio = row.BestCpu > 0 ? row.LatestCpu / row.BestCpu : 0.0;
                     worstDimension = cpuRatio >= 2 ? 1 : 2; // 1 = cpu, 2 = duration
                 }
-                offenderCount++;
 
                 /* #3902: both keys are join keys of the comparison above, so neither is ever NULL here. Two
                    replicas of one query are two rows and one offender. */
-                var offender = new PlanRegressionOffender(reader.GetString(8), ToInt64(reader.GetValue(0)));
+                var offender = new PlanRegressionOffender(row.DatabaseName, row.QueryId);
                 if (!offenders.Contains(offender))
                     offenders.Add(offender);
             }
@@ -539,6 +585,12 @@ LIMIT 20";
                     ["force_failure_count"] = worstForceFailures,
                     /* #3953 parity: Lite reads its raw slice (0); Darling's 1 is the interval table. */
                     ["plan_regression_source"] = 0,
+                    /* #5630, the names Darling's fact carries: candidates dropped because the two plans were
+                       compiled for different inputs (or the statement carries OPTION (RECOMPILE)), and kept
+                       candidates whose inputs could not be compared (no plan fetched, or the plans carry no
+                       compiled values). Only counts leave the comparison, never a plan or a value. */
+                    ["cross_input_excluded_count"] = verification.CrossInputExcluded,
+                    ["inputs_unverified_count"] = verification.InputsUnverified,
                 }
             };
 

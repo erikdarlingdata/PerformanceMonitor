@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -563,7 +564,12 @@ WITH plan_agg AS
         SUM(dur_per_exec * execs) / NULLIF(SUM(execs), 0) AS dur_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
-        MAX(force_failure_count) AS force_failure_count
+        MAX(force_failure_count) AS force_failure_count,
+        -- #5630: one plan_id per hash group, so the caller can read the two plans' compiled parameter values. The
+        -- group's newest-run plan stands for the latest group, its most-executed plan for the best group; ties
+        -- break on plan_id so the pick is the same on every read.
+        (array_agg(plan_id ORDER BY last_exec DESC, plan_id DESC))[1] AS newest_plan_id,
+        (array_agg(plan_id ORDER BY execs DESC, plan_id DESC))[1] AS busiest_plan_id
     FROM plan_agg
     /*SEC*/
     GROUP BY database_name, query_id, replica_role, query_plan_hash
@@ -613,7 +619,10 @@ compared AS
         l.database_name,
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
-        b.last_exec AS best_last_exec
+        b.last_exec AS best_last_exec,
+        -- #5630: the plans to compare, and the key for the statement text.
+        l.newest_plan_id AS latest_plan_id,
+        b.busiest_plan_id AS best_plan_id
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -622,29 +631,46 @@ compared AS
       AND b.cheapness = 1
     WHERE l.recency = 1
     AND   l.query_plan_hash <> b.query_plan_hash
+),
+candidates AS
+(
+    SELECT *
+    FROM compared
+    WHERE regression_factor >= 2
+    -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
+    -- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
+    -- regression_factor and the scorer.
+    AND   latest_total_cpu_us >= 10000000
+    -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
+    -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
+    ORDER BY regression_factor DESC
+    LIMIT 100
 )
 SELECT
-    query_id,
-    latest_cpu,
-    latest_dur,
-    latest_is_forced,
-    force_failure_count,
-    best_cpu,
-    best_dur,
-    regression_factor,
+    c.query_id,
+    c.latest_cpu,
+    c.latest_dur,
+    c.latest_is_forced,
+    c.force_failure_count,
+    c.best_cpu,
+    c.best_dur,
+    c.regression_factor,
     -- #3902: appended, so the ordinals above are untouched. With query_id it names each offender for the
     -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
-    database_name,
+    c.database_name,
     -- #3953: appended for the same reason.
-    best_last_exec
-FROM compared
-WHERE regression_factor >= 2
--- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
--- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
--- regression_factor and the scorer.
-AND   latest_total_cpu_us >= 10000000
-ORDER BY regression_factor DESC
-LIMIT 20";
+    c.best_last_exec,
+    -- #5630: appended for the same reason. The two plans to compare, then the statement text (the table is keyed
+    -- on (server, database, query_id), so it cannot fan a row out).
+    c.latest_plan_id,
+    c.best_plan_id,
+    x.query_sql_text
+FROM candidates AS c
+LEFT JOIN query_store_text AS x
+  ON  x.server_id = $1
+  AND x.database_name = c.database_name
+  AND x.query_id = c.query_id
+ORDER BY c.regression_factor DESC";
 
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution
@@ -749,7 +775,80 @@ LIMIT 20";
                variants share, so they cannot drift; bound after every other parameter. */
             PgSecondaryReplicaScope.Apply(cmd, context, "PLAN_REGRESSION", "database_name", "WHERE");
 
-            var offenderCount = 0;
+            /* #5630: read the candidates first (the worst 100 by factor), then judge them, because judging reads plans
+               and a second command cannot run while this reader is open. */
+            var candidates = new List<PlanRegressionCandidate>();
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    candidates.Add(new PlanRegressionCandidate(
+                        DatabaseName: reader.GetString(8),
+                        QueryId: ToInt64(reader.GetValue(0)),
+                        LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
+                        LatestIsForced: !reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3)),
+                        ForceFailures: reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4)),
+                        BestCpu: reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)),
+                        Factor: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
+                        BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
+                        LatestPlanId: reader.IsDBNull(10) ? null : ToInt64(reader.GetValue(10)),
+                        BestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
+                        StatementText: reader.IsDBNull(12) ? null : reader.GetString(12)));
+                }
+            }
+
+            /* The snapshot has done its job: the plan reads below are ordinary statements, so one that fails cannot abort it. */
+            if (snapshot is not null)
+            {
+                await snapshot.DisposeAsync();
+                snapshot = null;
+            }
+
+            /* #5630: drop the queries whose two plans were not compiled for the same inputs, keep the worst 20 of the
+               rest. Everything that reads the list downstream (the offenders, the regressed-queries drill-down, the
+               force-plan targets built from it) sees only the kept queries. The drill-down names a query by
+               (database, query_id) and not by replica, so a query one replica's row excludes is out for every replica
+               (an excluded query must not reach a force): a query is judged whole, every replica row of it, the first
+               time its key comes up, so the exclusion is known before any row of it is kept and the cut to 20 counts
+               only rows that stay. */
+            var kept = new List<PlanRegressionCandidate>();
+            var excludedKeys = new HashSet<PlanRegressionOffender>();
+            var judgedKeys = new HashSet<PlanRegressionOffender>();
+            var judgements = new Dictionary<int, bool>();
+            var planReads = new PlanReadFailures();
+            for (var i = 0; i < candidates.Count; i++)
+            {
+                if (kept.Count >= PlanRegressionMaxOffenders)
+                    break;
+
+                var candidate = candidates[i];
+                var queryKey = new PlanRegressionOffender(candidate.DatabaseName, candidate.QueryId);
+                if (judgedKeys.Add(queryKey))
+                {
+                    for (var j = i; j < candidates.Count; j++)
+                    {
+                        if (candidates[j].DatabaseName != queryKey.DatabaseName || candidates[j].QueryId != queryKey.QueryId)
+                            continue;
+
+                        var verdict = await JudgePlanRegressionInputsAsync(connection, context, candidates[j], planReads);
+                        if (verdict.Exclude)
+                        {
+                            excludedKeys.Add(queryKey);
+                            break;
+                        }
+
+                        judgements[j] = verdict.Unverified;
+                    }
+                }
+
+                if (excludedKeys.Contains(queryKey))
+                    continue;
+
+                kept.Add(candidate with { Unverified = judgements[i] });
+            }
+
+            var offenderCount = kept.Count;
+            var unverified = kept.Count(k => k.Unverified);
             var worstFactor = 0.0;
             var worstQueryId = 0L;
             var worstLatestCpu = 0.0;
@@ -760,33 +859,29 @@ LIMIT 20";
             DateTime? worstBestLastExec = null;
             var offenders = new List<PlanRegressionOffender>();
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            while (await reader.ReadAsync(context.CancellationToken))
+            for (var i = 0; i < kept.Count; i++)
             {
+                var row = kept[i];
                 // Rows arrive ordered by regression_factor DESC — the first row is the worst offender.
-                if (offenderCount == 0)
+                if (i == 0)
                 {
-                    worstQueryId = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-                    var latestCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-                    worstLatestForced = (!reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3))) ? 1 : 0;
-                    worstForceFailures = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-                    var bestCpu = reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5));
-                    worstFactor = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7));
-
-                    worstLatestCpu = latestCpu;
-                    worstBestCpu = bestCpu;
-                    worstBestLastExec = reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9));
+                    worstQueryId = row.QueryId;
+                    worstLatestForced = row.LatestIsForced ? 1 : 0;
+                    worstForceFailures = row.ForceFailures;
+                    worstFactor = row.Factor;
+                    worstLatestCpu = row.LatestCpu;
+                    worstBestCpu = row.BestCpu;
+                    worstBestLastExec = row.BestLastExec;
                     // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
                     // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
                     // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
-                    var cpuRatio = bestCpu > 0 ? latestCpu / bestCpu : 0.0;
+                    var cpuRatio = row.BestCpu > 0 ? row.LatestCpu / row.BestCpu : 0.0;
                     worstDimension = cpuRatio >= 2 ? 1 : 2; // 1 = cpu, 2 = duration
                 }
-                offenderCount++;
 
                 /* #3902: both keys are join keys of the comparison above, so neither is ever NULL here. Two
                    replicas of one query are two rows and one offender. */
-                var offender = new PlanRegressionOffender(reader.GetString(8), ToInt64(reader.GetValue(0)));
+                var offender = new PlanRegressionOffender(row.DatabaseName, row.QueryId);
                 if (!offenders.Contains(offender))
                     offenders.Add(offender);
             }
@@ -796,6 +891,23 @@ LIMIT 20";
             /* #5448: M is recorded only now, after the read has succeeded. A read that threw leaves "not known" (null), as the
                AnalysisContext doc says, so the drill-down does not start at an edge no fact read from. */
             context.PlanRegressionWindowStart = readsDays ? windowFloor : null;
+
+            /* #5630: plan reads that failed are one event for the pass, not one per candidate. The fact already carries
+               them (the kept candidates are counted unverified), so the family is recorded as not read only when there is
+               no fact to carry them. Only the exception's type is logged: a plan holds customer values. */
+            if (planReads.FirstFailure is Exception planReadFailure)
+            {
+                if (offenderCount == 0)
+                {
+                    context.RecordCollectionFailure(
+                        CollectionFailure.FamilyOf(nameof(CollectPlanRegressionFactsAsync)), nameof(CollectPlanRegressionFactsAsync),
+                        ClassifyOutcome(planReadFailure), planReadFailure);
+                }
+
+                _logger?.LogWarning(
+                    "[PgFactCollector] The PLAN_REGRESSION input check could not read the plans of {FailedReads} candidate(s) on server {ServerId} ({ExceptionType}); they are kept unverified",
+                    planReads.Count, context.ServerId, planReadFailure.GetType().Name);
+            }
 
             if (offenderCount == 0) return;
 
@@ -817,6 +929,11 @@ LIMIT 20";
                     ["force_failure_count"] = worstForceFailures,
                     /* #3953: 1 when this pass read the latest-snapshot interval table, 0 for the raw slice. */
                     ["plan_regression_source"] = readsTable ? 1 : 0,
+                    /* #5630: queries left out because their two plans were compiled for different inputs (or the
+                       statement recompiles on every call), and kept queries that could not be checked (a plan or the
+                       statement text is missing, or was withheld by the statement filter). */
+                    ["cross_input_excluded_count"] = excludedKeys.Count,
+                    ["inputs_unverified_count"] = unverified,
                 }
             };
 
@@ -844,6 +961,115 @@ LIMIT 20";
                 await snapshot.DisposeAsync();
             }
         }
+    }
+
+    /// <summary>How many offenders the PLAN_REGRESSION fact reports: the worst of what the input check leaves (#5630).</summary>
+    internal const int PlanRegressionMaxOffenders = 20;
+
+    /// <summary>One row of the PLAN_REGRESSION read, with the keys to the two plans and the statement text (#5630).</summary>
+    private sealed record PlanRegressionCandidate(
+        string DatabaseName,
+        long QueryId,
+        double LatestCpu,
+        bool LatestIsForced,
+        long ForceFailures,
+        double BestCpu,
+        double Factor,
+        DateTime? BestLastExec,
+        long? LatestPlanId,
+        long? BestPlanId,
+        string? StatementText,
+        bool Unverified = false);
+
+    /// <summary>The plan reads of one PLAN_REGRESSION pass that failed: how many, and the first exception (#5630).</summary>
+    private sealed class PlanReadFailures
+    {
+        public int Count { get; private set; }
+
+        public Exception? FirstFailure { get; private set; }
+
+        public void Add(Exception ex)
+        {
+            Count++;
+            FirstFailure ??= ex;
+        }
+    }
+
+    /// <summary>What the input check decided about one candidate: leave it out, or keep it (checked or not).</summary>
+    private readonly record struct PlanInputJudgement(bool Exclude, bool Unverified);
+
+    /// <summary>
+    /// The stored plan XML for two plan_ids of one database (#5630): the plan map reaches the plan dimension, which holds
+    /// text or gzip bytes. A plan the map or the dimension does not hold is absent from the result.
+    /// $1 server_id, $2 database_name, $3 plan_ids.
+    /// </summary>
+    internal const string PlanRegressionPlansSql = @"
+SELECT m.plan_id, d.query_plan_xml, d.query_plan_gz
+FROM collect.query_store_plan_map AS m
+LEFT JOIN query_plan_dim AS d
+  ON d.digest = m.digest
+WHERE m.server_id = $1
+AND   m.database_name = $2
+AND   m.plan_id = ANY($3)";
+
+    /// <summary>
+    /// Decides whether one PLAN_REGRESSION candidate compares plans compiled for different inputs (#5630). A statement with
+    /// OPTION (RECOMPILE) is out: each call compiles for its own parameters, so its plans differ by input. Otherwise the two
+    /// plans' compiled parameter values are compared, and different values are out. Anything that cannot be checked (a plan
+    /// or the statement text is missing, unreadable or withheld, or the read failed) keeps the candidate, as before, and
+    /// counts as unverified. Only the verdict leaves <see cref="PlanInputComparison"/>: no value is logged or stored.
+    /// </summary>
+    private async Task<PlanInputJudgement> JudgePlanRegressionInputsAsync(
+        NpgsqlConnection connection, AnalysisContext context, PlanRegressionCandidate candidate, PlanReadFailures planReads)
+    {
+        var text = candidate.StatementText;
+        if (PlanInputComparison.HasRecompileHint(text))
+            return new PlanInputJudgement(Exclude: true, Unverified: false);
+
+        var textUnknown = string.IsNullOrWhiteSpace(text) || WithheldStatementMarker.IsMarker(text);
+        if (candidate.LatestPlanId is not long latestId || candidate.BestPlanId is not long bestId)
+            return new PlanInputJudgement(Exclude: false, Unverified: true);
+
+        string? latestXml = null;
+        string? bestXml = null;
+        try
+        {
+            using var cmd = new NpgsqlCommand(PlanRegressionPlansSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(candidate.DatabaseName);
+            cmd.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bigint,
+                Value = new[] { latestId, bestId }
+            });
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                var planId = ToInt64(reader.GetValue(0));
+                var xml = PayloadDimensions.ResolveContent(
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : (byte[])reader.GetValue(2));
+                if (planId == latestId)
+                    latestXml = xml;
+                if (planId == bestId)
+                    bestXml = xml;
+            }
+        }
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+        {
+            /* The check could not run, so the candidate stays, as it did before the check existed. The caller records the
+               failure once for the pass (#2826), so a broken connection is one event, not one per candidate. */
+            planReads.Add(ex);
+            return new PlanInputJudgement(Exclude: false, Unverified: true);
+        }
+
+        var verdict = PlanInputComparison.Compare(latestXml, bestXml);
+        return verdict switch
+        {
+            PlanInputVerdict.Different => new PlanInputJudgement(Exclude: true, Unverified: false),
+            PlanInputVerdict.Same => new PlanInputJudgement(Exclude: false, Unverified: textUnknown),
+            _ => new PlanInputJudgement(Exclude: false, Unverified: true),
+        };
     }
 
     public const string ProcedureStatsSql = @"
