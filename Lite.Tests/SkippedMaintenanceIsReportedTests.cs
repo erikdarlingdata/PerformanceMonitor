@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace Lite.Tests;
@@ -90,7 +91,9 @@ public sealed class SkippedMaintenanceIsReportedTests
     {
         var source = ReadDatabaseStatesSource().Replace("\r\n", "\n");
 
-        var catchIndex = source.IndexOf("catch (TimeoutException)", StringComparison.Ordinal);
+        /* With or without a variable: #5650 binds it (catch (TimeoutException ex)) to name the lock holder, and the pin is about the clause, not the identifier. */
+        var catchMatch = Regex.Match(source, @"catch \(TimeoutException(?: \w+)?\)");
+        var catchIndex = catchMatch.Success ? catchMatch.Index : -1;
         Assert.True(catchIndex > 0, "the best-effort maintenance catch must still exist");
         var judgedIndex = source.IndexOf("if (judged)", catchIndex, StringComparison.Ordinal);
         var readIndex = source.IndexOf("using var connection = await OpenConnectionAsync();", StringComparison.Ordinal);
