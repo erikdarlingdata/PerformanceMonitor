@@ -1880,7 +1880,7 @@ function Get-CimInstance {
     /// #5677: the lock's owner step sets the owner one object at a time, in process, on the handle the name count is read from,
     /// and never with one <c>icacls /setowner ... /T</c> over the tree (which would change the owner of every name of a file
     /// that has more than one). Pins the shape in both scripts: the lock calls <c>SetOwner</c>, has no <c>/T</c> owner call,
-    /// turns the two privileges on and off around the step, skips what the owner step listed, and the native class opens the
+    /// turns the two privileges on and puts them back around the step, holds the root open for the walk, skips what the owner step listed, and the native class opens the
     /// object itself (not what a link points to), reads the count from that handle and sets the owner on it.
     /// </summary>
     [Theory]
@@ -1893,14 +1893,24 @@ function Get-CimInstance {
         Assert.DoesNotContain("/setowner \"*$($adminsSid.Value)\"", lockText, StringComparison.Ordinal);
         Assert.DoesNotContain("$adminsSid.Value)\" /T", lockText, StringComparison.Ordinal);
         Assert.Contains("[DarlingNativeOwner]::SetOwner($ownPath, $ownerBytes, [ref]$detail, [ref]$attributes)", lockText, StringComparison.Ordinal);
-        Assert.Contains("[DarlingNativeOwner]::SetPrivileges($true)", lockText, StringComparison.Ordinal);
-        Assert.Contains("[DarlingNativeOwner]::SetPrivileges($false)", lockText, StringComparison.Ordinal);
-        Assert.Contains("if ($skipped.ContainsKey($target.FullName)) { continue }", lockText, StringComparison.Ordinal);
+        Assert.Contains("[DarlingNativeOwner]::EnablePrivileges()", lockText, StringComparison.Ordinal);
+        Assert.Contains("[DarlingNativeOwner]::RestorePrivileges()", lockText, StringComparison.Ordinal);
+        Assert.Contains("[DarlingNativeOwner]::OpenRoot($root, [ref]$rootError)", lockText, StringComparison.Ordinal);
+        Assert.Contains("[DarlingNativeOwner]::CloseRoot()", lockText, StringComparison.Ordinal);
+        Assert.Contains("$skipped = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)", lockText, StringComparison.Ordinal);
+        Assert.Contains("if ($skipped.Contains($target.FullName)) { continue }", lockText, StringComparison.Ordinal);
+        Assert.DoesNotContain("ContainsKey", lockText, StringComparison.Ordinal);
+        Assert.DoesNotContain("SeRestorePrivilege", lockText, StringComparison.Ordinal);
         /* A link is acted on itself and never walked into. */
         Assert.Contains("($attributes -band 0x400) -eq 0", lockText, StringComparison.Ordinal);
 
         var native = ExtractFunction(script, "Initialize-DarlingNativeOwner");
-        Assert.Contains("CreateFileW(path, 0x80 | 0x00080000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero)", native, StringComparison.Ordinal);
+        Assert.Contains("CreateFileW(ExtendedPath(path), 0x80 | 0x00080000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero)", native, StringComparison.Ordinal);
+        Assert.Contains("CreateFileW(ExtendedPath(root), 0x80, 3, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)", native, StringComparison.Ordinal);
+        Assert.Contains("GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 1)", native, StringComparison.Ordinal);
+        Assert.Contains("\"SeTakeOwnershipPrivilege\", \"SeBackupPrivilege\"", native, StringComparison.Ordinal);
+        Assert.DoesNotContain("SeRestorePrivilege", native, StringComparison.Ordinal);
+        Assert.Contains("string.Equals(real, root, StringComparison.Ordinal)", native, StringComparison.Ordinal);
         Assert.Contains("if (information.NumberOfLinks != 1) { return 1; }", native, StringComparison.Ordinal);
         Assert.Contains("SetSecurityInfo(handle, 1, 1, ownerSid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero)", native, StringComparison.Ordinal);
         Assert.DoesNotContain("/setowner /T", script.Replace("\r\n", "\n"), StringComparison.Ordinal);
@@ -1944,6 +1954,8 @@ function Get-CimInstance {
                 $linkedBefore = Get-OwnerValue "$outsideDir\linked.txt"
                 $targetBefore = Get-OwnerValue "$root\target"
                 Initialize-DarlingNativeOwner
+                $rootError = 0
+                'setup.rootOpened=' + [DarlingNativeOwner]::OpenRoot($root, [ref]$rootError)
                 foreach ($name in @('plain.txt', 'sub', 'sub\linked.txt', 'junction')) {
                     $detail = 0
                     $attributes = [uint32]0
@@ -1957,6 +1969,7 @@ function Get-CimInstance {
                 'owner.junctionTarget=' + ((Get-OwnerValue "$root\target") -eq $targetBefore)
             }
             finally {
+                try { [DarlingNativeOwner]::CloseRoot() } catch { }
                 foreach ($dir in @($root, $outsideDir)) {
                     if (Test-Path -LiteralPath $dir) {
                         if (Test-Path -LiteralPath "$dir\junction") { & cmd.exe /c rmdir "$dir\junction" | Out-Null }
@@ -2061,7 +2074,7 @@ function Get-CimInstance {
         if (answers.Contains("elevated=True"))
         {
             Assert.Contains("linkedListed=1", answers);
-            Assert.Contains(answers, a => a.StartsWith("open:\\sub\\linked.dll (a hard link: this file has more than one name", StringComparison.Ordinal));
+            Assert.Contains(answers, a => a.StartsWith("open:\\sub\\linked.dll (has 2 names (a hard link)", StringComparison.Ordinal));
             foreach (var leaf in new[] { "", "\\sub", "\\plain.dll", "\\sub\\inner.dll" })
             {
                 Assert.Contains($"adminOwner[{leaf}]=True", answers);
@@ -2069,8 +2082,411 @@ function Get-CimInstance {
         }
         else
         {
-            Assert.Contains(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("run elevated", StringComparison.Ordinal));
+            Assert.Contains(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv)", StringComparison.Ordinal));
         }
+    }
+
+    /// <summary>Runs a probe in the shell a theory case names, skipping the case when PowerShell 7 is not installed.</summary>
+    private static List<string> RunProbeInShell(string shell, string probe)
+    {
+        if (shell == "pwsh")
+        {
+            var answers = RunPowerShell7(probe);
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); }
+            return answers ?? new List<string>();
+        }
+
+        return RunWindowsPowerShell(probe);
+    }
+
+    /// <summary>
+    /// The shared head of the #5677 owner-step probes: the temp folders, the current account's SID as the owner to set (so the
+    /// native step works without elevation), an owner reader and a cleaner that closes the root handle, removes any junction
+    /// first and deletes through a <c>\\?\</c> path so a name ending in a dot goes too.
+    /// </summary>
+    private const string OwnerStepProbeHead = """
+        $ErrorActionPreference = 'Stop'
+        $stamp = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $root = Join-Path $env:TEMP ('pm5677-step-' + $stamp)
+        $outsideDir = Join-Path $env:TEMP ('pm5677-step-outside-' + $stamp)
+        $sidType = [System.Security.Principal.SecurityIdentifier]
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $mine = New-Object byte[] $me.BinaryLength
+        $me.GetBinaryForm($mine, 0)
+        $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        'elevated=' + $elevated
+        function Get-OwnerValue([string]$p) { return (Get-Acl -LiteralPath $p).GetOwner($sidType).Value }
+        function Remove-ProbeDirectory([string]$dir) {
+            if (-not (Test-Path -LiteralPath $dir)) { return }
+            foreach ($link in @(Get-ChildItem -LiteralPath $dir -Force -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })) { & cmd.exe /c rmdir "$($link.FullName)" | Out-Null }
+            & icacls.exe $dir /reset /T /C /L /Q 2>&1 | Out-Null
+            & cmd.exe /c rd /s /q "\\?\$dir" 2>&1 | Out-Null
+        }
+        function Get-StepResult([string]$p) {
+            $detail = 0
+            $attributes = [uint32]0
+            $result = [DarlingNativeOwner]::SetOwner($p, $mine, [ref]$detail, [ref]$attributes)
+            return "$result,$detail"
+        }
+        """;
+
+    /// <summary>
+    /// #5677: the owner step changes only what is inside the root it was given. The root is opened once and its real path read
+    /// from that handle; an object reached through a name in the tree whose real path is elsewhere (here a folder replaced by a
+    /// junction to an outside folder that holds a file) gets result 5 and its owner is not set, so nothing needs to be timed.
+    /// The junction itself is a name in the tree and gets its own owner (result 0). A path that no longer exists is result 2 (error 2), an owner the system refuses is result 4, and with no root open every
+    /// path is result 5. The root itself, a plain file, a folder and a differently-cased spelling of the root are inside.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheNativeOwnerStep_ChangesNothingOutsideTheRoot_AndGivesEveryOtherOutcomeItsOwnResult(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Initialize-DarlingNativeOwner"));
+        probe.AppendLine(OwnerStepProbeHead);
+        probe.AppendLine("""
+            try {
+                New-Item -ItemType Directory -Path "$root\sub", $outsideDir -Force | Out-Null
+                Set-Content -LiteralPath "$root\plain.txt" -Value 'x'
+                Set-Content -LiteralPath "$outsideDir\file" -Value 'x'
+                & cmd.exe /c mklink /J "$root\a" $outsideDir | Out-Null
+                'setup.junctionMade=' + ((((Get-Item -LiteralPath "$root\a" -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0))
+                'setup.reachable=' + (Test-Path -LiteralPath "$root\a\file")
+                $outsideBefore = Get-OwnerValue "$outsideDir\file"
+                Initialize-DarlingNativeOwner
+                $rootError = 0
+                'setup.rootOpened=' + [DarlingNativeOwner]::OpenRoot($root, [ref]$rootError)
+                'result.throughJunction=' + (Get-StepResult "$root\a\file")
+                'result.junctionItself=' + (Get-StepResult "$root\a")
+                'result.plain=' + (Get-StepResult "$root\plain.txt")
+                'result.folder=' + (Get-StepResult "$root\sub")
+                'result.root=' + (Get-StepResult $root)
+                'result.deleted=' + (Get-StepResult "$root\sub\deleted.txt")
+                'result.upperCaseSpelling=' + (Get-StepResult ($root.ToUpperInvariant() + '\sub'))
+                $detail = 0
+                $attributes = [uint32]0
+                $refused = [DarlingNativeOwner]::SetOwner("$root\plain.txt", [byte[]](1, 2, 0, 0, 0, 0, 0, 5, 99, 134, 1, 0, 17, 34, 51, 68), [ref]$detail, [ref]$attributes)
+                'result.refusedOwner=' + $refused + ',' + ($detail -ne 0)
+                'owner.outsideFile=' + ((Get-OwnerValue "$outsideDir\file") -eq $outsideBefore)
+                [DarlingNativeOwner]::CloseRoot()
+                'result.noRootOpen=' + (Get-StepResult "$root\plain.txt")
+            }
+            finally {
+                try { [DarlingNativeOwner]::CloseRoot() } catch { }
+                foreach ($dir in @($root, $outsideDir)) { Remove-ProbeDirectory $dir }
+            }
+            """);
+
+        var answers = RunProbeInShell(shell, probe.ToString());
+
+        AssertProbeSetupTook(answers);
+        Assert.Contains("result.throughJunction=5,0", answers);
+        Assert.Contains("result.junctionItself=0,1", answers);
+        Assert.Contains("result.plain=0,1", answers);
+        Assert.Contains("result.folder=0,1", answers);
+        Assert.Contains("result.root=0,1", answers);
+        Assert.Contains("result.deleted=2,2", answers);
+        Assert.Contains("result.upperCaseSpelling=0,1", answers);
+        Assert.Contains("result.refusedOwner=4,True", answers);
+        Assert.Contains("owner.outsideFile=True", answers);
+        Assert.Contains("result.noRootOpen=5,0", answers);
+    }
+
+    /// <summary>
+    /// #5677: a name that ends in a dot is opened as that name. The folder holds <c>dn.</c> (one name) and <c>dn</c> (a hard link
+    /// with a second name outside), both made through <c>\\?\</c> paths. Without the extended spelling Windows drops the dot and
+    /// the step would open <c>dn</c> twice.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheNativeOwnerStep_OpensANameEndingInADot_AsThatName_NotAsTheNameWithoutIt(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Initialize-DarlingNativeOwner"));
+        probe.AppendLine(OwnerStepProbeHead);
+        probe.AppendLine("""
+            try {
+                New-Item -ItemType Directory -Path $root, $outsideDir -Force | Out-Null
+                Set-Content -LiteralPath "$outsideDir\twin" -Value 'x'
+                [IO.File]::WriteAllText("\\?\$root\dn.", 'x')
+                New-Item -ItemType HardLink -Path "\\?\$root\dn" -Value "$outsideDir\twin" | Out-Null
+                'setup.bothNamesListed=' + ((((@(Get-ChildItem -LiteralPath $root -Force | ForEach-Object Name) | Sort-Object) -join '|')) -eq 'dn|dn.')
+                Initialize-DarlingNativeOwner
+                $rootError = 0
+                'setup.rootOpened=' + [DarlingNativeOwner]::OpenRoot($root, [ref]$rootError)
+                'result.dotName=' + (Get-StepResult "$root\dn.")
+                'result.plainName=' + (Get-StepResult "$root\dn")
+            }
+            finally {
+                try { [DarlingNativeOwner]::CloseRoot() } catch { }
+                foreach ($dir in @($root, $outsideDir)) { Remove-ProbeDirectory $dir }
+            }
+            """);
+
+        var answers = RunProbeInShell(shell, probe.ToString());
+
+        AssertProbeSetupTook(answers);
+        Assert.Contains("result.dotName=0,1", answers);
+        Assert.Contains("result.plainName=1,2", answers);
+    }
+
+    /// <summary>
+    /// #5677: the privileges the step turns on are put back as they were. The two lines <c>whoami /priv</c> prints for them are
+    /// the same before the step and after it (an elevated token has both and has them off; one that is not elevated has neither,
+    /// so turning them on reports false and nothing changes).
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheNativeOwnerStep_PutsThePrivilegesBackAsItFoundThem(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Initialize-DarlingNativeOwner"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            'elevated=' + $elevated
+            function Get-PrivilegeLines { return (@(& "$env:SystemRoot\System32\whoami.exe" /priv) | Where-Object { $_ -match 'SeTakeOwnershipPrivilege|SeBackupPrivilege' } | ForEach-Object { ($_ -replace '\s+', ' ').Trim() }) -join ';' }
+            Initialize-DarlingNativeOwner
+            $before = Get-PrivilegeLines
+            $enabled = [DarlingNativeOwner]::EnablePrivileges()
+            $during = Get-PrivilegeLines
+            $restored = [DarlingNativeOwner]::RestorePrivileges()
+            $after = Get-PrivilegeLines
+            'enabled=' + $enabled
+            'duringDiffers=' + ($during -ne $before)
+            'restored=' + $restored
+            'afterSameAsBefore=' + ($after -eq $before)
+            $again = [DarlingNativeOwner]::EnablePrivileges()
+            $null = [DarlingNativeOwner]::RestorePrivileges()
+            'twiceSameAsBefore=' + ((Get-PrivilegeLines) -eq $before)
+            """);
+
+        var answers = RunProbeInShell(shell, probe.ToString());
+
+        Assert.Contains("restored=True", answers);
+        Assert.Contains("afterSameAsBefore=True", answers);
+        Assert.Contains("twiceSameAsBefore=True", answers);
+        if (answers.Contains("elevated=True"))
+        {
+            Assert.Contains("enabled=True", answers);
+            Assert.Contains("duringDiffers=True", answers);
+        }
+        else
+        {
+            Assert.Contains("enabled=False", answers);
+        }
+    }
+
+    /// <summary>
+    /// #5677: the lock over a tree that holds a folder replaced by a junction to an outside folder, and a name ending in a dot
+    /// next to the same name without it. The outside file keeps its owner, the junction is listed, and the dot name is listed as
+    /// open and not given an owner (the plain name beside it is). The owner step needs the two privileges, which only an
+    /// elevated token holds; a token without them lists the root with the privilege names and changes no owner.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheInstallTreeLock_LeavesAnOutsideFolderAlone_AndListsANameEndingInADotWithoutActingOnIt(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine(ExtractFunction(script, "Lock-DarlingInstallTree"));
+        probe.AppendLine(OwnerStepProbeHead);
+        probe.AppendLine("""
+            $admins = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+            try {
+                New-Item -ItemType Directory -Path $root, $outsideDir -Force | Out-Null
+                Set-Content -LiteralPath "$outsideDir\file" -Value 'x'
+                Set-Content -LiteralPath "$root\dn" -Value 'x'
+                [IO.File]::WriteAllText("\\?\$root\dn.", 'x')
+                & cmd.exe /c mklink /J "$root\a" $outsideDir | Out-Null
+                foreach ($p in @("$outsideDir\file", "$root\dn")) { $null = & icacls.exe $p /setowner "*$($me.Value)" /L /Q 2>&1 }
+                'setup.bothNamesListed=' + ((((@(Get-ChildItem -LiteralPath $root -Force | ForEach-Object Name) | Sort-Object) -join '|')) -eq 'a|dn|dn.')
+                'setup.ownersSet=' + ((Get-OwnerValue "$outsideDir\file") -eq $me.Value)
+                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } }
+                'owner.outsideFile=' + ((Get-OwnerValue "$outsideDir\file") -eq $me.Value)
+                'adminOwner[dn]=' + ((Get-OwnerValue "$root\dn") -eq $admins.Value)
+                'adminOwner[dn.]=' + ((Get-OwnerValue "\\?\$root\dn.") -eq $admins.Value)
+            }
+            finally { foreach ($dir in @($root, $outsideDir)) { Remove-ProbeDirectory $dir } }
+            """);
+
+        var answers = RunProbeInShell(shell, probe.ToString());
+
+        AssertProbeSetupTook(answers);
+        Assert.Contains("owner.outsideFile=True", answers);
+        Assert.Contains("adminOwner[dn.]=False", answers);
+        Assert.Contains(answers, a => a.StartsWith("open:\\a (a junction or link)", StringComparison.Ordinal));
+        if (answers.Contains("elevated=True"))
+        {
+            Assert.Contains("adminOwner[dn]=True", answers);
+            Assert.Contains(answers, a => a.StartsWith("open:\\dn. (its name ends in a dot or a space", StringComparison.Ordinal));
+        }
+        else
+        {
+            Assert.Contains("adminOwner[dn]=False", answers);
+            Assert.Contains(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv); a policy may have removed them from Administrators", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// #5677: an object whose owner could not be set (result 4, the count was 1) is listed with that reason but is NOT put in
+    /// the skip set, so the permission walk still removes its explicit write grant for ordinary users and checks it, as it did
+    /// before the owner step existed. The probe replaces the privilege call with <c>$true</c> so the owner step runs on a token
+    /// without elevation: setting Administrators as owner is then refused (result 4); on an elevated token it succeeds, and the
+    /// grant is removed either way.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheInstallTreeLock_StillFixesAndChecksAnObjectWhoseOwnerCouldNotBeSet(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var lockText = ExtractFunction(script, "Lock-DarlingInstallTree");
+        var privilegeCall = "$ownerReady = [DarlingNativeOwner]::EnablePrivileges()";
+        Assert.Contains(privilegeCall, lockText, StringComparison.Ordinal);
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine(lockText.Replace(privilegeCall, "$ownerReady = $true", StringComparison.Ordinal));
+        probe.AppendLine(OwnerStepProbeHead);
+        probe.AppendLine("""
+            $users = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+            function Test-UsersExplicit([string]$p) { return @((Get-Acl -LiteralPath $p).GetAccessRules($true, $false, $sidType) | Where-Object { $_.IdentityReference -eq $users }).Count -gt 0 }
+            try {
+                New-Item -ItemType Directory -Path "$root\sub" -Force | Out-Null
+                Set-Content -LiteralPath "$root\sub\f.dll" -Value 'x'
+                foreach ($p in @("$root\sub", "$root\sub\f.dll")) { $null = & icacls.exe $p /setowner "*$($me.Value)" /L /Q 2>&1 }
+                $null = & icacls.exe "$root\sub\f.dll" /grant "*S-1-5-32-545:(W)" /Q 2>&1
+                'setup.grantMade=' + (Test-UsersExplicit "$root\sub\f.dll")
+                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } }
+                'usersExplicitAfter=' + (Test-UsersExplicit "$root\sub\f.dll")
+            }
+            finally { foreach ($dir in @($root, $outsideDir)) { Remove-ProbeDirectory $dir } }
+            """);
+
+        var answers = RunProbeInShell(shell, probe.ToString());
+
+        AssertProbeSetupTook(answers);
+        Assert.Contains("usersExplicitAfter=False", answers);
+        if (!answers.Contains("elevated=True"))
+        {
+            Assert.Contains(answers, a => a.StartsWith("open:\\sub\\f.dll (its owner could not be set, error ", StringComparison.Ordinal));
+            Assert.DoesNotContain(answers, a => a.StartsWith("open:\\sub\\f.dll (has ", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// #5677: the skip set compares names exactly. In a folder that has the per-folder case-sensitive flag, <c>a.dll</c> (a hard
+    /// link, listed by the owner step and left alone) and <c>A.DLL</c> (a plain file) are two objects: the permission walk leaves
+    /// the first with its explicit grant and still removes the second's. Needs <c>fsutil file setCaseSensitiveInfo</c>, which
+    /// needs an elevated token and a file system that supports it; the case is skipped, with that reason, where it cannot be set
+    /// up. The privilege call is replaced as in the test above.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheInstallTreeLock_TreatsTwoNamesThatDifferOnlyInCaseAsTwoObjects(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var lockText = ExtractFunction(script, "Lock-DarlingInstallTree");
+        var privilegeCall = "$ownerReady = [DarlingNativeOwner]::EnablePrivileges()";
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine(lockText.Replace(privilegeCall, "$ownerReady = $true", StringComparison.Ordinal));
+        probe.AppendLine(OwnerStepProbeHead);
+        probe.AppendLine("""
+            $users = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+            function Test-UsersExplicit([string]$p) { return @((Get-Acl -LiteralPath $p).GetAccessRules($true, $false, $sidType) | Where-Object { $_.IdentityReference -eq $users }).Count -gt 0 }
+            try {
+                New-Item -ItemType Directory -Path "$root\cs", $outsideDir -Force | Out-Null
+                $null = & fsutil.exe file setCaseSensitiveInfo "$root\cs" enable 2>&1
+                'caseSensitive=' + ($LASTEXITCODE -eq 0)
+                if ($LASTEXITCODE -eq 0) {
+                    Set-Content -LiteralPath "$outsideDir\twin" -Value 'x'
+                    New-Item -ItemType HardLink -Path "$root\cs\a.dll" -Value "$outsideDir\twin" | Out-Null
+                    Set-Content -LiteralPath "$root\cs\A.DLL" -Value 'x'
+                    'twoObjects=' + (@(Get-ChildItem -LiteralPath "$root\cs" -Force).Count -eq 2)
+                    foreach ($p in @("$root\cs", "$root\cs\A.DLL", "$root\cs\a.dll")) { $null = & icacls.exe $p /setowner "*$($me.Value)" /L /Q 2>&1 }
+                    foreach ($p in @("$root\cs\A.DLL", "$root\cs\a.dll")) { $null = & icacls.exe $p /grant "*S-1-5-32-545:(W)" /Q 2>&1 }
+                    'setup.grantsMade=' + ((Test-UsersExplicit "$root\cs\A.DLL") -and (Test-UsersExplicit "$root\cs\a.dll"))
+                    $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                    'hardLinkListed=' + (@($open | Where-Object { $_ -like '*\cs\a.dll (has 2 names*' }).Count -eq 1)
+                    'upperKeepsGrant=' + (Test-UsersExplicit "$root\cs\a.dll")
+                    'upperFixed=' + (-not (Test-UsersExplicit "$root\cs\A.DLL"))
+                }
+            }
+            finally { foreach ($dir in @($root, $outsideDir)) { Remove-ProbeDirectory $dir } }
+            """);
+
+        var answers = RunProbeInShell(shell, probe.ToString());
+
+        if (!answers.Contains("caseSensitive=True")) { Assert.Skip("this machine cannot set the per-folder case-sensitive flag (fsutil file setCaseSensitiveInfo needs an elevated token and a supporting file system)."); return; }
+        if (!answers.Contains("twoObjects=True")) { Assert.Skip("this machine's case-sensitive folder did not keep two names that differ only in case."); return; }
+        AssertProbeSetupTook(answers);
+        Assert.Contains("hardLinkListed=True", answers);
+        Assert.Contains("upperKeepsGrant=True", answers);
+        Assert.Contains("upperFixed=True", answers);
+    }
+
+    /// <summary>
+    /// #5677: the by-hand advice both scripts print. A privilege failure names the two privileges and says how to check them
+    /// (never "run elevated": both scripts already require it); a path marked as a hard link gets its own line (delete the name,
+    /// or extract the file again, and no icacls on it); the per-path commands are said to be only for paths not marked as a hard
+    /// link; and the per-path reset has no /T. The lock and the native class are the same text in both scripts.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheOwnerStepAdvice_NamesThePrivileges_GivesHardLinksTheirOwnLine_AndDropsTheTreeWideReset(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName)).Replace("\r\n", "\n");
+        var lockText = ExtractFunction(script, "Lock-DarlingInstallTree");
+        Assert.Contains("this elevated session does not hold SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv); a policy may have removed them from Administrators", lockText, StringComparison.Ordinal);
+        Assert.DoesNotContain("run elevated", lockText, StringComparison.Ordinal);
+        Assert.Contains("has $detail names (a hard link): its permissions are the same under every one, so its owner and permissions were not changed", lockText, StringComparison.Ordinal);
+        Assert.Contains("could not be opened, error $detail$belowNote", lockText, StringComparison.Ordinal);
+        Assert.Contains("its names could not be counted, error $detail$belowNote", lockText, StringComparison.Ordinal);
+        Assert.Contains("its owner could not be set, error $detail\"", lockText, StringComparison.Ordinal);
+        Assert.Contains("its path resolved outside the install folder, so its owner was not changed$belowNote", lockText, StringComparison.Ordinal);
+        Assert.Contains("; nothing below it was given an owner or checked", lockText, StringComparison.Ordinal);
+        Assert.Contains("if ($result -ne 4 -and -not $isRoot) { $null = $skipped.Add($ownPath) }", lockText, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("/reset /T", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("from an elevated prompt: it makes", script, StringComparison.Ordinal);
+        Assert.Contains("these two commands are only for paths not marked as a hard link", script, StringComparison.Ordinal);
+        Assert.Contains("/reset /C. Remove any junction or link it names.", script, StringComparison.Ordinal);
+        Assert.Contains("delete this name if it is not part of the install, or extract the file again if it is", script, StringComparison.Ordinal);
+        Assert.Contains("o not run icacls on it", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5677: the upgrade's staging-folder comment no longer says the lock's owner step needs no privilege.</summary>
+    [Fact]
+    public void TheUpgradeStagingFolderComment_SaysTheOwnerStepTurnsItsPrivilegesOnItself()
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1")).Replace("\r\n", "\n");
+        Assert.DoesNotContain("already relies on", script, StringComparison.Ordinal);
+        Assert.Contains("owner step, which changes objects this process did not create, turns on\n# SeTakeOwnershipPrivilege and SeBackupPrivilege itself.", script, StringComparison.Ordinal);
     }
 
     /// <summary>

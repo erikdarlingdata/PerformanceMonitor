@@ -382,22 +382,29 @@ public static class DarlingNativeFileNames
     catch { return -1 }
 }
 
-# Sets the owner of one file or folder to the SID given, only when it has exactly one name, on the SAME handle the name count
-# is read from (#5677): the handle is opened for attributes and WRITE_OWNER with every sharing mode allowed and the object
-# itself rather than anything it points to (FILE_FLAG_OPEN_REPARSE_POINT, the way Get-DarlingFileNameCount opens), the link
-# count is read from it, and only a count of exactly 1 is followed by SetSecurityInfo on that handle for the owner alone. A
-# file with more than one name (a hard link) shares one owner under every name, so one whose count is not 1 is never touched.
-# SetOwner returns 0 when the owner was set; 1 when the count is not 1 (detail is the count); 2 when it could not be opened and
-# 3 when the count could not be read (detail is the Win32 error); 4 when the owner could not be set (detail is the error).
-# attributes is the object's attribute bits as read from the handle, so a caller can tell a folder from a link without
-# opening it again. SetPrivileges turns SeTakeOwnershipPrivilege and SeRestorePrivilege on or off for this process's token (the
-# two icacls /setowner turns on for itself) and returns false if either could not be changed. Kept byte-identical in
-# install-darling.ps1 and upgrade-darling.ps1.
+# Sets the owner of one file or folder to the SID given, only when it has exactly one name and is inside the tree being locked
+# (#5677). OpenRoot opens the tree's root folder once, without sharing delete or rename, and keeps that handle open until
+# CloseRoot, so no folder above the root can be replaced while the walk runs; the root's real path is read from that handle
+# (GetFinalPathNameByHandleW, normalized, by volume GUID). SetOwner opens the object itself rather than anything it points to
+# (FILE_FLAG_OPEN_REPARSE_POINT, the way Get-DarlingFileNameCount opens) through a \\?\ path, so a name ending in a dot or a space
+# is not folded into another, reads the opened handle's real path and sets nothing unless that is the root's path or begins with
+# it and a backslash (ordinal, case-sensitive: both come from the file system), reads the link count from the same handle, and
+# only a count of exactly 1 is followed by SetSecurityInfo on that handle for the owner alone. A file with more than one name (a
+# hard link) shares one owner under every name, so one whose count is not 1 is never touched. SetOwner returns 0 when the owner
+# was set; 1 when the count is not 1 (detail is the count); 2 when it could not be opened and 3 when the count could not be read
+# (detail is the Win32 error); 4 when the owner could not be set (detail is the error); 5 when the opened object is not inside
+# the root, or no root is open, or its real path could not be read (nothing was changed). attributes is the object's attribute
+# bits as read from the handle, so a caller can tell a folder from a link without opening it again. EnablePrivileges turns on
+# SeTakeOwnershipPrivilege and SeBackupPrivilege (backup semantics let an object that denies Administrators read access open)
+# for this process's token, keeps what AdjustTokenPrivileges reports as their previous state and returns false if either could
+# not be turned on; RestorePrivileges puts back exactly that previous state. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
 function Initialize-DarlingNativeOwner {
     if ('DarlingNativeOwner' -as [type]) { return }
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 public static class DarlingNativeOwner
@@ -423,8 +430,15 @@ public static class DarlingNativeOwner
         public uint FileIndexLow;
     }
 
+    private static SafeFileHandle rootHandle;
+    private static string rootPath;
+    private static TokenPrivilege[] previousStates = new TokenPrivilege[0];
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path, uint length, uint flags);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
@@ -445,27 +459,104 @@ public static class DarlingNativeOwner
     private static extern bool LookupPrivilegeValueW(string systemName, string name, out long luid);
 
     [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state, uint length, out TokenPrivilege previous, out uint returned);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state, uint length, IntPtr previous, IntPtr returned);
 
-    // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY; SE_PRIVILEGE_ENABLED is 2. A privilege the token does not hold is reported as an error.
-    public static bool SetPrivileges(bool on)
+    // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY; SE_PRIVILEGE_ENABLED is 2. A privilege the token does not hold is reported as an
+    // error. A privilege that was already on changes nothing, so its previous state comes back empty and is not touched again.
+    public static bool EnablePrivileges()
     {
         IntPtr token;
         if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) { return false; }
         try
         {
             bool all = true;
-            foreach (string name in new string[] { "SeTakeOwnershipPrivilege", "SeRestorePrivilege" })
+            System.Collections.Generic.List<TokenPrivilege> saved = new System.Collections.Generic.List<TokenPrivilege>();
+            foreach (string name in new string[] { "SeTakeOwnershipPrivilege", "SeBackupPrivilege" })
             {
                 TokenPrivilege state = new TokenPrivilege();
                 state.Count = 1;
-                state.Attributes = on ? 2u : 0u;
+                state.Attributes = 2u;
                 if (!LookupPrivilegeValueW(null, name, out state.Luid)) { all = false; continue; }
-                if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero) || Marshal.GetLastWin32Error() != 0) { all = false; }
+                TokenPrivilege previous;
+                uint returned;
+                if (!AdjustTokenPrivileges(token, false, ref state, (uint)Marshal.SizeOf(typeof(TokenPrivilege)), out previous, out returned) || Marshal.GetLastWin32Error() != 0) { all = false; }
+                else if (previous.Count > 0) { saved.Add(previous); }
             }
+            previousStates = saved.ToArray();
             return all;
         }
         finally { CloseHandle(token); }
+    }
+
+    public static bool RestorePrivileges()
+    {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) { return false; }
+        try
+        {
+            bool all = true;
+            foreach (TokenPrivilege previous in previousStates)
+            {
+                TokenPrivilege state = previous;
+                if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero) || Marshal.GetLastWin32Error() != 0) { all = false; }
+            }
+            previousStates = new TokenPrivilege[0];
+            return all;
+        }
+        finally { CloseHandle(token); }
+    }
+
+    // The \\?\ spelling of an absolute path (\\?\UNC\ for a UNC path), which Windows does not trim or fold.
+    private static string ExtendedPath(string path)
+    {
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) { return path; }
+        if (path.StartsWith(@"\\", StringComparison.Ordinal)) { return @"\\?\UNC\" + path.Substring(2); }
+        return @"\\?\" + path;
+    }
+
+    // FILE_NAME_NORMALIZED (0) | VOLUME_NAME_GUID (1). Null when the path could not be read.
+    private static string RealPath(SafeFileHandle handle, out int error)
+    {
+        error = 0;
+        StringBuilder buffer = new StringBuilder(1024);
+        uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 1);
+        if (length >= buffer.Capacity)
+        {
+            buffer = new StringBuilder((int)length + 1);
+            length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 1);
+        }
+        if (length == 0 || length >= buffer.Capacity)
+        {
+            error = Marshal.GetLastWin32Error();
+            if (error == 0) { error = 122; }
+            return null;
+        }
+        return buffer.ToString();
+    }
+
+    // FILE_READ_ATTRIBUTES; share read and write but not delete; OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS.
+    public static bool OpenRoot(string root, out int detail)
+    {
+        CloseRoot();
+        detail = 0;
+        SafeFileHandle handle = CreateFileW(ExtendedPath(root), 0x80, 3, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); handle.Dispose(); return false; }
+        int error;
+        string real = RealPath(handle, out error);
+        if (real == null) { detail = error; handle.Dispose(); return false; }
+        rootHandle = handle;
+        rootPath = real;
+        return true;
+    }
+
+    public static void CloseRoot()
+    {
+        if (rootHandle != null) { rootHandle.Dispose(); }
+        rootHandle = null;
+        rootPath = null;
     }
 
     // FILE_READ_ATTRIBUTES | WRITE_OWNER; share read, write and delete; OPEN_EXISTING;
@@ -474,9 +565,15 @@ public static class DarlingNativeOwner
     {
         detail = 0;
         attributes = 0;
-        using (SafeFileHandle handle = CreateFileW(path, 0x80 | 0x00080000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00080000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
         {
             if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
+            int pathError;
+            string real = RealPath(handle, out pathError);
+            string root = rootPath;
+            if (real == null || root == null) { detail = pathError; return 5; }
+            string prefix = root.EndsWith(@"\", StringComparison.Ordinal) ? root : root + @"\";
+            if (!string.Equals(real, root, StringComparison.Ordinal) && !real.StartsWith(prefix, StringComparison.Ordinal)) { return 5; }
             ByHandleFileInformation information;
             if (!GetFileInformationByHandle(handle, out information)) { detail = Marshal.GetLastWin32Error(); return 3; }
             attributes = information.FileAttributes;
@@ -1252,42 +1349,70 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         if ($LASTEXITCODE -ne 0) { return @("$root (icacls $($step -join ' ') failed: $($output -join ' '))") }
     }
     # The owner step (#5677). The tree is walked here and the owner of each object is set one at a time, in this process, on the
-    # handle its name count is read from (see Initialize-DarlingNativeOwner): a file whose count is not exactly 1, or cannot be
-    # read, keeps its owner, because a file with more than one name (a hard link) has one owner that every name shares, some of
-    # them outside this folder. Such a file, and one whose owner cannot be set, is listed as open here and put in $skipped so the
-    # walk below leaves it out (it is listed once). The walk does not follow a junction or link: the link itself is the object,
-    # and nothing below it is listed. The two privileges are turned on for the step and off again after it; without them (not
-    # elevated) the step is not run and the root is reported.
-    $skipped = @{}
+    # handle its name count is read from (see Initialize-DarlingNativeOwner). The root is opened once, without sharing delete or
+    # rename, and kept open for the whole walk; each object's real path is read from its own handle and an object that is not
+    # the root or below it is left alone (result 5), so a folder swapped for a junction while the walk runs cannot send it
+    # outside the tree. A file whose count is not exactly 1, or cannot be read, keeps its owner, because a file with more than one
+    # name (a hard link) has one owner that every name shares, some of them outside this folder. A name ending in a dot or a
+    # space is listed and not acted on (Windows would open a different name). Each such object is listed as open here and put in
+    # $skipped so the walk below leaves it out (it is listed once), except the root and an object whose owner could not be set:
+    # the walk below still fixes and checks those. $skipped compares by ordinal, so two names that differ only in case (a
+    # case-sensitive folder) stay two. The walk does not follow a junction or link: the link itself is the object, and nothing
+    # below it is listed. The two privileges are turned on for the step and put back as they were after it; without them (the
+    # session does not hold them) the step is not run and the root is reported.
+    $skipped = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $ownerBytes = New-Object byte[] $adminsSid.BinaryLength
     $adminsSid.GetBinaryForm($ownerBytes, 0)
     $ownerReady = $false
     try {
         Initialize-DarlingNativeOwner
-        $ownerReady = [DarlingNativeOwner]::SetPrivileges($true)
-        if (-not $ownerReady) { $open += "$root (could not make Administrators the owner of everything below it; run elevated)" }
+        $ownerReady = [DarlingNativeOwner]::EnablePrivileges()
+        if (-not $ownerReady) { $open += "$root (could not make Administrators the owner of everything below it: this elevated session does not hold SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv); a policy may have removed them from Administrators)" }
         else {
-            $pending = New-Object System.Collections.Stack
-            $pending.Push($root)
-            while ($pending.Count -gt 0) {
-                $ownPath = [string]$pending.Pop()
-                $detail = 0
-                $attributes = [uint32]0
-                $result = [DarlingNativeOwner]::SetOwner($ownPath, $ownerBytes, [ref]$detail, [ref]$attributes)
-                if ($result -ne 0) {
-                    $skipped[$ownPath] = $true
-                    if ($result -eq 4) { $open += "$ownPath (its owner could not be set, error $detail)" }
-                    else { $open += "$ownPath (a hard link: this file has more than one name, or its names could not be counted, and its permissions are the same under every one; its owner and permissions were not changed)" }
-                }
-                if (($attributes -band 0x10) -ne 0 -and ($attributes -band 0x400) -eq 0) {
-                    try { foreach ($kid in @(Get-ChildItem -LiteralPath $ownPath -Force -ErrorAction Stop)) { $pending.Push($kid.FullName) } }
-                    catch { $open += "$ownPath (its contents could not be listed, so nothing below it was given an owner: $($_.Exception.Message))" }
+            $rootError = 0
+            if (-not [DarlingNativeOwner]::OpenRoot($root, [ref]$rootError)) { $open += "$root (could not make Administrators the owner of everything below it: the folder could not be pinned and its real path read, error $rootError)" }
+            else {
+                $pending = New-Object System.Collections.Stack
+                $pending.Push((Get-Item -LiteralPath $root -Force))
+                $atRoot = $true
+                while ($pending.Count -gt 0) {
+                    $item = $pending.Pop()
+                    $ownPath = [string]$item.FullName
+                    $isRoot = $atRoot
+                    $atRoot = $false
+                    $belowNote = if ($item.PSIsContainer) { '; nothing below it was given an owner or checked' } else { '' }
+                    if ((-not $isRoot) -and ($ownPath.EndsWith('.') -or $ownPath.EndsWith(' '))) {
+                        $null = $skipped.Add($ownPath)
+                        $open += "$ownPath (its name ends in a dot or a space, which Windows folds into another name, so it was not given an owner or checked$belowNote)"
+                        continue
+                    }
+                    $detail = 0
+                    $attributes = [uint32]0
+                    $result = [DarlingNativeOwner]::SetOwner($ownPath, $ownerBytes, [ref]$detail, [ref]$attributes)
+                    if ($result -ne 0) {
+                        $why = switch ($result) {
+                            1 { "has $detail names (a hard link): its permissions are the same under every one, so its owner and permissions were not changed" }
+                            2 { "could not be opened, error $detail$belowNote" }
+                            3 { "its names could not be counted, error $detail$belowNote" }
+                            4 { "its owner could not be set, error $detail" }
+                            default { "its path resolved outside the install folder, so its owner was not changed$belowNote" }
+                        }
+                        if ($result -ne 4 -and -not $isRoot) { $null = $skipped.Add($ownPath) }
+                        $open += "$ownPath ($why)"
+                    }
+                    if (($attributes -band 0x10) -ne 0 -and ($attributes -band 0x400) -eq 0) {
+                        try { foreach ($kid in @(Get-ChildItem -LiteralPath $ownPath -Force -ErrorAction Stop)) { $pending.Push($kid) } }
+                        catch { $open += "$ownPath (its contents could not be listed, so nothing below it was given an owner: $($_.Exception.Message))" }
+                    }
                 }
             }
         }
     }
     catch { $open += "$root (could not make Administrators the owner of everything below it: $($_.Exception.Message))" }
-    finally { try { $null = [DarlingNativeOwner]::SetPrivileges($false) } catch { } }
+    finally {
+        try { [DarlingNativeOwner]::CloseRoot() } catch { }
+        try { $null = [DarlingNativeOwner]::RestorePrivileges() } catch { }
+    }
     $serviceWritePaths = @()
     if ($serviceSid) {
         foreach ($secret in @(Get-DarlingServiceWrittenRootFiles $root)) {
@@ -1326,7 +1451,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     if (-not (Get-Acl -LiteralPath $root).AreAccessRulesProtected) { $open += "$root (still inherits from its parent)" }
     $targets = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue)
     foreach ($target in $targets) {
-        if ($skipped.ContainsKey($target.FullName)) { continue }
+        if ($skipped.Contains($target.FullName)) { continue }
         $path = Get-DarlingCanonicalPath $target.FullName
         if ($null -eq $path) { $open += "$($target.FullName) (its full path could not be worked out)"; continue }
         if ($path.TrimEnd('\') -ine $root.TrimEnd('\') -and ($target.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
@@ -1416,9 +1541,10 @@ function Invoke-InstallTreeLock([string]$account, [switch]$StopOnOpen) {
     Write-Host "    icacls `"$root`" /inheritance:d" -ForegroundColor Yellow
     Write-Host "    icacls `"$root`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4" -ForegroundColor Yellow
     Write-Host "    icacls `"$root`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant:r `"$grantTo`:(OI)(CI)RX`"" -ForegroundColor Yellow
-    Write-Host '    (then run this script again from an elevated prompt: it makes Administrators the owner of each path itself, and lists a file with more than one name)' -ForegroundColor Yellow
-    Write-Host '  A path listed as owned by an account, or BELOW the folder, needs its own fix: icacls "<path>" /setowner' -ForegroundColor Red
-    Write-Host '  *S-1-5-32-544 /L, then icacls "<path>" /reset /T /C. Remove any junction or link it names.' -ForegroundColor Red
+    Write-Host '    (then run this script again: it makes Administrators the owner of each path itself, and lists a file with more than one name)' -ForegroundColor Yellow
+    Write-Host '  A path marked as a hard link (a file with more than one name): delete this name if it is not part of the install, or extract the file again if it is. Do not run icacls on it.' -ForegroundColor Red
+    Write-Host '  Any other path listed as owned by an account, or BELOW the folder, needs its own fix; these two commands are only for paths not marked as a hard link: icacls "<path>" /setowner' -ForegroundColor Red
+    Write-Host '  *S-1-5-32-544 /L, then icacls "<path>" /reset /C. Remove any junction or link it names.' -ForegroundColor Red
     Write-Host ''
     if ($StopOnOpen) {
         Fail 'Stopped before running anything from a folder ordinary users can still change. Fix the paths above, or extract the zip into a fresh folder, then re-run this script.'
