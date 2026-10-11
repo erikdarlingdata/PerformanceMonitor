@@ -8,12 +8,36 @@ Best for quick triage, Azure SQL Database, restricted environments, and consulta
 
 ## Prerequisites
 
-**None.** Both artifacts are self-contained win-x64 builds and carry their own .NET runtime, so a stock Windows Server with no .NET installed runs either one.
+**None.** Both artifacts are self-contained win-x64 builds and carry their own .NET runtime, so a stock Windows Server with no .NET installed runs either one. Windows itself must be current on its updates (see below).
 
 | Artifact | What you install first |
 |---|---|
 | `PerformanceMonitorLite-win-Setup.exe` (recommended) | **Nothing.** Self-contained; it also auto-updates |
 | `PerformanceMonitorLite-<version>.zip` (portable) | **Nothing.** Self-contained; unzip and run |
+
+### Windows must be up to date
+
+.NET 10 apps need current Windows updates to start on a CPU with CET (Control-flow Enforcement Technology, a hardware protection). Without them, Lite stops at start. We saw this on Windows Server 2022 build 20348.1366. The exit code is `0x80131506` and stderr shows this message:
+
+```text
+Fatal error. Your Windows doesn't fully support CET. Please install all available Windows updates.
+```
+
+`Setup.exe` then ends with "Install Partially Succeeded" and gives no reason, because Velopack shows a fixed message when the app's install step fails. Velopack's velopack.log records the same exit code.
+
+The fix is to install all available Windows updates and restart. If you cannot do that yet, there is a short-term workaround. Run it from an elevated PowerShell before `Setup.exe` or the first start. It turns off one protection (`UserShadowStack`, the hardware-enforced stack protection) for the Lite exe only:
+
+```powershell
+Set-ProcessMitigation -Name PerformanceMonitorLite.exe -Disable UserShadowStack
+```
+
+This weakens Lite's protection against stack-corruption attacks, so treat it as a stopgap. To undo it once Windows is patched:
+
+```powershell
+Set-ProcessMitigation -Name PerformanceMonitorLite.exe -Remove -Disable UserShadowStack
+```
+
+Both commands are described in Microsoft's [Set-ProcessMitigation](https://learn.microsoft.com/en-us/powershell/module/processmitigations/set-processmitigation) reference.
 
 ### Why the ZIP changed, and why it got smaller
 
