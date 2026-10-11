@@ -328,8 +328,11 @@ public sealed class PerfmonRegroupLiveTests
         await ExecAsync(connection, $"SELECT decompress_chunk('{chunk.Name}')", ct);
         await using var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
         var logger = new CapturingTestLogger();
-        var compress = TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromMilliseconds(200), ct);
-        await WaitForAsync(() => logger.Lines.Any(line => line.Contains("not changed this pass", StringComparison.Ordinal)), 15, ct);
+        /* #5667: the lock must be released before the second try STARTS, not merely within its 3 s lock wait, so a runner that
+           stalls between the first try's timeout and the release cannot cost the second try its lock wait: the pause between tries
+           is 3 s, and the wait for the first try's line is 60 s, far above the 3 s it takes. */
+        var compress = TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromSeconds(3), ct);
+        await WaitForAsync(() => logger.Lines.Any(line => line.Contains("not changed this pass", StringComparison.Ordinal)), 60, ct);
         await holder.ReleaseAsync(ct);
         var compressed = await compress;
 
@@ -490,8 +493,9 @@ public sealed class PerfmonRegroupLiveTests
 
     /// <summary>
     /// A decompress that runs into its statement cap is not retried while the process lives (#5574, M2): the newest chunk's lock is
-    /// held, so its decompress waits and the 2 s cap (a test value for the 30 minutes) ends it before the 3 s lock timeout. The
-    /// other four chunks are re-grouped, the capped one is untouched with ONE Warning, and a second run of the same drain does not
+    /// held, so its decompress waits and the 2 s cap (a test value for the 30 minutes) ends it. The lock timeout is 120 s here
+    /// (LockTimeoutFarAboveTheCap), so the cap is the only timeout that can end the wait. The other four
+    /// chunks are re-grouped, the capped one is untouched with ONE Warning, and a second run of the same drain does not
     /// try it again even though it is still a candidate.
     /// </summary>
     [Fact]
@@ -509,7 +513,7 @@ public sealed class PerfmonRegroupLiveTests
         var held = ChunkOfDay(await ReadChunksAsync(connection, ct), 1);
         await using var holder = await HoldLockAsync(scratch.ConnectionString, held.Name, ct);
         var logger = new CapturingTestLogger();
-        var drain = NewDrain(scratch.ConnectionString, logger, TimeSpan.Zero, new List<TimeSpan>(), statementTimeoutSeconds: 2);
+        var drain = NewDrain(scratch.ConnectionString, logger, TimeSpan.Zero, new List<TimeSpan>(), statementTimeoutSeconds: 2, lockTimeoutOverride: LockTimeoutFarAboveTheCap);
         var first = await RunDetailedBoundedAsync(drain, 60, ct);
         await holder.ReleaseAsync(ct);
 
@@ -517,6 +521,14 @@ public sealed class PerfmonRegroupLiveTests
         Assert.Equal(1, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
         Assert.Single(logger.Lines, line => line.Contains("could not be decompressed within 2 s", StringComparison.Ordinal) && line.Contains("hit the statement cap after", StringComparison.Ordinal) && line.Contains(held.Name, StringComparison.Ordinal));
         Assert.DoesNotContain(logger.Lines, line => line.Contains("cancelled by the server", StringComparison.Ordinal));
+
+        /* #5667: WHICH timeout fired. The cap is the client's CommandTimeout, which Npgsql surfaces as a timeout exception ("Exception
+           while reading from stream"), not as the server's 57014; IsStatementTimeout puts that in the TimedOut arm, the arm that
+           logs "hit the statement cap" above. A lock timeout (55P03) takes the LockBusy arm instead and logs "not changed this
+           pass", and the lock timeout is 120 s here, so it cannot fire inside the run. */
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("not changed this pass", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("55P03", StringComparison.Ordinal));
+        Assert.Single(logger.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains("(decompress) could not be changed", StringComparison.Ordinal) && line.Contains(held.Name, StringComparison.Ordinal));
         Assert.Equal(OldChunkSegmentBy, (await ReadChunksAsync(connection, ct)).Single(chunk => chunk.Name == held.Name).SegmentBy);
 
         var linesBefore = logger.Lines.Count;
@@ -532,8 +544,9 @@ public sealed class PerfmonRegroupLiveTests
     /// A decompress the SERVER cancels before the 30-minute cap (a short <c>statement_timeout</c> on the role, a cancel from
     /// another session) is still not tried again until the restart, so a short server timeout does not cost a rewrite every hour,
     /// but the log tells the truth about it (#5574, check round 2): "cancelled by the server" with the real elapsed time, not
-    /// "could not be decompressed within 1800 s". The session's <c>statement_timeout</c> is 2 s here, under the 3 s lock wait the
-    /// held chunk gives, so the server cancels first and the cap (the default 1800 s) is nowhere near.
+    /// "could not be decompressed within 1800 s". The session's <c>statement_timeout</c> is 2 s here and the lock timeout is 120 s
+    /// (LockTimeoutFarAboveTheCap), so the server's cancel is the only timeout that can end the wait and the cap (the default 1800 s)
+    /// is nowhere near.
     /// </summary>
     [Fact]
     public async Task ADecompressTheServerCancelsBeforeTheCap_IsNotTriedAgain_AndTheLogSaysTheServerDidIt()
@@ -554,7 +567,7 @@ public sealed class PerfmonRegroupLiveTests
         var drainConnection = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Options = "-c statement_timeout=2000" }.ConnectionString;
         await using var holder = await HoldLockAsync(scratch.ConnectionString, held.Name, ct);
         var logger = new CapturingTestLogger();
-        var drain = NewDrain(drainConnection, logger, TimeSpan.Zero, new List<TimeSpan>(), readCandidates: FixedRead(stub));
+        var drain = NewDrain(drainConnection, logger, TimeSpan.Zero, new List<TimeSpan>(), readCandidates: FixedRead(stub), lockTimeoutOverride: LockTimeoutFarAboveTheCap);
         var first = await RunDetailedBoundedAsync(drain, 60, ct);
         await holder.ReleaseAsync(ct);
 
@@ -562,6 +575,12 @@ public sealed class PerfmonRegroupLiveTests
         Assert.Single(logger.Lines, line => line.Contains("cancelled by the server", StringComparison.Ordinal)
             && line.Contains(held.Name, StringComparison.Ordinal) && line.Contains("before the 1800 s statement cap", StringComparison.Ordinal));
         Assert.DoesNotContain(logger.Lines, line => line.Contains("could not be decompressed within", StringComparison.Ordinal) || line.Contains("hit the statement cap", StringComparison.Ordinal));
+
+        /* #5667: WHICH timeout fired. The server's statement_timeout reaches the product as a PostgresException, and the Warning
+           carries its SQLSTATE: 57014 (query_canceled), not 55P03 (lock_not_available, which would log "not changed this pass"). */
+        Assert.Single(logger.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains("(decompress) could not be changed", StringComparison.Ordinal)
+            && line.Contains("57014:", StringComparison.Ordinal) && line.Contains(held.Name, StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("not changed this pass", StringComparison.Ordinal) || line.Contains("55P03", StringComparison.Ordinal));
         Assert.Equal(OldChunkSegmentBy, (await ReadChunksAsync(connection, ct)).Single(chunk => chunk.Name == held.Name).SegmentBy);
 
         /* Not tried again while the process lives, though the stub keeps answering with it. */
@@ -593,7 +612,7 @@ public sealed class PerfmonRegroupLiveTests
         await ExecAsync(connection, $"SELECT decompress_chunk('{chunk.Name}')", ct);
         await using var holder = await HoldLockAsync(scratch.ConnectionString, chunk.Name, ct);
         var logger = new CapturingTestLogger();
-        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.LeftUncompressed, await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct, statementTimeoutSeconds: 1));
+        Assert.Equal(TimescaleSupport.PerfmonRegroupChunkResult.LeftUncompressed, await TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.Zero, ct, statementTimeoutSeconds: 1, lockTimeoutOverride: LockTimeoutFarAboveTheCap));
         await holder.ReleaseAsync(ct);
 
         Assert.Equal(1, logger.Lines.Count(line => line.Contains("(compress) could not be changed", StringComparison.Ordinal)));
@@ -821,7 +840,8 @@ public sealed class PerfmonRegroupLiveTests
         string connectionString, CapturingTestLogger logger, TimeSpan minPause, List<TimeSpan> pauses,
         int statementTimeoutSeconds = TimescaleSupport.PerfmonRegroupStatementTimeoutSeconds,
         Func<NpgsqlConnection, Microsoft.Extensions.Logging.ILogger?, int, CancellationToken, Task<TimescaleSupport.PerfmonRegroupRead>>? readCandidates = null,
-        TimeSpan? lostWorkThreshold = null) =>
+        TimeSpan? lostWorkThreshold = null,
+        string? lockTimeoutOverride = null) =>
         new(async token =>
             {
                 var connection = new NpgsqlConnection(connectionString);
@@ -834,7 +854,7 @@ public sealed class PerfmonRegroupLiveTests
                 pauses.Add(pause);
                 return Task.CompletedTask;
             },
-            statementTimeoutSeconds, readCandidates, lostWorkThreshold);
+            statementTimeoutSeconds, readCandidates, lostWorkThreshold, lockTimeoutOverride);
 
     /// <summary>A candidates read that always answers with <paramref name="read"/> (a catalog the product's query cannot be made
     /// to produce on a real store: a chunk that stays a candidate, a failed read, a chunk that is already gone).</summary>

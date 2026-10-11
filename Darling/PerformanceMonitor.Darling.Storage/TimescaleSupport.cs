@@ -10859,7 +10859,7 @@ WHERE ca.view_schema = 'collect'
     /// <summary>
     /// Runs DDL that takes an AccessExclusiveLock (the compression-settings ALTER on a hypertable or a continuous
     /// aggregate) without letting it queue indefinitely. The statements run in ONE explicit transaction behind
-    /// <c>SET LOCAL lock_timeout</c> (<see cref="HourlyDdlLockTimeout"/>), because <c>SET LOCAL</c> outside a
+    /// <c>SET LOCAL lock_timeout</c> (<see cref="HourlyDdlLockTimeout"/>, or the internal <c>lockTimeoutOverride</c> a test passes), because <c>SET LOCAL</c> outside a
     /// transaction is a no-op and a waiting AccessExclusiveLock request holds up every collector write to the
     /// table behind it. A busy lock (<c>55P03</c>) costs one Information line and the next hourly pass tries again;
     /// the same <paramref name="what"/> busy <see cref="BoundedDdlBusyStreaks.EscalateAfter"/> passes in a row also
@@ -10890,12 +10890,15 @@ WHERE ca.view_schema = 'collect'
     /// </summary>
     internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
         NpgsqlConnection connection, Func<NpgsqlTransaction, Task> body, ILogger? logger, string what, CancellationToken cancellationToken,
-        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false)
+        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false, string? lockTimeoutOverride = null)
     {
+        /* #5667: the test seam. Production passes null and gets HourlyDdlLockTimeout; a test whose statement cap has to be the
+           only timeout that can fire on a held chunk passes a lock timeout far above the cap. */
+        var lockTimeout = lockTimeoutOverride ?? HourlyDdlLockTimeout;
         try
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{HourlyDdlLockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{lockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
             {
                 await timeout.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -10916,7 +10919,7 @@ WHERE ca.view_schema = 'collect'
         {
             logger?.LogInformation(
                 "TimescaleDB: {What} not changed this pass: another session held the table for {Timeout}, and waiting longer would hold up every collector's writes to it; the next hourly pass tries again",
-                what, HourlyDdlLockTimeout);
+                what, lockTimeout);
             var now = DateTime.UtcNow;
 
             /* #5574: the compress half's in-call retries (three tries inside ten seconds) are not "passes", and counting
@@ -12531,7 +12534,7 @@ ORDER BY c.range_start DESC";
     /// </summary>
     internal static async Task<PerfmonRegroupChunkOutcome> RegroupPerfmonChunkAsync(
         NpgsqlConnection connection, ILogger? logger, PerfmonRegroupCandidate candidate, CancellationToken cancellationToken,
-        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds)
+        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds, string? lockTimeoutOverride = null)
     {
         if (connection is null)
         {
@@ -12549,7 +12552,7 @@ ORDER BY c.range_start DESC";
                 await decompress.ExecuteNonQueryAsync(cancellationToken);
             },
             logger, $"re-grouping perfmon_stats chunk {chunk} (decompress)", cancellationToken,
-            distinguishTimeoutAndMissing: true);
+            distinguishTimeoutAndMissing: true, lockTimeoutOverride: lockTimeoutOverride);
 
         if (decompressed != BoundedDdlOutcome.Applied)
         {
@@ -12576,7 +12579,7 @@ ORDER BY c.range_start DESC";
             logger?.LogDebug("TimescaleDB: could not count the rows of perfmon_stats chunk {Chunk} before compressing it again: {Message}", chunk, ex.Message);
         }
 
-        var compressResult = await CompressRegroupedChunkAsync(connection, logger, chunk, PerfmonRegroupCompressAttempts, PerfmonRegroupCompressRetryDelay, cancellationToken, statementTimeoutSeconds);
+        var compressResult = await CompressRegroupedChunkAsync(connection, logger, chunk, PerfmonRegroupCompressAttempts, PerfmonRegroupCompressRetryDelay, cancellationToken, statementTimeoutSeconds, lockTimeoutOverride);
         if (compressResult == PerfmonRegroupChunkResult.Regrouped)
         {
             logger?.LogInformation(
@@ -12630,21 +12633,21 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
     /// <summary>
     /// The compress half of a chunk's re-group (#5574): the chunk was decompressed in a transaction that has committed,
     /// so it is uncompressed now and a busy lock is worth <paramref name="attempts"/> tries, <paramref name="retryDelay"/>
-    /// apart, each behind the 3 s lock timeout. Returns <see cref="PerfmonRegroupChunkResult.Regrouped"/> when the chunk is compressed again,
+    /// apart, each behind the lock timeout (<see cref="HourlyDdlLockTimeout"/> unless the caller passes <paramref name="lockTimeoutOverride"/>). Returns <see cref="PerfmonRegroupChunkResult.Regrouped"/> when the chunk is compressed again,
     /// <see cref="PerfmonRegroupChunkResult.Gone"/> when the chunk is really gone (retention dropped it between the halves),
     /// and <see cref="PerfmonRegroupChunkResult.LeftUncompressed"/> otherwise. When every try failed the
     /// chunk stays uncompressed, with one Warning, and the compression policy compresses it with the hypertable's grouping
     /// at its next run. <c>if_not_compressed</c> makes a policy run that got there first a success, not an error.
     /// A cancellation (the service stopping) leaves the chunk the same way, says so at Information, and propagates.
     ///
-    /// <para><b>Only a busy lock is retried</b> (55P03, behind the 3 s lock timeout): any other error, a statement that ran
+    /// <para><b>Only a busy lock is retried</b> (55P03, behind that lock timeout): any other error, a statement that ran
     /// into its cap included, ends the tries at once, because a second try of a compression that just failed (or ran
     /// 30 minutes) is another whole compression. The busy tries are not fed to <see cref="BusyStreaks"/>: three tries inside
     /// ten seconds are not "three passes", and the Warning below is the one line an all-busy half logs.</para>
     /// </summary>
     internal static async Task<PerfmonRegroupChunkResult> CompressRegroupedChunkAsync(
         NpgsqlConnection connection, ILogger? logger, string chunk, int attempts, TimeSpan retryDelay, CancellationToken cancellationToken,
-        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds)
+        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds, string? lockTimeoutOverride = null)
     {
         try
         {
@@ -12659,7 +12662,7 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
                         await compress.ExecuteNonQueryAsync(cancellationToken);
                     },
                     logger, $"re-grouping perfmon_stats chunk {chunk} (compress)", cancellationToken,
-                    recordBusyStreak: false, distinguishTimeoutAndMissing: true);
+                    recordBusyStreak: false, distinguishTimeoutAndMissing: true, lockTimeoutOverride: lockTimeoutOverride);
 
                 if (compressed == BoundedDdlOutcome.Applied)
                 {

@@ -456,7 +456,7 @@ public sealed class McpHealthTools
                 /* The same string both WPF grids render, composed on this side so the web dashboard and
                    any other consumer cannot re-derive it differently. */
                 note_summary = CollectorHealthClassifier.FormatCollectionNote(
-                    r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases),
+                    r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases, r.RecoveredNote),
                 /* #2472: the per-database breakdown of a collector that fans out, null for one that does
                    not. A nested object rather than sibling fields so a consumer cannot read a slowest item
                    without the width it has to be judged against — the parts only mean something together.
@@ -824,6 +824,8 @@ public sealed class McpHealthTools
                a status word (about 200 characters at most), and only a regressed row carries one at all.
                Field-for-field Darling's twin. */
             regression_finding = r.AnyRegressionFinding,
+            /* #5646: the recovery sentence, with the last failure time. */
+            recovered_note = r.RecoveredNote,
             output_finding = McpHelpers.Truncate(outputFinding, OutputFindingPreviewLength),
             output_finding_truncated = outputFinding is not null && outputFinding.Length > OutputFindingPreviewLength,
         }
@@ -851,6 +853,8 @@ public sealed class McpHealthTools
             denied_since_last_success = r.DeniedSinceLastSuccess,
             regressed_from_productive = r.AnyRegression,
             regression_finding = r.AnyRegressionFinding,
+            /* #5646: the recovery sentence, with the last failure time. */
+            recovered_note = r.RecoveredNote,
             output_finding = McpHelpers.Truncate(outputFinding, OutputFindingPreviewLength),
             output_finding_truncated = outputFinding is not null && outputFinding.Length > OutputFindingPreviewLength,
             run_at = (string?)runTime.RunAt,

@@ -18,12 +18,13 @@ namespace PerformanceMonitor.Common;
 /// 40615 message in both.
 ///
 /// 40615 is a firewall rejection ("Client with IP address ... is not allowed to access the server"). A
-/// missing database setting never causes it, so the 40615 message names the firewall and the client IP the
-/// server reported and says nothing about setting a database. The firewall advice already covers a client that
-/// is admitted only by a database-level rule on a user database: a database-level rule can be created in master,
-/// which makes master reachable, so a set-a-database sentence is not needed there. Any other known error number
-/// (4060, 18456) gets the set-a-database advice alone, since the firewall is ruled out; only a caller with no
-/// number keeps the combined message.
+/// missing database setting never causes it, so the 40615 message leads with the firewall and the client IP the
+/// server reported. It then adds one more sentence (#5647 follow-up): Azure checks a database-level IP rule only
+/// for connections to that database. A user whose IP is allowed by a database-level rule in their user database,
+/// and who registered the server with no database, connects to master and gets 40615, and the simplest fix for
+/// them is to set the database. So the 40615 message also offers that, worded as an "if" for the users it does
+/// not apply to. Any other known error number (4060, 18456) gets the set-a-database advice alone, since the
+/// firewall is ruled out; only a caller with no number keeps the combined message.
 ///
 /// The decision is made on the SQL error number the caller read off the SqlException, never on the message
 /// text, so a translated server message cannot change which advice a user is given. Only the client IP is
@@ -80,7 +81,9 @@ public static class AzureMasterFallbackMessage
 
             return head +
                 $"The Azure firewall did not allow {client}. Add a firewall rule for it, " +
-                "either a server-level rule or a database-level rule in master.";
+                "either a server-level rule or a database-level rule in master. " +
+                $"If a database-level rule in a user database already allows this IP, set the {databaseSetting} " +
+                $"for '{displayName}' to that database instead.";
         }
 
         var setDatabase =

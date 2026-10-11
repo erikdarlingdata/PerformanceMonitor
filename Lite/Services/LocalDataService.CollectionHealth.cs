@@ -189,6 +189,17 @@ WITH health AS
         -- productivity sits BEFORE the streak rather than inside it, which is the ORDER that makes this a
         -- regression rather than two unrelated facts.
         MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+        -- #5646: the success flags of the NEWEST three runs, newest first (the recovery rule's input). max_by with a
+        -- count is a top-3 aggregate: DuckDB keeps three rows while it makes the pass this CTE already makes, so
+        -- it neither sorts the window (the cost #5371 removed) nor reads it a second time. The order is the full
+        -- timestamp (DuckDB keeps microseconds), then log_id, the unique id, compared as one struct (field by
+        -- field), so two runs at the same instant are ordered the same way every time. The success test is
+        -- success_count's own (SUCCESS, not an abandoned cycle) over the rows total_runs counts. Fewer than three
+        -- runs leave the list short, and the CASE below reads the missing flags as not-success.
+        max_by(CASE WHEN status = 'SUCCESS'
+                     AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                    THEN 1 ELSE 0 END,
+               struct_pack(t := collection_time, i := log_id), 3) AS recent_flags,
         -- #5371: the instants the keyed lookups below read at. The statement used to rank every run of the
         -- window four times (ROW_NUMBER over each collector, sorted on collection_time and a VARCHAR) to
         -- reach the newest row of four classes; that sorts the whole window. These are plain aggregates, so
@@ -319,7 +330,16 @@ SELECT
     -- collector's current state. The newest run of any status, and the SUCCESS gate matches last_note's
     -- (only the SUCCESS write carries a note). APPENDED, read positionally; Darling's twin carries it at
     -- the same ordinal.
-    CASE WHEN newest.pick.status = 'SUCCESS' THEN newest.pick.error_message END AS latest_run_note
+    CASE WHEN newest.pick.status = 'SUCCESS' THEN newest.pick.error_message END AS latest_run_note,
+    -- #5646: how many of the NEWEST runs in a row succeeded, counted to 3 and no further (the recovery rule's
+    -- input). The window's runs ordered newest first on the FULL timestamp (DuckDB keeps microseconds), then
+    -- log_id DESC, the unique id, so two runs at the same instant are ordered the same way every time. The
+    -- success test is success_count's own (SUCCESS, not an abandoned cycle) over the rows total_runs counts.
+    -- APPENDED, read positionally; Darling's twin carries it at the same ordinal.
+    CASE WHEN h.recent_flags[1] = 1 AND h.recent_flags[2] = 1 AND h.recent_flags[3] = 1 THEN 3
+         WHEN h.recent_flags[1] = 1 AND h.recent_flags[2] = 1 THEN 2
+         WHEN h.recent_flags[1] = 1 THEN 1
+         ELSE 0 END AS trailing_success_runs
 FROM health h
 -- #5371: the keyed lookups. Each reads ONE collector's rows at an instant the aggregate above already
 -- found, so the scan of v_collection_log carries an equality on collection_time (the hot table's
@@ -596,7 +616,9 @@ ORDER BY h.collector_name";
                    arrives as a BigInteger that Convert.ToInt64 cannot take. */
                 TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : ToInt64(reader.GetValue(29)),
                 /* Appended (#4748), for the same reason every column before it was. */
-                LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30)
+                LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30),
+                /* Appended (#5646): the newest runs' success streak, the band's recovery input. */
+                TrailingSuccessRuns = reader.IsDBNull(31) ? 0 : ToInt64(reader.GetValue(31))
             });
         }
 
@@ -1265,6 +1287,21 @@ public class CollectorHealthRow
     public string? LatestRunNote { get; set; }
 
     /// <summary>
+    /// #5646: how many of the collector's newest runs in a row succeeded, counted to
+    /// <see cref="CollectorHealthClassifier.RecoveryTrailingSuccessRuns"/> and no further. The per-server read
+    /// sets it from the newest runs (full timestamp precision, then the unique log id, newest first). A row
+    /// built from plain aggregates (a fleet roll-up, which Lite does not have) would start at 0.
+    /// </summary>
+    public long TrailingSuccessRuns { get; set; }
+
+    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null. Only
+    /// a row whose displayed <see cref="HealthStatus"/> is HEALTHY carries it, so a row another rung bands
+    /// (abandon rate, lost databases, stopped, regression) never does. Display text only; it carries the last
+    /// failure time.</summary>
+    public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
+        HealthStatus, TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime, FrequencyMinutes);
+
+    /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
     /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
     /// enumerating nothing despite having databases. False also covers "no inventory to go on", which
@@ -1432,7 +1469,7 @@ public class CollectorHealthRow
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
            would return HEALTHY forever. */
@@ -1474,6 +1511,6 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases);
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote);
 }
 

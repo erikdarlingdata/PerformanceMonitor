@@ -3251,11 +3251,11 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>31 columns since #4748 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// <para>32 columns since #5646 (16 at #2460, plus #2472's four fan-out columns, #2804's
     /// abandoned_count, #3010's last_denied_time, #3017's rows_stored/runs_with_rows, #3240's
     /// extension_missing_count, #3754's session_missing_count, #3819's current_status /
-    /// last_non_skip_time / last_productive_time, #3885's trailing_zero_row_success_runs and #4748's
-    /// latest_run_note) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// last_non_skip_time / last_productive_time, #3885's trailing_zero_row_success_runs, #4748's
+    /// latest_run_note and #5646's trailing_success_runs) — every addition APPENDED, never inserted, because both MCP surfaces read
     /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
@@ -3558,7 +3558,14 @@ internal static class DarlingDataReader
             -- gate matches last_note's (only the SUCCESS write carries a note). APPENDED like every
             -- column since #2472, because this result set is read positionally and Lite's DuckDB read
             -- mirrors the ordinals.
-            CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note
+            CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note,
+            -- #5646: how many of the NEWEST runs in a row succeeded, counted to 3 and no further (the recovery
+            -- rule's input). Newest first on the FULL timestamp (collection_time keeps microseconds), then
+            -- log_id DESC, the unique id, so two runs at the same instant are ordered the same way every time.
+            -- The success test is success_count's own (SUCCESS, not an abandoned cycle) over the same window
+            -- rows total_runs counts. APPENDED, read positionally; Lite's DuckDB read carries it at the same
+            -- ordinal.
+            COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs
         FROM health h
         -- #4955: the keyed lookups. Each reads ONE collector's rows through
         -- idx_collection_log_watermark (server_id, collector_name, collection_time DESC), at an instant the
@@ -3648,6 +3655,30 @@ internal static class DarlingDataReader
                 AND   s.collection_time >= h.last_streak_break_time
             ) ranked
         ) streak ON TRUE
+        -- #5646: the newest three runs, newest first, then the highest log_id. A plain index walk of
+        -- idx_collection_log_watermark that stops after three rows.
+        LEFT JOIN LATERAL
+        (
+            SELECT {CollectorTrailingRuns.StreakFromFlagsSql} AS trailing_success_runs
+            FROM
+            (
+                -- An ordered aggregate over the three rows, not a window function: the keyed lookups
+                -- above rank nothing over the window.
+                SELECT array_agg(x.ok ORDER BY x.collection_time DESC, x.log_id DESC) AS flags
+                FROM
+                (
+                    SELECT {CollectorTrailingRuns.RunOkSql} AS ok,
+                           v.collection_time,
+                           v.log_id
+                    FROM v_collection_log v
+                    WHERE v.server_id = $1
+                    AND   v.collector_name = h.collector_name
+                    AND   v.collection_time >= $2
+                    ORDER BY v.collection_time DESC, v.log_id DESC
+                    LIMIT 3
+                ) x
+            ) r
+        ) recent ON TRUE
         ORDER BY h.collector_name
         """;
 
@@ -3784,6 +3815,8 @@ internal static class DarlingDataReader
                 TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : Convert.ToInt64(reader.GetValue(29)),
                 /* #4748: the newest run's note, the band's text input. */
                 LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30),
+                /* #5646: the newest runs' success streak, the band's recovery input. */
+                TrailingSuccessRuns = reader.IsDBNull(31) ? 0 : Convert.ToInt64(reader.GetValue(31)),
             });
         }
 
@@ -5137,6 +5170,27 @@ internal sealed class CollectorHealth
     public string? LatestRunNote { get; set; }
 
     /// <summary>
+    /// #5646: how many of the collector's newest runs in a row succeeded, counted to
+    /// <see cref="CollectorHealthClassifier.RecoveryTrailingSuccessRuns"/> and no further. The per-server read
+    /// sets it from the newest runs (full timestamp precision, then the unique log id, newest first). A row
+    /// built from plain aggregates (the fleet roll-up) starts at 0 and the roll-up sets it (#5666) for the rows whose band it could change, so the fleet card and the server's tab band alike.
+    /// </summary>
+    public long TrailingSuccessRuns { get; set; }
+
+    /// <summary>#5666: whether the newest-runs streak could move this row's band
+    /// (<see cref="CollectorHealthClassifier.RecoveryCouldChangeBand"/>), over the same inputs <see cref="HealthStatus"/> reads.</summary>
+    internal bool RecoveryCouldChangeBand => CollectorHealthClassifier.RecoveryCouldChangeBand(
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote);
+
+    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null. Only
+    /// a row whose displayed <see cref="HealthStatus"/> is HEALTHY carries it, so a row another rung bands
+    /// (abandon rate, lost databases, stopped, regression) never does. Display text only; it carries the last
+    /// failure time.</summary>
+    public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
+        HealthStatus, TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime, FrequencyMinutes);
+
+    /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
     /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
     /// enumerating nothing despite having databases. False also covers "no inventory to go on", which
@@ -5332,7 +5386,7 @@ internal sealed class CollectorHealth
     /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
     /// answer everywhere else.
     ///
-    /// <para>The floor is applied outside <c>Classify</c> rather than as an eleventh parameter, and
+    /// <para>The floor is applied outside <c>Classify</c> rather than as a further parameter, and
     /// deliberately: that signature takes RUN-CLASS COUNTS (plus, since #4748, the newest run's
     /// partial-failure note - the run's own outcome, still a run-class fact) and nothing about output or
     /// currency, a discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
@@ -5343,7 +5397,7 @@ internal sealed class CollectorHealth
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
            would return HEALTHY forever. */

@@ -7289,10 +7289,10 @@ RETURNING s.state_key";
 
         if (fallback.Count == 0)
         {
-            /* #5498: the firewall comes first. #5647: for 40615 it is the only advice. 40615 means the server's
-               firewall did not allow the client's IP address, which a missing database setting never causes;
-               the set-a-database advice is only the fix for the master-only case (a login allowed into a user
-               database but not master). Text only: the fallback itself is unchanged. */
+            /* #5498: the firewall comes first. #5647: 40615 means the server's firewall did not allow the
+               client's IP address, which a missing database setting never causes, so the message leads with the
+               firewall and then offers the set-a-database fix for a client allowed only by a database-level rule
+               in a user database. Text only: the fallback itself is unchanged. */
             throw new InvalidOperationException(AzureMasterFallbackMessage.Build(
                 reason, errorNumber, serverMessage, server.Config.DisplayName, "database"));
         }

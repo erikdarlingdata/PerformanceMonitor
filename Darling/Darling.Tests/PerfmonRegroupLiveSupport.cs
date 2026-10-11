@@ -142,6 +142,11 @@ internal static class PerfmonRegroupLiveSupport
     internal static ChunkRow ChunkOfDay(List<ChunkRow> chunks, int daysBack) =>
         chunks.Single(chunk => chunk.Start.Date == RunStartUtc.Date.AddDays(-daysBack));
 
+    /// <summary>#5667: the lock timeout of a test that holds a chunk on purpose to make a statement cap or a server
+    /// <c>statement_timeout</c> fire. The product's own is 3 s; with that, a cap of 1 or 2 s wins by 1 or 2 s on a quiet machine and
+    /// loses on a slow one. 120 s is far above every cap and cancel in the re-group live tests, so the cap is the ONLY timeout that can end the wait.</summary>
+    internal const string LockTimeoutFarAboveTheCap = "120s";
+
     /// <summary>Another session holds ROW EXCLUSIVE on the chunk inside an open transaction, which conflicts with the
     /// EXCLUSIVE lock both halves of the re-group ask for.</summary>
     internal static async Task<HeldLock> HoldLockAsync(string connectionString, string chunk, CancellationToken ct)

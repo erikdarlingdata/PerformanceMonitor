@@ -135,8 +135,11 @@ public sealed class PerfmonRegroupTimingLiveTests
     }
 
     /// <summary>
-    /// A service stop during the compress half (#5574): the wait for a held lock is cancelled at once (not after the 3 s lock
-    /// timeout), the cancellation propagates, and the log says the chunk is left for the compression policy.
+    /// A service stop during the compress half (#5574): the wait for a held lock is cancelled at once (not after the lock
+    /// timeout), the cancellation propagates, and the log says the chunk is left for the compression policy. The lock timeout is
+    /// 120 s here (<see cref="PerfmonRegroupLiveSupport.LockTimeoutFarAboveTheCap"/>), not the product's 3 s, so the cancel is the only
+    /// thing that can end the wait and the 2.5 s bar measures cancellation alone (#5667). The test asserts WHICH one ended it: the
+    /// lock timeout's own line ("not changed this pass", 55P03) must be absent.
     /// </summary>
     [Fact]
     public async Task AServiceStopDuringTheCompressHalf_CancelsTheWait_AndSaysTheChunkIsLeftToThePolicy()
@@ -158,11 +161,15 @@ public sealed class PerfmonRegroupTimingLiveTests
         using var stopping = CancellationTokenSource.CreateLinkedTokenSource(ct);
         stopping.CancelAfter(TimeSpan.FromMilliseconds(500));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromSeconds(5), stopping.Token));
+            () => TimescaleSupport.CompressRegroupedChunkAsync(connection, logger, chunk.Name, 3, TimeSpan.FromSeconds(5), stopping.Token,
+                lockTimeoutOverride: LockTimeoutFarAboveTheCap));
         await holder.ReleaseAsync(ct);
 
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2.5), $"the stop took {clock.Elapsed.TotalSeconds:0.0} s to end the wait");
         Assert.Single(logger.Lines, line => line.Contains("the service is stopping with perfmon_stats chunk", StringComparison.Ordinal));
+        /* #5667: WHICH timeout ended the wait. A lock timeout that fired first would log the busy-lock line (55P03) before the cancel was
+           seen; with the 120 s lock timeout only the cancel can have ended it. */
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("not changed this pass", StringComparison.Ordinal) || line.Contains("55P03", StringComparison.Ordinal));
         TimescaleSupport.BusyStreaks.Reset();
     }
 }
