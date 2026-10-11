@@ -442,6 +442,82 @@ public sealed class QueryModificationDetectorTests
         Assert.True(info.ModifiesData);
     }
 
+    /* #5639: a SELECT plan does not describe what an EXEC'd procedure or a remote rowset runs, so those texts get the
+       "could not be analyzed" warning (uncertain, treated as modifying) instead of a clean pass. */
+    [Theory]
+    [InlineData("EXEC dbo.DoWork @id = 1")]
+    [InlineData("exec dbo.DoWork")]
+    [InlineData("EXECUTE sp_who2")]
+    [InlineData("SELECT 1; EXEC dbo.DoWork")]
+    [InlineData("BEGIN\n    EXECUTE dbo.DoWork\nEND")]
+    [InlineData("SELECT * FROM OPENQUERY(linked, 'SELECT 1')")]
+    [InlineData("select * from openrowset('SQLNCLI', 'Server=x;', 'SELECT 1')")]
+    [InlineData("SELECT * FROM OPENDATASOURCE('SQLNCLI', 'Data Source=x').db.dbo.t")]
+    public void ExecAndRemoteRowsetText_GetTheCouldNotBeAnalyzedWarning_EvenWithASelectPlan(string text)
+    {
+        var info = QueryModificationDetector.Detect(Plan("SELECT"), text);
+
+        Assert.True(info.IsUncertain);
+        Assert.True(info.ModifiesData);
+        Assert.Contains("could not be analyzed", QueryModificationDetector.BuildConsentWarning(info, "master"), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("SELECT execution_count FROM sys.dm_exec_query_stats")]
+    [InlineData("SELECT [exec] FROM dbo.t")]
+    [InlineData("SELECT t.exec FROM dbo.t AS t")]
+    [InlineData("SELECT @exec = 1")]
+    [InlineData("SELECT 1")]
+    [InlineData("SELECT * FROM dbo.openqueryish")]
+    public void OtherSelectText_StaysAFlagFreePass_WithASelectPlan(string text)
+    {
+        var info = QueryModificationDetector.Detect(Plan("SELECT"), text);
+
+        Assert.False(info.IsUncertain);
+        Assert.False(info.ModifiesData);
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("   ", false)]
+    [InlineData("0x0000000000000000", false)]
+    [InlineData("0000000000000000", false)]
+    [InlineData("0x", false)]
+    [InlineData("0x1A2B3C4D5E6F7081", true)]
+    [InlineData("0x0000000000000001", true)]
+    public void IsUsableQueryHash_RejectsEmptyAndAllZeroHashes(string? hash, bool expected)
+        => Assert.Equal(expected, QueryModificationDetector.IsUsableQueryHash(hash));
+
+    [Fact]
+    public void BuildConsentTarget_NamesTheServerAndTheDatabase()
+    {
+        Assert.Equal("server [PROD-A], database [Sales]", QueryModificationDetector.BuildConsentTarget("PROD-A", "Sales"));
+        Assert.Equal("server [PROD-A], database the default database", QueryModificationDetector.BuildConsentTarget("PROD-A", ""));
+        Assert.Equal("server [unknown], database [Sales]", QueryModificationDetector.BuildConsentTarget(null, "Sales"));
+    }
+
+    [Fact]
+    public void BuildConsentQueryText_ShowsAShortQueryWhole()
+    {
+        var shown = QueryModificationDetector.BuildConsentQueryText("SELECT 1");
+
+        Assert.Contains("SELECT 1", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("more characters not shown", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildConsentQueryText_CutsALongQueryAtTheLimit_AndCountsTheRest()
+    {
+        var text = new string('a', QueryModificationDetector.ConsentQueryTextLimit) + new string('b', 234);
+
+        var shown = QueryModificationDetector.BuildConsentQueryText(text);
+
+        Assert.Contains(new string('a', 1000), shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("b", shown, StringComparison.Ordinal);
+        Assert.Contains("(234 more characters not shown)", shown, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("SELECT", false)]
     [InlineData("INSERT", true)]
