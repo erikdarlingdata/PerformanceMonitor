@@ -88,6 +88,7 @@ function Stop-CurrentStep {
     # The runner's worker starts one process per step. Everything under the worker except this watcher's own tree is
     # the step that is running now. Returns how many top-level processes were ended.
     $workers = @(Get-Process -Name 'Runner.Worker' -ErrorAction SilentlyContinue)
+    Write-Host "guard-watch: $($workers.Count) Runner.Worker process(es): $(($workers | ForEach-Object { $_.Id }) -join ',')."
     if ($workers.Count -eq 0) {
         Write-Host 'guard-watch: no Runner.Worker process found, so nothing can be stopped from here; the Check step still fails the job.'
         return 0
@@ -96,6 +97,7 @@ function Stop-CurrentStep {
     $ended = 0
     foreach ($worker in $workers) {
         $children = @($table.GetEnumerator() | Where-Object { $_.Value -eq $worker.Id } | ForEach-Object { [int] $_.Key })
+        Write-Host "guard-watch: worker $($worker.Id) has child processes: $($children -join ',')."
         foreach ($child in $children) {
             $tree = @($child) + @(Get-Descendants $table $child)
             if ($tree -contains $PID) { continue }
@@ -122,8 +124,10 @@ switch ($Mode) {
     }
     'Watch' {
         $ended = 0
+        try {
         while ($true) {
             $job = Get-GuardJob
+            Write-Host "$(Get-Date -Format o) guard-watch: poll, '$GuardJobName' status '$(if ($job) { $job.status } else { 'unknown' })' conclusion '$(if ($job) { $job.conclusion } else { '' })'."
             if (Test-GuardFailed $job) {
                 Write-Host "guard-watch: '$GuardJobName' ended '$($job.conclusion)'. Stopping the running step."
                 # A kill can land between two steps and find no process; try again until one step has been ended.
@@ -136,8 +140,15 @@ switch ($Mode) {
             if ($null -ne $job -and $job.status -eq 'completed') { Write-Host "guard-watch: '$GuardJobName' succeeded; nothing to do."; break }
             Start-Sleep -Seconds $PollSeconds
         }
+        }
+        catch { Write-Host "guard-watch: the watcher stopped on an error: $($_ | Out-String)" }
     }
     'Check' {
+        # The watcher's own log, so a job log shows what it saw and did (its output goes to files).
+        foreach ($name in 'guard-watch.log', 'guard-watch.err') {
+            $file = Join-Path $env:RUNNER_TEMP $name
+            if (Test-Path $file) { Write-Host "--- $name (last 15 lines)"; Get-Content $file -Tail 15 }
+        }
         if (Test-Path $pidFile) {
             Stop-Process -Id ([int] (Get-Content $pidFile)) -Force -ErrorAction SilentlyContinue
             Remove-Item $pidFile -ErrorAction SilentlyContinue
