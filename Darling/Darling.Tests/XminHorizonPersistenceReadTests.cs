@@ -106,6 +106,9 @@ public sealed class XminHorizonPersistenceReadTests
             Assert.Equal(4, info.ObservationsTotal);
             Assert.Equal(3, info.ObservationsAboveThreshold);
             Assert.Equal(6, info.CapturesInWindow);
+            /* #5642: the winning row's collection time rides the read, as a UTC instant, for the alert's age line. */
+            Assert.Equal(MinutesAgo(now, 4), info.NewestSampleUtc);
+            Assert.Equal(DateTimeKind.Utc, info.NewestSampleUtc!.Value.Kind);
 
             /* And the consequence the figures exist for: 3 of 6 captures is the horizon arm's majority
                where the identity fraction is 1 of 4 — the rotating-holder fire, under the subject the
