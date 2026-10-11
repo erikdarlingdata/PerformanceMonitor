@@ -836,6 +836,41 @@ public static class AlertContextSerializer
     }
 
     /// <summary>
+    /// The newest-sample carrier a persisted alert-history row holds (#5642): the sample's source label, UTC
+    /// instant and the age computed ONCE when the alert fired. <c>null</c> when the row carries none (an alert
+    /// with no UTC sample instant, a row written before the member existed, a resolution row, or unparseable
+    /// JSON). Reads the one property rather than rehydrating the whole context, for the reason
+    /// <see cref="TryReadRoute"/> gives; every surface that shows the age reads it here and never measures it
+    /// again against a later clock.
+    /// </summary>
+    public static AlertNewestSample? TryReadNewestSample(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.NewestSample), out var sample)
+                || sample.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var dto = sample.Deserialize<AlertNewestSampleDto>();
+            return dto is not null && !string.IsNullOrWhiteSpace(dto.Source)
+                ? new AlertNewestSample(dto.Source, DateTime.SpecifyKind(dto.InstantUtc, DateTimeKind.Utc),
+                    TimeSpan.FromSeconds(Math.Max(0, dto.AgeSeconds)))
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The tier a persisted alert-history row FIRED at (#3539 A8e), or <c>null</c> when the row carries none
     /// — written before the member existed, an alert that fired with no override (so the per-metric map
     /// decided), a resolution row (persisted with a null context), or unparseable JSON. Reads the one

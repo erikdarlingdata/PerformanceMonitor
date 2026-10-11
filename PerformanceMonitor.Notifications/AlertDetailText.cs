@@ -118,6 +118,23 @@ public static class AlertDetailText
     }
 
     /// <summary>
+    /// The sample-age line a surface that holds only a persisted row (its <c>context_json</c> and
+    /// <c>detail_text</c>) should show, or null when the row carries no age or <paramref name="prose"/> already
+    /// has the line (#5642). Reads the carrier the engine persisted at fire time; never measures against the
+    /// clock, so a row opened a day later still says how old the sample was when the alert went out.
+    /// </summary>
+    public static string? SampleAgeLineFromJson(string? contextJson, string? prose)
+    {
+        var line = SampleAgeLine(AlertContextSerializer.TryReadNewestSample(contextJson));
+        if (line is null)
+        {
+            return null;
+        }
+
+        return prose is not null && s_ageLine.IsMatch(prose) ? null : line;
+    }
+
+    /// <summary>
     /// The detail text to persist and deliver for an alert whose context carries a sample age (#5642): the
     /// text unchanged when it already carries the line (the engine built it with the age stamped) or the
     /// context has none; the line appended once when it does not (a text built before the age was stamped);

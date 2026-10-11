@@ -275,6 +275,11 @@ function detailBody(a, details) {
   const body = [];
   if (items) {
     for (const item of items) body.push(...detailItem(item));
+    /* #5642: the structured items replace detail_text, which is where the fire-time sample-age line lives, so the
+     * line is shown here from the row's newest_sample field - once, and only when the persisted carrier set it.
+     * The detail_text branches below already carry the line in the text and must not add it a second time. */
+    const ageLine = a.newest_sample != null && typeof a.newest_sample.line === "string" ? a.newest_sample.line : "";
+    if (ageLine.length > 0) body.push(el("div", { class: "detail-sample-age", text: ageLine }));
   } else if (fields) {
     body.push(el("div", { class: "detail-fields" }, fields.map(fieldRow)));
   } else if (hasDetail) {

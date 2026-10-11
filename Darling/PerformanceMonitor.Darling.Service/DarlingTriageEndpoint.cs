@@ -878,6 +878,8 @@ internal static class DarlingTriageEndpoint
         ["send_error"] = row.SendError,
         ["muted"] = row.Muted,
         ["detail_text"] = row.DetailText,
+        /* #5642: the fire-time age of the newest sample, read from the persisted context. */
+        ["newest_sample"] = AlertNotebookEndpoint.NewestSampleNode(row.ContextJson),
     };
 
     /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this

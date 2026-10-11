@@ -53,6 +53,19 @@ public partial class AlertDetailWindow : Window
             DetailTextBox.Visibility = Visibility.Visible;
             DetailPanel.Visibility = Visibility.Visible;
         }
+
+        /* #5642: the fire-time sample-age line, read from the persisted context and never measured against
+           this window's clock. The flat detail_text already carries it for rows persisted with the line, so it
+           is shown here only when the structured view (which does not print detail_text) is up or the text
+           lacks it - once either way. No line when the row carries no age. */
+        var ageLine = AlertDetailText.SampleAgeLineFromJson(
+            item.ContextJson, DetailItemsScroll.Visibility == Visibility.Visible ? null : item.DetailText);
+        if (ageLine is not null)
+        {
+            SampleAgeText.Text = ageLine;
+            SampleAgeText.Visibility = Visibility.Visible;
+            DetailPanel.Visibility = Visibility.Visible;
+        }
     }
 
     /* WPF cannot data-bind to AlertDetailItem.Fields (a List<(string,string)> ValueTuple — its
