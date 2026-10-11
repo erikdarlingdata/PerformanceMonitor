@@ -1081,6 +1081,116 @@ function Get-CimInstance {
     }
 
     /// <summary>
+    /// #5649: a name Windows folds into another (a trailing dot or a trailing space) is not on the service-written list,
+    /// whatever its start: it resolves to a DIFFERENT file, and the path test has always refused it. The name test and the
+    /// path test must give the same answer for it, so the lock and the install pass never act on a file the pre-lock walk
+    /// declined to trust. The plain backup name keeps matching. Run under Windows PowerShell 5.1 and PowerShell 7, with
+    /// both scripts.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheServiceWrittenFileName_RefusesANameWindowsFolds_AndTheNameAndPathTestsAgree(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, script);
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm5649-fold-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            Set-Content -LiteralPath "$root\darling.json.bak-x" -Value 'x'
+            'setup.backupFileMade=' + (Test-Path -LiteralPath "$root\darling.json.bak-x")
+            $fileItem = [pscustomobject]@{ PSIsContainer = $false; LinkType = $null; Attributes = [IO.FileAttributes]::Normal }
+            try {
+                foreach ($name in @('darling.json.bak-x', 'DARLING.JSON.BAK-X', 'darling.json.bak-x.', 'darling.json.bak-x ', 'darling.json.bak-x..', 'darling.json.bak-x. ', 'darling.json.bak-.', 'darling.json.bak- ', '')) {
+                    'name:[' + $name + ']=' + (Test-DarlingServiceWrittenFileName $name)
+                    if ($name -ne '') { 'path:[' + $name + ']=' + (Test-DarlingServiceWrittenPath $root ($root + '\' + $name) @() $fileItem) }
+                }
+            }
+            finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        AssertProbeSetupTook(answers);
+        Assert.Contains("name:[darling.json.bak-x]=True", answers);
+        Assert.Contains("name:[DARLING.JSON.BAK-X]=True", answers);
+        Assert.Contains("path:[darling.json.bak-x]=True", answers);
+        foreach (var folded in new[] { "darling.json.bak-x.", "darling.json.bak-x ", "darling.json.bak-x..", "darling.json.bak-x. ", "darling.json.bak-.", "darling.json.bak- " })
+        {
+            Assert.Contains($"name:[{folded}]=False", answers);
+            Assert.Contains($"path:[{folded}]=False", answers);
+        }
+
+        Assert.Contains("name:[]=False", answers);
+    }
+
+    /// <summary>
+    /// #5649: the pre-lock walk names each finding once, and Windows paths are compared without regard to case, so the same
+    /// path spelled in two cases is one finding too. The probe runs the two de-duplication lines exactly as the script
+    /// ships them over findings whose text differs only in case, under both shells (the way a comparer is passed to
+    /// <c>New-Object</c> is the part most likely to differ between them).
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheWalksDeDuplication_TreatsTheSamePathInTwoCasesAsOneFinding(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var seenLine = ExtractLine(script, "$seen = New-Object 'System.Collections.Generic.HashSet[string]'");
+        var uniqueLine = ExtractLine(script, "$unique = @(foreach ($found in $result)");
+        Assert.Contains("OrdinalIgnoreCase", seenLine, StringComparison.Ordinal);
+
+        var probe = new StringBuilder();
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $result = @(
+                [pscustomobject]@{ Kind = 'Grant'; Path = 'C:\Pm\Folder'; Text = 'BUILTIN\Users on C:\Pm\Folder'; IsFile = $false },
+                [pscustomobject]@{ Kind = 'Grant'; Path = 'c:\pm\folder'; Text = 'BUILTIN\Users on c:\pm\folder'; IsFile = $false },
+                [pscustomobject]@{ Kind = 'Grant'; Path = 'C:\Pm\Folder'; Text = 'BUILTIN\Users on C:\Pm\Folder'; IsFile = $false },
+                [pscustomobject]@{ Kind = 'Grant'; Path = 'C:\Pm\Other'; Text = 'BUILTIN\Users on C:\Pm\Other'; IsFile = $false })
+            """);
+        probe.AppendLine(seenLine);
+        probe.AppendLine(uniqueLine);
+        probe.AppendLine("""
+            'unique=' + @($unique).Count
+            'first=' + $unique[0].Text
+            'second=' + $unique[1].Text
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("unique=2", answers);
+        Assert.Contains(@"first=BUILTIN\Users on C:\Pm\Folder", answers);
+        Assert.Contains(@"second=BUILTIN\Users on C:\Pm\Other", answers);
+    }
+
+    /// <summary>
     /// #5649: the pre-lock walk trusts the service account (as grantee and as owner) on EVERY file in the install root
     /// whose name starts with darling.json.bak-, the glob the hardening covers, so a backup an operator named by hand
     /// (the hardening makes the service its owner at the next start) is not read as a stranger's file. Narrow: any other

@@ -38,8 +38,11 @@ internal static class DarlingConfigBackup
     public const string Glob = Prefix + "*";
 
     /// <summary>Whether <paramref name="fileName"/> is a backup of the config file named <paramref name="configFileName"/>:
-    /// it starts with that name plus <see cref="Tail"/>, compared ordinally and ignoring case, as Windows compares names.</summary>
+    /// it starts with that name plus <see cref="Tail"/>, compared ordinally and ignoring case, as Windows compares names.
+    /// A name ending in a dot or a space is never a backup: Windows folds that tail away, so the name resolves to a
+    /// DIFFERENT file, and the install and upgrade scripts' <c>Test-DarlingServiceWrittenFileName</c> refuses it the same way.</summary>
     public static bool IsBackupName(string configFileName, string fileName) =>
+        !fileName.EndsWith('.') && !fileName.EndsWith(' ') &&
         fileName.StartsWith(configFileName + Tail, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The backups of the config file named <paramref name="configFileName"/> directly in

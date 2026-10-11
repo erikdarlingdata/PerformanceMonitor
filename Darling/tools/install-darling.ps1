@@ -230,7 +230,8 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
     }
     # Each finding once: a folder made under C:\ inherits BUILTIN\Users as two ACEs (one grants append, one
     # grants write), and without this every caller named that principal twice for the same path.
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    # Compared without regard to case, the way Windows compares paths: the same path spelled in two cases is one finding.
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $unique = @(foreach ($found in $result) { if ($seen.Add($found.Text)) { $found } })
     if ($AsRecords) { return @($unique) }
     return @($unique | ForEach-Object { $_.Text })
@@ -298,7 +299,8 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
 # PowerShell 5.1, match some look-alike characters, so they can disagree with the service. DarlingConfigBackup.Prefix
 # in the service is the one in C#, and a test pins the two to the same text. A file with more than one name (a hard
 # link) is never one the service writes: the root files this list covers come from Get-DarlingServiceWrittenRootFiles,
-# which leaves those out. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# which leaves those out. Nor is a name ending in a dot or a space, which Windows folds into another name (the path test
+# refuses those too, and the service's backup test does the same). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingServiceWrittenNames {
     return [pscustomobject]@{
         Directories    = @('pg-runtime', 'pg-runtime-prev')
@@ -311,6 +313,9 @@ function Get-DarlingServiceWrittenNames {
 # True when a file NAME is one of the root files on the list above.
 function Test-DarlingServiceWrittenFileName([string]$name) {
     $names = Get-DarlingServiceWrittenNames
+    # A name Windows folds into another (a trailing dot or space) is not one the service wrote: it resolves to a DIFFERENT
+    # file, and Test-DarlingServiceWrittenPath already refuses it, so the two answer the same (#5649).
+    if ([string]::IsNullOrEmpty($name) -or $name.EndsWith('.') -or $name.EndsWith(' ')) { return $false }
     foreach ($file in @($names.Files)) {
         if ([string]::Equals($name, $file, [StringComparison]::OrdinalIgnoreCase)) { return $true }
     }
