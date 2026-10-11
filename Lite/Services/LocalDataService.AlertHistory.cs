@@ -655,24 +655,10 @@ public class AlertHistoryRow
        computed the age once at fire time and the history store kept it; this reads it back and never works it out
        from the clock now, so a row opened a day later still says what the alert knew when it went out. Null on a
        row written before the carrier existed, or one whose source had no sample time: no line then. */
-    private string? _newestSampleSourceJson;
-    private AlertNewestSample? _newestSample;
-    private bool _newestSampleRead;
-
-    public AlertNewestSample? NewestSample
-    {
-        get
-        {
-            if (!_newestSampleRead || !ReferenceEquals(_newestSampleSourceJson, ContextJson))
-            {
-                _newestSample = AlertContextSerializer.TryDeserialize(ContextJson, out var context) ? context.NewestSample : null;
-                _newestSampleSourceJson = ContextJson;
-                _newestSampleRead = true;
-            }
-
-            return _newestSample;
-        }
-    }
+    /* Reads the one property (TryReadNewestSample, the way the route field reads TryReadRoute) rather than rehydrating the
+       whole context: a grid row or a 500-row get_alert_history page needs one nullable record, not every detail item and
+       incident roster. Cheap enough per read that the reference-keyed cache it replaces is gone. */
+    public AlertNewestSample? NewestSample => AlertContextSerializer.TryReadNewestSample(ContextJson);
 
     /// <summary>The one-line sample age the shared formatter prints everywhere else, or empty when the row has none.</summary>
     public string NewestSampleDisplay => AlertDetailText.SampleAgeLine(NewestSample) ?? "";

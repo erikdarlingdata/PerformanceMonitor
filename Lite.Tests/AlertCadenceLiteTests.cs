@@ -232,6 +232,9 @@ public sealed class LiteSampleAgeHistoryTests : IClassFixture<SharedDuckDbFixtur
         var rowSource = File.ReadAllText(LiteSampleAgeDeliveryTests.RepoFile("Lite/Services/LocalDataService.AlertHistory.cs"));
         var rowClass = rowSource[rowSource.IndexOf("public class AlertHistoryRow", StringComparison.Ordinal)..];
         Assert.DoesNotContain("DateTime.UtcNow", rowClass);
+        /* One property off the persisted JSON, not a rehydrate of the whole context per grid row (#5642 review). */
+        Assert.Contains("AlertContextSerializer.TryReadNewestSample(ContextJson)", rowClass);
+        Assert.DoesNotContain("TryDeserialize(", rowClass);
     }
 }
 
