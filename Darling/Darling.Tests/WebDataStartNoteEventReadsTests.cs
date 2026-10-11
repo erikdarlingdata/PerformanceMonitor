@@ -11,8 +11,10 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -32,6 +34,76 @@ public sealed class WebDataStartNoteEventReadsTests
         NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
 
     private static readonly CancellationToken Cancelled = new(canceled: true);
+
+    /* A logger that is slow on every call: Npgsql logs while it opens a connection, after it has started its 1-second connect
+       budget, so the budget is spent by the time it would look at the token. (Slow on the first call only is not enough: the
+       first log line comes before the budget starts.) */
+    private sealed class SlowLogger : ILogger, ILoggerFactory
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            Thread.Sleep(1200);
+        }
+
+        public ILogger CreateLogger(string categoryName) => this;
+
+        public void AddProvider(ILoggerProvider provider)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    /* The race behind #5678 made deterministic: with the connect budget spent, a pre-cancelled token still meets a connect timeout,
+       an NpgsqlException that wraps a TimeoutException, not an OperationCanceledException. */
+    private static NpgsqlDataSource ConnectBudgetSpent()
+    {
+        var builder = new NpgsqlDataSourceBuilder("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
+        builder.UseLoggerFactory(new SlowLogger());
+        return builder.Build();
+    }
+
+    /// <summary>The control for the two pins below: the store open really does throw a connect timeout, not a cancellation, when its
+    /// budget is spent under an already-cancelled token. Without this, the pins would pass on a Npgsql that stopped doing so.</summary>
+    [Fact]
+    public async Task ASpentConnectBudget_ThrowsATimeout_NotACancellation_UnderACancelledToken()
+    {
+        await using var store = ConnectBudgetSpent();
+
+        var thrown = await Assert.ThrowsAnyAsync<Exception>(async () => { await using var _ = await store.OpenConnectionAsync(Cancelled); });
+
+        Assert.IsNotAssignableFrom<OperationCanceledException>(thrown);
+    }
+
+    /// <summary>#5678: a cancelled caller gets the cancellation from the registry read, never the registry-fault sentence, whatever
+    /// exception type the connect attempt ends in.</summary>
+    [Fact]
+    public async Task TheRegistryRead_SurfacesCancellation_WhenTheConnectBudgetIsSpent()
+    {
+        await using var store = ConnectBudgetSpent();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => DarlingServerResolver.LoadEnabledOrFaultAsync(store, Cancelled));
+    }
+
+    /// <summary>#5678: a page that is not capped reaches the store and surfaces cancellation, even when the store's connect ends in a
+    /// timeout rather than a cancellation. This is the call that failed once on a loaded runner.</summary>
+    [Fact]
+    public async Task AnUncappedPage_SurfacesCancellation_WhenTheConnectBudgetIsSpent()
+    {
+        await using var store = ConnectBudgetSpent();
+        const string page = "{\"server\":\"sql01\",\"hours_back\":48,\"total_entries\":2,\"shown\":2,\"entries\":["
+            + "{\"event_time\":\"2026-01-02T18:00:00.0000000Z\"},{\"event_time\":\"2026-01-02T12:30:00.0000000Z\"}]}";
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => WebDataStartNote.AddAsync(store, "get_health_parser_system_health", "sql01", 48, WindowEnd, page, null, Cancelled));
+    }
 
     private const string DefaultTraceCapped =
         "{\"server\":\"sql01\",\"hours_back\":48,\"total_events\":250,\"shown\":2,\"events\":["

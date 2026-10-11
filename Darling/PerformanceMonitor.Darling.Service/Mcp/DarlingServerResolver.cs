@@ -131,7 +131,13 @@ ORDER BY server_name";
         {
             /* #4203: an abandoned request's cancellation must reach the caller as OperationCanceledException,
                not be folded into a fault sentence here — the web handler's own catch tells the two apart to
-               decide whether this is a quiet abandonment or a real registry-read failure. */
+               decide whether this is a quiet abandonment or a real registry-read failure.
+
+               #5678: the caller's cancelled token decides it, not the type of the exception. Npgsql throws a connect
+               timeout (an NpgsqlException wrapping a TimeoutException) rather than OperationCanceledException when the
+               connect budget runs out before it looks at the token, so a cancelled caller on a stalled machine would
+               otherwise be told the registry could not be read. */
+            cancellationToken.ThrowIfCancellationRequested();
             return (new List<RegisteredServer>(), $"{RegistryReadFaultPrefix}{ex.Message}");
         }
     }

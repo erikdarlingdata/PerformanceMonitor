@@ -744,6 +744,10 @@ internal static class WebDataStartNote
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #5678: a cancelled caller is not a failed probe. A connect timeout that beats Npgsql's look at the token arrives
+               as a different exception type, and answering the grid would hide that the request was abandoned. */
+            cancellationToken.ThrowIfCancellationRequested();
+
             /* Debug, like the Custom Views runner's probe: the grid is still answered, and this runs once per grid
                refresh, so a standing fault at Warning would put a line in the log on every one. */
             logger?.LogDebug(ex, "The data-start probe for {Tool} failed; the grid is answered without a partial-window notice.", tool);
