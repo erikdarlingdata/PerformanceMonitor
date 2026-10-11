@@ -339,7 +339,8 @@ public static class DarlingPgSessionStatesReader
         string? Username,
         string? ApplicationName,
         string? CommandTag,
-        long QueryDurationMs);
+        long QueryDurationMs,
+        DateTime? NewestSampleUtc = null);
 
     /// <summary>
     /// The single most recent <c>pg_session_states</c> capture for this server, filtered to sessions whose
@@ -498,6 +499,7 @@ public static class DarlingPgSessionStatesReader
                 s.application_name,
                 s.command_tag,
                 s.query_duration_ms,
+                r.latest_capture AS capture_time,
                 {1} AS excluded_by_program_prefix,
                 {2} AS excluded_by_login,
                 {3} AS excluded_by_database
@@ -521,7 +523,8 @@ public static class DarlingPgSessionStatesReader
             s.query_duration_ms,
             CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS integer) AS excluded_by_program_prefix_count,
             CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count,
-            CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count
+            CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count,
+            s.capture_time AS newest_sample_utc
         FROM candidates AS s
         WHERE NOT (s.excluded_by_program_prefix OR s.excluded_by_login OR s.excluded_by_database)
         ORDER BY s.query_duration_ms DESC, s.pid
@@ -674,7 +677,9 @@ public static class DarlingPgSessionStatesReader
                 reader.IsDBNull(3) ? null : reader.GetString(3),
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? -1 : reader.GetInt64(6)));
+                reader.IsDBNull(6) ? -1 : reader.GetInt64(6),
+                /* ordinal 10: the capture the rows were read from (#5642), stamped UTC (the store keeps naive UTC). */
+                reader.IsDBNull(10) ? null : DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc)));
             /* The same three scalars on every row — read once is enough; a read with no rows has nothing to
                fire and therefore nothing to render the counts beside (the SQL Server read's rule). */
             excludedByProgramPrefix = reader.IsDBNull(7) ? 0 : reader.GetInt32(7);

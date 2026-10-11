@@ -30,7 +30,7 @@ public sealed class DarlingAlertReadAdapterNewestSampleTests
         ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertReadAdapter.cs");
 
     /// <summary>The top-level select-list expressions of the LAST depth-0 SELECT in <paramref name="sql"/>.</summary>
-    private static List<string> FinalSelectColumns(string sql)
+    internal static List<string> FinalSelectColumns(string sql)
     {
         var depth = 0;
         var lastSelect = -1;

@@ -7,11 +7,16 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
+using static Darling.Tests.RepoFile;
+using Finding = PerformanceMonitor.Alerting.PostgresAlertEvaluator.Finding;
 
 namespace Darling.Tests;
 
@@ -19,8 +24,9 @@ namespace Darling.Tests;
 /// #5642, ruling 6: the PostgreSQL alert families that fire from <c>DarlingWorker</c> carry the newest-sample age too,
 /// computed once at fire time from the instant the family's own read already returned and persisted with the alert's
 /// context. The families whose read returns an instant are High CPU (the counted sample), Deadlocks (the newest
-/// report), Blocking (the newest capture) and Poison Wait (the newest collection). The Tier 0 trio and Long-Running
-/// Query read no instant, so they carry none.
+/// report), Blocking (the newest capture) and Poison Wait (the newest collection). The Tier 0 trio (wraparound,
+/// vacuum horizon, replication slots) and Long-Running Query read their row's collection time as a last column and
+/// stamp it the same way; a read that returns none gives no line.
 /// </summary>
 public sealed class PgAlertSampleAgeTests
 {
@@ -98,6 +104,120 @@ public sealed class PgAlertSampleAgeTests
         Assert.Contains("\"deadlock\", NewestPgInstant(rows.Select(r => r.OccurredAtUtc)), now)", source, StringComparison.Ordinal);
         Assert.Contains("\"blocking capture\", NewestPgInstant(worstPerRoot.Select(r => r.CapturedAt)), now)", source, StringComparison.Ordinal);
         Assert.Contains("newestCollectionBySubject.TryGetValue(finding.Subject, out var newestWaitCollection)", source, StringComparison.Ordinal);
-        Assert.Equal(4, Regex.Matches(source, @"StampPgNewestSample\(\s*(?:null|new AlertContext)").Count);
+        Assert.Equal(6, Regex.Matches(source, @"StampPgNewestSample\(\s*(?:null|new AlertContext)").Count);
+    }
+
+    // ---- the Tier 0 trio and Long-Running Query (#5642, ruling 6) ----
+
+    public static IEnumerable<object[]> Tier0AndLongRunningReads() => new[]
+    {
+        new object[] { "WraparoundSql", DarlingPostgresAlertReadAdapter.WraparoundSql },
+        new object[] { "XminSql", DarlingPostgresAlertReadAdapter.XminSql },
+        new object[] { "SlotSql", DarlingPostgresAlertReadAdapter.SlotSql },
+        new object[] { "CurrentLongRunningSessionsSqlTemplate", DarlingPgSessionStatesReader.CurrentLongRunningSessionsSqlTemplate },
+    };
+
+    /// <summary>
+    /// Shape pin: each read ends in the collection-time column. A column added in the middle of a select list moves
+    /// the ordinal the reader takes, so the age line would read another column.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Tier0AndLongRunningReads))]
+    public void TheSql_EndsInTheNewestSampleColumn(string name, string sql)
+    {
+        var columns = DarlingAlertReadAdapterNewestSampleTests.FinalSelectColumns(sql);
+        Assert.True(columns.Count >= 2, $"{name}: the select list was not parsed");
+        Assert.EndsWith("newest_sample_utc", columns[^1], StringComparison.Ordinal);    }
+
+    [Fact]
+    public void TheReaders_TakeTheLastColumn_ByOrdinal_AsUtc()
+    {
+        var adapter = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingPostgresAlertReadAdapter.cs");
+        var ordinals = Regex.Matches(adapter, @"AsUtc\(reader, (\d+)\)")
+            .Select(m => int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture))
+            .ToList();
+        Assert.Equal(
+            new[]
+            {
+                DarlingAlertReadAdapterNewestSampleTests.FinalSelectColumns(DarlingPostgresAlertReadAdapter.WraparoundSql).Count - 1,
+                DarlingAlertReadAdapterNewestSampleTests.FinalSelectColumns(DarlingPostgresAlertReadAdapter.XminSql).Count - 1,
+                DarlingAlertReadAdapterNewestSampleTests.FinalSelectColumns(DarlingPostgresAlertReadAdapter.SlotSql).Count - 1,
+            },
+            ordinals);
+        Assert.Contains("DateTime.SpecifyKind(reader.GetDateTime(ordinal), DateTimeKind.Utc)", adapter, StringComparison.Ordinal);
+
+        var sessions = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgSessionStatesReader.cs");
+        var lastOrdinal = DarlingAlertReadAdapterNewestSampleTests.FinalSelectColumns(
+            DarlingPgSessionStatesReader.CurrentLongRunningSessionsSqlTemplate).Count - 1;
+        Assert.Contains(
+            $"reader.IsDBNull({lastOrdinal}) ? null : DateTime.SpecifyKind(reader.GetDateTime({lastOrdinal}), DateTimeKind.Utc)",
+            sessions, StringComparison.Ordinal);
+    }
+
+    private static Finding MakeFinding(string metric, string subject) =>
+        new(metric, AlertSeverityLevel.Warning, subject, "", "", "", 0, 0);
+
+    [Fact]
+    public void ATier0Finding_IsAgedFromItsOwnRow_ByMetricAndSubject()
+    {
+        var older = Now.AddMinutes(-9);
+        var newer = Now.AddSeconds(-90);
+        var wraparound = new[]
+        {
+            new PostgresWraparoundAlertInfo("db_a", 1, 0, 1, 1, NewestSampleUtc: older),
+            new PostgresWraparoundAlertInfo("db_b", 1, 0, 1, 1, NewestSampleUtc: newer),
+        };
+        var xmin = new PostgresXminHorizonAlertInfo("session", "1", 1, 1, 1, null, NewestSampleUtc: Now.AddMinutes(-4));
+        var slots = new[]
+        {
+            new PostgresSlotAlertInfo("slot_a", "lost", false, 1, 0, null, Now.AddMinutes(-2)),
+        };
+
+        Assert.Equal(older, DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.WraparoundMetric, "db_a"), wraparound, xmin, slots));
+        Assert.Equal(newer, DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.WraparoundMetric, "db_b"), wraparound, xmin, slots));
+        Assert.Equal(xmin.NewestSampleUtc, DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.XminHorizonMetric, "rotating holders"), wraparound, xmin, slots));
+        Assert.Equal(Now.AddMinutes(-2), DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.SlotRetentionMetric, "slot_a"), wraparound, xmin, slots));
+    }
+
+    [Fact]
+    public void ATier0ReadWithNoTime_GivesNoLine()
+    {
+        var wraparound = new[] { new PostgresWraparoundAlertInfo("db_a", 1, 0, 1, 1) };
+        var slots = new[] { new PostgresSlotAlertInfo("slot_a", "lost", false, 1, 0, null) };
+        var xmin = new PostgresXminHorizonAlertInfo("session", "1", 1, 1, 1, null);
+
+        Assert.Null(DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.WraparoundMetric, "db_a"), wraparound, xmin, slots));
+        Assert.Null(DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.XminHorizonMetric, "x"), wraparound, xmin, slots));
+        Assert.Null(DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.SlotRetentionMetric, "slot_a"), wraparound, xmin, slots));
+        Assert.Null(DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.SlotRetentionMetric, "unknown_slot"), wraparound, xmin, slots));
+        Assert.Null(DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.WraparoundMetric, "db_a"), null, null, null));
+
+        var context = DarlingWorker.StampPgNewestSample(
+            new AlertContext(), "collection",
+            DarlingWorker.Tier0NewestSample(MakeFinding(PostgresAlertEvaluator.SlotRetentionMetric, "slot_a"), wraparound, xmin, slots), Now);
+        Assert.Null(context!.NewestSample);
+        Assert.Null(AlertDetailText.SampleAgeLineFor(context, null));
+    }
+
+    [Fact]
+    public void ATier0Fire_CarriesTheLineOnce_FromItsRowsTime()
+    {
+        var context = DarlingWorker.StampPgNewestSample(new AlertContext(), "collection", Now.AddMinutes(-4), Now);
+        var text = AlertDetailText.WithSampleAge("  XID age 1,000", context);
+        Assert.Single(Regex.Matches(text!, "Newest collection sample"));
+        Assert.EndsWith("Newest collection sample: 15:44:49 UTC, 4m 0s old", text, StringComparison.Ordinal);
+        Assert.Equal(text, AlertDetailText.WithSampleAge(text, context));
+    }
+
+    /// <summary>
+    /// Source shape, RED at the base commit (the Tier 0 fire passed a context with no sample, and so did
+    /// Long-Running Query): both fires hand the stamp the instant their own read returned.
+    /// </summary>
+    [Fact]
+    public void TheTier0TrioAndLongRunningQuery_StampTheirReadsInstantAtFireTime()
+    {
+        var source = ServerConnectBackoffTests.ReadWorkerSource();
+        Assert.Contains("Tier0NewestSample(finding, wraparound, xmin, slots), now)", source, StringComparison.Ordinal);
+        Assert.Contains("\"query snapshot\", NewestPgInstant(rows.Select(r => r.NewestSampleUtc ?? default)), now)", source, StringComparison.Ordinal);
     }
 }

@@ -7394,6 +7394,26 @@ LIMIT 1";
         return context;
     }
 
+    /// <summary>
+    /// The collection time of the row a Tier 0 finding was judged on (#5642): the finding's own database row for
+    /// wraparound, its own slot row for slot retention, the winning row for the vacuum horizon. Null when the read
+    /// carried none, which gives no age line.
+    /// </summary>
+    internal static DateTime? Tier0NewestSample(
+        PostgresAlertEvaluator.Finding finding,
+        IReadOnlyList<PostgresWraparoundAlertInfo>? wraparound,
+        PostgresXminHorizonAlertInfo? xmin,
+        IReadOnlyList<PostgresSlotAlertInfo>? slots) =>
+        finding.MetricName switch
+        {
+            PostgresAlertEvaluator.WraparoundMetric =>
+                wraparound?.FirstOrDefault(w => string.Equals(w.DatabaseName, finding.Subject, StringComparison.Ordinal))?.NewestSampleUtc,
+            PostgresAlertEvaluator.XminHorizonMetric => xmin?.NewestSampleUtc,
+            PostgresAlertEvaluator.SlotRetentionMetric =>
+                slots?.FirstOrDefault(sl => string.Equals(sl.SlotName, finding.Subject, StringComparison.Ordinal))?.NewestSampleUtc,
+            _ => null,
+        };
+
     /// <summary>The newest of a PostgreSQL family's row instants, or null when there are none (a default instant is none).</summary>
     internal static DateTime? NewestPgInstant(IEnumerable<DateTime> instants)
     {
@@ -7611,13 +7631,19 @@ LIMIT 1";
                            silently suppressed for the whole cooldown window. The DedupKey is identity only —
                            no ages or byte counts — so a recurrence of the SAME subject collapses while a
                            different subject does not. */
-                        Context: new AlertContext
-                        {
-                            Incidents = new List<AlertIncident>
+                        Context: StampPgNewestSample(
+                            new AlertContext
                             {
-                                new(finding.Subject, new[] { finding.Subject }),
+                                Incidents = new List<AlertIncident>
+                                {
+                                    new(finding.Subject, new[] { finding.Subject }),
+                                },
                             },
-                        },
+                            /* #5642, ruling 6: the age of the row this finding was judged on, counted once at fire
+                               time. Wraparound and slot findings are keyed by their own subject (database, slot);
+                               the horizon finding comes from the one winning row. */
+                            "collection",
+                            Tier0NewestSample(finding, wraparound, xmin, slots), now),
                         DetailText: null,
                         finding.NumericCurrentValue,
                         finding.NumericThresholdValue,
@@ -8573,17 +8599,21 @@ LIMIT 1";
                         metricName,
                         $"{rows.Count} query(s), longest {elapsedMinutes}m",
                         $"{thresholdMinutes}m",
-                        Context: new AlertContext
-                        {
-                            Incidents = rows.Select(BuildPgLongRunningQueryIncident).ToList(),
-                            /* #3743: the knob's receipt, the SQL Server twin's item verbatim (same builder, same
-                               labels) and under the same rule — only when the knob is SET; a cleared knob has no
-                               footnote. #3742: the database list's receipt beside it, the twin's second item, only
-                               when the list is SET. See the method summary. */
-                            Details = BuildPgLongRunningQueryExclusionDetails(
-                                exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin,
-                                alertSettings.ExcludedDatabases, read.ExcludedByDatabase),
-                        },
+                        Context: StampPgNewestSample(
+                            new AlertContext
+                            {
+                                Incidents = rows.Select(BuildPgLongRunningQueryIncident).ToList(),
+                                /* #3743: the knob's receipt, the SQL Server twin's item verbatim (same builder, same
+                                   labels) and under the same rule — only when the knob is SET; a cleared knob has no
+                                   footnote. #3742: the database list's receipt beside it, the twin's second item, only
+                                   when the list is SET. See the method summary. */
+                                Details = BuildPgLongRunningQueryExclusionDetails(
+                                    exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin,
+                                    alertSettings.ExcludedDatabases, read.ExcludedByDatabase),
+                            },
+                            /* #5642, ruling 6: the capture these rows were read from, counted once at fire time. The
+                               same label the SQL Server twin uses for its snapshot. */
+                            "query snapshot", NewestPgInstant(rows.Select(r => r.NewestSampleUtc ?? default)), now),
                         DetailText: null,
                         NumericCurrentValue: elapsedMinutes,
                         NumericThresholdValue: thresholdMinutes,
