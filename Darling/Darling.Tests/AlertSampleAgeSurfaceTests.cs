@@ -266,6 +266,28 @@ public sealed class AlertSampleAgeSurfaceTests
     }
 
     [Fact]
+    public void TheViewerGrid_ShowsTheRowsPersistedLine_InANewestSampleColumn()
+    {
+        // Lite's history grid has the column (#5642); the Viewer's twin grid reads the same persisted carrier.
+        var withSample = new PerformanceMonitor.Darling.Viewer.ViewerAlertRow
+        {
+            AlertTime = new DateTime(2026, 7, 1, 15, 49, 0, DateTimeKind.Unspecified),
+            MetricName = "High CPU",
+            ContextJson = ContextJsonWith(Sample()),
+        };
+        Assert.Equal(Line, withSample.NewestSampleDisplay);
+        Assert.Equal(string.Empty, new PerformanceMonitor.Darling.Viewer.ViewerAlertRow
+        {
+            AlertTime = new DateTime(2026, 7, 1, 15, 49, 0, DateTimeKind.Unspecified),
+            MetricName = "Failed Jobs",
+            ContextJson = ContextJsonWith(null),
+        }.NewestSampleDisplay);
+
+        Assert.Contains("Binding=\"{Binding NewestSampleDisplay}\"",
+            ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/AlertsHistoryTab.xaml"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheViewerToast_DoesNotSummariseOnTheAgeLine()
     {
         var source = ReadRepoFile(ViewerMainPath);
