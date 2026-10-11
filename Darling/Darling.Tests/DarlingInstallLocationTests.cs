@@ -4569,6 +4569,26 @@ function Get-CimInstance {
         Assert.Contains("other=1", answers);
     }
 
+    /// <summary>
+    /// #5673: the canonical spelling trims and joins with the runtime's directory separator and not a literal backslash, so a
+    /// backslash that is part of a name on another platform (<c>/opt/a\</c>) is not dropped as if it were a separator. The
+    /// separator is the same character on Windows, so nothing changes there; this pins the text because the rule cannot be
+    /// run with another separator from a Windows run.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheCanonicalPath_TrimsAndJoinsWithTheRuntimesSeparator(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var body = ExtractFunction(script, "Get-DarlingCanonicalPath");
+
+        Assert.DoesNotContain("TrimEnd('\\')", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("-join '\\'", body, StringComparison.Ordinal);
+        Assert.Contains("$full.TrimEnd([IO.Path]::DirectorySeparatorChar)", body, StringComparison.Ordinal);
+        Assert.Contains("-join [IO.Path]::DirectorySeparatorChar", body, StringComparison.Ordinal);
+    }
+
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>
     private static void AppendPathHelpers(StringBuilder probe, string script)
     {

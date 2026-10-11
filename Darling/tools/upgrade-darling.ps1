@@ -647,13 +647,14 @@ public static class DarlingNativeOwner
 # the part that exists), so a root typed one way and a path listed or joined the other compared unequal, which is how a root
 # under a GitHub Windows runner's temp folder (C:\Users\RUNNER~1\...) lost its hard links and its trusted folders. The part
 # of the path that exists is spelled out by GetLongPathName and a name below it that does not exist stays as typed. Returns
-# $null when no part of the path can be worked out, and every caller treats that as not trusted. Kept byte-identical in
-# install-darling.ps1 and upgrade-darling.ps1.
+# $null when no part of the path can be worked out, and every caller treats that as not trusted. The separator it trims and
+# joins with is the runtime's, so a backslash is only a separator on Windows. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
 function Get-DarlingCanonicalPath([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($path)
-        $trimmed = $full.TrimEnd('\')
+        $trimmed = $full.TrimEnd([IO.Path]::DirectorySeparatorChar)
         if ($trimmed.Length -le 2) { return $full }
         if ($trimmed.IndexOf('~') -lt 0) { return $trimmed }
         if (-not ('DarlingNativePaths' -as [type])) {
@@ -693,7 +694,7 @@ public static class DarlingNativePaths
             $below = @([IO.Path]::GetFileName($existing)) + $below
             $existing = $parent
         }
-        return (@($long.TrimEnd('\')) + $below) -join '\'
+        return (@($long.TrimEnd([IO.Path]::DirectorySeparatorChar)) + $below) -join [IO.Path]::DirectorySeparatorChar
     }
     catch { return $null }
 }
