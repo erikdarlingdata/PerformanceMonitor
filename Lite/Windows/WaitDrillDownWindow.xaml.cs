@@ -461,9 +461,8 @@ public partial class WaitDrillDownWindow : Window
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not QuerySnapshotRow row) return;
         /* #4239: fetch before passing estimatedPlanXml on — it feeds ReproScriptBuilder's SET-options
-           extraction (ActualPlanExecutor, #233); a null plan silently loses that fidelity. (This path's
-           confirm dialog is PlanNavigationController's generic one — Lite's only QueryModificationDetector
-           call is ServerTab.Plans.cs's GetActualPlan_Click, unaffected by this window.) */
+           extraction (ActualPlanExecutor, #233); a null plan silently loses that fidelity. #5639: it also
+           feeds the data-modification check PlanNavigationController.GetActualPlanAsync runs. */
         var estimatedPlanXml = await FetchSnapshotPlanAsync(row);
         await _planActions.GetActualPlanAsync(row.QueryText, row.DatabaseName ?? "",
             $"Actual Plan - SPID {row.SessionId}",

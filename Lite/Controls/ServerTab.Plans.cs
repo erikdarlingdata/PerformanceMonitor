@@ -517,7 +517,7 @@ public partial class ServerTab : UserControl
 
         var result = MessageBox.Show(
             prompt.ToString(),
-            modification.ModifiesData ? "Get Actual Plan (re-run) — DATA WILL BE MODIFIED" : "Get Actual Plan (re-run)",
+            QueryModificationDetector.BuildConsentTitle(modification),
             MessageBoxButton.OKCancel,
             MessageBoxImage.Warning);
 

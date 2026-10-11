@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -92,7 +93,9 @@ public sealed class PlanNavigationController
     /// <summary>
     /// Re-executes <paramref name="queryText"/> against the monitored server (after confirmation) with
     /// SET STATISTICS XML ON and opens the captured actual plan. No-ops gracefully when there is no
-    /// query text (e.g. procedure rows, which carry only a name).
+    /// query text (e.g. procedure rows, which carry only a name). The prompt leads with the shared
+    /// data-modification warning when <paramref name="estimatedPlanXml"/> shows the query writes data, or when
+    /// that plan is missing or unreadable (#5639).
     /// </summary>
     public async Task GetActualPlanAsync(string? queryText, string databaseName, string label,
         string? estimatedPlanXml = null, string? isolationLevel = null)
@@ -104,14 +107,29 @@ public sealed class PlanNavigationController
             return;
         }
 
-        var confirm = MessageBox.Show(_owner,
-            $"You are about to execute this query against {_targetDescription} in database " +
-            $"[{(string.IsNullOrEmpty(databaseName) ? "default" : databaseName)}].\n\n" +
-            "Make sure you understand what the query does before proceeding.\n" +
-            "The query will execute with SET STATISTICS XML ON to capture the actual plan.\n" +
-            "All data results will be discarded.\n\n" +
-            QueryModificationDetector.CapturedQueryNotice,
-            "Get Actual Plan", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+        /* #5639: the same data-modification check every other actual-plan entry point runs. The stored plan
+           decides it; a missing or unreadable plan is treated as modifying, and the prompt says so. */
+        var modification = QueryModificationDetector.Detect(estimatedPlanXml, queryText);
+        var modificationWarning = QueryModificationDetector.BuildConsentWarning(modification, databaseName);
+
+        var prompt = new StringBuilder();
+        if (modificationWarning.Length > 0)
+        {
+            prompt.AppendLine(modificationWarning);
+            prompt.AppendLine("──────────────────────────────────────────");
+            prompt.AppendLine();
+        }
+        prompt.AppendLine($"You are about to execute this query against {_targetDescription} in database " +
+            $"[{(string.IsNullOrEmpty(databaseName) ? "default" : databaseName)}].");
+        prompt.AppendLine();
+        prompt.AppendLine("Make sure you understand what the query does before proceeding.");
+        prompt.AppendLine("The query will execute with SET STATISTICS XML ON to capture the actual plan.");
+        prompt.AppendLine("All data results will be discarded.");
+        prompt.AppendLine();
+        prompt.AppendLine(QueryModificationDetector.CapturedQueryNotice);
+
+        var confirm = MessageBox.Show(_owner, prompt.ToString(),
+            QueryModificationDetector.BuildConsentTitle(modification), MessageBoxButton.OKCancel, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.OK) return;
 
         _actualPlanCts?.Dispose();

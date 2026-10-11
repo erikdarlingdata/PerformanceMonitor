@@ -251,10 +251,18 @@ public partial class FinOpsTab : UserControl
         switch (GetFinOpsRow(sender))
         {
             case HighImpactQueryRow hi:
-                await PlanActions.GetActualPlanAsync(hi.FullQueryText, hi.DatabaseName, $"Actual Plan - {hi.QueryHash}");
+                /* #5639: the stored plan feeds the data-modification check; a failed lookup is the same as no plan. */
+                string? hiPlan = null;
+                try { hiPlan = await FetchFinOpsHighImpactPlanAsync(hi.QueryHash); }
+                catch { /* no plan: fail-safe prompt */ }
+                await PlanActions.GetActualPlanAsync(hi.FullQueryText, hi.DatabaseName, $"Actual Plan - {hi.QueryHash}",
+                    estimatedPlanXml: hiPlan);
                 break;
             case ExpensiveQueryRow ex:
-                await PlanActions.GetActualPlanAsync(ex.FullQueryText, ex.DatabaseName, "Actual Plan - Expensive Query");
+                /* #5639: these rows carry no query hash, so there is no plan to look up; the check treats the
+                   query as modifying and the prompt says so. */
+                await PlanActions.GetActualPlanAsync(ex.FullQueryText, ex.DatabaseName, "Actual Plan - Expensive Query",
+                    estimatedPlanXml: null);
                 break;
         }
     }

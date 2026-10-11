@@ -320,7 +320,15 @@ public partial class QueryStoreHistoryWindow : Window
     }
 
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
-        => await _planActions.GetActualPlanAsync(_queryText, _databaseName, $"Actual Plan - QS {_queryId}");
+    {
+        /* #5639: the selected row's plan feeds the data-modification check; a failed lookup is the same as no
+           plan (the check then treats the query as modifying). */
+        string? estimatedPlanXml = null;
+        try { estimatedPlanXml = await FetchPlanAsync(SelectedPlanId); }
+        catch { /* no plan: fail-safe prompt */ }
+        await _planActions.GetActualPlanAsync(_queryText, _databaseName, $"Actual Plan - QS {_queryId}",
+            estimatedPlanXml: estimatedPlanXml);
+    }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }
