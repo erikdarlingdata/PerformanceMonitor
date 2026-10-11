@@ -332,6 +332,8 @@ SELECT
     /// </summary>
     public async Task RepairOnStartupAsync(CancellationToken cancellationToken = default)
     {
+        /* Which attempt this start is, once known. Zero until the attempt table has been read. */
+        long attemptNumber = 0;
         try
         {
             if (await AlreadyRepairedAsync(cancellationToken))
@@ -348,6 +350,7 @@ SELECT
                something cheap. The shape quoted in the message is what the last attempt RECORDED rather than
                what a fresh survey would find, which is the same number that survey would have cost us. */
             var attempts = await ReadAttemptsAsync(cancellationToken);
+            attemptNumber = attempts.Count + 1;
             if (attempts.Count >= MaxStartupAttempts)
             {
                 /* Report BOTH halves of the outstanding work. Naming only the hot groups would read as "0 left
@@ -429,8 +432,9 @@ SELECT
                    the union_by_name view still reads them, with #1907's read-side tie-break resolving their
                    split slices deterministically. */
                 _logger?.LogWarning(
-                    "#1912 Query Store repair finished with {Count} file(s) unrepaired; they will be retried on the next start. {Failures}",
+                    "#1912 Query Store repair finished with {Count} file(s) unrepaired. {Outlook} {Failures}",
                     result.Failures.Count,
+                    RetryOutlook(attemptNumber),
                     string.Join(" | ", result.Failures));
             }
         }
@@ -448,9 +452,21 @@ SELECT
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "#1912 Query Store repair could not run; it will be retried on the next start");
+            _logger?.LogError(ex, "#1912 Query Store repair could not run. {Outlook}", RetryOutlook(attemptNumber));
         }
     }
+
+    /// <summary>
+    /// What happens to a repair that did not finish (#5653). The old text said "will be retried on the next
+    /// start" after every attempt, including the last one, after which the next start skips the repair. The last
+    /// attempt says so, and names what the user can do about it.
+    /// </summary>
+    internal static string RetryOutlook(long attemptNumber) =>
+        attemptNumber >= MaxStartupAttempts
+            ? $"This was attempt {attemptNumber} of {MaxStartupAttempts}, the last one: the repair will NOT run again on the next start. " +
+              "The app collects normally, and reads still resolve the duplicate rows deterministically. To try again, free up disk space " +
+              $"if the failures above mention it, then drop the '{AttemptTable}' table from the store."
+            : $"This was attempt {attemptNumber} of {MaxStartupAttempts}; the unrepaired files will be retried on the next start.";
 
     /// <summary>
     /// Counts the split slices waiting in the hot table and in every archive file. Reads only; writes nothing.
@@ -718,7 +734,7 @@ HAVING COUNT(*) > 1";
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 failures.Add($"{Path.GetFileName(file.Path)}: {ex.Message}");
-                _logger?.LogError(ex, "#1912 archive repair failed for {File}; the original was left in place and will be retried", file.Path);
+                _logger?.LogError(ex, "#1912 archive repair failed for {File}; the original was left in place", file.Path);
                 progress?.Report($"Archive {Path.GetFileName(file.Path)}: NOT repaired — {ex.Message}");
             }
         }
@@ -815,7 +831,7 @@ HAVING COUNT(*) > 1";
             throw new RewriteSkippedException(
                 $"not enough free disk space to rewrite this file safely: {FormatBytes(freeBytes)} free, " +
                 $"{FormatBytes(neededBytes)} needed ({FormatBytes(beforeBytes)} file, up to {FormatBytes(spillCapBytes)} of temporary " +
-                "spill and the rewritten copy). The file was left as it is. Free up disk space and it will be retried.");
+                "spill and the rewritten copy). The file was left as it is.");
         }
 
         long rewrittenRows;
@@ -879,7 +895,7 @@ COPY (
             throw new InvalidOperationException(
                 $"Archive repair of {name} did not conserve its contents — " +
                 $"{rewrittenRows:N0} rows (expected {expectedRows:N0}) and {rewrittenExecutions:N0} executions " +
-                $"(expected {file.Executions:N0}). The original was left untouched and will be retried.");
+                $"(expected {file.Executions:N0}). The original was left untouched.");
         }
 
         /* WRITE LOCK, for the swap instant only — this is where a live path's bytes are replaced, and a reader

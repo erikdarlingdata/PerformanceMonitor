@@ -139,6 +139,34 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains(log, l => l.Level == LogLevel.Warning && l.Message.Contains("free disk space", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #5653: the warning after an unfinished repair tells the truth about what happens next. After attempt 1 the
+    /// next start retries; after the last attempt it does not, and the text says so and what the user can do.
+    /// </summary>
+    [Fact]
+    public async Task UnfinishedRepair_WarningSaysWhetherItWillBeRetried_AndTheLastAttemptSaysWhatToDo()
+    {
+        await WriteSplitArchiveAsync(Path.Combine(_archivePath, "202605_query_store_stats.parquet"));
+        _duckDb.AvailableFreeBytesProvider = _ => 1024 * 1024;
+
+        var log = new List<(LogLevel Level, string Message)>();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, new CapturingLogger(log));
+
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+        var first = log.Single(l => l.Level == LogLevel.Warning && l.Message.Contains("file(s) unrepaired", StringComparison.Ordinal)).Message;
+        Assert.Contains("will be retried on the next start", first, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT run again", first, StringComparison.Ordinal);
+
+        log.Clear();
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+        var last = log.Single(l => l.Level == LogLevel.Warning && l.Message.Contains("file(s) unrepaired", StringComparison.Ordinal)).Message;
+        Assert.Contains("the last one", last, StringComparison.Ordinal);
+        Assert.Contains("will NOT run again", last, StringComparison.Ordinal);
+        Assert.Contains("free up disk space", last, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreSliceRepairService.AttemptTable, last, StringComparison.Ordinal);
+        Assert.DoesNotContain("will be retried on the next start", last, StringComparison.Ordinal);
+    }
+
     /// <summary>An unreadable volume (null) counts as enough, as it does for compaction: the repair goes ahead.</summary>
     [Fact]
     public async Task Rewrite_WhenFreeSpaceCannotBeRead_StillRuns()
