@@ -1390,11 +1390,41 @@ namespace PerformanceMonitor.Common
         public const double WarningFailureRatePercent = 20.0;
 
         /// <summary>
-        /// #5646. The failure rate bands WARNING only once the window holds at least this many runs. Two
-        /// errors in the first eight runs of a new target is 25%, which read WARNING until the tenth run
-        /// landed even though the collector had long since recovered.
+        /// #5646. The most runs the failure rate waits for before it bands WARNING. Two errors in the first
+        /// eight runs of a new target is 25%, which read WARNING until the tenth run landed even though the
+        /// collector had long since recovered. This is the ceiling of the floor, not the floor itself: a
+        /// collector that runs less often than this window can hold has a lower one
+        /// (<see cref="FailureRateRunFloor"/>).
         /// </summary>
         public const int MinimumRunsForFailureRate = 10;
+
+        /// <summary>
+        /// #5646. The length of the trailing window every collection-health read counts runs over: 7 days, in
+        /// minutes. Lite's per-server read, the Darling service's per-server read and fleet roll-up, and the
+        /// Viewer's reads all cut <c>now - 7 days</c>. <see cref="FailureRateRunFloor"/> divides it by a
+        /// collector's frequency to find how many runs a full window holds.
+        /// </summary>
+        public const int HealthWindowMinutes = 7 * 24 * 60;
+
+        /// <summary>
+        /// #5646. How many runs the window must hold before the failure rate alone bands a collector
+        /// WARNING: <see cref="MinimumRunsForFailureRate"/>, or fewer when a full health window
+        /// (<see cref="HealthWindowMinutes"/>) holds fewer at <paramref name="frequencyMinutes"/>, so the
+        /// floor is never one the collector cannot reach. A daily collector (1440 minutes) fills the window
+        /// with 7 runs, and a floor of 10 would exempt it from the rate for good. A frequency of 0 or less
+        /// (not on a schedule) keeps the full floor. The band (<see cref="Classify"/>) and the "recovered"
+        /// sentence (<see cref="FormatRecoveredNote"/>) both read it, so they cannot disagree.
+        /// </summary>
+        public static long FailureRateRunFloor(int frequencyMinutes)
+        {
+            if (frequencyMinutes <= 0)
+            {
+                return MinimumRunsForFailureRate;
+            }
+
+            var fullWindowRuns = (HealthWindowMinutes + (long)frequencyMinutes - 1) / frequencyMinutes;
+            return Math.Min(MinimumRunsForFailureRate, fullWindowRuns);
+        }
 
         /// <summary>
         /// #5646. How many of a collector's newest runs in a row must have succeeded before the failure rate
@@ -2312,7 +2342,8 @@ namespace PerformanceMonitor.Common
             /* Below STALE/FAILING deliberately. A collector that has not succeeded in far too long is the
                louder fact and keeps its band; abandonment is the one that would otherwise have NO band at all,
                because a partially-abandoning collector still lands successes and so never ages into either. */
-            if (FailureRateBandsWarning(totalRuns, errorCount, failureRatePercent, trailingSuccessRuns)
+            if (FailureRateBandsWarning(
+                    totalRuns, errorCount, failureRatePercent, trailingSuccessRuns, frequencyMinutes)
                 || abandonRatePercent > WarningAbandonRatePercent)
             {
                 return Warning;
@@ -2332,7 +2363,8 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// #5646. Whether the 7-day failure rate alone bands WARNING. Three rules, each only ever quieter than
-        /// the plain rate: a MINIMUM-RUNS floor (<see cref="MinimumRunsForFailureRate"/>), a RECOVERY rule
+        /// the plain rate: a MINIMUM-RUNS floor (<see cref="FailureRateRunFloor"/>: 10 runs, or fewer for a
+        /// collector that runs so rarely a full window holds fewer, such as 7 for a daily one), a RECOVERY rule
         /// (<see cref="RecoveryTrailingSuccessRuns"/> successes in a row), and the exception to the floor: a
         /// collector whose newest run did not succeed (<paramref name="trailingSuccessRuns"/> is 0) keeps the
         /// plain rate, so a few-run collector whose runs all failed is never read as healthy by the floor.
@@ -2342,7 +2374,7 @@ namespace PerformanceMonitor.Common
         /// (#5666).
         /// </summary>
         private static bool FailureRateBandsWarning(
-            long totalRuns, long errorCount, double failureRatePercent, long trailingSuccessRuns)
+            long totalRuns, long errorCount, double failureRatePercent, long trailingSuccessRuns, int frequencyMinutes)
         {
             if (failureRatePercent <= WarningFailureRatePercent)
             {
@@ -2354,7 +2386,7 @@ namespace PerformanceMonitor.Common
                 return false;
             }
 
-            return totalRuns >= MinimumRunsForFailureRate || (trailingSuccessRuns <= 0 && errorCount > 0);
+            return totalRuns >= FailureRateRunFloor(frequencyMinutes) || (trailingSuccessRuns <= 0 && errorCount > 0);
         }
 
         /// <summary>
@@ -2389,17 +2421,19 @@ namespace PerformanceMonitor.Common
         /// #5646. The sentence a collector that RECOVERED carries beside its HEALTHY band, or null. Present
         /// only where the recovery rule is what kept the band off WARNING: the row's band
         /// (<paramref name="healthStatus"/>, the one it displays) is HEALTHY, the window holds enough runs for
-        /// the rate to count, the rate is over the threshold, and the newest
+        /// the rate to count (<see cref="FailureRateRunFloor"/> at <paramref name="frequencyMinutes"/>, the same
+        /// floor the band uses), the rate is over the threshold, and the newest
         /// <see cref="RecoveryTrailingSuccessRuns"/> runs all succeeded. A row any other rung bands (the abandon
         /// rate, the lost-databases note, a stale or stopped collector, a regression) carries no such sentence,
         /// because its band is not one the streak decided. <paramref name="lastFailureTime"/> is the newest
         /// failure of the window (naive UTC).
         /// </summary>
         public static string? FormatRecoveredNote(
-            string healthStatus, long totalRuns, long errorCount, long trailingSuccessRuns, DateTime? lastFailureTime)
+            string healthStatus, long totalRuns, long errorCount, long trailingSuccessRuns, DateTime? lastFailureTime,
+            int frequencyMinutes)
         {
             if (!string.Equals(healthStatus, Healthy, StringComparison.Ordinal)
-                || totalRuns < MinimumRunsForFailureRate
+                || totalRuns < FailureRateRunFloor(frequencyMinutes)
                 || errorCount <= 0
                 || trailingSuccessRuns < RecoveryTrailingSuccessRuns
                 || (double)errorCount / totalRuns * 100 <= WarningFailureRatePercent)

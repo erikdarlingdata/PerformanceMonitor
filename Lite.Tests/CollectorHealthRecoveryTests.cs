@@ -18,9 +18,9 @@ namespace Lite.Tests;
 public sealed class CollectorHealthRecoveryTests
 {
     private static string Band(long total, long errors, long trailing, double hoursSinceSuccess = 0.1,
-        double hoursSinceRun = 0.1, long abandoned = 0, string? note = null) =>
+        double hoursSinceRun = 0.1, long abandoned = 0, string? note = null, int frequencyMinutes = 5) =>
         CollectorHealthClassifier.Classify(
-            total, total - errors, errors, 0, 0, abandoned, hoursSinceSuccess, hoursSinceRun, 5, note, trailing);
+            total, total - errors, errors, 0, 0, abandoned, hoursSinceSuccess, hoursSinceRun, frequencyMinutes, note, trailing);
 
     [Fact]
     public void TheFloorAndTheRecoveryConstants_ArePinned()
@@ -59,7 +59,7 @@ public sealed class CollectorHealthRecoveryTests
         Assert.Equal(CollectorHealthClassifier.Healthy, Band(40, 12, 3));
 
         var failure = new DateTime(2026, 10, 9, 14, 30, 5, DateTimeKind.Unspecified);
-        var note = CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 3, failure);
+        var note = CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 3, failure, 5);
         Assert.NotNull(note);
         Assert.Contains("recovered", note, StringComparison.Ordinal);
         Assert.Contains("2026-10-09 14:30:05", note, StringComparison.Ordinal);
@@ -69,7 +69,7 @@ public sealed class CollectorHealthRecoveryTests
     public void Recovery_TwoSuccessesAfterFailures_StaysWarning_AndCarriesNoNote()
     {
         Assert.Equal(CollectorHealthClassifier.Warning, Band(40, 12, 2));
-        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 2, DateTime.UtcNow));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 2, DateTime.UtcNow, 5));
     }
 
     [Fact]
@@ -83,9 +83,9 @@ public sealed class CollectorHealthRecoveryTests
     [Fact]
     public void Recovery_NoNoteWhenNothingWasSuppressed()
     {
-        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 0, 3, null));
-        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 2, 3, DateTime.UtcNow));
-        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 9, 3, 3, DateTime.UtcNow));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 0, 3, null, 5));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 2, 3, DateTime.UtcNow, 5));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 9, 3, 3, DateTime.UtcNow, 5));
     }
 
     [Fact]
@@ -125,10 +125,73 @@ public sealed class CollectorHealthRecoveryTests
                      CollectorHealthClassifier.Stale, CollectorHealthClassifier.NeverRun,
                  })
         {
-            Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(band, 40, 12, 3, DateTime.UtcNow));
+            Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(band, 40, 12, 3, DateTime.UtcNow, 5));
         }
 
-        Assert.NotNull(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 3, DateTime.UtcNow));
+        Assert.NotNull(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 3, DateTime.UtcNow, 5));
+    }
+
+    /* The floor is the runs a full 7-day window holds at the collector's frequency, capped at 10.
+       index_object_stats runs every 1440 minutes, so its window holds 7 runs and a flat floor of 10 never
+       arrived: a collector that failed 6 days of 7 and succeeded today read HEALTHY. */
+    private const int DailyMinutes = 1440;
+
+    [Fact]
+    public void Floor_IsTheRunsAFullWindowHolds_CappedAtTen()
+    {
+        Assert.Equal(10, CollectorHealthClassifier.FailureRateRunFloor(1));
+        Assert.Equal(10, CollectorHealthClassifier.FailureRateRunFloor(5));
+        Assert.Equal(10, CollectorHealthClassifier.FailureRateRunFloor(1008));
+        Assert.Equal(9, CollectorHealthClassifier.FailureRateRunFloor(1200));
+        Assert.Equal(7, CollectorHealthClassifier.FailureRateRunFloor(DailyMinutes));
+        Assert.Equal(1, CollectorHealthClassifier.FailureRateRunFloor(CollectorHealthClassifier.HealthWindowMinutes));
+        Assert.Equal(1, CollectorHealthClassifier.FailureRateRunFloor(int.MaxValue));
+        /* Not on a schedule: the full floor. */
+        Assert.Equal(10, CollectorHealthClassifier.FailureRateRunFloor(0));
+        Assert.Equal(10, CollectorHealthClassifier.FailureRateRunFloor(-1));
+    }
+
+    [Fact]
+    public void Floor_DailyCollector_SixFailuresInSevenDays_NewestRunSucceeded_StaysWarning()
+    {
+        Assert.Equal(CollectorHealthClassifier.Warning, Band(7, 6, 1, frequencyMinutes: DailyMinutes));
+    }
+
+    [Fact]
+    public void Floor_DailyCollector_RecoveredAfterThreeSuccesses_IsHealthy_WithTheNote()
+    {
+        Assert.Equal(CollectorHealthClassifier.Healthy, Band(7, 4, 3, frequencyMinutes: DailyMinutes));
+        var note = CollectorHealthClassifier.FormatRecoveredNote(
+            CollectorHealthClassifier.Healthy, 7, 4, 3, DateTime.UtcNow, DailyMinutes);
+        Assert.NotNull(note);
+        Assert.Contains("recovered", note, StringComparison.Ordinal);
+        /* The same counts at a frequency that holds ten runs are under the floor: no note there. */
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(
+            CollectorHealthClassifier.Healthy, 7, 4, 3, DateTime.UtcNow, 1));
+    }
+
+    [Fact]
+    public void Floor_EveryMinuteCollector_FiveRuns_FourErrors_NewestRunSucceeded_IsHealthy_WithNoNote()
+    {
+        /* A target added minutes ago: the few-run case #5646 asked to keep quiet. */
+        Assert.Equal(CollectorHealthClassifier.Healthy, Band(5, 4, 1, frequencyMinutes: 1));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(
+            CollectorHealthClassifier.Healthy, 5, 4, 1, DateTime.UtcNow, 1));
+    }
+
+    [Fact]
+    public void Floor_EveryMinuteCollector_FiveRuns_AllFailed_NewestRunFailed_IsWarning()
+    {
+        Assert.Equal(CollectorHealthClassifier.Warning, Band(5, 5, 0, frequencyMinutes: 1));
+    }
+
+    [Fact]
+    public void RecoveryCouldChangeBand_FollowsTheFrequencyAwareFloor()
+    {
+        /* Daily, 7 runs, 4 errors: the rate counts, so the streak decides the band. */
+        Assert.True(CollectorHealthClassifier.RecoveryCouldChangeBand(7, 3, 4, 0, 0, 0, 0.1, 0.1, DailyMinutes, null));
+        /* Every minute, 10 runs, 4 errors: at the floor, so the streak decides the band. */
+        Assert.True(CollectorHealthClassifier.RecoveryCouldChangeBand(10, 6, 4, 0, 0, 0, 0.1, 0.1, 1, null));
     }
 
     private static string PartialNote() =>

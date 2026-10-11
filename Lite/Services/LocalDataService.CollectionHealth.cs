@@ -1299,7 +1299,7 @@ public class CollectorHealthRow
     /// (abandon rate, lost databases, stopped, regression) never does. Display text only; it carries the last
     /// failure time.</summary>
     public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
-        HealthStatus, TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
+        HealthStatus, TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime, FrequencyMinutes);
 
     /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
