@@ -1,0 +1,111 @@
+# TEMPORARY (#5672): runs the live busy-streak class at the fix, with the fix reverted, and against the pre-fix product.
+# Triggered only by a push to the fix branch; removed before the PR is finished.
+name: tmp-5672-redplant
+
+on:
+  push:
+    branches: [fix/5672-busy-streak-race]
+
+jobs:
+  redplant:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [head, red-head, red-base]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+      - name: Put the mode's code in place
+        shell: pwsh
+        run: |
+          $ts = 'Darling/PerformanceMonitor.Darling.Storage/TimescaleSupport.cs'
+          $test = 'Darling/Darling.Tests/BoundedDdlBusyStreakTests.cs'
+          if ('${{ matrix.mode }}' -eq 'red-head') {
+            # The fix reverted: the body ignores the registry the test hands in and counts in the shared one.
+            $text = [IO.File]::ReadAllText($ts)
+            $new = $text.Replace('var busyStreaks = streaks ?? BusyStreaks;', 'var busyStreaks = BusyStreaks;')
+            if ($new -eq $text) { throw 'the fix line was not found' }
+            [IO.File]::WriteAllText($ts, $new)
+          }
+          if ('${{ matrix.mode }}' -eq 'red-base') {
+            # The pre-fix product (the parent of the fix commit) with the test calling it the old way.
+            git show "79bb27e07:$ts" > $ts
+            $text = [IO.File]::ReadAllText($test)
+            $new = $text.Replace(', streaks: streaks', '')
+            if ($new -eq $text) { throw 'the test calls were not found' }
+            [IO.File]::WriteAllText($test, $new)
+          }
+          git diff --stat
+      - name: Build Darling.Tests
+        run: |
+          dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+          dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+      - name: Start PostgreSQL (the same settings as the Darling PG job)
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          $logFile = "$env:RUNNER_TEMP\darling-pg.log"
+          & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
+          if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
+          & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
+          if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
+          & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
+          if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
+      - name: Run the live busy-streak class
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: Host=127.0.0.1;Port=5541;Username=darling;Database=darling
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $exe = (Get-ChildItem Darling/Darling.Tests/bin/Release -Recurse -Filter Darling.Tests.exe | Select-Object -First 1).FullName
+          $log = "$env:RUNNER_TEMP\busy.txt"
+          & $exe -class Darling.Tests.BoundedDdlBusyStreakLiveTests > $log 2>&1
+          $code = $LASTEXITCODE
+          Select-String -Path $log -Pattern '\[FAIL\]|Total:' | ForEach-Object { $_.Line.Trim() }
+          Write-Host "RESULT mode ${{ matrix.mode }}: exit code $code"
+          $lines = Get-Content $log
+          $fails = @($lines | Select-String -Pattern '\[FAIL\]')
+          foreach ($f in $fails) {
+            $at = $f.LineNumber
+            $lines[($at - 1)..([Math]::Min($at + 6, $lines.Count - 1))] | ForEach-Object { if ($_.Length -gt 1500) { $_.Substring(0, 1500) } else { $_ } }
+          }
+          if ('${{ matrix.mode }}' -eq 'head') { if ($code -ne 0) { throw 'expected the class to pass at the fix' } }
+          else { if ($fails.Count -ne 2) { throw "expected exactly the two forced-reset tests to fail, got $($fails.Count)" } }
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: |
+          $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          & "$bin\pg_ctl.exe" -D "$env:RUNNER_TEMP\darling-pgdata" -m immediate stop
+          exit 0
