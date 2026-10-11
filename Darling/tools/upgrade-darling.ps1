@@ -1006,10 +1006,16 @@ function Test-PathIsAtOrUnder([string]$candidate, [string]$parent) {
     if ([string]::IsNullOrWhiteSpace($candidate) -or [string]::IsNullOrWhiteSpace($parent)) { return $false }
 
     try {
-        # Normalizes separators, resolves . and .., and makes the comparison independent of how the path
-        # was typed. Anything GetFullPath rejects is not a path we can reason about, so it is not matched.
-        $c = [IO.Path]::GetFullPath($candidate).TrimEnd('\')
-        $p = [IO.Path]::GetFullPath($parent).TrimEnd('\')
+        # Normalizes separators, resolves . and .., spells 8.3 short names out and makes the comparison
+        # independent of how the path was typed (Get-DarlingCanonicalPath, #5673). A path it cannot work out is
+        # compared as GetFullPath spells it, and anything GetFullPath rejects is not a path we can reason about,
+        # so it is not matched.
+        $c = Get-DarlingCanonicalPath $candidate
+        if ($null -eq $c) { $c = [IO.Path]::GetFullPath($candidate) }
+        $p = Get-DarlingCanonicalPath $parent
+        if ($null -eq $p) { $p = [IO.Path]::GetFullPath($parent) }
+        $c = $c.TrimEnd('\')
+        $p = $p.TrimEnd('\')
     }
     catch {
         return $false
@@ -1449,12 +1455,11 @@ function Test-DarlingRollbackBackupIsRecent($backups, [int]$withinMinutes, [date
 
 # ============================ the install tree ============================
 
-# True when two paths name the same directory. One spelling of path equality for the whole script: the
-# comparison decides whether an upgrade is allowed to touch a tree, and two hand-rolled copies of it is
-# the same "two spellings of one rule" that #2525 is a case study in.
-#
-# Separator from the runtime rather than a hardcoded backslash, for the same reason as the process filter
-# below - a rule that gates a destructive operation should be verifiable off the platform it ships to.
+# True when two paths name the same directory: both go through Get-DarlingCanonicalPath (#5673), so a folder typed as a
+# short path (C:\PROGRA~1\x), with a trailing backslash or in another case gives the same answer as its long spelling, and
+# the two are then compared without regard to case. A path Get-DarlingCanonicalPath cannot work out is compared as
+# GetFullPath spells it. The separator comes from the runtime rather than a hardcoded backslash, so the rule can be run off
+# Windows. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Test-DarlingSamePath([string]$left, [string]$right) {
     if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) { return $false }
 
@@ -1462,8 +1467,13 @@ function Test-DarlingSamePath([string]$left, [string]$right) {
     $alt = [IO.Path]::AltDirectorySeparatorChar
 
     try {
-        $l = [IO.Path]::GetFullPath($left).TrimEnd($sep, $alt)
-        $r = [IO.Path]::GetFullPath($right).TrimEnd($sep, $alt)
+        # The canonical long spelling (#5673); GetFullPath's answer for a path it cannot work out.
+        $l = Get-DarlingCanonicalPath $left
+        if ($null -eq $l) { $l = [IO.Path]::GetFullPath($left) }
+        $r = Get-DarlingCanonicalPath $right
+        if ($null -eq $r) { $r = [IO.Path]::GetFullPath($right) }
+        $l = $l.TrimEnd($sep, $alt)
+        $r = $r.TrimEnd($sep, $alt)
     }
     catch {
         return $false

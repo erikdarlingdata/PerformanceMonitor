@@ -203,6 +203,7 @@ public class DarlingInstallLocationTests
         };
 
         var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingCanonicalPath"));
         probe.AppendLine(ExtractFunction(InstallScript, "Test-PathIsAtOrUnder"));
         foreach (var (candidate, parent, _) in cases)
         {
@@ -446,6 +447,7 @@ function Get-CimInstance {
 }");
 
         probe.AppendLine(ExtractFunction(script, "Convert-ExtendedLengthPath"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
         probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
         probe.AppendLine(ExtractFunction(script, "Get-NetworkPathKind"));
 
@@ -4020,6 +4022,114 @@ function Get-CimInstance {
             Assert.DoesNotContain("GetFullPath", ExtractFunction(script, name), StringComparison.Ordinal);
         }
         Assert.Contains("Get-DarlingSegmentsBelowRoot $root $candidate", ExtractFunction(script, "Test-DarlingServiceWrittenPath"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5673: the same-folder test and the at-or-under test put both paths in the canonical long spelling
+    /// (Get-DarlingCanonicalPath) before comparing, so one folder gives one answer however it is typed. This test gives each
+    /// helper an install folder in its long form, as a short 8.3 path, as a short path with a trailing backslash, in upper
+    /// case, in lower case and with a trailing backslash, and requires the same answer for every form, for a folder below it
+    /// (also one that does not exist yet) and for a sibling whose name only starts the same. The short-path forms need 8.3
+    /// names on the volume; without them those forms are left out and the test is skipped at the end, after the trailing
+    /// backslash and case forms have been checked.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheSameFolderTestAndTheAtOrUnderTest_AnswerTheSameForAFolderInShortFormWithATrailingBackslashOrInOtherCase(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSamePath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $parent = Join-Path $env:TEMP ('pm5673-short-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            # CreateDirectory, not New-Item: Windows PowerShell 5.1's New-Item refuses a new folder chain whose parent is typed as a short path.
+            foreach ($made in @("$parent\install-root-with-a-long-name", "$parent\install-root-with-a-long-name-sibling")) { [void][IO.Directory]::CreateDirectory($made) }
+            $long = (Get-Item -LiteralPath "$parent\install-root-with-a-long-name" -Force).FullName
+            $sibling = (Get-Item -LiteralPath "$parent\install-root-with-a-long-name-sibling" -Force).FullName
+            $short = ((cmd /c "for %I in (""$long"") do @echo %~sI") | Select-Object -First 1).Trim()
+            try {
+                $forms = [ordered]@{ long = $long; longSlash = $long + '\'; upper = $long.ToUpperInvariant(); lower = $long.ToLowerInvariant() }
+                if ($short.IndexOf('~') -lt 0 -or $short -ieq $long) { 'noShortNames=True' }
+                else {
+                    'shortForm=' + $short
+                    'longForm=' + $long
+                    $forms['short'] = $short
+                    $forms['shortSlash'] = $short + '\'
+                    $forms['shortUpper'] = $short.ToUpperInvariant()
+                }
+                foreach ($tag in $forms.Keys) {
+                    $form = $forms[$tag]
+                    foreach ($other in $forms.Keys) {
+                        'same[' + $tag + '/' + $other + ']=' + (Test-DarlingSamePath $form $forms[$other])
+                        'atOrUnderSelf[' + $tag + '/' + $other + ']=' + (Test-PathIsAtOrUnder $form $forms[$other])
+                    }
+                    'sameSibling[' + $tag + ']=' + (Test-DarlingSamePath $form $sibling)
+                    'sameChild[' + $tag + ']=' + (Test-DarlingSamePath $form "$long\child")
+                    'childUnder[' + $tag + ']=' + (Test-PathIsAtOrUnder "$long\child" $form)
+                    'childOfFormUnder[' + $tag + ']=' + (Test-PathIsAtOrUnder (Join-Path $form 'not-there\deeper') $long)
+                    'siblingUnder[' + $tag + ']=' + (Test-PathIsAtOrUnder $sibling $form)
+                    'parentUnder[' + $tag + ']=' + (Test-PathIsAtOrUnder $form (Split-Path -Parent $long))
+                    'rootUnderChild[' + $tag + ']=' + (Test-PathIsAtOrUnder $form "$long\child")
+                }
+                # A path that cannot be worked out is not the same as anything and is not under anything.
+                'sameEmpty=' + (Test-DarlingSamePath $long '')
+                'underEmpty=' + (Test-PathIsAtOrUnder $long '')
+            }
+            finally {
+                Remove-Item -LiteralPath $parent -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        var tags = new List<string> { "long", "longSlash", "upper", "lower" };
+        var hasShortNames = !answers.Contains("noShortNames=True");
+        if (hasShortNames)
+        {
+            tags.AddRange(new[] { "short", "shortSlash", "shortUpper" });
+            var longForm = answers.Single(a => a.StartsWith("longForm=", StringComparison.Ordinal))["longForm=".Length..];
+            var shortForm = answers.Single(a => a.StartsWith("shortForm=", StringComparison.Ordinal))["shortForm=".Length..];
+            Assert.Contains("~", shortForm, StringComparison.Ordinal);
+            Assert.NotEqual(longForm, shortForm, StringComparer.OrdinalIgnoreCase);
+        }
+
+        foreach (var tag in tags)
+        {
+            foreach (var other in tags)
+            {
+                Assert.Contains($"same[{tag}/{other}]=True", answers);
+                Assert.Contains($"atOrUnderSelf[{tag}/{other}]=True", answers);
+            }
+            Assert.Contains($"sameSibling[{tag}]=False", answers);
+            Assert.Contains($"sameChild[{tag}]=False", answers);
+            Assert.Contains($"childUnder[{tag}]=True", answers);
+            Assert.Contains($"childOfFormUnder[{tag}]=True", answers);
+            Assert.Contains($"siblingUnder[{tag}]=False", answers);
+            Assert.Contains($"parentUnder[{tag}]=True", answers);
+            Assert.Contains($"rootUnderChild[{tag}]=False", answers);
+        }
+        Assert.Contains("sameEmpty=False", answers);
+        Assert.Contains("underEmpty=False", answers);
+
+        if (!hasShortNames)
+        {
+            Assert.Skip("8.3 short names are not created on the volume the temp folder is on, so there is no short spelling to test; the trailing backslash and case forms above passed.");
+        }
     }
 
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>

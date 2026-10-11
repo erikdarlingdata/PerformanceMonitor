@@ -604,6 +604,7 @@ public sealed class DarlingDeployRollbackRetentionTests
     public void TheDeployScript_ComparesPathsOneWay_AndToleratesTheWaysPeopleTypeThem()
     {
         var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(DeployScript, "Get-DarlingCanonicalPath"));
         probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingSamePath"));
         probe.AppendLine("$sep = [IO.Path]::DirectorySeparatorChar");
         probe.AppendLine("$root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'PerformanceMonitorDarling')).TrimEnd($sep)");
