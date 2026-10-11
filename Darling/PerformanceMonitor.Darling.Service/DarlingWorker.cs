@@ -9241,7 +9241,7 @@ WHERE server_id = $1
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT $3";
 
-    private Task<IReadOnlyList<AlertCpuSample>> ReadRecentCpuSamplesAsync(
+    internal Task<IReadOnlyList<AlertCpuSample>> ReadRecentCpuSamplesAsync(
         int serverId, DateTime nowUtc, CancellationToken cancellationToken)
         => DarlingAlertReadAdapter.ExecuteWithOneRetryAsync(
             token => ReadRecentCpuSamplesCoreAsync(serverId, nowUtc, token),
