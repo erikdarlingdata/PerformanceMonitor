@@ -209,7 +209,11 @@ public sealed partial class ViewerDataService
             -- newest run that CARRIED a note, so a clean run after a partial-failure cycle still shows the
             -- older cycle's note there). The band reads only this one, because the loss an older note names
             -- is not the collector's current state. APPENDED, read positionally by the one shared mapper.
-            CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note
+            CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note,
+            -- #5646: how many of the NEWEST runs in a row succeeded, counted to 3 and no further. Newest first on
+            -- the full timestamp, then log_id DESC (unique), the Darling service read's own statement.
+            -- APPENDED, read positionally by the one shared mapper.
+            COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs
         FROM health h
         -- #4955: the keyed lookups. Each reads ONE collector's rows through
         -- idx_collection_log_watermark (server_id, collector_name, collection_time DESC), at an instant the
@@ -259,6 +263,28 @@ public sealed partial class ViewerDataService
             ORDER BY t.error_message DESC
             LIMIT 1
         ) noted ON TRUE
+        -- #5646: the newest three runs, newest first, then the highest log_id.
+        LEFT JOIN LATERAL
+        (
+            SELECT COALESCE(MIN(CASE WHEN r.ok = 0 THEN r.run_rank END) - 1, COUNT(*)) AS trailing_success_runs
+            FROM
+            (
+                SELECT CASE WHEN x.status = 'SUCCESS'
+                             AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                            THEN 1 ELSE 0 END AS ok,
+                       ROW_NUMBER() OVER (ORDER BY x.collection_time DESC, x.log_id DESC) AS run_rank
+                FROM
+                (
+                    SELECT v.status, v.error_message, v.rows_collected, v.collection_time, v.log_id
+                    FROM v_collection_log v
+                    WHERE v.server_id = $1
+                    AND   v.collector_name = h.collector_name
+                    AND   v.collection_time >= $2
+                    ORDER BY v.collection_time DESC, v.log_id DESC
+                    LIMIT 3
+                ) x
+            ) r
+        ) recent ON TRUE
         ORDER BY h.collector_name
         """;
 
@@ -712,6 +738,8 @@ public sealed partial class ViewerDataService
         LastProductiveTime = reader.IsDBNull(17) ? null : reader.GetDateTime(17),
         /* Appended (#4748). So the band agrees between the grid and the fleet total. */
         LatestRunNote = reader.IsDBNull(18) ? null : reader.GetString(18),
+        /* Appended (#5646): the newest runs' success streak, the band's recovery input. */
+        TrailingSuccessRuns = reader.IsDBNull(19) ? 0 : Convert.ToInt64(reader.GetValue(19)),
     };
 
     /// <summary>
@@ -1079,6 +1107,19 @@ public class CollectorHealthRow
     public string? LatestRunNote { get; set; }
 
     /// <summary>
+    /// #5646: how many of the collector's newest runs in a row succeeded, counted to
+    /// <see cref="CollectorHealthClassifier.RecoveryTrailingSuccessRuns"/> and no further. The per-server read
+    /// sets it from the newest runs (full timestamp precision, then the unique log id, newest first). A row
+    /// built from plain aggregates (the fleet roll-up) leaves it 0, which keeps the old failure-rate banding.
+    /// </summary>
+    public long TrailingSuccessRuns { get; set; }
+
+    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null.
+    /// Display text only; it carries the last failure time.</summary>
+    public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
+        TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
+
+    /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
     /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
     /// enumerating nothing despite having databases. False also covers "no inventory to go on" (the fleet
@@ -1144,7 +1185,7 @@ public class CollectorHealthRow
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         RegressedFromProductive);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
@@ -1171,7 +1212,7 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases);
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote);
 }
 
 /// <summary>

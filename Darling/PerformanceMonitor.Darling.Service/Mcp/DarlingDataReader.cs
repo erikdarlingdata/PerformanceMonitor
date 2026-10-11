@@ -3558,7 +3558,14 @@ internal static class DarlingDataReader
             -- gate matches last_note's (only the SUCCESS write carries a note). APPENDED like every
             -- column since #2472, because this result set is read positionally and Lite's DuckDB read
             -- mirrors the ordinals.
-            CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note
+            CASE WHEN newest.status = 'SUCCESS' THEN newest.error_message END AS latest_run_note,
+            -- #5646: how many of the NEWEST runs in a row succeeded, counted to 3 and no further (the recovery
+            -- rule's input). Newest first on the FULL timestamp (collection_time keeps microseconds), then
+            -- log_id DESC, the unique id, so two runs at the same instant are ordered the same way every time.
+            -- The success test is success_count's own (SUCCESS, not an abandoned cycle) over the same window
+            -- rows total_runs counts. APPENDED, read positionally; Lite's DuckDB read carries it at the same
+            -- ordinal.
+            COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs
         FROM health h
         -- #4955: the keyed lookups. Each reads ONE collector's rows through
         -- idx_collection_log_watermark (server_id, collector_name, collection_time DESC), at an instant the
@@ -3648,6 +3655,29 @@ internal static class DarlingDataReader
                 AND   s.collection_time >= h.last_streak_break_time
             ) ranked
         ) streak ON TRUE
+        -- #5646: the newest three runs, newest first, then the highest log_id. A plain index walk of
+        -- idx_collection_log_watermark that stops after three rows.
+        LEFT JOIN LATERAL
+        (
+            SELECT COALESCE(MIN(CASE WHEN r.ok = 0 THEN r.run_rank END) - 1, COUNT(*)) AS trailing_success_runs
+            FROM
+            (
+                SELECT CASE WHEN x.status = 'SUCCESS'
+                             AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                            THEN 1 ELSE 0 END AS ok,
+                       ROW_NUMBER() OVER (ORDER BY x.collection_time DESC, x.log_id DESC) AS run_rank
+                FROM
+                (
+                    SELECT v.status, v.error_message, v.rows_collected, v.collection_time, v.log_id
+                    FROM v_collection_log v
+                    WHERE v.server_id = $1
+                    AND   v.collector_name = h.collector_name
+                    AND   v.collection_time >= $2
+                    ORDER BY v.collection_time DESC, v.log_id DESC
+                    LIMIT 3
+                ) x
+            ) r
+        ) recent ON TRUE
         ORDER BY h.collector_name
         """;
 
@@ -3784,6 +3814,8 @@ internal static class DarlingDataReader
                 TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : Convert.ToInt64(reader.GetValue(29)),
                 /* #4748: the newest run's note, the band's text input. */
                 LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30),
+                /* #5646: the newest runs' success streak, the band's recovery input. */
+                TrailingSuccessRuns = reader.IsDBNull(31) ? 0 : Convert.ToInt64(reader.GetValue(31)),
             });
         }
 
@@ -5137,6 +5169,19 @@ internal sealed class CollectorHealth
     public string? LatestRunNote { get; set; }
 
     /// <summary>
+    /// #5646: how many of the collector's newest runs in a row succeeded, counted to
+    /// <see cref="CollectorHealthClassifier.RecoveryTrailingSuccessRuns"/> and no further. The per-server read
+    /// sets it from the newest runs (full timestamp precision, then the unique log id, newest first). A row
+    /// built from plain aggregates (the fleet roll-up) leaves it 0, which keeps the old failure-rate banding.
+    /// </summary>
+    public long TrailingSuccessRuns { get; set; }
+
+    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null.
+    /// Display text only; it carries the last failure time.</summary>
+    public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
+        TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
+
+    /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
     /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
     /// enumerating nothing despite having databases. False also covers "no inventory to go on", which
@@ -5332,7 +5377,7 @@ internal sealed class CollectorHealth
     /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
     /// answer everywhere else.
     ///
-    /// <para>The floor is applied outside <c>Classify</c> rather than as an eleventh parameter, and
+    /// <para>The floor is applied outside <c>Classify</c> rather than as a further parameter, and
     /// deliberately: that signature takes RUN-CLASS COUNTS (plus, since #4748, the newest run's
     /// partial-failure note - the run's own outcome, still a run-class fact) and nothing about output or
     /// currency, a discipline both SKUs' suites pin off the type. A regression is a fact about rows stored and the
@@ -5343,7 +5388,7 @@ internal sealed class CollectorHealth
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
            would return HEALTHY forever. */

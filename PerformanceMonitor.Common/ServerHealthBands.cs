@@ -1390,6 +1390,20 @@ namespace PerformanceMonitor.Common
         public const double WarningFailureRatePercent = 20.0;
 
         /// <summary>
+        /// #5646. The failure rate bands WARNING only once the window holds at least this many runs. Two
+        /// errors in the first eight runs of a new target is 25%, which read WARNING until the tenth run
+        /// landed even though the collector had long since recovered.
+        /// </summary>
+        public const int MinimumRunsForFailureRate = 10;
+
+        /// <summary>
+        /// #5646. How many of a collector's newest runs in a row must have succeeded before the failure rate
+        /// alone stops banding WARNING. A collector that alternates between failing and succeeding never has
+        /// this many in a row.
+        /// </summary>
+        public const int RecoveryTrailingSuccessRuns = 3;
+
+        /// <summary>
         /// A collector whose ABANDONED rate exceeds this percent bands WARNING (#2804). An abandoned cycle is
         /// the #2673 whole-server wall-clock budget giving up: it stores nothing and advances no watermark, so
         /// it is guaranteed data loss rather than a retryable fault.
@@ -2231,7 +2245,8 @@ namespace PerformanceMonitor.Common
             double hoursSinceLastSuccess,
             double hoursSinceLastRun,
             int frequencyMinutes,
-            string? latestRunNote = null)
+            string? latestRunNote = null,
+            long trailingSuccessRuns = 0)
         {
             if (totalRuns == 0)
             {
@@ -2297,7 +2312,8 @@ namespace PerformanceMonitor.Common
             /* Below STALE/FAILING deliberately. A collector that has not succeeded in far too long is the
                louder fact and keeps its band; abandonment is the one that would otherwise have NO band at all,
                because a partially-abandoning collector still lands successes and so never ages into either. */
-            if (failureRatePercent > WarningFailureRatePercent || abandonRatePercent > WarningAbandonRatePercent)
+            if (FailureRateBandsWarning(totalRuns, errorCount, failureRatePercent, trailingSuccessRuns)
+                || abandonRatePercent > WarningAbandonRatePercent)
             {
                 return Warning;
             }
@@ -2312,6 +2328,59 @@ namespace PerformanceMonitor.Common
             }
 
             return Healthy;
+        }
+
+        /// <summary>
+        /// #5646. Whether the 7-day failure rate alone bands WARNING. Three rules, each only ever quieter than
+        /// the plain rate: a MINIMUM-RUNS floor (<see cref="MinimumRunsForFailureRate"/>), a RECOVERY rule
+        /// (<see cref="RecoveryTrailingSuccessRuns"/> successes in a row), and the exception to the floor: a
+        /// collector whose newest run did not succeed (<paramref name="trailingSuccessRuns"/> is 0) keeps the
+        /// plain rate, so a few-run collector whose runs all failed is never read as healthy by the floor.
+        /// <paramref name="trailingSuccessRuns"/> 0 is also what a read that cannot see the newest runs (the
+        /// fleet roll-up's plain aggregates) passes, which keeps the old banding there.
+        /// </summary>
+        private static bool FailureRateBandsWarning(
+            long totalRuns, long errorCount, double failureRatePercent, long trailingSuccessRuns)
+        {
+            if (failureRatePercent <= WarningFailureRatePercent)
+            {
+                return false;
+            }
+
+            if (trailingSuccessRuns >= RecoveryTrailingSuccessRuns)
+            {
+                return false;
+            }
+
+            return totalRuns >= MinimumRunsForFailureRate || (trailingSuccessRuns <= 0 && errorCount > 0);
+        }
+
+        /// <summary>
+        /// #5646. The sentence a collector that RECOVERED carries beside its HEALTHY band, or null. Present
+        /// only where the recovery rule is what kept the band off WARNING: the window holds enough runs for
+        /// the rate to count, the rate is over the threshold, and the newest
+        /// <see cref="RecoveryTrailingSuccessRuns"/> runs all succeeded. <paramref name="lastFailureTime"/>
+        /// is the newest failure of the window (naive UTC).
+        /// </summary>
+        public static string? FormatRecoveredNote(
+            long totalRuns, long errorCount, long trailingSuccessRuns, DateTime? lastFailureTime)
+        {
+            if (totalRuns < MinimumRunsForFailureRate
+                || errorCount <= 0
+                || trailingSuccessRuns < RecoveryTrailingSuccessRuns
+                || (double)errorCount / totalRuns * 100 <= WarningFailureRatePercent)
+            {
+                return null;
+            }
+
+            return lastFailureTime.HasValue
+                ? string.Format(
+                    CultureInfo.InvariantCulture,
+                    "recovered: the last {0} runs succeeded; last failure {1:yyyy-MM-dd HH:mm:ss} UTC",
+                    RecoveryTrailingSuccessRuns, lastFailureTime.Value)
+                : string.Format(
+                    CultureInfo.InvariantCulture,
+                    "recovered: the last {0} runs succeeded", RecoveryTrailingSuccessRuns);
         }
 
         /// <summary>
@@ -2376,7 +2445,25 @@ namespace PerformanceMonitor.Common
             long noteCount,
             long totalRuns,
             string? collectorName = null,
-            bool targetHasUserDatabases = false)
+            bool targetHasUserDatabases = false,
+            string? recoveredNote = null)
+        {
+            /* #5646: the recovery sentence rides beside the run note, in the same column on every surface. */
+            var runNote = FormatRunNote(lastNote, noteCount, totalRuns, collectorName, targetHasUserDatabases);
+            if (string.IsNullOrEmpty(recoveredNote))
+            {
+                return runNote;
+            }
+
+            return runNote.Length == 0 ? recoveredNote : recoveredNote + "; " + runNote;
+        }
+
+        private static string FormatRunNote(
+            string? lastNote,
+            long noteCount,
+            long totalRuns,
+            string? collectorName,
+            bool targetHasUserDatabases)
         {
             if (string.IsNullOrWhiteSpace(lastNote) || noteCount <= 0)
             {

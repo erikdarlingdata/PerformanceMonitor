@@ -319,7 +319,16 @@ SELECT
     -- collector's current state. The newest run of any status, and the SUCCESS gate matches last_note's
     -- (only the SUCCESS write carries a note). APPENDED, read positionally; Darling's twin carries it at
     -- the same ordinal.
-    CASE WHEN newest.pick.status = 'SUCCESS' THEN newest.pick.error_message END AS latest_run_note
+    CASE WHEN newest.pick.status = 'SUCCESS' THEN newest.pick.error_message END AS latest_run_note,
+    -- #5646: how many of the NEWEST runs in a row succeeded, counted to 3 and no further (the recovery rule's
+    -- input). The window's runs ordered newest first on the FULL timestamp (DuckDB keeps microseconds), then
+    -- log_id DESC, the unique id, so two runs at the same instant are ordered the same way every time. The
+    -- success test is success_count's own (SUCCESS, not an abandoned cycle) over the rows total_runs counts.
+    -- APPENDED, read positionally; Darling's twin carries it at the same ordinal.
+    CASE WHEN recent.flags[1] = 1 AND recent.flags[2] = 1 AND recent.flags[3] = 1 THEN 3
+         WHEN recent.flags[1] = 1 AND recent.flags[2] = 1 THEN 2
+         WHEN recent.flags[1] = 1 THEN 1
+         ELSE 0 END AS trailing_success_runs
 FROM health h
 -- #5371: the keyed lookups. Each reads ONE collector's rows at an instant the aggregate above already
 -- found, so the scan of v_collection_log carries an equality on collection_time (the hot table's
@@ -402,6 +411,17 @@ LEFT JOIN LATERAL
            OR (s.collection_time = h.last_streak_break_time
                AND s.status > h.last_streak_break_status))
 ) streak ON TRUE
+-- #5646: the success flags of the window's runs, newest first (a plain aggregate, like the lookups above).
+LEFT JOIN LATERAL
+(
+    SELECT list(CASE WHEN v.status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END ORDER BY v.collection_time DESC, v.log_id DESC)[1:3] AS flags
+    FROM v_collection_log v
+    WHERE v.server_id = $1
+    AND   v.collector_name = h.collector_name
+    AND   v.collection_time >= $2
+) recent ON TRUE
 ORDER BY h.collector_name";
 
     /// <summary>How long a memoized Collection Health result is reused when the caller names no lifetime (#5371). The tab
@@ -596,7 +616,9 @@ ORDER BY h.collector_name";
                    arrives as a BigInteger that Convert.ToInt64 cannot take. */
                 TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : ToInt64(reader.GetValue(29)),
                 /* Appended (#4748), for the same reason every column before it was. */
-                LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30)
+                LatestRunNote = reader.IsDBNull(30) ? null : reader.GetString(30),
+                /* Appended (#5646): the newest runs' success streak, the band's recovery input. */
+                TrailingSuccessRuns = reader.IsDBNull(31) ? 0 : ToInt64(reader.GetValue(31))
             });
         }
 
@@ -1265,6 +1287,19 @@ public class CollectorHealthRow
     public string? LatestRunNote { get; set; }
 
     /// <summary>
+    /// #5646: how many of the collector's newest runs in a row succeeded, counted to
+    /// <see cref="CollectorHealthClassifier.RecoveryTrailingSuccessRuns"/> and no further. The per-server read
+    /// sets it from the newest runs (full timestamp precision, then the unique log id, newest first). A row
+    /// built from plain aggregates (the fleet roll-up) leaves it 0, which keeps the old failure-rate banding.
+    /// </summary>
+    public long TrailingSuccessRuns { get; set; }
+
+    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null.
+    /// Display text only; it carries the last failure time.</summary>
+    public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
+        TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
+
+    /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window
     /// (<c>has_user_databases</c>) — what tells a legitimately empty server apart from one that is
     /// enumerating nothing despite having databases. False also covers "no inventory to go on", which
@@ -1432,7 +1467,7 @@ public class CollectorHealthRow
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
            would return HEALTHY forever. */
@@ -1474,6 +1509,6 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases);
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote);
 }
 
