@@ -756,6 +756,9 @@ HAVING COUNT(*) > 1";
     /// <summary>The most DuckDB may spill to its temp folder while one archive file is rewritten (#5653).</summary>
     internal const long RewriteSpillCeilingBytes = 4L * 1024 * 1024 * 1024;
 
+    /// <summary>The folder next to the archive where the rewrite's own DuckDB instance spills (#5653). Emptied and removed after each file.</summary>
+    internal const string RewriteSpillFolderName = "slice_repair_tmp";
+
     /// <summary>Below this much temp room the rewrite is not started: it would only fail part way through.</summary>
     internal const long RewriteSpillFloorBytes = 256L * 1024 * 1024;
 
@@ -797,42 +800,61 @@ HAVING COUNT(*) > 1";
             || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Smallest spill cap a rewrite will start with. Settable so a test can lower it; production keeps the floor.</summary>
+    /// <summary>Test seam only: the smallest spill cap a rewrite will start with. A test lowers it; production keeps <see cref="RewriteSpillFloorBytes"/>.</summary>
     internal long SpillFloorBytes { get; set; } = RewriteSpillFloorBytes;
 
-    /// <summary>Test seam: runs inside the spill cap, just before the COPY, on the COPY's own connection.</summary>
+    /// <summary>Test seam only, null in production: runs just before the COPY, on the rewrite's own DuckDB instance (the one the cap is set on).</summary>
     internal Func<DuckDBConnection, Task>? InsideSpillCapHook { get; set; }
 
     /// <summary>
-    /// Runs <paramref name="action"/> with DuckDB's temp-folder size capped, then puts the setting back. Same
-    /// shape as <see cref="ArchiveService.WithRaisedCopyMemoryLimit"/>: the setting is instance-wide, so a query
-    /// running on another connection meanwhile sees the cap too.
+    /// Opens the DuckDB instance one archive file is rewritten on (#5653): its own in-memory instance, with its own
+    /// <c>temp_directory</c>, its own <c>max_temp_directory_size</c> (the cap) and its own <c>memory_limit</c>, the way
+    /// archive compaction runs its merges (<see cref="ParquetCompaction.MergeBatchToFile"/>).
+    ///
+    /// <para><b>Why not the store's own instance.</b> <c>max_temp_directory_size</c> and <c>memory_limit</c> are
+    /// instance-wide. The repair runs un-awaited at startup while the UI keeps reading, so a cap set on the store's
+    /// instance would hold every other query to it (as low as 256 MiB) for as long as a rewrite runs, and a
+    /// concurrent archive read that needs more temp room than that would fail. The rewrite reads one parquet file and
+    /// writes one parquet file, so it needs nothing from the store's tables and loses nothing by running apart.</para>
     /// </summary>
-    internal static async Task WithRewriteSpillCap(DuckDBConnection connection, long capBytes, Func<Task> action)
+    internal static async Task<DuckDBConnection> OpenRewriteInstanceAsync(
+        string spillDirectory, long capBytes, CancellationToken cancellationToken)
     {
         var capMiB = Math.Max(1, capBytes / (1024 * 1024));
-        using (var cap = connection.CreateCommand())
-        {
-            cap.CommandText = $"SET max_temp_directory_size = '{capMiB}MiB'";
-            await cap.ExecuteNonQueryAsync();
-        }
-
+        Directory.CreateDirectory(spillDirectory);
+        var connection = new DuckDBConnection("DataSource=:memory:");
         try
         {
-            await action();
+            await connection.OpenAsync(cancellationToken);
+            using var settings = connection.CreateCommand();
+            settings.CommandText =
+                $"SET memory_limit = '{ArchiveService.MainConnectionCopyMemoryLimit}'; " +
+                $"SET threads = {ParquetCompaction.DefaultThreads}; " +
+                $"SET temp_directory = '{EscapePath(spillDirectory.Replace('\\', '/'))}'; " +
+                $"SET max_temp_directory_size = '{capMiB}MiB';";
+            await settings.ExecuteNonQueryAsync(cancellationToken);
+            return connection;
         }
-        finally
+        catch
         {
-            try
+            connection.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Removes the rewrite's spill folder, whatever is left in it. Best effort: the next rewrite clears it first.</summary>
+    private static void DeleteSpillFolder(string spillDirectory)
+    {
+        try
+        {
+            if (Directory.Exists(spillDirectory))
             {
-                using var restore = connection.CreateCommand();
-                restore.CommandText = "RESET max_temp_directory_size";
-                await restore.ExecuteNonQueryAsync();
+                Directory.Delete(spillDirectory, recursive: true);
             }
-            catch
-            {
-                /* Best-effort restore; a connection in a bad state is disposed by the caller's using. */
-            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* A file still held open, or an antivirus scan; the next rewrite clears the folder before it starts. */
         }
     }
 
@@ -894,22 +916,28 @@ HAVING COUNT(*) > 1";
             var key = KeyColumnsFor(columns);
             var rewrite = BuildRewriteSelect(columnTypes, key, EscapePath(file.Path));
 
+            /* The COPY runs on its OWN DuckDB instance (OpenRewriteInstanceAsync), so the spill cap and the memory
+               limit it sets do not reach the connections the UI is reading through. The store lock above is still
+               held for the whole rewrite, exactly as before. The folder is cleared first because a crash can strand
+               one, and removed after because it is only ever scratch. */
+            var spillDirectory = Path.Combine(_archivePath, RewriteSpillFolderName);
+            DeleteSpillFolder(spillDirectory);
             try
             {
-                await ArchiveService.WithRaisedCopyMemoryLimit(connection, () => WithRewriteSpillCap(connection, spillCapBytes, async () =>
+                using (var rewriteInstance = await OpenRewriteInstanceAsync(spillDirectory, spillCapBytes, cancellationToken))
                 {
                     if (InsideSpillCapHook is { } hook)
                     {
-                        await hook(connection);
+                        await hook(rewriteInstance);
                     }
 
-                    using var command = connection.CreateCommand();
+                    using var command = rewriteInstance.CreateCommand();
                     command.CommandText = $@"
 COPY (
 {rewrite}
 ) TO '{EscapePath(temp)}' ({ParquetCompaction.ArchiveCopyOptions})";
                     await command.ExecuteNonQueryAsync(cancellationToken);
-                }));
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException && IsOutOfTempSpace(ex))
             {
@@ -920,6 +948,10 @@ COPY (
                     $"the rewrite ran out of temporary space (DuckDB was allowed {FormatBytes(spillCapBytes)} of temp folder, " +
                     $"with {FormatBytes(freeBytes ?? 0)} free on the volume). The original was left untouched. " +
                     $"DuckDB said: {ex.Message}", ex);
+            }
+            finally
+            {
+                DeleteSpillFolder(spillDirectory);
             }
 
             (rewrittenRows, rewrittenExecutions) = await MeasureRewrittenAsync(connection, temp, cancellationToken);

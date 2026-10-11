@@ -263,30 +263,92 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains(log, l => l.Level == LogLevel.Warning && l.Message.Contains("temporary space", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #5653 round 1: the temp cap is a property of the rewrite's OWN DuckDB instance. The repair runs un-awaited at
+    /// startup while the UI keeps reading, and <c>max_temp_directory_size</c> is instance-wide, so a cap set on the main
+    /// instance would hold every other query to it (as low as 256 MiB) for as long as a rewrite runs. This reads the
+    /// main instance's setting from inside the rewrite, while the cap is in force.
+    /// </summary>
+    [Fact]
+    public async Task Rewrite_LeavesTheMainInstancesTempCapAlone_WhileItRuns()
+    {
+        const long MiB = 1024 * 1024;
+        var file = Path.Combine(_archivePath, "202605_query_store_stats.parquet");
+        await WriteSplitArchiveAsync(file);
+        var reserve = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
+        _duckDb.AvailableFreeBytesProvider = _ => reserve + RewriteCopy(new FileInfo(file).Length) + (300 * MiB);
+
+        string mainBefore;
+        using (var before = _duckDb.CreateConnection())
+        {
+            await before.OpenAsync(TestContext.Current.CancellationToken);
+            mainBefore = await SettingAsync(before);
+        }
+
+        string? mainDuring = null;
+        string? rewriteDuring = null;
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath)
+        {
+            InsideSpillCapHook = async rewriteConnection =>
+            {
+                rewriteDuring = await SettingAsync(rewriteConnection);
+                using var main = _duckDb.CreateConnection();
+                await main.OpenAsync(TestContext.Current.CancellationToken);
+                mainDuring = await SettingAsync(main);
+            },
+        };
+
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(mainBefore, mainDuring);
+        Assert.Equal("300.0 MiB", rewriteDuring);
+        Assert.False(Directory.Exists(Path.Combine(_archivePath, QueryStoreSliceRepairService.RewriteSpillFolderName)));
+    }
+
     private static long RewriteCopy(long fileBytes) => QueryStoreSliceRepairService.RewriteCopyBytes(fileBytes);
 
-    /// <summary>The cap is in force while the action runs and the setting is put back after, even when the action throws.</summary>
+    /// <summary>
+    /// The rewrite instance carries the cap, the temp folder and the memory limit, and they stay on it: another
+    /// instance in the same process (the store's) keeps its own.
+    /// </summary>
     [Fact]
-    public async Task SpillCap_AppliesDuringTheAction_AndIsRestoredAfter()
+    public async Task RewriteInstance_CarriesItsOwnCap_AndAnotherInstanceKeepsItsOwn()
     {
-        using var connection = new DuckDBConnection("DataSource=:memory:");
-        await connection.OpenAsync(TestContext.Current.CancellationToken);
-        var original = await SettingAsync(connection);
-        string? during = null;
+        using var other = new DuckDBConnection("DataSource=:memory:");
+        await other.OpenAsync(TestContext.Current.CancellationToken);
+        var otherBefore = await SettingAsync(other);
 
-        await QueryStoreSliceRepairService.WithRewriteSpillCap(connection, 700L * 1024 * 1024, async () =>
+        var spill = Path.Combine(_archivePath, "unit_spill");
+        using (var rewrite = await QueryStoreSliceRepairService.OpenRewriteInstanceAsync(
+            spill, 700L * 1024 * 1024, TestContext.Current.CancellationToken))
         {
-            during = await SettingAsync(connection);
-        });
+            Assert.Equal("700.0 MiB", await SettingAsync(rewrite));
+            Assert.Equal(otherBefore, await SettingAsync(other));
+            Assert.Equal(spill.Replace('\\', '/'), (await ScalarAsync(rewrite, "current_setting('temp_directory')")).Replace('\\', '/'));
 
-        Assert.NotEqual(original, during);
-        Assert.Contains("MiB", during, StringComparison.Ordinal);
-        Assert.Equal(original, await SettingAsync(connection));
+            /* DuckDB prints GB limits in GiB, so compare against what it prints for the same SET on a third instance. */
+            using var expected = new DuckDBConnection("DataSource=:memory:");
+            await expected.OpenAsync(TestContext.Current.CancellationToken);
+            using (var set = expected.CreateCommand())
+            {
+                set.CommandText = $"SET memory_limit = '{ArchiveService.MainConnectionCopyMemoryLimit}'";
+                await set.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            QueryStoreSliceRepairService.WithRewriteSpillCap(
-                connection, 700L * 1024 * 1024, () => throw new InvalidOperationException("boom")));
-        Assert.Equal(original, await SettingAsync(connection));
+            Assert.Equal(
+                await ScalarAsync(expected, "current_setting('memory_limit')"),
+                await ScalarAsync(rewrite, "current_setting('memory_limit')"));
+        }
+
+        Assert.True(Directory.Exists(spill));
+    }
+
+    private static async Task<string> ScalarAsync(DuckDBConnection connection, string expression)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"SELECT CAST({expression} AS VARCHAR)";
+        return Convert.ToString(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken), System.Globalization.CultureInfo.InvariantCulture) ?? "";
     }
 
     private static async Task<string> SettingAsync(DuckDBConnection connection)
