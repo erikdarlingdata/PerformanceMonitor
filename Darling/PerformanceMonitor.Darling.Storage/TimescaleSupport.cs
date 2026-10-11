@@ -10890,12 +10890,15 @@ WHERE ca.view_schema = 'collect'
     /// </summary>
     internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
         NpgsqlConnection connection, Func<NpgsqlTransaction, Task> body, ILogger? logger, string what, CancellationToken cancellationToken,
-        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false)
+        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false, string? lockTimeoutOverride = null)
     {
+        /* #5667: the test seam. Production passes null and gets HourlyDdlLockTimeout; a test whose statement cap has to be the
+           only timeout that can fire on a held chunk passes a lock timeout far above the cap. */
+        var lockTimeout = lockTimeoutOverride ?? HourlyDdlLockTimeout;
         try
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{HourlyDdlLockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{lockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
             {
                 await timeout.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -10916,7 +10919,7 @@ WHERE ca.view_schema = 'collect'
         {
             logger?.LogInformation(
                 "TimescaleDB: {What} not changed this pass: another session held the table for {Timeout}, and waiting longer would hold up every collector's writes to it; the next hourly pass tries again",
-                what, HourlyDdlLockTimeout);
+                what, lockTimeout);
             var now = DateTime.UtcNow;
 
             /* #5574: the compress half's in-call retries (three tries inside ten seconds) are not "passes", and counting
@@ -12531,7 +12534,7 @@ ORDER BY c.range_start DESC";
     /// </summary>
     internal static async Task<PerfmonRegroupChunkOutcome> RegroupPerfmonChunkAsync(
         NpgsqlConnection connection, ILogger? logger, PerfmonRegroupCandidate candidate, CancellationToken cancellationToken,
-        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds)
+        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds, string? lockTimeoutOverride = null)
     {
         if (connection is null)
         {
@@ -12549,7 +12552,7 @@ ORDER BY c.range_start DESC";
                 await decompress.ExecuteNonQueryAsync(cancellationToken);
             },
             logger, $"re-grouping perfmon_stats chunk {chunk} (decompress)", cancellationToken,
-            distinguishTimeoutAndMissing: true);
+            distinguishTimeoutAndMissing: true, lockTimeoutOverride: lockTimeoutOverride);
 
         if (decompressed != BoundedDdlOutcome.Applied)
         {
@@ -12576,7 +12579,7 @@ ORDER BY c.range_start DESC";
             logger?.LogDebug("TimescaleDB: could not count the rows of perfmon_stats chunk {Chunk} before compressing it again: {Message}", chunk, ex.Message);
         }
 
-        var compressResult = await CompressRegroupedChunkAsync(connection, logger, chunk, PerfmonRegroupCompressAttempts, PerfmonRegroupCompressRetryDelay, cancellationToken, statementTimeoutSeconds);
+        var compressResult = await CompressRegroupedChunkAsync(connection, logger, chunk, PerfmonRegroupCompressAttempts, PerfmonRegroupCompressRetryDelay, cancellationToken, statementTimeoutSeconds, lockTimeoutOverride);
         if (compressResult == PerfmonRegroupChunkResult.Regrouped)
         {
             logger?.LogInformation(
@@ -12644,7 +12647,7 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
     /// </summary>
     internal static async Task<PerfmonRegroupChunkResult> CompressRegroupedChunkAsync(
         NpgsqlConnection connection, ILogger? logger, string chunk, int attempts, TimeSpan retryDelay, CancellationToken cancellationToken,
-        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds)
+        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds, string? lockTimeoutOverride = null)
     {
         try
         {
@@ -12659,7 +12662,7 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
                         await compress.ExecuteNonQueryAsync(cancellationToken);
                     },
                     logger, $"re-grouping perfmon_stats chunk {chunk} (compress)", cancellationToken,
-                    recordBusyStreak: false, distinguishTimeoutAndMissing: true);
+                    recordBusyStreak: false, distinguishTimeoutAndMissing: true, lockTimeoutOverride: lockTimeoutOverride);
 
                 if (compressed == BoundedDdlOutcome.Applied)
                 {
