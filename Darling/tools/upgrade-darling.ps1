@@ -1501,6 +1501,67 @@ function Get-DarlingOrdinaryPath([string]$path) {
     return Convert-ExtendedLengthPath ($path -replace '^\\\\\.\\(?=[A-Za-z]:)', '')
 }
 
+# True when two existing folders are the same folder on disk, however each is spelled: a junction or link in the path, a
+# subst or mapped drive letter and a short name all lead to the same volume serial number and file index (#5673). False
+# when either folder cannot be opened, so the caller keeps the answer of the text comparison.
+function Test-DarlingSameFolderIdentity([string]$left, [string]$right) {
+    if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) { return $false }
+    try {
+        if (-not ('DarlingFileIdentity' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class DarlingFileIdentity
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(IntPtr handle, out ByHandleFileInformation info);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    // 'volume:index' of an existing folder (opened with backup semantics, links followed), or null.
+    public static string Of(string folder)
+    {
+        IntPtr handle = CreateFileW(folder, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) { return null; }
+        try
+        {
+            ByHandleFileInformation info;
+            if (!GetFileInformationByHandle(handle, out info)) { return null; }
+            return info.VolumeSerialNumber.ToString("x") + ":" + info.FileIndexHigh.ToString("x") + ":" + info.FileIndexLow.ToString("x");
+        }
+        finally { CloseHandle(handle); }
+    }
+}
+'@
+        }
+        $leftId = [DarlingFileIdentity]::Of($left)
+        $rightId = [DarlingFileIdentity]::Of($right)
+        if ($null -eq $leftId -or $null -eq $rightId) { return $false }
+        return $leftId -eq $rightId
+    }
+    catch { return $false }
+}
+
 # Where the service is ACTUALLY installed, read from the registered ImagePath rather than guessed from
 # where this script happens to be sitting. Returns $null when the service is not installed.
 #
@@ -2448,11 +2509,17 @@ $runningFrom = $PSScriptRoot
 if (Test-DarlingSamePath $runningFrom $InstallRoot) {
     Fail "This script is running from the install directory, so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder only an administrator can write to (e.g. C:\Program Files\PerformanceMonitorDarling-staging\<version>, never a folder made directly under C:\) and run ITS upgrade-darling.ps1 instead. To prune rollback backups from the installed copy, use -PruneOnly, which copies nothing."
 }
+if (Test-DarlingSameFolderIdentity $runningFrom $InstallRoot) {
+    Fail "This script is running from the install directory (reached by a different path), so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder only an administrator can write to and run ITS upgrade-darling.ps1 instead."
+}
 
 # And the degenerate case the rule above does not cover: a source folder that IS the install directory,
 # handed in from a script running somewhere else. Copying a tree over itself is not an upgrade.
 if (-not $sourceIsZip -and (Test-DarlingSamePath $sourceRoot $InstallRoot)) {
     Fail "The source folder is the install directory itself, so there is nothing to upgrade from. Point -Source at the new build."
+}
+if (-not $sourceIsZip -and (Test-DarlingSameFolderIdentity $sourceRoot $InstallRoot)) {
+    Fail "The source folder is the install directory itself (reached by a different path), so there is nothing to upgrade from. Point -Source at the new build."
 }
 
 if ($sourceIsZip) {

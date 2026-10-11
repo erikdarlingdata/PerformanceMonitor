@@ -4318,6 +4318,60 @@ function Get-CimInstance {
         Assert.Contains("underParent=False", answers);
     }
 
+    /// <summary>
+    /// #5673: the upgrade's self-overwrite and source-is-install refusals also ask whether the two folders are the same
+    /// folder on disk (volume serial number and file index), so a junction to the install folder reads as the install
+    /// folder. A folder that does not exist, or another folder, is not the same.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheUpgrade_ReadsAJunctionToTheInstallFolderAsTheInstallFolder(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var probe = new StringBuilder();
+        Assert.Contains("if (Test-DarlingSameFolderIdentity $runningFrom $InstallRoot) {", script, StringComparison.Ordinal);
+        Assert.Contains("if (-not $sourceIsZip -and (Test-DarlingSameFolderIdentity $sourceRoot $InstallRoot)) {", script, StringComparison.Ordinal);
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSameFolderIdentity"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $base = Join-Path $env:TEMP ('pm5673-id-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory("$base\real")
+            [void][IO.Directory]::CreateDirectory("$base\other")
+            try {
+                [void](New-Item -ItemType Junction -Path "$base\link" -Target "$base\real")
+                'junctionMade=' + (Test-Path -LiteralPath "$base\link")
+                'selfSame=' + (Test-DarlingSameFolderIdentity "$base\real" "$base\real")
+                'junctionSame=' + (Test-DarlingSameFolderIdentity "$base\real" "$base\link")
+                'otherSame=' + (Test-DarlingSameFolderIdentity "$base\real" "$base\other")
+                'missingSame=' + (Test-DarlingSameFolderIdentity "$base\real" "$base\missing")
+                'emptySame=' + (Test-DarlingSameFolderIdentity "$base\real" '')
+            }
+            finally {
+                if (Test-Path -LiteralPath "$base\link") { [IO.Directory]::Delete("$base\link") }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("junctionMade=True", answers);
+        Assert.Contains("selfSame=True", answers);
+        Assert.Contains("junctionSame=True", answers);
+        Assert.Contains("otherSame=False", answers);
+        Assert.Contains("missingSame=False", answers);
+        Assert.Contains("emptySame=False", answers);
+    }
+
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>
     private static void AppendPathHelpers(StringBuilder probe, string script)
     {
