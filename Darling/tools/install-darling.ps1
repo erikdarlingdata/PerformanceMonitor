@@ -206,8 +206,16 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
             # A file with more than one name (a hard link) shares its permissions and its owner under every name, so
             # one of them in the root with a name the service is trusted on would carry the other name's rights into
             # the lock and the install pass (#5649). Reported like a link, for the root files the service writes.
-            if (-not $child.PSIsContainer -and $child.LinkType -eq 'HardLink' -and (Test-DarlingServiceWrittenFileName $child.Name) -and ([IO.Path]::GetDirectoryName($child.FullName).TrimEnd('\') -ieq $rootFull)) {
-                $result += New-DarlingWriteFinding 'HardLink' $child.FullName "$($child.FullName) (a hard link: this file has more than one name, and its permissions are the same under every one)" $true
+            # The names are counted through Get-DarlingFileNameCount, never from LinkType, and a count that cannot be read is a
+            # hard link here too.
+            if (-not $child.PSIsContainer -and (Test-DarlingServiceWrittenFileName $child.Name) -and ([IO.Path]::GetDirectoryName($child.FullName).TrimEnd('\') -ieq $rootFull)) {
+                $nameCount = Get-DarlingFileNameCount $child.FullName
+                if ($nameCount -gt 1) {
+                    $result += New-DarlingWriteFinding 'HardLink' $child.FullName "$($child.FullName) (a hard link: this file has more than one name, and its permissions are the same under every one)" $true
+                }
+                elseif ($nameCount -lt 1) {
+                    $result += New-DarlingWriteFinding 'HardLink' $child.FullName "$($child.FullName) (a hard link, as far as can be told: the number of names this file has could not be read, and a file with more than one name has the same permissions under every one)" $true
+                }
             }
             $result += Get-DarlingOneObjectWriteFindings $child.FullName $false $child
         }
@@ -305,6 +313,65 @@ function Test-DarlingServiceWrittenFileName([string]$name) {
     return [bool]$name.StartsWith($names.BackupPrefix, [StringComparison]::OrdinalIgnoreCase)
 }
 
+# The number of names a file has (1 for an ordinary file, more for a hard link), read through a handle opened for
+# attributes only, with every sharing mode allowed and the file itself rather than anything it points to (the way
+# DarlingFileSecurity.HardenWithoutFollowingLinks reads it in the service). $item.LinkType is no substitute: Windows
+# PowerShell 5.1 leaves it empty when the file cannot be opened for read (another process holds it with no read
+# sharing, or this account is denied read), so a hard link read as no link at all. Returns -1 when the count cannot be
+# read, and every caller treats that as more than one name: a file whose names cannot be counted is never trusted, made
+# service-owned, granted anything or reset (#5649). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingFileNameCount([string]$path) {
+    try {
+        if (-not ('DarlingNativeFileNames' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class DarlingNativeFileNames
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTimeValue { public uint Low; public uint High; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public FileTimeValue CreationTime;
+        public FileTimeValue LastAccessTime;
+        public FileTimeValue LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
+
+    // FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS.
+    public static int CountNames(string path)
+    {
+        using (SafeFileHandle handle = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            ByHandleFileInformation information;
+            if (handle.IsInvalid || !GetFileInformationByHandle(handle, out information)) { return -1; }
+            return (int)information.NumberOfLinks;
+        }
+    }
+}
+'@
+        }
+        return [int][DarlingNativeFileNames]::CountNames($path)
+    }
+    catch { return -1 }
+}
+
 # The files directly in $root that the service writes (the names on the list above): the ones the lock makes the
 # service the owner of, and with -BackupsOnly the darling.json.bak-* ones the install pass hardens. A file with more
 # than one name (a hard link) and a file that is a link are left out, so neither gets the service as its owner or a
@@ -315,8 +382,8 @@ function Get-DarlingServiceWrittenRootFiles([string]$root, [switch]$BackupsOnly)
     return @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object {
         (Test-DarlingServiceWrittenFileName $_.Name) -and
         (-not $BackupsOnly -or $_.Name.StartsWith($names.BackupPrefix, [StringComparison]::OrdinalIgnoreCase)) -and
-        $_.LinkType -ne 'HardLink' -and
-        -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) })
+        -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and
+        (Get-DarlingFileNameCount $_.FullName) -eq 1 })
 }
 
 # True when $candidate is a folder on the list above inside $root (or anything below it), or one of the listed
@@ -340,7 +407,7 @@ function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [stri
     }
     # Files only (#5649): a folder that carries a listed name is not a file the service writes, and neither is a link or
     # a file with more than one name. The answer comes from the item the walk listed.
-    return [bool]($segments.Count -eq 1 -and (Test-DarlingServiceWrittenFileName $segments[0]) -and $null -ne $item -and -not $item.PSIsContainer -and $item.LinkType -ne 'HardLink' -and -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+    return [bool]($segments.Count -eq 1 -and (Test-DarlingServiceWrittenFileName $segments[0]) -and $null -ne $item -and -not $item.PSIsContainer -and -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and (Get-DarlingFileNameCount $candidate) -eq 1)
 }
 
 # The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
@@ -1026,6 +1093,13 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
             $open += "$path (a junction or link)"
             continue
         }
+        # A root file the service writes that has more than one name (a hard link, or one whose names cannot be counted) is
+        # reported and left alone, the way a junction is: resetting it or stripping a grant would change the permissions of
+        # its other names too, and a reset makes the other name readable by every local user (#5649).
+        if ((-not $target.PSIsContainer) -and ([IO.Path]::GetDirectoryName($path).TrimEnd('\') -ieq $root.TrimEnd('\')) -and (Test-DarlingServiceWrittenFileName $target.Name) -and (Get-DarlingFileNameCount $path) -ne 1) {
+            $open += "$path (a hard link: this file has more than one name, or its names could not be counted, and its permissions are the same under every one)"
+            continue
+        }
         # The service SID is trusted here only if $path is $root itself (its RX grant) or falls under one of
         # $serviceWritePaths (its Modify grant) - everywhere else its write grant is a stranger's, same as any
         # other untrusted account, even though the SID is the same one the tree hands its own real access to.
@@ -1034,7 +1108,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         # darling.json and its backups: step 4b gives the service an explicit FullControl there (#1647) and the setowner
         # above makes it the owner, so the service is trusted on those files too. Without this the walk strips the
         # service's own grant from its config (the explicit-ACE branch below) and the service cannot start.
-        $isSecretFile = (-not $target.PSIsContainer) -and ([IO.Path]::GetDirectoryName($path).TrimEnd('\') -ieq $root.TrimEnd('\')) -and (Test-DarlingServiceWrittenFileName $target.Name) -and ($target.LinkType -ne 'HardLink')
+        $isSecretFile = (-not $target.PSIsContainer) -and ([IO.Path]::GetDirectoryName($path).TrimEnd('\') -ieq $root.TrimEnd('\')) -and (Test-DarlingServiceWrittenFileName $target.Name)
         if ($serviceSid -and ($path.TrimEnd('\') -ieq $root.TrimEnd('\') -or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }
         try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
         catch { $open += "$path (its permissions could not be read)"; continue }
@@ -1536,6 +1610,16 @@ else {
 # Every path here is named with -LiteralPath (#4745). PowerShell reads [ and ] in a -Path value as wildcard
 # characters, so under an install folder named with either, -Path finds no .bak files at all, and Get-Acl or
 # Set-Acl -Path can resolve to a same-named file in a sibling folder (a[bc]d to abd) and harden that instead.
+# darling.json is hardened by name below, so it is checked here the way the backups are: a darling.json with more
+# than one name (a hard link) or one that is a link would take the service as its owner and a FullControl grant on
+# the OTHER name or the file it points to as well. Refused, not skipped: the service reads this file, so there is no
+# safe way to carry on with it (#5649). The names are counted through Get-DarlingFileNameCount, never from LinkType.
+$configItem = Get-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
+if ($null -ne $configItem -and (($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or (Get-DarlingFileNameCount $configPath) -ne 1)) {
+    Fail ("$configPath has more than one name (it is a hard link), could not be checked, or is a link to another file, so its permissions cannot be set without also changing the other name or the file it points to. " +
+        "The service is installed but has not been started. Replace it with an ordinary copy: copy it to a new file, delete the old darling.json, rename the copy to darling.json, then run this script again.")
+}
+
 $hardened = @()
 $failed = @()
 foreach ($secretFile in @($configPath) + @(Get-DarlingServiceWrittenRootFiles $root -BackupsOnly | ForEach-Object { $_.FullName })) {

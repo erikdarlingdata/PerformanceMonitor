@@ -596,7 +596,7 @@ function Get-CimInstance {
         foreach (var name in new[]
         {
             "Get-DarlingServiceSids", "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName",
-            "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
+            "Get-DarlingFileNameCount", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
             "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice",
             "Get-DarlingRefusalAdvice", "Get-DarlingBackupFileFindingNames", "Get-DarlingBackupFileAdvice", "Test-DarlingSamePath", "Get-DarlingInstallRootFromService",
         })
@@ -1014,7 +1014,12 @@ function Get-CimInstance {
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
-            $root = 'C:\Program Files\PerformanceMonitorDarling'
+            # Real files in a temp root: the files-only answer counts the file's names on disk (#5649), so a path that does not
+            # exist is never one the service is trusted on.
+            $root = Join-Path $env:TEMP ('pm5649-wp-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            foreach ($n in @('darling.json', 'darling.json.bak-20260101-120000', 'darling.json.bak-x.dll', 'darling.json.bak-before-edit', 'darling.json.bak-x', 'notes.txt')) { Set-Content -LiteralPath "$root\$n" -Value '{}' }
+            New-Item -ItemType HardLink -Path "$root\darling.json.bak-linked" -Value "$root\notes.txt" | Out-Null
             $fileItem = [pscustomobject]@{ PSIsContainer = $false; LinkType = $null; Attributes = [IO.FileAttributes]::Normal }
             foreach ($name in @('darling.json', 'DARLING.JSON', 'darling.json.bak-20260101-120000', 'darling.json.bak-20260101-120000-2',
                                 'darling.json.bak-x.dll', 'darling.json.bak-20260101', 'darling.json.bak-before-edit', 'DARLING.JSON.BAK-Upper', 'darling.json.bak-', 'darling.json.bak', 'darling.jsonbak-x', 'xdarling.json.bak-x', 'darling.json.', 'xdarling.json')) {
@@ -1029,13 +1034,15 @@ function Get-CimInstance {
             }
             # #5649: the files-only answer comes from the item the caller listed, never from the disk.
             'item:folder=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @() ([pscustomobject]@{ PSIsContainer = $true; LinkType = $null; Attributes = [IO.FileAttributes]::Directory }))
-            'item:hardLink=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @() ([pscustomobject]@{ PSIsContainer = $false; LinkType = 'HardLink'; Attributes = [IO.FileAttributes]::Normal }))
+            'item:hardLink=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-linked') @() $fileItem)
+            'item:missingFile=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-missing') @() $fileItem)
             'item:reparse=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @() ([pscustomobject]@{ PSIsContainer = $false; LinkType = 'SymbolicLink'; Attributes = [IO.FileAttributes]::ReparsePoint }))
             'item:none=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @())
             'item:plainFile=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @() $fileItem)
             'item:directoryNeedsNoItem=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'pg-runtime\a.dll') @())
             'path:root=' + (Test-DarlingServiceWrittenPath $root $root @('darling-keys'))
-            'path:outside=' + (Test-DarlingServiceWrittenPath $root 'C:\Program Files\PerformanceMonitorDarling-2\pg-runtime\a.dll' @())
+            'path:outside=' + (Test-DarlingServiceWrittenPath $root "$root-2\pg-runtime\a.dll" @())
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
             """);
 
         var answers = RunWindowsPowerShell(probe.ToString());
@@ -1067,7 +1074,7 @@ function Get-CimInstance {
 
         Assert.Contains("item:plainFile=True", answers);
         Assert.Contains("item:directoryNeedsNoItem=True", answers);
-        foreach (var no in new[] { "item:folder", "item:hardLink", "item:reparse", "item:none" })
+        foreach (var no in new[] { "item:folder", "item:hardLink", "item:missingFile", "item:reparse", "item:none" })
         {
             Assert.Contains($"{no}=False", answers);
         }
@@ -1432,7 +1439,8 @@ function Get-CimInstance {
             /* The lock's service-owned loop reads the helper (which drops hard links), and its walk does not trust a hard link as a secret file. */
             var lockText = ExtractFunction(script, "Lock-DarlingInstallTree");
             Assert.Contains("foreach ($secret in @(Get-DarlingServiceWrittenRootFiles $root))", lockText, StringComparison.Ordinal);
-            Assert.Contains("(Test-DarlingServiceWrittenFileName $target.Name) -and ($target.LinkType -ne 'HardLink')", lockText, StringComparison.Ordinal);
+            Assert.Contains("(Test-DarlingServiceWrittenFileName $target.Name) -and (Get-DarlingFileNameCount $path) -ne 1) {", lockText, StringComparison.Ordinal);
+            Assert.DoesNotContain("LinkType", lockText, StringComparison.Ordinal);
         }
 
         Assert.Contains("Get-DarlingServiceWrittenRootFiles $root -BackupsOnly", InstallScript, StringComparison.Ordinal);
@@ -1444,6 +1452,221 @@ function Get-CimInstance {
         Assert.DoesNotContain("\".bak-*\"", worker, StringComparison.Ordinal);
         Assert.Contains("ConfigBackupFiles(Path.GetDirectoryName(resolvedConfig), Path.GetFileName(resolvedConfig))", cli, StringComparison.Ordinal);
         Assert.DoesNotContain("\"darling.json.bak-*\"", cli, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5649: the number of names a file has is read through a handle opened for attributes only, never from
+    /// <c>$item.LinkType</c>, which Windows PowerShell 5.1 leaves EMPTY when the file cannot be opened for read (a
+    /// process holds it with no read sharing). One helper, shared by the pre-lock walk, the service-written root files and
+    /// the path test: it returns 1 for a plain file, more for a hard link, and -1 when the count cannot be read, which every
+    /// caller treats as a hard link. The probe holds a hard link open with no sharing at all (the case that reads as no link
+    /// at 5.1) and the walk, the root-file list and the path test must each still see it. Run under Windows PowerShell
+    /// 5.1 and PowerShell 7, with both scripts.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheFileNameCount_IsOneForAPlainFile_AndSeesAHardLinkHeldOpenWithNoReadSharing(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm5649-nc-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $outside = "$root-outside.txt"
+            $outsideHeld = "$root-outside-held.txt"
+            New-Item -ItemType Directory -Path "$root\sub" -Force | Out-Null
+            Set-Content -LiteralPath "$root\plain.txt" -Value 'x'
+            Set-Content -LiteralPath "$root\darling.json.bak-plain" -Value 'x'
+            Set-Content -LiteralPath $outside -Value 'x'
+            Set-Content -LiteralPath $outsideHeld -Value 'x'
+            New-Item -ItemType HardLink -Path "$root\darling.json.bak-linked" -Value $outside | Out-Null
+            New-Item -ItemType HardLink -Path "$root\darling.json.bak-held" -Value $outsideHeld | Out-Null
+            $held = $null
+            try {
+                'plain=' + (Get-DarlingFileNameCount "$root\plain.txt")
+                'linked=' + (Get-DarlingFileNameCount "$root\darling.json.bak-linked")
+                'folder=' + (Get-DarlingFileNameCount "$root\sub")
+                'missing=' + (Get-DarlingFileNameCount "$root\not-here.txt")
+
+                # Held open for read AND write with no sharing at all: nothing else can open it for read.
+                $held = [IO.File]::Open("$root\darling.json.bak-held", 'Open', 'ReadWrite', 'None')
+                'setup.heldOpenRefusesARead=' + $(try { $s = [IO.File]::Open("$root\darling.json.bak-held", 'Open', 'Read', 'ReadWrite'); $s.Dispose(); $false } catch { $true })
+                'heldLinkType=[' + $(try { (Get-Item -LiteralPath "$root\darling.json.bak-held" -Force -ErrorAction Stop).LinkType } catch { 'unreadable' }) + ']'
+                'held=' + (Get-DarlingFileNameCount "$root\darling.json.bak-held")
+                'heldRootFiles=' + (@(Get-DarlingServiceWrittenRootFiles $root | ForEach-Object { $_.Name } | Sort-Object) -join ',')
+                $heldItem = Get-Item -LiteralPath "$root\darling.json.bak-held" -Force
+                'heldTrustedPath=' + (Test-DarlingServiceWrittenPath $root "$root\darling.json.bak-held" @() $heldItem)
+                $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                $records = @(Get-UntrustedWriteGrantees $root @($me) -Recurse -AsRecords)
+                foreach ($r in $records) { if ($r.Kind -eq 'HardLink') { 'walkHardLink=' + $r.Path.Substring($root.Length + 1) } }
+            }
+            finally {
+                if ($held) { $held.Dispose() }
+                Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $outside, $outsideHeld -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        AssertProbeSetupTook(answers);
+        Assert.Contains("plain=1", answers);
+        Assert.Contains("linked=2", answers);
+        Assert.Contains("folder=1", answers);
+        Assert.Contains("missing=-1", answers);
+        Assert.Contains("held=2", answers);
+        Assert.Contains("heldRootFiles=darling.json.bak-plain", answers);
+        Assert.Contains("heldTrustedPath=False", answers);
+        Assert.Contains("walkHardLink=darling.json.bak-held", answers);
+        Assert.Contains("walkHardLink=darling.json.bak-linked", answers);
+        Assert.DoesNotContain(answers, a => a.StartsWith("walkHardLink=darling.json.bak-plain", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #5649: install step 4b hardens darling.json by name, so a darling.json with more than one name (a hard link) or one
+    /// that is a link would hand the service its ownership and FullControl on the other name too. The installer refuses
+    /// before that loop, with the fix named (an ordinary copy), even when the count cannot be read because another
+    /// process holds the file. The probe runs the refusal block as shipped, with Fail recording instead of exiting.
+    /// </summary>
+    [Fact]
+    public void TheInstaller_RefusesADarlingJsonWithMoreThanOneName_BeforeItHardensAnything()
+    {
+        var script = InstallScript;
+        var start = script.IndexOf("$configItem = Get-Item -LiteralPath $configPath", StringComparison.Ordinal);
+        var end = script.IndexOf("$hardened = @()", StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, "install-darling.ps1 no longer checks darling.json before the hardening loop");
+        var block = script.Substring(start, end - start);
+        Assert.True(script.IndexOf("foreach ($secretFile in @($configPath)", end, StringComparison.Ordinal) > end, "the hardening loop must follow the refusal");
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingFileNameCount"));
+        probe.AppendLine("function Fail([string]$message) { 'refused=' + $message; $script:didRefuse = $true }");
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm5649-cfg-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            $held = $null
+            try {
+                function RunCase([string]$label, [string]$configPath) {
+                    $script:didRefuse = $false
+            """);
+        probe.AppendLine(block);
+        probe.AppendLine("""
+                    $label + '.refused=' + $script:didRefuse
+                }
+                Set-Content -LiteralPath "$root\plain.json" -Value '{}'
+                RunCase 'plain' "$root\plain.json"
+
+                Set-Content -LiteralPath "$root-other.json" -Value '{}'
+                New-Item -ItemType HardLink -Path "$root\linked.json" -Value "$root-other.json" | Out-Null
+                RunCase 'hardLink' "$root\linked.json"
+
+                Set-Content -LiteralPath "$root-other-held.json" -Value '{}'
+                New-Item -ItemType HardLink -Path "$root\held.json" -Value "$root-other-held.json" | Out-Null
+                $held = [IO.File]::Open("$root\held.json", 'Open', 'ReadWrite', 'None')
+                RunCase 'heldHardLink' "$root\held.json"
+                $held.Dispose(); $held = $null
+
+                $linkMade = $false
+                try { New-Item -ItemType SymbolicLink -Path "$root\symlink.json" -Value "$root\plain.json" -ErrorAction Stop | Out-Null; $linkMade = $true } catch { }
+                'symlinkMade=' + $linkMade
+                if ($linkMade) { RunCase 'symlink' "$root\symlink.json" }
+            }
+            finally {
+                if ($held) { $held.Dispose() }
+                Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath "$root-other.json", "$root-other-held.json" -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("plain.refused=False", answers);
+        Assert.Contains("hardLink.refused=True", answers);
+        Assert.Contains("heldHardLink.refused=True", answers);
+        if (answers.Contains("symlinkMade=True")) { Assert.Contains("symlink.refused=True", answers); }
+
+        var message = answers.Find(a => a.StartsWith("refused=", StringComparison.Ordinal))!;
+        Assert.Contains("linked.json", message, StringComparison.Ordinal);
+        Assert.Contains("copy it to a new file, delete the old darling.json, rename the copy to darling.json", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5649: the lock's verify walk reports a root file the service writes that has more than one name, and leaves it
+    /// alone, the way it does a junction. A reset (or stripping the grant) on a hard-linked backup with an untrusted
+    /// write grant would change the permissions of its other name too, and a reset hands that name to every local user.
+    /// The probe gives a hard-linked backup an explicit BUILTIN\Users write grant behind its own protection, runs the lock
+    /// and requires the grant to be untouched and the file named in what the lock returns.
+    /// </summary>
+    [Fact]
+    public void TheInstallTreeLock_ReportsAHardLinkedBackupWithAnUntrustedGrant_AndLeavesItsPermissionsAlone()
+    {
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, InstallScript);
+        probe.AppendLine(ExtractFunction(InstallScript, "Lock-DarlingInstallTree"));
+        probe.AppendLine(ConfirmProbeAclFunction);
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm5649-lock-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $outside = Join-Path $env:TEMP ("pm5649-lock-outside-" + [guid]::NewGuid().ToString("N").Substring(0, 8) + ".txt")
+            try {
+                New-Item -ItemType Directory -Path $root -Force | Out-Null
+                Set-Content -LiteralPath "$root\darling.json" -Value '{}'
+                Set-Content -LiteralPath $outside -Value 'x'
+                New-Item -ItemType HardLink -Path "$root\darling.json.bak-linked" -Value $outside | Out-Null
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                $users = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+                $system = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+                $admins = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+                $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                # icacls, not Set-Acl: Set-Acl on a hard link needs SeSecurityPrivilege here, which a developer shell lacks.
+                $null = & icacls.exe "$root\darling.json.bak-linked" /inheritance:d /grant "*$($users.Value):(M)" 2>&1
+                Confirm-ProbeAcl 'linkedAces' "$root\darling.json.bak-linked" $null @($users)
+                'setup.otherNameSharesTheAcl=' + (@((Get-Acl -LiteralPath $outside).GetAccessRules($true, $false, $sidType) | Where-Object { $_.IdentityReference -eq $users }).Count -gt 0)
+
+                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } }
+                foreach ($path in @("$root\darling.json.bak-linked", $outside)) {
+                    $acl = Get-Acl -LiteralPath $path
+                    $leaf = Split-Path -Leaf $path
+                    $leaf + '.usersExplicit=' + (@($acl.GetAccessRules($true, $false, $sidType) | Where-Object { $_.IdentityReference -eq $users }).Count -gt 0)
+                    $leaf + '.protected=' + $acl.AreAccessRulesProtected
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                if (Test-Path -LiteralPath $outside) {
+                    & icacls.exe $outside /reset /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        AssertProbeSetupTook(answers);
+
+        Assert.Contains(answers, a => a.StartsWith(@"open:\darling.json.bak-linked (a hard link: this file has more than one name", StringComparison.Ordinal));
+        Assert.Contains("darling.json.bak-linked.usersExplicit=True", answers);
+        Assert.Contains("darling.json.bak-linked.protected=True", answers);
+        Assert.Contains(answers, a => a.EndsWith(".txt.usersExplicit=True", StringComparison.Ordinal));
     }
 
     private static void AppendStepFunctions(StringBuilder probe, string? script = null)
@@ -1800,6 +2023,7 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
@@ -1891,6 +2115,7 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
@@ -2005,6 +2230,7 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
@@ -2096,6 +2322,7 @@ function Get-CimInstance {
             }
             """);
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine("""
             $trusted = Get-DarlingPreLockTrustedSids
             $found = @(Get-UntrustedWriteGrantees 'C:\does-not-need-to-exist-for-this-probe' $trusted)
@@ -2141,6 +2368,7 @@ function Get-CimInstance {
             }
             """);
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine("""
             $usersAces = @((Get-Acl).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $script:usersSid })
             'usersAces=' + $usersAces.Count
@@ -2168,6 +2396,7 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
@@ -2406,6 +2635,7 @@ function Get-CimInstance {
         var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
+        AppendServiceWrittenList(probe, script);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
             $root = Join-Path $env:TEMP ('pm4043-ma-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -2721,7 +2951,7 @@ function Get-CimInstance {
     /// (the lock and the pre-lock walk both read them).</summary>
     private static void AppendServiceWrittenList(StringBuilder probe, string script)
     {
-        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles" })
+        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles" })
         {
             probe.AppendLine(ExtractFunction(script, name));
         }
@@ -2780,6 +3010,46 @@ function Get-CimInstance {
             process.WaitForExit(60_000);
 
             Assert.True(string.IsNullOrWhiteSpace(stderr), $"powershell.exe reported an error running the extracted function:\n{stderr}");
+
+            var lines = new List<string>();
+            foreach (var line in stdout.Split('\n'))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.Length > 0) { lines.Add(trimmed); }
+            }
+
+            return lines;
+        }
+        finally
+        {
+            try { File.Delete(path); } catch (IOException) { /* best-effort */ }
+        }
+    }
+
+    /// <summary>The same as <see cref="RunWindowsPowerShell"/> under PowerShell 7 (<c>pwsh</c>); null when it is not installed.</summary>
+    private static List<string>? RunPowerShell7(string script)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"darling-5649-{Guid.NewGuid():N}.ps1");
+        File.WriteAllText(path, script);
+        try
+        {
+            var startInfo = new ProcessStartInfo("pwsh", $"-NoProfile -File \"{path}\"")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            Process? process;
+            try { process = Process.Start(startInfo); }
+            catch (System.ComponentModel.Win32Exception) { return null; }
+            Assert.NotNull(process);
+
+            var stdout = process!.StandardOutput.ReadToEnd();
+            var stderr = process.StandardError.ReadToEnd();
+            process.WaitForExit(60_000);
+
+            Assert.True(string.IsNullOrWhiteSpace(stderr), $"pwsh reported an error running the extracted function:\n{stderr}");
 
             var lines = new List<string>();
             foreach (var line in stdout.Split('\n'))
