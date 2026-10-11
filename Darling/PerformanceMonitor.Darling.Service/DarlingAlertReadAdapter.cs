@@ -651,7 +651,8 @@ GROUP BY collection_time";
 SELECT
     victim_process_id,
     victim_sql_text,
-    deadlock_graph_xml
+    deadlock_graph_xml,
+    collection_time
 FROM deadlocks
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -695,7 +696,9 @@ LIMIT 50";
             {
                 VictimProcessId = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 VictimSqlText = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                DeadlockGraphXml = reader.IsDBNull(2) ? "" : reader.GetString(2)
+                DeadlockGraphXml = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                /* #5642: the row's own collection instant (naive UTC in the store), the age line's newest sample. */
+                NewestSampleUtc = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)
             });
         }
 
@@ -859,6 +862,7 @@ WITH candidates AS (
         r.program_name,
         r.login_name,
         r.total_elapsed_time_ms,
+        r.collection_time,
         {1} AS excluded_by_program_prefix,
         {2} AS excluded_by_login,
         {3} AS excluded_by_database
@@ -885,7 +889,8 @@ SELECT
     r.login_name,
     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS integer) AS excluded_by_program_prefix_count,
     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count,
-    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count
+    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count,
+    r.collection_time AS newest_collection_time
 FROM candidates AS r
 WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)
 ORDER BY r.total_elapsed_time_ms DESC
@@ -1001,7 +1006,9 @@ LIMIT $3";
                     BlockingSessionId = reader.IsDBNull(8) ? null : (int?)reader.GetInt32(8),
                     QueryHash = reader.IsDBNull(9) ? null : reader.GetString(9),
                     ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                    LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
+                    LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11),
+                    /* #5642: the snapshot's own collection instant (naive UTC in the store). */
+                    NewestSampleUtc = reader.IsDBNull(15) ? null : DateTime.SpecifyKind(reader.GetDateTime(15), DateTimeKind.Utc)
                 });
                 /* The same three scalars on every row — read once is enough; a read with no rows has nothing to
                    fire and therefore nothing to render the counts beside. */
@@ -1162,7 +1169,8 @@ ORDER BY c.database_name, c.file_name";
 SELECT
     volume_mount_point,
     MAX(volume_total_mb) AS volume_total_mb,
-    MIN(volume_free_mb) AS volume_free_mb
+    MIN(volume_free_mb) AS volume_free_mb,
+    MAX(collection_time) AS newest_collection_time
 FROM database_size_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -1208,7 +1216,9 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
             {
                 MountPoint = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 TotalMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                FreeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                FreeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                /* #5642: the newest snapshot's instant (naive UTC in the store). */
+                NewestSampleUtc = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)
             });
         }
 
@@ -1232,7 +1242,8 @@ SELECT
     oldest_active_transaction_id,
     oldest_aborted_transaction_id,
     aborted_version_cleaner_start_time,
-    aborted_version_cleaner_end_time
+    aborted_version_cleaner_end_time,
+    collection_time
 FROM pvs_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -1284,7 +1295,9 @@ ORDER BY
                 OldestActiveTransactionId = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 OldestAbortedTransactionId = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 /* MS's documented shape for "cleanup is ongoing": a start time with no end time. */
-                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7)
+                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7),
+                /* #5642: the newest snapshot's instant (naive UTC in the store). */
+                NewestSampleUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
             });
         }
 
@@ -1437,6 +1450,7 @@ LIMIT 5";
            or lost msdb access leaves a stale "latest" that would otherwise read as NOW, and the engine's
            per-run cooldown key expires each pass, so a stale snapshot re-fires the same historical run
            every cooldown, forever. Same rule as Lite's adapter; parity is the point. */
+        DateTime? newestSampleUtc = null;
         using (var snapshotProbe = new NpgsqlCommand(
             "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1", connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
@@ -1448,6 +1462,9 @@ LIMIT 5";
             {
                 return AnomalousJobsResult.Stale;
             }
+
+            /* #5642: the snapshot the rows below were read from, for the age line (naive UTC in the store). */
+            newestSampleUtc = DateTime.SpecifyKind(snapshotTime, DateTimeKind.Utc);
         }
 
         using var command = new NpgsqlCommand(AnomalousJobsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
@@ -1473,7 +1490,8 @@ LIMIT 5";
                 StartTime = startTime,
                 /* The offset in force when THIS job started, so StartTimeUtc and the "Started" label are right for a
                    job from before the last daylight saving change; a null offset stays null. */
-                UtcOffsetMinutes = ServerLocalTimes.JobStartOffsetMinutes(clock, startTime, snapshotOffset)
+                UtcOffsetMinutes = ServerLocalTimes.JobStartOffsetMinutes(clock, startTime, snapshotOffset),
+                NewestSampleUtc = newestSampleUtc
             });
         }
 
@@ -1638,7 +1656,8 @@ previous AS (
     FROM database_states ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
 )
-SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, '')
+SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, ''),
+       (SELECT t FROM newest) AS newest_collection_time
 FROM latest l
 JOIN previous p
   ON p.database_name = l.database_name
@@ -1743,7 +1762,9 @@ ORDER BY l.database_name";
                     DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                     StateDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
                     ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                    LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3)
+                    LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    /* #5642: the newest collection both samples of the two-sample rule end at (naive UTC). */
+                    NewestSampleUtc = reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc)
                 });
             }
         }
