@@ -755,10 +755,10 @@ public sealed partial class ViewerDataService
         LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
     };
 
-    /// <summary>Maps one row of the 19-column per-server health projection (<see cref="CollectionHealthSql"/>, ordinals 0-18)
+    /// <summary>Maps one row of the 20-column per-server health projection (<see cref="CollectionHealthSql"/>, ordinals 0-19)
     /// to a <see cref="CollectorHealthRow"/>. The count is load-bearing: the projection is read POSITIONALLY
-    /// through this one mapper, so it must match it exactly (19 since #4748 appended latest_run_note at
-    /// ordinal 18; #3819's last_non_skip_time and last_productive_time sit at ordinals 16-17,
+    /// through this one mapper, so it must match it exactly (20 since #5646 appended trailing_success_runs at
+    /// ordinal 19; #4748's latest_run_note sits at ordinal 18; #3819's last_non_skip_time and last_productive_time sit at ordinals 16-17,
     /// #3240's extension_missing_count at 15 and #2804's abandoned_count at 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
@@ -1165,10 +1165,12 @@ public class CollectorHealthRow
     /// </summary>
     public long TrailingSuccessRuns { get; set; }
 
-    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null.
-    /// Display text only; it carries the last failure time.</summary>
+    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null. Only
+    /// a row whose displayed <see cref="HealthStatus"/> is HEALTHY carries it, so a row another rung bands
+    /// (abandon rate, lost databases, stopped, regression) never does. Display text only; it carries the last
+    /// failure time.</summary>
     public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
-        TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
+        HealthStatus, TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
 
     /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window

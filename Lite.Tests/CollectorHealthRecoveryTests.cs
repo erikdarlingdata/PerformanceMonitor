@@ -6,6 +6,7 @@
 
 using System;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace Lite.Tests;
@@ -58,7 +59,7 @@ public sealed class CollectorHealthRecoveryTests
         Assert.Equal(CollectorHealthClassifier.Healthy, Band(40, 12, 3));
 
         var failure = new DateTime(2026, 10, 9, 14, 30, 5, DateTimeKind.Unspecified);
-        var note = CollectorHealthClassifier.FormatRecoveredNote(40, 12, 3, failure);
+        var note = CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 3, failure);
         Assert.NotNull(note);
         Assert.Contains("recovered", note, StringComparison.Ordinal);
         Assert.Contains("2026-10-09 14:30:05", note, StringComparison.Ordinal);
@@ -68,7 +69,7 @@ public sealed class CollectorHealthRecoveryTests
     public void Recovery_TwoSuccessesAfterFailures_StaysWarning_AndCarriesNoNote()
     {
         Assert.Equal(CollectorHealthClassifier.Warning, Band(40, 12, 2));
-        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(40, 12, 2, DateTime.UtcNow));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 2, DateTime.UtcNow));
     }
 
     [Fact]
@@ -82,9 +83,9 @@ public sealed class CollectorHealthRecoveryTests
     [Fact]
     public void Recovery_NoNoteWhenNothingWasSuppressed()
     {
-        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(40, 0, 3, null));
-        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(40, 2, 3, DateTime.UtcNow));
-        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(9, 3, 3, DateTime.UtcNow));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 0, 3, null));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 2, 3, DateTime.UtcNow));
+        Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 9, 3, 3, DateTime.UtcNow));
     }
 
     [Fact]
@@ -111,6 +112,73 @@ public sealed class CollectorHealthRecoveryTests
         Assert.Equal(
             CollectorHealthClassifier.Warning,
             CollectorHealthClassifier.Classify(8, 6, 2, 0, 0, 0, 0.1, 0.1, 5, null, 0));
+    }
+
+    [Fact]
+    public void RecoveredNote_NeedsTheHealthyBand_ForEveryOtherBandItIsNull()
+    {
+        /* The same counts that give a note under HEALTHY give none under any other band: the sentence says the
+           recovery rule decided the band, which is false of a row another rung banded. */
+        foreach (var band in new[]
+                 {
+                     CollectorHealthClassifier.Warning, CollectorHealthClassifier.Stopped, CollectorHealthClassifier.Failing,
+                     CollectorHealthClassifier.Stale, CollectorHealthClassifier.NeverRun,
+                 })
+        {
+            Assert.Null(CollectorHealthClassifier.FormatRecoveredNote(band, 40, 12, 3, DateTime.UtcNow));
+        }
+
+        Assert.NotNull(CollectorHealthClassifier.FormatRecoveredNote(CollectorHealthClassifier.Healthy, 40, 12, 3, DateTime.UtcNow));
+    }
+
+    private static string PartialNote() =>
+        string.Format(System.Globalization.CultureInfo.InvariantCulture, PartialDatabaseFailureNote.Format, 5, 8, "a, b", "login failed");
+
+    private static CollectorHealthRow RecoveredRow(long abandoned = 0, string? latestRunNote = null, double lastRunHoursAgo = 0.05) => new()
+    {
+        CollectorName = "wait_stats",
+        TotalRuns = 40,
+        SuccessCount = 28,
+        ErrorCount = 12,
+        AbandonedCount = abandoned,
+        TrailingSuccessRuns = 3,
+        LatestRunNote = latestRunNote,
+        LastErrorTime = DateTime.UtcNow.AddHours(-3),
+        LastRunTime = DateTime.UtcNow.AddHours(-lastRunHoursAgo),
+        LastSuccessTime = DateTime.UtcNow.AddHours(-lastRunHoursAgo),
+    };
+
+    [Fact]
+    public void ARowTheRecoveryRuleMoved_ReadsHealthy_WithTheRecoveredNote()
+    {
+        var row = RecoveredRow();
+        Assert.Equal(CollectorHealthClassifier.Healthy, row.HealthStatus);
+        Assert.NotNull(row.RecoveredNote);
+        Assert.StartsWith("recovered:", row.RecoveredNote, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARowAnotherRungBandsWarning_WithThreeTrailingSuccesses_CarriesNoRecoveredNote()
+    {
+        /* Three runs in a row succeeded and the failure rate is over the threshold, so the recovery rule has
+           nothing to say about the band: the abandon rate and the lost-databases note bring WARNING on their own. */
+        var abandoning = RecoveredRow(abandoned: 5);
+        Assert.Equal(CollectorHealthClassifier.Warning, abandoning.HealthStatus);
+        Assert.Null(abandoning.RecoveredNote);
+        Assert.DoesNotContain("recovered", abandoning.NoteFormatted, StringComparison.Ordinal);
+
+        var partial = RecoveredRow(latestRunNote: PartialNote());
+        Assert.Equal(CollectorHealthClassifier.Warning, partial.HealthStatus);
+        Assert.Null(partial.RecoveredNote);
+        Assert.DoesNotContain("recovered", partial.NoteFormatted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStoppedRow_WithThreeTrailingSuccesses_CarriesNoRecoveredNote()
+    {
+        var row = RecoveredRow(lastRunHoursAgo: 999);
+        Assert.Equal(CollectorHealthClassifier.Stopped, row.HealthStatus);
+        Assert.Null(row.RecoveredNote);
     }
 
     [Fact]

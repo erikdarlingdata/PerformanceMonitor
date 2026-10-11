@@ -3251,11 +3251,11 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>31 columns since #4748 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// <para>32 columns since #5646 (16 at #2460, plus #2472's four fan-out columns, #2804's
     /// abandoned_count, #3010's last_denied_time, #3017's rows_stored/runs_with_rows, #3240's
     /// extension_missing_count, #3754's session_missing_count, #3819's current_status /
-    /// last_non_skip_time / last_productive_time, #3885's trailing_zero_row_success_runs and #4748's
-    /// latest_run_note) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// last_non_skip_time / last_productive_time, #3885's trailing_zero_row_success_runs, #4748's
+    /// latest_run_note and #5646's trailing_success_runs) — every addition APPENDED, never inserted, because both MCP surfaces read
     /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
@@ -5183,10 +5183,12 @@ internal sealed class CollectorHealth
         TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
         HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote);
 
-    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null.
-    /// Display text only; it carries the last failure time.</summary>
+    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null. Only
+    /// a row whose displayed <see cref="HealthStatus"/> is HEALTHY carries it, so a row another rung bands
+    /// (abandon rate, lost databases, stopped, regression) never does. Display text only; it carries the last
+    /// failure time.</summary>
     public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
-        TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
+        HealthStatus, TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
 
     /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window

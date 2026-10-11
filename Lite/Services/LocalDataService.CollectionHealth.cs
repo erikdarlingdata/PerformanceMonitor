@@ -189,6 +189,17 @@ WITH health AS
         -- productivity sits BEFORE the streak rather than inside it, which is the ORDER that makes this a
         -- regression rather than two unrelated facts.
         MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+        -- #5646: the success flags of the NEWEST three runs, newest first (the recovery rule's input). max_by with a
+        -- count is a top-3 aggregate: DuckDB keeps three rows while it makes the pass this CTE already makes, so
+        -- it neither sorts the window (the cost #5371 removed) nor reads it a second time. The order is the full
+        -- timestamp (DuckDB keeps microseconds), then log_id, the unique id, compared as one struct (field by
+        -- field), so two runs at the same instant are ordered the same way every time. The success test is
+        -- success_count's own (SUCCESS, not an abandoned cycle) over the rows total_runs counts. Fewer than three
+        -- runs leave the list short, and the CASE below reads the missing flags as not-success.
+        max_by(CASE WHEN status = 'SUCCESS'
+                     AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                    THEN 1 ELSE 0 END,
+               struct_pack(t := collection_time, i := log_id), 3) AS recent_flags,
         -- #5371: the instants the keyed lookups below read at. The statement used to rank every run of the
         -- window four times (ROW_NUMBER over each collector, sorted on collection_time and a VARCHAR) to
         -- reach the newest row of four classes; that sorts the whole window. These are plain aggregates, so
@@ -325,9 +336,9 @@ SELECT
     -- log_id DESC, the unique id, so two runs at the same instant are ordered the same way every time. The
     -- success test is success_count's own (SUCCESS, not an abandoned cycle) over the rows total_runs counts.
     -- APPENDED, read positionally; Darling's twin carries it at the same ordinal.
-    CASE WHEN recent.flags[1] = 1 AND recent.flags[2] = 1 AND recent.flags[3] = 1 THEN 3
-         WHEN recent.flags[1] = 1 AND recent.flags[2] = 1 THEN 2
-         WHEN recent.flags[1] = 1 THEN 1
+    CASE WHEN h.recent_flags[1] = 1 AND h.recent_flags[2] = 1 AND h.recent_flags[3] = 1 THEN 3
+         WHEN h.recent_flags[1] = 1 AND h.recent_flags[2] = 1 THEN 2
+         WHEN h.recent_flags[1] = 1 THEN 1
          ELSE 0 END AS trailing_success_runs
 FROM health h
 -- #5371: the keyed lookups. Each reads ONE collector's rows at an instant the aggregate above already
@@ -411,17 +422,6 @@ LEFT JOIN LATERAL
            OR (s.collection_time = h.last_streak_break_time
                AND s.status > h.last_streak_break_status))
 ) streak ON TRUE
--- #5646: the success flags of the window's runs, newest first (a plain aggregate, like the lookups above).
-LEFT JOIN LATERAL
-(
-    SELECT list(CASE WHEN v.status = 'SUCCESS'
-                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-                     THEN 1 ELSE 0 END ORDER BY v.collection_time DESC, v.log_id DESC)[1:3] AS flags
-    FROM v_collection_log v
-    WHERE v.server_id = $1
-    AND   v.collector_name = h.collector_name
-    AND   v.collection_time >= $2
-) recent ON TRUE
 ORDER BY h.collector_name";
 
     /// <summary>How long a memoized Collection Health result is reused when the caller names no lifetime (#5371). The tab
@@ -1294,10 +1294,12 @@ public class CollectorHealthRow
     /// </summary>
     public long TrailingSuccessRuns { get; set; }
 
-    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null.
-    /// Display text only; it carries the last failure time.</summary>
+    /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null. Only
+    /// a row whose displayed <see cref="HealthStatus"/> is HEALTHY carries it, so a row another rung bands
+    /// (abandon rate, lost databases, stopped, regression) never does. Display text only; it carries the last
+    /// failure time.</summary>
     public string? RecoveredNote => CollectorHealthClassifier.FormatRecoveredNote(
-        TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
+        HealthStatus, TotalRuns, ErrorCount, TrailingSuccessRuns, LastErrorTime);
 
     /// <summary>
     /// #1852: whether the store saw user databases on this target inside the health window

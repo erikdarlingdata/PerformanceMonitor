@@ -157,9 +157,22 @@ FROM generate_series(1, 6) c, generate_series(1, 2000) g", ServerId, ServerName)
             Console.WriteLine("PLAN5666 indexes=" + string.Join(",", indexes));
             Assert.NotEmpty(indexes);
             Assert.All(indexes, i => Assert.StartsWith("idx_collection_log_", i, StringComparison.Ordinal));
+            /* The index that carries the lookup's own key and order, (server_id, collector_name, collection_time
+               DESC): the prefix above would pass idx_collection_log_time just as well. */
+            Assert.Contains("idx_collection_log_watermark", indexes);
+            Assert.DoesNotContain("idx_collection_log_time", indexes);
             Assert.DoesNotContain("\"Node Type\":\"Seq Scan\"", plan, StringComparison.Ordinal);
-            /* No sort of the window: the three-row array_agg order is inside the aggregate, not a plan node. */
-            Assert.DoesNotContain("\"Node Type\":\"Sort\"", plan, StringComparison.Ordinal);
+            /* No sort of the window. The index is keyed on collection_time but not log_id, so the planner does
+               choose an INCREMENTAL Sort for the tie-break, which sorts only the rows that share one
+               collection_time: every sort node in the plan must be that kind, presorted on the index's order,
+               and sit under the Limit. (The exact "Sort" assert above cannot see an Incremental Sort.) */
+            var sortNodes = System.Text.RegularExpressions.Regex.Matches(plan, "\"Node Type\":\"([^\"]*Sort[^\"]*)\"")
+                .Select(m => m.Groups[1].Value).ToList();
+            Console.WriteLine("PLAN5666 sortNodes=" + string.Join(",", sortNodes));
+            Assert.All(sortNodes, n => Assert.Equal("Incremental Sort", n));
+            if (sortNodes.Count > 0)
+                Assert.Contains("\"Presorted Key\"", plan, StringComparison.Ordinal);
+            Assert.Contains("\"Node Type\":\"Limit\"", plan, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

@@ -2387,15 +2387,19 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// #5646. The sentence a collector that RECOVERED carries beside its HEALTHY band, or null. Present
-        /// only where the recovery rule is what kept the band off WARNING: the window holds enough runs for
+        /// only where the recovery rule is what kept the band off WARNING: the row's band
+        /// (<paramref name="healthStatus"/>, the one it displays) is HEALTHY, the window holds enough runs for
         /// the rate to count, the rate is over the threshold, and the newest
-        /// <see cref="RecoveryTrailingSuccessRuns"/> runs all succeeded. <paramref name="lastFailureTime"/>
-        /// is the newest failure of the window (naive UTC).
+        /// <see cref="RecoveryTrailingSuccessRuns"/> runs all succeeded. A row any other rung bands (the abandon
+        /// rate, the lost-databases note, a stale or stopped collector, a regression) carries no such sentence,
+        /// because its band is not one the streak decided. <paramref name="lastFailureTime"/> is the newest
+        /// failure of the window (naive UTC).
         /// </summary>
         public static string? FormatRecoveredNote(
-            long totalRuns, long errorCount, long trailingSuccessRuns, DateTime? lastFailureTime)
+            string healthStatus, long totalRuns, long errorCount, long trailingSuccessRuns, DateTime? lastFailureTime)
         {
-            if (totalRuns < MinimumRunsForFailureRate
+            if (!string.Equals(healthStatus, Healthy, StringComparison.Ordinal)
+                || totalRuns < MinimumRunsForFailureRate
                 || errorCount <= 0
                 || trailingSuccessRuns < RecoveryTrailingSuccessRuns
                 || (double)errorCount / totalRuns * 100 <= WarningFailureRatePercent)

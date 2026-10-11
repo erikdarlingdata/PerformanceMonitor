@@ -442,6 +442,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
         Assert.DoesNotContain("LIMIT", code, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("FROM v_collection_log", code, StringComparison.Ordinal);
 
+        /* #5646: the recovery rule's three newest flags come from a top-3 aggregate inside the single pass, not
+           from an ordered list() over the window (which materialises and sorts every run of a collector's seven
+           days to keep three). An ordered aggregate is neither a WINDOW nor a TOP_N operator, so the plan checks
+           below cannot see it; the text can. */
+        Assert.Contains("max_by(", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("list(", code, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ORDER BY v.", code, StringComparison.Ordinal);
+
         /* The positive control for the negatives above: the oracle is the statement they are written against. */
         Assert.Contains("ROW_NUMBER() OVER", CollectionHealthOracleSql.Lite, StringComparison.Ordinal);
         Assert.Contains("PARTITION BY collector_name", CollectionHealthOracleSql.Lite, StringComparison.Ordinal);
