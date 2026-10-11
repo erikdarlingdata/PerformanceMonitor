@@ -647,6 +647,10 @@ jobs:
               # #5616: the Lite shard script and its packer are test inputs (Lite.Tests CrossAppGuardCiGateTests parses the script), so an edit to either has to reach the Lite suite.
               - '.github/scripts/run-lite-shard.ps1'
               - '.github/scripts/lite-shard-pack.py'
+              # #5656: Lite.Tests pins read install/ scripts as source (CpuSchedulerStatsCollectorDefinitionTests reads install/17,
+              # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
+              # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
+              - 'install/**/!(*.md)'
               # #2489, changed by Erik's 2026-09-24 ruling that docs-only changes skip CI:
               # README.md and Lite/README.md used to sit here so LiteRuntimePrerequisiteDocsTests
               # (which reads these two READMEs against the built runtimeconfig and this file's
@@ -2650,6 +2654,10 @@ jobs:
               # #5616: the Lite shard script and its packer are test inputs (Lite.Tests CrossAppGuardCiGateTests parses the script), so an edit to either has to reach the Lite suite.
               - '.github/scripts/run-lite-shard.ps1'
               - '.github/scripts/lite-shard-pack.py'
+              # #5656: Lite.Tests pins read install/ scripts as source (CpuSchedulerStatsCollectorDefinitionTests reads install/17,
+              # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
+              # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
+              - 'install/**/!(*.md)'
             # The rest of the build job's `lite` set: the three Darling trees Lite.Tests reads as source.
             # A diff that reaches ONLY these (no lite_shard, core_shard or root_shard entry) runs just the
             # Lite.Tests classes tagged [Trait("Reads", "Darling")], in one shard; see the scope step below.

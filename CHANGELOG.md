@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Added
+
+- **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
+
 ### Fixed
 
 - **The Darling viewer's Manage Servers window now shows the service's version, once, instead of its own version on every server row** ([#5668]) - the grid's Installed Version column filled every row with the viewer's own version, so an old viewer talking to a newer service read as up to date. The service now writes its product version and process start time to the store when it starts (a new table, `config.service_version`, one row per service host, store schema V174, created by the first start after the upgrade), and Manage Servers shows it once above the grid beside the viewer's own version: one line per service host when more than one service writes to the store. A store with no row yet, or without the table, reads `unknown (older than 3.11)`. The Installed Version column is removed. The line is display only and shows no warning.
@@ -5201,4 +5205,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
 [#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
 [#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
+[#5663]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5663
 [#5668]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5668
