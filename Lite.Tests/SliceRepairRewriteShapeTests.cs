@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -77,8 +78,46 @@ public sealed class SliceRepairRewriteShapeTests : IClassFixture<SharedDuckDbFix
             $"the repaired file grew from {r.BeforeBytes:N0} to {r.AfterBytes:N0} bytes after losing 40 rows");
     }
 
+    /// <summary>
+    /// The size test above is a proxy. This reads the rewritten file itself: its collection_time column, in the file's
+    /// own row order, never steps backwards, and no row went missing from the order check.
+    /// </summary>
+    [Fact]
+    public async Task Rewrite_KeepsTheRowsInTheirOriginalOrder()
+    {
+        var r = await RewriteAsync();
+
+        Assert.Equal(Queries * Intervals, r.RowsAfter);
+        Assert.Equal(0, r.TimeInversionsAfter);
+    }
+
+    /// <summary>
+    /// The row order is explicit (ORDER BY the file's row number) when the temp allowance can hold the sort, and is
+    /// left to the join when it cannot: sorting the wide rows spilled 9.3 times the file in the measurement, so a
+    /// tight disk would otherwise turn a file it can rewrite into a failure.
+    /// </summary>
+    [Fact]
+    public void Rewrite_SortsByFilePosition_OnlyWhenTheTempAllowanceCanHoldTheSort()
+    {
+        const long MiB = 1024 * 1024;
+        var columns = new List<(string Name, string Type)>
+        {
+            ("collection_id", "BIGINT"), ("collection_time", "TIMESTAMP"), ("server_id", "INTEGER"),
+            ("query_id", "BIGINT"), ("plan_id", "BIGINT"), ("execution_count", "BIGINT"),
+        };
+        var key = QueryStoreSliceRepairService.KeyColumnsFor(columns.Select(c => c.Name).ToList());
+
+        Assert.Contains("ORDER BY t.file_row_number", QueryStoreSliceRepairService.BuildRewriteSelect(columns, key, "f.parquet", ordered: true), StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY", QueryStoreSliceRepairService.BuildRewriteSelect(columns, key, "f.parquet", ordered: false), StringComparison.Ordinal);
+
+        Assert.True(QueryStoreSliceRepairService.RewriteKeepsExplicitOrder(4096 * MiB, 272 * MiB));
+        Assert.False(QueryStoreSliceRepairService.RewriteKeepsExplicitOrder(4096 * MiB, 400 * MiB));
+        Assert.False(QueryStoreSliceRepairService.RewriteKeepsExplicitOrder(256 * MiB, 272 * MiB));
+    }
+
     private sealed record Rewritten(
-        long BeforeBytes, long AfterBytes, string TypesBefore, string TypesAfter, long TotalBefore, long TotalAfter);
+        long BeforeBytes, long AfterBytes, string TypesBefore, string TypesAfter, long TotalBefore, long TotalAfter,
+        long RowsAfter, long TimeInversionsAfter);
 
     private async Task<Rewritten> RewriteAsync()
     {
@@ -112,7 +151,12 @@ public sealed class SliceRepairRewriteShapeTests : IClassFixture<SharedDuckDbFix
             beforeTypes,
             await SchemaAsync(con, sql),
             totalBefore,
-            await ScalarAsync(con, $"SELECT CAST(SUM(execution_count) AS BIGINT) FROM read_parquet('{sql}')"));
+            await ScalarAsync(con, $"SELECT CAST(SUM(execution_count) AS BIGINT) FROM read_parquet('{sql}')"),
+            await ScalarAsync(con, $"SELECT COUNT(*) FROM read_parquet('{sql}')"),
+            await ScalarAsync(
+                con,
+                "SELECT COUNT(*) FROM (SELECT collection_time, lag(collection_time) OVER (ORDER BY file_row_number) AS previous " +
+                $"FROM read_parquet('{sql}', file_row_number = true)) WHERE collection_time < previous"));
     }
 
     private static async Task ExecAsync(DuckDBConnection con, string sql)
