@@ -218,7 +218,7 @@ OPTION(RECOMPILE);";
     {
         var sql = copy == "collector"
             ? CpuSchedulerStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(new RecordingCollectorDeltaCalculator())).Text
-            : File.ReadAllText(FindRepoFile(Path.Combine("install", "17_collect_cpu_scheduler_stats.sql")));
+            : CollectionSelect(File.ReadAllText(FindRepoFile(Path.Combine("install", "17_collect_cpu_scheduler_stats.sql"))));
 
         /* The DAC node is left out by its state, never by a node_id; "online" is every state except OFFLINE. */
         Assert.Contains("n.node_state_desc NOT LIKE N'%DAC%'", sql);
@@ -243,6 +243,15 @@ OPTION(RECOMPILE);";
         var sql = File.ReadAllText(FindRepoFile(Path.Combine("install", "17_collect_cpu_scheduler_stats.sql")));
         Assert.Contains("Offline CPUs detected: %d offline CPUs", sql);
         Assert.DoesNotContain("offline nodes", sql);
+    }
+
+    /* The collection_log row is what an operator reads back after the fact, and the count no longer counts nodes. */
+    [Fact]
+    public void InstallScript_CollectionLogText_NamesOfflineCpusNotNodes()
+    {
+        var sql = File.ReadAllText(FindRepoFile(Path.Combine("install", "17_collect_cpu_scheduler_stats.sql")));
+        Assert.Contains("N'CRITICAL: Offline CPUs detected'", sql);
+        Assert.DoesNotContain("in NUMA nodes", sql);
     }
 
     [Fact]
@@ -359,6 +368,20 @@ OPTION(RECOMPILE);";
 
         /* Point-in-time snapshot — no delta calculator interaction at all. */
         Assert.Empty(deltas.Calls);
+    }
+
+    /* The install proc's collection SELECT, from its first select-list column to its OPTION(RECOMPILE). The
+       whole-file DoesNotContain checks (32767, is_online) belong to this slice, not to the rest of the proc. Both
+       anchors are asserted, so a rename cannot leave an empty slice that passes every DoesNotContain. */
+    private static string CollectionSelect(string installScript)
+    {
+        const string startAnchor = "max_workers_count = osi.max_workers_count";
+        const string endAnchor = "OPTION(RECOMPILE);";
+        var start = installScript.IndexOf(startAnchor, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"install/17 no longer contains the collection SELECT start anchor: {startAnchor}");
+        var end = installScript.IndexOf(endAnchor, start, StringComparison.Ordinal);
+        Assert.True(end > start, $"install/17 no longer contains {endAnchor} after the collection SELECT start");
+        return installScript.Substring(start, end + endAnchor.Length - start);
     }
 
     private static int CountOccurrences(string text, string needle)

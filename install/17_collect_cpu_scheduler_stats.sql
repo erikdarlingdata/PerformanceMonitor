@@ -310,7 +310,7 @@ BEGIN
             (
                 N'cpu_scheduler_stats_collector',
                 N'CRITICAL',
-                N'CRITICAL: Offline CPUs detected in NUMA nodes'
+                N'CRITICAL: Offline CPUs detected'
             );
         END;
 
