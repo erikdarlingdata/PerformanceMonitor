@@ -38,6 +38,8 @@ namespace Darling.Tests;
 /// the function as it ships, under <c>powershell.exe</c> (Windows PowerShell 5.1), which is what Windows
 /// Server hands an operator by default.</para>
 /// </summary>
+/* Reads Lite/README.md and a Lite csproj (#5651), so the Reads=Lite guard (#5459) wants the trait. */
+[Trait("Reads", "Lite")]
 public class DarlingRuntimePreflightTests
 {
     private static string InstallScript => ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
@@ -335,17 +337,19 @@ public class DarlingRuntimePreflightTests
 
     /// <summary>
     /// #5651: on a Windows that lacks the updates .NET 10 needs for CET, the service exe dies before any of
-    /// our code runs, with exit code 0x80131506 (-2146233082 signed, 2148734214 unsigned) and
-    /// <see cref="CetMessage"/> on stderr. The decision is executed as it ships: each signal alone must
-    /// stop the install, and an ordinary pre-flight failure or a pass must not.
+    /// our code runs, with exit code 0x80131506 (-2146233082 signed) and <see cref="CetMessage"/> on stderr.
+    /// 0x80131506 is .NET's general fatal-error code (COR_E_EXECUTIONENGINE), so only the message stops the
+    /// install; the exit code alone keeps the ordinary failure path. The decision is executed as it ships.
     /// </summary>
     [Fact]
     public void TestCetStartFailure_RecognisesTheExitCodeAndTheMessage_AsShipped()
     {
         var cases = new (string Args, bool Expected)[]
         {
-            ("-2146233082 @()", true),
-            ("2148734214 @()", true),
+            /* The exit code alone is not CET: any fatal runtime error returns it. */
+            ("-2146233082 @()", false),
+            ("2148734214 @()", false),
+            ("-2146233082 @('Fatal error.', 'Some other runtime failure')", false),
             ("0 @('" + CetMessage.Replace("'", "''") + "')", true),
             ("1 @('Fatal error.', 'Your Windows doesn''t fully support CET. Please install all available Windows updates.')", true),
             ("-2146233082 @('" + CetMessage.Replace("'", "''") + "')", true),
@@ -477,6 +481,11 @@ public class DarlingRuntimePreflightTests
         var readme = ReadRepoFile(product, "README.md").ReplaceLineEndings("\n");
         Assert.Contains(CetMessage, readme, StringComparison.Ordinal);
         Assert.Contains("0x80131506", readme, StringComparison.Ordinal);
+        /* The undo is the registry way, proven on build 20348.5622; the cmdlet's own -Remove failed there. */
+        Assert.DoesNotContain(readme.Split((char)10), l => l.TrimStart().StartsWith("Set-ProcessMitigation", StringComparison.Ordinal) && l.Contains("-Remove", StringComparison.Ordinal));
+        Assert.Contains("Remove-ItemProperty", readme, StringComparison.Ordinal);
+        Assert.Contains("MitigationOptions, MitigationAuditOptions, EAFModules", readme, StringComparison.Ordinal);
+        Assert.Contains("20348.5622", readme, StringComparison.Ordinal);
         Assert.Contains("install all available Windows updates", readme, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("off one protection", readme, StringComparison.Ordinal);
 
@@ -488,7 +497,7 @@ public class DarlingRuntimePreflightTests
             var exe = match.Groups[1].Value + ".exe";
 
             Assert.Contains($"Set-ProcessMitigation -Name {exe} -Disable UserShadowStack", readme, StringComparison.Ordinal);
-            Assert.Contains($"Set-ProcessMitigation -Name {exe} -Remove -Disable UserShadowStack", readme, StringComparison.Ordinal);
+            Assert.Contains(exe, readme[readme.IndexOf("To undo it once Windows is patched", StringComparison.Ordinal)..], StringComparison.Ordinal);
         }
     }
 

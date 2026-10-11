@@ -45,21 +45,23 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
   Fatal error. Your Windows doesn't fully support CET. Please install all available Windows updates.
   ```
 
-  `install-darling.ps1` recognises that exit code and message in its pre-flight and stops with a plain message instead of asking whether to install anyway. The fix is to install all available Windows updates and restart. If you cannot do that yet, there is a short-term workaround. Run these from an elevated PowerShell before you install or start. Each turns off one protection (`UserShadowStack`, the hardware-enforced stack protection) for one Darling exe:
+  `install-darling.ps1` recognises that message in its pre-flight and stops with a plain message instead of asking whether to install anyway. The fix is to install all available Windows updates and restart. If you cannot do that yet, there is a short-term workaround. Run these from an elevated PowerShell before you install or start. Each turns off one protection (`UserShadowStack`, the hardware-enforced stack protection) for one Darling exe:
 
   ```powershell
   Set-ProcessMitigation -Name PerformanceMonitor.Darling.Service.exe -Disable UserShadowStack
   Set-ProcessMitigation -Name PerformanceMonitor.Darling.Viewer.exe -Disable UserShadowStack
   ```
 
-  This weakens that program's protection, so treat it as a stopgap. To undo it once Windows is patched:
+  This weakens that program's protection, so treat it as a stopgap. To undo it once Windows is patched, remove the values the first command wrote:
 
   ```powershell
-  Set-ProcessMitigation -Name PerformanceMonitor.Darling.Service.exe -Remove -Disable UserShadowStack
-  Set-ProcessMitigation -Name PerformanceMonitor.Darling.Viewer.exe -Remove -Disable UserShadowStack
+  $ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
+  foreach ($exe in 'PerformanceMonitor.Darling.Service.exe', 'PerformanceMonitor.Darling.Viewer.exe') {
+      Remove-ItemProperty -Path "$ifeo\$exe" -Name MitigationOptions, MitigationAuditOptions, EAFModules -ErrorAction SilentlyContinue
+  }
   ```
 
-  Both commands are described in Microsoft's [Set-ProcessMitigation](https://learn.microsoft.com/en-us/powershell/module/processmitigations/set-processmitigation) reference.
+  On Windows Server 2022 build 20348.5622, `Set-ProcessMitigation -Remove -Disable UserShadowStack` and `Set-ProcessMitigation -Reset` both failed to remove the setting (the first returned `C000000D`, the second "Invalid input parameters"), and the registry way below worked. The `Set-ProcessMitigation -Disable` command above stores the setting as three values (`MitigationOptions`, `MitigationAuditOptions`, `EAFModules`) under the exe's key in `Image File Execution Options`; the commands below remove only those values and leave any other value on that key alone. Restart the program afterwards. The first command is described in Microsoft's [Set-ProcessMitigation](https://learn.microsoft.com/en-us/powershell/module/processmitigations/set-processmitigation) reference.
 - **.NET 10 runtimes on the host**, from <https://dotnet.microsoft.com/download/dotnet/10.0>. Both
   shipped binaries are framework-dependent, and a stock Windows Server image has none of them:
   - **.NET Runtime 10 and ASP.NET Core Runtime 10** for the service. The simplest way to get both is the
