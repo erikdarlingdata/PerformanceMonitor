@@ -42,14 +42,34 @@ public sealed class PgDeadlockNormalizationTests
     private const string LegacyGraph =
         "Process 3101 waits for ShareLock on transaction 5501; blocked by process 3102.\n"
         + "Process 3102 waits for ShareLock on transaction 5500; blocked by process 3101.\n"
-        + "Process 3101: UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111\n"
-        + "Process 3102: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559";
+        + "Process 3101: UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111\n"
+        + "Process 3102: UPDATE accounts SET pin = '90X4' WHERE card = 5500005555555559";
 
-    private const string LegacyVictimStatement = "UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111";
+    private const string LegacyVictimStatement = "UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111";
 
-    private static readonly string[] s_secrets = ["4721", "9034", "4111111111111111", "5500005555555559"];
+    /* #5675: each secret holds a character no clock id can hold, or an eleven-digit run. See
+       EverySecretIsOneNoStoredClockCanContain. A four-digit PIN was a clock: 4721 is 17:47:21 at any hour. */
+    private static readonly string[] s_secrets = ["47Q1", "90X4", "4111111111111111", "5500005555555559"];
 
     /* ───────────────────────── pure ───────────────────────── */
+
+    /// <summary>
+    /// #5675: a planted secret must be one no stored clock can contain. The alert id is
+    /// <c>at-yyyyMMddTHHmmss.ffffff-pid</c>: every character in it is a digit, <c>a</c>, <c>t</c>, <c>T</c>,
+    /// <c>-</c> or <c>.</c>, and no run of its digits is longer than ten. A secret made only of those characters,
+    /// with no eleven-digit run, can match the id by chance. So each secret must hold a character outside that
+    /// set, or an eleven-digit run.
+    /// </summary>
+    [Fact]
+    public void EverySecretIsOneNoStoredClockCanContain()
+    {
+        foreach (var secret in s_secrets)
+        {
+            var clockAlphabet = secret.All(c => char.IsDigit(c) || "atT-.".Contains(c));
+            var longDigitRun = System.Text.RegularExpressions.Regex.IsMatch(secret, "[0-9]{11}");
+            Assert.True(!clockAlphabet || longDigitRun, $"Secret '{secret}' can match a clock id by chance.");
+        }
+    }
 
     /// <summary>
     /// Each read spells the raw-hash test out because its SQL is a constant; this holds every spelling to the
@@ -202,8 +222,8 @@ public sealed class PgDeadlockNormalizationTests
         return prefix + "ERROR:  deadlock detected\n"
             + prefix + $"DETAIL:  Process {victim} waits for ShareLock on transaction 5501; blocked by process {other}.\n"
             + $"\tProcess {other} waits for ShareLock on transaction 5500; blocked by process {victim}.\n"
-            + $"\tProcess {victim}: UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111\n"
-            + $"\tProcess {other}: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559\n"
+            + $"\tProcess {victim}: UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111\n"
+            + $"\tProcess {other}: UPDATE accounts SET pin = '90X4' WHERE card = 5500005555555559\n"
             + prefix + "HINT:  See server log for query details.\n";
     }
 
