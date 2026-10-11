@@ -30,7 +30,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $shape, $which = $Leg.Split('-')
 $svc = 'PerformanceMonitor Darling'
-$HandNamedBackup = 'darling.json.bak-before-edit'
+$HandNamedBackupName = 'darling.json.bak-before-edit'
 $work = 'C:\darling-shapes-work'
 $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { 'erikdarlingdata/PerformanceMonitor' }
 $tools = Join-Path $Workspace 'Darling\tools'
@@ -120,7 +120,7 @@ function New-Base([string]$version, [string]$root, [bool]$acceptWritable, [bool]
     # #5649: a backup the operator named by hand, put there before the base install so the release's own install
     # script and the service (both harden every darling.json.bak-* file) make it service-owned, the way a real one is
     # after a service start. The script under test must then accept it.
-    if ($handNamedBackup) { Set-Content -LiteralPath (Join-Path $root $HandNamedBackup) -Value $cfg }
+    if ($handNamedBackup) { Set-Content -LiteralPath (Join-Path $root $HandNamedBackupName) -Value $cfg }
     $script = Join-Path $root 'install-darling.ps1'
     $declared = @(Select-String -LiteralPath $script -Pattern '^\s*\[switch\]\$(\w+)' | ForEach-Object { $_.Matches[0].Groups[1].Value })
     $a = @(); foreach ($w in 'SkipPreflight', 'NoShortcuts') { if ($declared -contains $w) { $a += "-$w" } }
@@ -140,8 +140,8 @@ function New-Base([string]$version, [string]$root, [bool]$acceptWritable, [bool]
     if ($handNamedBackup) {
         # The shape only means something if the file really is the service's now. If the hardening did not make it so,
         # the leg is not testing the refusal it exists to prevent, so it fails here instead of passing for nothing.
-        $backup = Join-Path $root $HandNamedBackup
-        if (-not (Test-Path -LiteralPath $backup)) { Fail-Leg "the hand-named backup $HandNamedBackup is gone from $root after the base install" }
+        $backup = Join-Path $root $HandNamedBackupName
+        if (-not (Test-Path -LiteralPath $backup)) { Fail-Leg "the hand-named backup $HandNamedBackupName is gone from $root after the base install" }
         $owner = (Get-Acl -LiteralPath $backup).GetOwner([System.Security.Principal.SecurityIdentifier])
         $ownerName = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { '(untranslatable)' }
         Write-Host "owner of ${backup}: $ownerName"
@@ -255,7 +255,7 @@ switch ($Leg) {
         Expect-Success $r "$which-darling.ps1"
         if ($shape -eq 'U1') {
             # #5649: the service-owned hand-named backup does not refuse the run (Expect-Success above) and stays where it was.
-            if (-not (Test-Path -LiteralPath (Join-Path $root $HandNamedBackup))) { Fail-Leg "$which-darling.ps1 removed the hand-named backup $HandNamedBackup" }
+            if (-not (Test-Path -LiteralPath (Join-Path $root $HandNamedBackupName))) { Fail-Leg "$which-darling.ps1 removed the hand-named backup $HandNamedBackupName" }
         }
     }
     'U3-install' {
