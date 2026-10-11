@@ -229,20 +229,18 @@ public sealed class AlertSampleAgeSurfaceTests
     [Fact]
     public void TheTwinMcpTools_PublishTheSameNewestSampleShape()
     {
-        // Lite's get_alert_history builds source, instant_utc (round-trip text) and age_seconds (whole seconds)
-        // inline; Darling's goes through AlertNewestSampleWire. The names, the "o" format and the rounding must
-        // stay the same so the twin tools return identical fields.
+        // One definition by type, not two copies pinned equal by text: Lite's get_alert_history publishes
+        // AlertNewestSampleWire, the same record Darling's does (#5642 review), so the names, the "o" format and
+        // the age rendering cannot drift between the SKUs. Lite builds no inline copy of any field.
         var lite = ReadRepoFile("Lite/Mcp/McpAlertTools.cs");
-        Assert.Contains("source = sample.Source,", lite, StringComparison.Ordinal);
-        Assert.Contains("instant_utc = DateTime.SpecifyKind(sample.InstantUtc, DateTimeKind.Utc).ToString(\"o\"),", lite, StringComparison.Ordinal);
-        Assert.Contains("age_seconds = Math.Round(sample.Age.TotalSeconds, 0),", lite, StringComparison.Ordinal);
+        Assert.Contains("newest_sample = AlertNewestSampleWire.FromContextJson(r.ContextJson),", lite, StringComparison.Ordinal);
+        Assert.DoesNotContain("age_seconds", lite, StringComparison.Ordinal);
+        Assert.DoesNotContain("instant_utc", lite, StringComparison.Ordinal);
 
         var wire = ReadRepoFile("PerformanceMonitor.Notifications/AlertNewestSampleWire.cs");
         Assert.Contains("JsonPropertyName(\"source\")", wire, StringComparison.Ordinal);
         Assert.Contains("JsonPropertyName(\"instant_utc\")", wire, StringComparison.Ordinal);
         Assert.Contains("JsonPropertyName(\"age_seconds\")", wire, StringComparison.Ordinal);
-        Assert.Contains("ToString(\"o\", CultureInfo.InvariantCulture)", wire, StringComparison.Ordinal);
-        Assert.Contains("Math.Round(sample.Age.TotalSeconds, 0)", wire, StringComparison.Ordinal);
     }
 
     /* ---------------- the Viewer's alert detail ---------------- */

@@ -138,15 +138,9 @@ public sealed class McpAlertTools
                     detail_text = r.DetailText,
                     /* #5642: the newest sample the alert judged and how old it was when the alert fired, read off the
                        persisted context (computed once at fire time, never from the clock now). Null on a row with
-                       no sample time: written before the field existed, or from a source that has none. */
-                    newest_sample = r.NewestSample is { } sample
-                        ? new
-                        {
-                            source = sample.Source,
-                            instant_utc = DateTime.SpecifyKind(sample.InstantUtc, DateTimeKind.Utc).ToString("o"),
-                            age_seconds = Math.Round(sample.Age.TotalSeconds, 0),
-                        }
-                        : null,
+                       no sample time: written before the field existed, or from a source that has none. The shared
+                       wire type, the one Darling's get_alert_history publishes, so the two SKUs cannot drift. */
+                    newest_sample = AlertNewestSampleWire.FromContextJson(r.ContextJson),
                 };
             }).ToList();
 
