@@ -117,11 +117,27 @@ switch ($Mode) {
         $log = Join-Path $env:RUNNER_TEMP 'guard-watch.log'
         # The streams go to files: a detached child that inherits the step's pipes would hold the step open. The arguments are one
         # string with quotes around the two values that can hold a space (Start-Process does not quote an array's elements).
-        $process = Start-Process -FilePath 'pwsh' -PassThru `
-            -ArgumentList "-NoProfile -NonInteractive -File `"$self`" -Mode Watch -GuardJobName `"$GuardJobName`" -PollSeconds $PollSeconds" `
-            -RedirectStandardOutput $log -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'guard-watch.err')
-        Set-Content -Path $pidFile -Value $process.Id
-        Write-Host "::notice title=Guard watcher started::Watching the '$GuardJobName' job of this run every $PollSeconds seconds (watcher pid $($process.Id)). If it fails, this job stops and fails too."
+        $err = Join-Path $env:RUNNER_TEMP 'guard-watch.err'
+        $watchArgs = "-NoProfile -NonInteractive -File `"$self`" -Mode Watch -GuardJobName `"$GuardJobName`" -PollSeconds $PollSeconds"
+        if ($IsWindows) {
+            # A process the step starts itself dies with the step on a hosted Windows runner (measured on this PR's own CI:
+            # the watcher logged one poll and was gone). A process the WMI service creates is outside the step's job
+            # object, so it lives until the job ends or the Check step stops it.
+            $pwsh = (Get-Command pwsh).Source
+            # The WMI service gives the process ITS environment, not ours, so the four values the watcher reads are set here.
+            $setEnv = ('RUNNER_TEMP', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GH_TOKEN' | ForEach-Object { "set `"$_=$([Environment]::GetEnvironmentVariable($_))`"" }) -join ' && '
+            $commandLine = "cmd.exe /c `"$setEnv && `"$pwsh`" $watchArgs > `"$log`" 2> `"$err`"`""
+            $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine }
+            if ($created.ReturnValue -ne 0) { throw "could not start the watcher: Win32_Process.Create returned $($created.ReturnValue)" }
+            $watcherPid = $created.ProcessId
+        }
+        else {
+            $started = Start-Process -FilePath 'setsid' -PassThru -ArgumentList "pwsh $watchArgs" `
+                -RedirectStandardOutput $log -RedirectStandardError $err
+            $watcherPid = $started.Id
+        }
+        Set-Content -Path $pidFile -Value $watcherPid
+        Write-Host "::notice title=Guard watcher started::Watching the '$GuardJobName' job of this run every $PollSeconds seconds (watcher pid $watcherPid). If it fails, this job stops and fails too."
     }
     'Watch' {
         $ended = 0
@@ -151,7 +167,11 @@ switch ($Mode) {
             if (Test-Path $file) { Write-Host "--- $name (last 15 lines)"; Get-Content $file -Tail 15 }
         }
         if (Test-Path $pidFile) {
-            Stop-Process -Id ([int] (Get-Content $pidFile)) -Force -ErrorAction SilentlyContinue
+            $watcher = [int] (Get-Content $pidFile)
+            # The watcher is a command shell around pwsh on Windows: end the whole tree, deepest first.
+            $tree = @($watcher) + @(Get-Descendants (Get-ProcessTable) $watcher)
+            [array]::Reverse($tree)
+            foreach ($id in $tree) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
             Remove-Item $pidFile -ErrorAction SilentlyContinue
         }
         $deadline = (Get-Date).AddMinutes($CheckTimeoutMinutes)
