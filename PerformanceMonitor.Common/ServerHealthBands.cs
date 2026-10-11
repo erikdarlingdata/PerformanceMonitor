@@ -2245,8 +2245,8 @@ namespace PerformanceMonitor.Common
             double hoursSinceLastSuccess,
             double hoursSinceLastRun,
             int frequencyMinutes,
-            string? latestRunNote = null,
-            long trailingSuccessRuns = 0)
+            string? latestRunNote,
+            long trailingSuccessRuns)
         {
             if (totalRuns == 0)
             {
@@ -2336,8 +2336,10 @@ namespace PerformanceMonitor.Common
         /// (<see cref="RecoveryTrailingSuccessRuns"/> successes in a row), and the exception to the floor: a
         /// collector whose newest run did not succeed (<paramref name="trailingSuccessRuns"/> is 0) keeps the
         /// plain rate, so a few-run collector whose runs all failed is never read as healthy by the floor.
-        /// <paramref name="trailingSuccessRuns"/> 0 is also what a read that cannot see the newest runs (the
-        /// fleet roll-up's plain aggregates) passes, which keeps the old banding there.
+        /// <paramref name="trailingSuccessRuns"/> 0 is also what a row passes where no streak can exist (a
+        /// collector with no runs). The fleet roll-ups' plain aggregates cannot see the newest runs, so they
+        /// ask <see cref="RecoveryCouldChangeBand"/> which rows need the streak and read it for those alone
+        /// (#5666).
         /// </summary>
         private static bool FailureRateBandsWarning(
             long totalRuns, long errorCount, double failureRatePercent, long trailingSuccessRuns)
@@ -2354,6 +2356,34 @@ namespace PerformanceMonitor.Common
 
             return totalRuns >= MinimumRunsForFailureRate || (trailingSuccessRuns <= 0 && errorCount > 0);
         }
+
+        /// <summary>
+        /// #5666. Whether the newest-runs streak could move this row's band: the ladder says WARNING with no
+        /// streak and does not say WARNING with a full one. The fleet roll-ups band from aggregates alone, so they
+        /// read the streak only for the rows this returns true for, and none at all when no row does. Decided by
+        /// running <see cref="Classify"/> both ways rather than by restating its rules, so a later rule cannot
+        /// make this disagree with it. A row it returns true for may still band WARNING once the streak is
+        /// known (an alternating collector); it is never wrong in the other direction.
+        /// </summary>
+        public static bool RecoveryCouldChangeBand(
+            long totalRuns,
+            long successCount,
+            long errorCount,
+            long permissionDeniedCount,
+            long extensionMissingCount,
+            long abandonedCount,
+            double hoursSinceLastSuccess,
+            double hoursSinceLastRun,
+            int frequencyMinutes,
+            string? latestRunNote) =>
+            Classify(
+                totalRuns, successCount, errorCount, permissionDeniedCount, extensionMissingCount, abandonedCount,
+                hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes, latestRunNote,
+                trailingSuccessRuns: 0) == Warning
+            && Classify(
+                totalRuns, successCount, errorCount, permissionDeniedCount, extensionMissingCount, abandonedCount,
+                hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes, latestRunNote,
+                trailingSuccessRuns: RecoveryTrailingSuccessRuns) != Warning;
 
         /// <summary>
         /// #5646. The sentence a collector that RECOVERED carries beside its HEALTHY band, or null. Present

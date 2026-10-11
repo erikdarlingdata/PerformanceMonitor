@@ -162,7 +162,8 @@ public sealed class CollectorHealthClassifierTests
     {
         Assert.Equal(expected, CollectorHealthClassifier.Classify(
             totalRuns, successCount, errorCount, permissionDeniedCount, extensionMissingCount, abandonedCount,
-            hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes));
+            hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes,
+            latestRunNote: null, trailingSuccessRuns: 0)); // 0: the table's rows are counts only, no run history
     }
 
     /// <summary>
@@ -177,7 +178,8 @@ public sealed class CollectorHealthClassifierTests
     {
         Assert.Equal(CollectorHealthClassifier.Stopped, CollectorHealthClassifier.Classify(
             totalRuns: 882, successCount: 882, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
-            abandonedCount: 0, hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5));
+            abandonedCount: 0, hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5,
+            latestRunNote: null, trailingSuccessRuns: 0)); // 0: a count-only fixture, no run history
     }
 
 
@@ -481,7 +483,8 @@ public sealed class CollectorHealthClassifierTests
         CollectorHealthClassifier.Classify(
             totalRuns: 100, successCount: 100, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
             abandonedCount: 0, hoursSinceLastSuccess: hoursSinceLastSuccess, hoursSinceLastRun: hoursSinceLastRun,
-            frequencyMinutes: 5, latestRunNote: note);
+            frequencyMinutes: 5, latestRunNote: note,
+            trailingSuccessRuns: 0); // 0: the note is the input under test, not the newest runs
 
     /// <summary>The run still records SUCCESS, so the counts read clean; the newest run's note is the only
     /// record of the loss. Half or more of the attempted databases failing bands Warning, fewer stays Healthy.</summary>

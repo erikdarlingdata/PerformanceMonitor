@@ -266,10 +266,7 @@ public sealed partial class ViewerDataService
         -- #5646: the newest three runs, newest first, then the highest log_id.
         LEFT JOIN LATERAL
         (
-            SELECT CASE WHEN r.flags[1] = 1 AND r.flags[2] = 1 AND r.flags[3] = 1 THEN 3
-                        WHEN r.flags[1] = 1 AND r.flags[2] = 1 THEN 2
-                        WHEN r.flags[1] = 1 THEN 1
-                        ELSE 0 END AS trailing_success_runs
+            SELECT {CollectorTrailingRuns.StreakFromFlagsSql} AS trailing_success_runs
             FROM
             (
                 -- An ordered aggregate over the three rows, not a window function: the keyed lookups
@@ -277,9 +274,7 @@ public sealed partial class ViewerDataService
                 SELECT array_agg(x.ok ORDER BY x.collection_time DESC, x.log_id DESC) AS flags
                 FROM
                 (
-                    SELECT CASE WHEN v.status = 'SUCCESS'
-                                 AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-                                THEN 1 ELSE 0 END AS ok,
+                    SELECT {CollectorTrailingRuns.RunOkSql} AS ok,
                            v.collection_time,
                            v.log_id
                     FROM v_collection_log v
@@ -664,17 +659,19 @@ public sealed partial class ViewerDataService
         }
 
         var byServer = new Dictionary<int, List<CollectorHealthRow>>();
-        await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
-        while (await reader.ReadAsync(CancellationToken.None))
+        await using (var reader = await command.ExecuteReaderAsync(CancellationToken.None))
         {
-            var serverId = reader.GetInt32(0);
-            if (!byServer.TryGetValue(serverId, out var rows))
+            while (await reader.ReadAsync(CancellationToken.None))
             {
-                rows = new List<CollectorHealthRow>();
-                byServer[serverId] = rows;
-            }
+                var serverId = reader.GetInt32(0);
+                if (!byServer.TryGetValue(serverId, out var rows))
+                {
+                    rows = new List<CollectorHealthRow>();
+                    byServer[serverId] = rows;
+                }
 
-            rows.Add(MapFleetByServerRow(reader));
+                rows.Add(MapFleetByServerRow(reader));
+            }
         }
 
         foreach (var (serverId, rows) in byServer)
@@ -682,7 +679,55 @@ public sealed partial class ViewerDataService
             ApplyScheduledFrequencies(rows, serverId, scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList());
         }
 
+        /* #5666: after the cadence is stamped (the ladder reads it) and after the aggregate's reader has closed. */
+        await ApplyTrailingSuccessRunsAsync(_dataSource, byServer, windowStart, CancellationToken.None);
+
         return byServer;
+    }
+
+    /// <summary>
+    /// #5666: sets <see cref="CollectorHealthRow.TrailingSuccessRuns"/> on the fleet rows whose band the newest runs could change
+    /// (<see cref="CollectorHealthClassifier.RecoveryCouldChangeBand"/>), so a collector that recovered bands HEALTHY on the
+    /// Overview card as it does on its own Collection Health tab. The aggregate stays plain (#3735): the streak
+    /// comes from ONE follow-up statement through <see cref="CollectorTrailingRuns"/>, the definition the per-server read
+    /// shares, asked for just those rows and not run at all when none needs it. A row left unset keeps 0, the right
+    /// value for a row whose band does not turn on the streak.
+    /// </summary>
+    internal static async Task ApplyTrailingSuccessRunsAsync(
+        NpgsqlDataSource dataSource,
+        Dictionary<int, List<CollectorHealthRow>> byServer,
+        DateTime windowStart,
+        CancellationToken cancellationToken)
+    {
+        var pairs = new List<(int ServerId, string CollectorName)>();
+        foreach (var (serverId, serverRows) in byServer)
+        {
+            foreach (var r in serverRows)
+            {
+                if (r.RecoveryCouldChangeBand)
+                {
+                    pairs.Add((serverId, r.CollectorName));
+                }
+            }
+        }
+
+        if (pairs.Count == 0)
+        {
+            return;
+        }
+
+        var streaks = await CollectorTrailingRuns.ReadAsync(
+            dataSource, pairs, windowStart, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        foreach (var (serverId, serverRows) in byServer)
+        {
+            foreach (var r in serverRows)
+            {
+                if (streaks.TryGetValue((serverId, r.CollectorName), out var streak))
+                {
+                    r.TrailingSuccessRuns = streak;
+                }
+            }
+        }
     }
 
     /// <summary>Maps one row of <see cref="FleetCollectionHealthByServerSql"/> / its composed twin (ordinals
@@ -1116,7 +1161,7 @@ public class CollectorHealthRow
     /// #5646: how many of the collector's newest runs in a row succeeded, counted to
     /// <see cref="CollectorHealthClassifier.RecoveryTrailingSuccessRuns"/> and no further. The per-server read
     /// sets it from the newest runs (full timestamp precision, then the unique log id, newest first). A row
-    /// built from plain aggregates (the fleet roll-up) leaves it 0, which keeps the old failure-rate banding.
+    /// built from plain aggregates (the fleet roll-up) starts at 0 and the roll-up sets it (#5666) for the rows whose band it could change, so the fleet card and the server's tab band alike.
     /// </summary>
     public long TrailingSuccessRuns { get; set; }
 
@@ -1172,6 +1217,12 @@ public class CollectorHealthRow
         ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
             ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
             : 0);
+
+    /// <summary>#5666: whether the newest-runs streak could move this row's band
+    /// (<see cref="CollectorHealthClassifier.RecoveryCouldChangeBand"/>), over the same inputs <see cref="HealthStatus"/> reads.</summary>
+    internal bool RecoveryCouldChangeBand => CollectorHealthClassifier.RecoveryCouldChangeBand(
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote);
 
     /// <summary>
     /// #4999: the interval, in minutes, this collector is scheduled at on the server the row was read for, as

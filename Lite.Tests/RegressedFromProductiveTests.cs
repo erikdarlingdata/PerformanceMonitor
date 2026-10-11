@@ -98,7 +98,8 @@ public sealed class RegressedFromProductiveTests
             CollectorHealthClassifier.Healthy,
             CollectorHealthClassifier.Classify(
                 row.TotalRuns, row.SuccessCount, row.ErrorCount, 0, row.ExtensionMissingCount, 0,
-                2.0, 0.02, 1));
+                2.0, 0.02, 1,
+                null, 0)); // 0: a count-only fixture, no run history
     }
 
     /// <summary>The second direction: the same status with nothing ever produced keeps the benign band.</summary>

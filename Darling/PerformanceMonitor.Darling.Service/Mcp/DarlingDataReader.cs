@@ -3659,10 +3659,7 @@ internal static class DarlingDataReader
         -- idx_collection_log_watermark that stops after three rows.
         LEFT JOIN LATERAL
         (
-            SELECT CASE WHEN r.flags[1] = 1 AND r.flags[2] = 1 AND r.flags[3] = 1 THEN 3
-                        WHEN r.flags[1] = 1 AND r.flags[2] = 1 THEN 2
-                        WHEN r.flags[1] = 1 THEN 1
-                        ELSE 0 END AS trailing_success_runs
+            SELECT {CollectorTrailingRuns.StreakFromFlagsSql} AS trailing_success_runs
             FROM
             (
                 -- An ordered aggregate over the three rows, not a window function: the keyed lookups
@@ -3670,9 +3667,7 @@ internal static class DarlingDataReader
                 SELECT array_agg(x.ok ORDER BY x.collection_time DESC, x.log_id DESC) AS flags
                 FROM
                 (
-                    SELECT CASE WHEN v.status = 'SUCCESS'
-                                 AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-                                THEN 1 ELSE 0 END AS ok,
+                    SELECT {CollectorTrailingRuns.RunOkSql} AS ok,
                            v.collection_time,
                            v.log_id
                     FROM v_collection_log v
@@ -5178,9 +5173,15 @@ internal sealed class CollectorHealth
     /// #5646: how many of the collector's newest runs in a row succeeded, counted to
     /// <see cref="CollectorHealthClassifier.RecoveryTrailingSuccessRuns"/> and no further. The per-server read
     /// sets it from the newest runs (full timestamp precision, then the unique log id, newest first). A row
-    /// built from plain aggregates (the fleet roll-up) leaves it 0, which keeps the old failure-rate banding.
+    /// built from plain aggregates (the fleet roll-up) starts at 0 and the roll-up sets it (#5666) for the rows whose band it could change, so the fleet card and the server's tab band alike.
     /// </summary>
     public long TrailingSuccessRuns { get; set; }
+
+    /// <summary>#5666: whether the newest-runs streak could move this row's band
+    /// (<see cref="CollectorHealthClassifier.RecoveryCouldChangeBand"/>), over the same inputs <see cref="HealthStatus"/> reads.</summary>
+    internal bool RecoveryCouldChangeBand => CollectorHealthClassifier.RecoveryCouldChangeBand(
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote);
 
     /// <summary>#5646: the "recovered" sentence for a collector the recovery rule kept off WARNING, or null.
     /// Display text only; it carries the last failure time.</summary>

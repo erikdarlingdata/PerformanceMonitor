@@ -106,11 +106,11 @@ public sealed class CollectorHealthRecoveryTests
     [Fact]
     public void ARowFromPlainAggregates_NoNewestRuns_KeepsTheOldBanding()
     {
-        /* trailingSuccessRuns left at its default: the fleet roll-up's rows. Eight runs, two errors was
-           WARNING before and is again. */
+        /* trailingSuccessRuns 0: a row with no newest-run streak (the newest run failed). Eight runs, two
+           errors was WARNING before and is again. */
         Assert.Equal(
             CollectorHealthClassifier.Warning,
-            CollectorHealthClassifier.Classify(8, 6, 2, 0, 0, 0, 0.1, 0.1, 5));
+            CollectorHealthClassifier.Classify(8, 6, 2, 0, 0, 0, 0.1, 0.1, 5, null, 0));
     }
 
     [Fact]

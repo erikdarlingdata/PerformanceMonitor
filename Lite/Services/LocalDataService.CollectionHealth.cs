@@ -1290,7 +1290,7 @@ public class CollectorHealthRow
     /// #5646: how many of the collector's newest runs in a row succeeded, counted to
     /// <see cref="CollectorHealthClassifier.RecoveryTrailingSuccessRuns"/> and no further. The per-server read
     /// sets it from the newest runs (full timestamp precision, then the unique log id, newest first). A row
-    /// built from plain aggregates (the fleet roll-up) leaves it 0, which keeps the old failure-rate banding.
+    /// built from plain aggregates (a fleet roll-up, which Lite does not have) would start at 0.
     /// </summary>
     public long TrailingSuccessRuns { get; set; }
 
