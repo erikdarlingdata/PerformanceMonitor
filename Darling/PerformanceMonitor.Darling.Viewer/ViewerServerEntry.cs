@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
@@ -35,7 +34,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <see cref="ViewerServerStore"/>. The optional Entra UPN is a non-secret hint and IS persisted here
 /// (a small viewer adaptation of Lite, which parked it in the credential store).</para>
 /// </summary>
-public sealed class ViewerServerEntry : INotifyPropertyChanged
+public sealed class ViewerServerEntry
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public string ServerName { get; set; } = string.Empty;
@@ -126,28 +125,4 @@ public sealed class ViewerServerEntry : INotifyPropertyChanged
     /// <summary>"Enabled"/"Disabled" for the Manage Servers grid.</summary>
     [JsonIgnore]
     public string StatusDisplay => IsEnabled ? "Enabled" : "Disabled";
-
-    private string? _installedVersion;
-
-    /// <summary>
-    /// Viewer version populated by the Manage Servers window (runtime-only display field, not persisted).
-    /// Same value for every row since one viewer shows all servers.
-    /// </summary>
-    [JsonIgnore]
-    public string? InstalledVersion
-    {
-        get => _installedVersion;
-        set
-        {
-            if (_installedVersion == value)
-            {
-                return;
-            }
-
-            _installedVersion = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstalledVersion)));
-        }
-    }
-
-    public event PropertyChangedEventHandler? PropertyChanged;
 }

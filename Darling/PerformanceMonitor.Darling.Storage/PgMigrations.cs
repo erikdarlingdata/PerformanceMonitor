@@ -932,6 +932,17 @@ END $$;";
     private static readonly string V173Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.CreateSql;
 
     /// <summary>
+    /// V174 (#5655) — <c>config.service_version</c>: one row per service host with the product version the service reported at
+    /// start, its process start time and the time the row was written. The Manage Servers window reads it to show the SERVICE's
+    /// version once, in place of the viewer's own version on every server row. A separate table keyed by the service host, as
+    /// <c>config.password_key_service</c> is, and not a column of <c>config.config_service</c>, whose self-bump trigger would make
+    /// every service reload on each start. The text is on <see cref="ServiceVersionTable"/>, which the rung embeds. Catalog-only:
+    /// the table is created empty, and no GRANT is needed (the <c>config</c> schema's blanket SELECT and default privileges cover
+    /// it). <b>No Lite twin:</b> Lite has no PostgreSQL store, and there the app is the collector.
+    /// </summary>
+    private static readonly string V174Sql = ServiceVersionTable.CreateSql;
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1216,6 +1227,7 @@ $rung$;";
         new Migration(171, "query-store-interval-wide-partitioned", V171Sql),
         new Migration(172, "query-store-interval-latest-partitioned", V172Sql),
         new Migration(173, "query-store-compose-stamp", V173Sql),
+        new Migration(174, "service-version", V174Sql),
     };
 
     /// <summary>
