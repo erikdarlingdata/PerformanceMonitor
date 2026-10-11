@@ -86,7 +86,7 @@ jobs:
             & $exe @args2 -maxThreads unlimited > $log 2>&1
             $summary = Select-String -Path $log -Pattern 'Total:' | Select-Object -Last 1
             Write-Host "iteration $iteration (copy ${{ matrix.copy }}): $($summary.Line.Trim())"
-            if ($summary.Line -match 'Total: 0b') { Get-Content $log -TotalCount 15; throw 'the class filter matched no tests' }
+            if ($summary.Line -match 'Total: 0[^0-9]') { Get-Content $log -TotalCount 15; throw 'the class filter matched no tests' }
             $hit = Select-String -Path $log -Pattern 'ABusyTable_WarnsOnceOnTheThirdPass' | Where-Object { $_.Line -match 'FAIL' }
             if ($hit) {
               $busyFailures++
