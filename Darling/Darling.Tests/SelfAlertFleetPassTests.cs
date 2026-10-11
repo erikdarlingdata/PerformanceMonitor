@@ -536,7 +536,12 @@ public sealed class SelfAlertFleetPassTests
 
         var pause = source.IndexOf("if (!ShouldRunCollection(_paused))", loop, StringComparison.Ordinal);
         var pauseContinue = source.IndexOf("continue;", pause, StringComparison.Ordinal);
-        var launch = source.IndexOf("TryStartSelfAlertPass(sweepTargets, stoppingToken, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps));", loop, StringComparison.Ordinal);
+        /* #5642: the call carries the engine, the config and the notification service, so it spans lines. */
+        var launchMatch = System.Text.RegularExpressions.Regex.Match(
+            source[loop..],
+            @"TryStartSelfAlertPass\(\s*sweepTargets, stoppingToken, StoreConfigProvider\.ClampConcurrentSweeps\(config\.MaxConcurrentSweeps\),\s*engine, config, notificationService\);");
+        Assert.True(launchMatch.Success, "the pass launch no longer carries the engine, the config and the notification service");
+        var launch = loop + launchMatch.Index;
         var guard = source.IndexOf("var mayLaunchSweeps = _launchMemoryGuard.MayLaunch(", loop, StringComparison.Ordinal);
         var launchLoop = source.IndexOf("foreach (var server in sweepTargets)", loop, StringComparison.Ordinal);
         Assert.True(pause > 0 && pauseContinue > pause, "the pause gate was not found");
@@ -554,6 +559,24 @@ public sealed class SelfAlertFleetPassTests
         Assert.DoesNotContain("EvaluateServerAsync", body, StringComparison.Ordinal);
         Assert.DoesNotContain("NextSelfAlertSweep", body, StringComparison.Ordinal);
         Assert.DoesNotContain("NextCustomAlertSweep", body, StringComparison.Ordinal);
+
+        /* #5642: the alert evaluation and the pileup finding left the body for the pass. */
+        Assert.DoesNotContain("EvaluateAlertsAsync", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("EvaluateSameStatementPileupAsync", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("NextAlertSweep", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("NextPileupSweep", body, StringComparison.Ordinal);
+
+        var passStart = source.IndexOf("private async Task RunSelfAlertPassAsync(", StringComparison.Ordinal);
+        var passEnd = source.IndexOf("Counts the collector slots that came due", passStart, StringComparison.Ordinal);
+        Assert.True(passStart > 0 && passEnd > passStart, "the fleet pass was not found");
+        var pass = source.Substring(passStart, passEnd - passStart);
+        var selfAt = pass.IndexOf("EvaluateStoreAlertsAsync", StringComparison.Ordinal);
+        var alertAt = pass.IndexOf("EvaluateAlertsAsync(engine!", StringComparison.Ordinal);
+        var pileupAt = pass.IndexOf("EvaluateSameStatementPileupAsync(server", StringComparison.Ordinal);
+        Assert.True(selfAt > 0 && alertAt > selfAt, "self-alerts must come first in the pass lambda, then the alert evaluation");
+        Assert.True(pileupAt > alertAt, "the pileup step follows the alert step in the pass lambda");
+        Assert.Contains("NextAlertSweep", pass, StringComparison.Ordinal);
+        Assert.Contains("NextPileupSweep", pass, StringComparison.Ordinal);
 
         /* Shutdown waits for the tracked pass like it does for the ticks. */
         Assert.Contains("inFlightSweeps.Add(_selfAlertPass);", source, StringComparison.Ordinal);
