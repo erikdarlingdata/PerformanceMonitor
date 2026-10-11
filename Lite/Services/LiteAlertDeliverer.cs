@@ -185,6 +185,11 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
             var deliveryMode = AlertDeliveryModeResolver.Resolve(
                 _resolveServerDeliveryOverride(serverId), App.AlertDeliveryMode);
 
+            /* #5642: the sample-age line rides the history row's detail_text and every channel's prose exactly once,
+               whichever way the engine built the text. The age is the one the engine computed when the alert fired
+               (outcome.Context.NewestSample), never recomputed here; no line when the context carries none. */
+            var detailText = AlertDetailText.WithSampleAge(outcome.DetailText, outcome.Context);
+
             /* Only blocking/deadlocks ever routed through SendDetectedAlertAsync's #1141 split in
                the old loop; every other metric was a direct single send with its numerics. */
             /* #1839's "Blocking Wait Time" joins them: it carries the same blocked-process incident
@@ -194,13 +199,13 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 return await SendDetectedAlertAsync(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                     serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
+                    outcome.Muted, detailText, deliveryMode, cancellationToken);
             }
 
             return await _sendAlert(
                 outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                 serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                outcome.Muted, outcome.DetailText, deliveryMode, cancellationToken);
+                outcome.Muted, detailText, deliveryMode, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -246,7 +251,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 deliveries.Add(await _sendAlert(
                     metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
                     msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
-                    AlertContextBuilders.ContextToDetailText(msg.Context), deliveryMode, cancellationToken));
+                    AlertDetailText.WithSampleAge(AlertContextBuilders.ContextToDetailText(msg.Context), msg.Context),
+                    deliveryMode, cancellationToken));
             }
 
             /* N sends, N rows: the split reports the one delivery the engine acts on (#4822). */

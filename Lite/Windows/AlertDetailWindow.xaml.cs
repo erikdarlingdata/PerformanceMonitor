@@ -28,6 +28,15 @@ public partial class AlertDetailWindow : Window
         NotificationText.Text = item.NotificationType;
         StatusText.Text = item.StatusDisplay;
 
+        /* #5642: the age the alert recorded when it fired, from the persisted context; no row when it has none. */
+        var sampleAge = item.NewestSampleDisplay;
+        if (sampleAge.Length > 0)
+        {
+            SampleAgeText.Text = sampleAge;
+            SampleAgeLabel.Visibility = Visibility.Visible;
+            SampleAgeText.Visibility = Visibility.Visible;
+        }
+
         if (item.Muted)
             MutedBanner.Visibility = Visibility.Visible;
 
