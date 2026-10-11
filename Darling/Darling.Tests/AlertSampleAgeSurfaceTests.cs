@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// the deliverer persists it with the history row, and the web pages, the MCP <c>get_alert_history</c> read and
 /// the Viewer's alert detail read it back from the persisted context and never measure it again.
 /// </summary>
+[Trait("Reads", "Lite")]
 public sealed class AlertSampleAgeSurfaceTests
 {
     private const string Line = "Newest CPU sample: 15:43:29 UTC, 5m 20s old";

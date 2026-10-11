@@ -1325,7 +1325,7 @@ internal static partial class AlertNotebookEndpoint
     /// <summary>The <c>newest_sample</c> node of an alert row (#5642), shared by the notebook and the triage
     /// page so both publish the shape <c>get_alert_history</c> does: null when the row carries no sample age.</summary>
     internal static JsonNode? NewestSampleNode(string? contextJson) =>
-        AlertNewestSampleWire.FromContextJson(contextJson) is { } wire
+        AlertNewestSampleWire.FromContextJson(contextJson) is AlertNewestSampleWire wire
             ? JsonSerializer.SerializeToNode(wire)
             : null;
 
