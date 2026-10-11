@@ -250,9 +250,11 @@ public sealed class AlertEngineSampleAgeTests
     public void EveryFiringSite_StampsTheAge_ExceptTheFailedJobs()
     {
         var source = ReadRepoFile("PerformanceMonitor.Alerting", "AlertEngine.cs");
+        // The CPU site stamps through the CpuReadingSource constant, so the label search matches its name; pin its value too.
+        Assert.Contains("internal const string CpuReadingSource = \"CPU reading\";", source, StringComparison.Ordinal);
         foreach (var label in new[]
                  {
-                     "\"CPU\"", "\"blocked process\"", "\"blocking wait\"", "\"deadlock\"", "\"wait stats\"", "\"query snapshot\"",
+                     "CpuReadingSource", "\"blocked process\"", "\"blocking wait\"", "\"deadlock\"", "\"wait stats\"", "\"query snapshot\"",
                      "\"tempdb\"", "\"volume\"", "\"PVS\"", "\"file growth\"", "\"running job\"", "\"database state\"", "\"query store\""
                  })
         {
