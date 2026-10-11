@@ -6,7 +6,7 @@ name: Claude Auto Review
 # the `decide` job makes that call once:
 #   - opened, reopened, ready_for_review: a FULL review, at the tier described further down.
 #   - a push (synchronize): at most ONE follow-up review after each full one. It runs on Sonnet
-#     with 30 turns and covers only the commits since the commit the newest verdict reviewed. That
+#     with 100 turns and covers only the commits since the commit the newest verdict reviewed. That
 #     commit is compared with the pushed head FIRST, whatever kind the verdict is: only a head
 #     that is ahead of it is skipped or given a follow-up (a follow-up after a full review, no
 #     review after a follow-up). Everything else gets a FULL review: a push with no verdict yet
@@ -85,7 +85,7 @@ name: Claude Auto Review
 # Plus a model and a TIER: a paths-filter step routes changes to the shared libraries, the
 # Darling Storage/Analysis/Service trees, Lite's service/MCP/database layers, install/ and every
 # .sql file to a FULL pass (Opus, 1M context, 120 turns) and everything else (tests, docs, viewer
-# XAML, wwwroot) to a LIGHT pass (Sonnet, 30 turns). Same prompt, same verdict contract, one
+# XAML, wwwroot) to a LIGHT pass (Sonnet, 100 turns). Same prompt, same verdict contract, one
 # review step -- the guard counts that step's conclusion and the bot's reviews, and neither
 # accounting knows or cares which tier ran.
 on:
@@ -524,7 +524,7 @@ jobs:
           if [ "$tier" = full ]; then
             model='claude-opus-5[1m]'; max_turns=120
           else
-            model='claude-sonnet-5'; max_turns=30
+            model='claude-sonnet-5'; max_turns=100
           fi
           echo "tier=$tier -- model=$model -- max_turns=$max_turns"
           {
