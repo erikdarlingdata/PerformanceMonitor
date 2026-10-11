@@ -160,6 +160,8 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
+                    <!-- #5642: the age of the newest sample the alert judged, as it was when the alert fired. -->
+                    <DataGridTextColumn Binding="{Binding NewestSampleDisplay}" Width="270" Header="Newest Sample"/>
                     <DataGridTextColumn Binding="{Binding StatusDisplay}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">

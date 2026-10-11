@@ -651,4 +651,29 @@ public class AlertHistoryRow
     public bool IsCritical => AlertHistoryRowSeverity.IsCritical(MetricName, ContextJson);
     public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
 
+    /* #5642: how old the newest sample was when the alert FIRED, read off the context the row persisted. The engine
+       computed the age once at fire time and the history store kept it; this reads it back and never works it out
+       from the clock now, so a row opened a day later still says what the alert knew when it went out. Null on a
+       row written before the carrier existed, or one whose source had no sample time: no line then. */
+    private string? _newestSampleSourceJson;
+    private AlertNewestSample? _newestSample;
+    private bool _newestSampleRead;
+
+    public AlertNewestSample? NewestSample
+    {
+        get
+        {
+            if (!_newestSampleRead || !ReferenceEquals(_newestSampleSourceJson, ContextJson))
+            {
+                _newestSample = AlertContextSerializer.TryDeserialize(ContextJson, out var context) ? context.NewestSample : null;
+                _newestSampleSourceJson = ContextJson;
+                _newestSampleRead = true;
+            }
+
+            return _newestSample;
+        }
+    }
+
+    /// <summary>The one-line sample age the shared formatter prints everywhere else, or empty when the row has none.</summary>
+    public string NewestSampleDisplay => AlertDetailText.SampleAgeLine(NewestSample) ?? "";
 }
