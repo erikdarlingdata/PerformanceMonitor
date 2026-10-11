@@ -7244,9 +7244,12 @@ LIMIT 1";
 
     /// <summary>
     /// Builds this sweep's <see cref="AlertServerSnapshot"/> and runs the engine for one
-    /// connected server. The CPU pair mirrors what Lite's overview summary carries (the latest
+    /// server with a runtime (#5642: the live one, else the last known one, so a dropped connection is still
+    /// evaluated from the store). The CPU pair mirrors what Lite's overview summary carries (the latest
     /// cpu_utilization_stats sample; total = SQL + other-process, null when no SQL sample);
-    /// isOnline is true by definition here (a connected runtime) and suppression is always false
+    /// isOnline is always passed true, which is NOT a statement that the server is connected: the only
+    /// consumer is the failed-jobs check, which reads the msdb cache and returns empty once the cache is
+    /// stale, so a dropped server yields no failed-jobs fire. Suppression is always false
     /// (headless — suppression is an engine INPUT owned by interactive hosts). Failure-isolated:
     /// a failed sweep logs and retries on the next cadence tick, mirroring the collector loop.
     /// </summary>
@@ -7315,6 +7318,7 @@ LIMIT 1";
             var snapshot = new AlertServerSnapshot(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                 runtime.Config.DisplayName,
+                /* Not "connected" (#5642): see the method summary. Gates only the cache-backed failed-jobs check. */
                 IsOnline: true,
                 SqlCpuPercent: sqlCpu,
                 TotalCpuPercent: totalCpu,
