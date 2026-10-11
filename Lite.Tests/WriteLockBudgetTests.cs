@@ -340,15 +340,15 @@ public sealed class WriteLockBudgetTests
                                  !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal)))
         {
             var relative = Path.GetFileName(path);
-            var code = File.ReadAllText(path);
+            /* The shared walk, not a line-prefix filter: it blanks comment and string text and keeps every
+               newline, so a call named in prose (a /// line, a // line, a block comment's continuation
+               line) is not a site, and the declaration regex below still reads real code. */
+            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
             foreach (Match site in call.Matches(code))
             {
                 var line = code.LastIndexOf('\n', site.Index);
                 var lineText = code.Substring(line + 1, code.IndexOf('\n', site.Index) - line - 1);
-                if (lineText.TrimStart().StartsWith("//", StringComparison.Ordinal) ||
-                    lineText.TrimStart().StartsWith("*", StringComparison.Ordinal) ||
-                    lineText.Contains("///", StringComparison.Ordinal) ||
-                    lineText.Contains("internal async Task<LockedConnection>", StringComparison.Ordinal))
+                if (lineText.Contains("internal async Task<LockedConnection>", StringComparison.Ordinal))
                 {
                     continue;
                 }
