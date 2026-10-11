@@ -50,15 +50,15 @@ public sealed class PgDeadlockRemaskTests
     private const string LegacyGraph =
         "Process 3101 waits for ShareLock on transaction 5501; blocked by process 3102.\n"
         + "Process 3102 waits for ShareLock on transaction 5500; blocked by process 3101.\n"
-        + "Process 3101: UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111\n"
-        + "Process 3102: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559";
+        + "Process 3101: UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111\n"
+        + "Process 3102: UPDATE accounts SET pin = '90X4' WHERE card = 5500005555555559";
 
-    private const string LegacyVictimStatement = "UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111";
+    private const string LegacyVictimStatement = "UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111";
 
     /* #5675: each secret holds a character no clock id can hold, or an eleven-digit run. See
        EverySecretIsOneNoStoredClockCanContain. A four-digit PIN can match a clock reading, such as 17:47:21 with
        its colons dropped. */
-    private static readonly string[] s_secrets = ["4721", "9034", "4111111111111111", "5500005555555559", "Leak4012"];
+    private static readonly string[] s_secrets = ["47Q1", "90X4", "4111111111111111", "5500005555555559", "Leak4012"];
 
     /* A store's log-hash key (#4004), fixed so the expected values are reproducible. */
     private static readonly PgLogHashKey s_key = new(Enumerable.Range(1, PgLogHashKey.KeyLength).Select(i => (byte)i).ToArray());
@@ -350,7 +350,7 @@ public sealed class PgDeadlockRemaskTests
         await PlantAsync(connection, atA.AddDays(1), atA, 3101, "A", PgDeadlockLogParser.HashOf(LegacyGraph), LegacyVictimStatement, LegacyGraph, ct);
         await PlantAsync(connection, atB.AddMinutes(1), atB, 4101, "B", PgDeadlockLogParser.HashOf(graphB), null, graphB, ct);
         await PlantAsync(connection, atD.AddMinutes(1), atD, 5101, "D", PgDeadlockLogParser.HashOf(graphD),
-            "UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111", graphD, ct);
+            "UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111", graphD, ct);
         var capturedD = Assert.Single(PgDeadlockLogParser.Extract(Report(atD, 5101, 5102)));
         await PlantAsync(connection, atD.AddMinutes(6), atD, 5101, "D", capturedD.DeadlockHash, capturedD.VictimStatement, capturedD.GraphText, ct);
         var capturedC = Assert.Single(PgDeadlockLogParser.Extract(Report(atC, 6101, 6102)));
@@ -515,7 +515,7 @@ public sealed class PgDeadlockRemaskTests
         var cut = "Process 3101 waits for ShareLock on transaction 5501; blocked by process 3102.\n"
             + "Process 3102 waits for ShareLock on transaction 5500; blocked by process 3101.\n"
             + "Process 3101: UPDATE accounts SET pin = '47\n"
-            + "Process 3102: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559";
+            + "Process 3102: UPDATE accounts SET pin = '90X4' WHERE card = 5500005555555559";
         var (_, cutGraph, cutHash) = PgDeadlockRemask.RemaskReport(at, null, cut);
         AssertNoSecret(cutGraph);
         Assert.Equal(PgDeadlockLogParser.NormalizeGraph(cut, complete: false), cutGraph);
@@ -1363,7 +1363,7 @@ WHERE victim_pid = 10004", ct);
         var (early, earlyContext) = LegacyFindingAlert(legacyDrillDown, legacyStory, "4012e0e000000000");
         await PlantAlertAsync(connection, PgDeadlockRemask.FindingAlertSectionSince.AddMinutes(-1), null, earlyContext, ct, early);
         Assert.Contains(PgDeadlockLogParser.HashOf(LegacyGraph), keptContext, StringComparison.Ordinal);
-        Assert.Contains("4721", keptContext, StringComparison.Ordinal);
+        Assert.Contains("47Q1", keptContext, StringComparison.Ordinal);
 
         var progress = new PgDeadlockRemask.RemaskProgress();
         await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), ct);
@@ -1570,13 +1570,13 @@ INSERT INTO pg_deadlocks
     (collection_id, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count, deadlock_hash, lock_modes, resources, victim_statement, graph_text)
 SELECT $1 + g, $2 + g * interval '1 minute', $3, $4, $2 + g * interval '1 minute' - interval '5 seconds', 10000 + g, 2,
        upper(left(encode(sha256(convert_to(t.graph, 'UTF8')), 'hex'), 32)), 'ShareLock', 'transaction 5500, transaction 5501',
-       'UPDATE accounts SET pin = ''4721'' WHERE id = ' || g, t.graph
+       'UPDATE accounts SET pin = ''47Q1'' WHERE id = ' || g, t.graph
 FROM generate_series(1, $5) AS g
 CROSS JOIN LATERAL (SELECT
     'Process ' || (10000 + g) || ' waits for ShareLock on transaction 5501; blocked by process ' || (20000 + g) || '.' || chr(10)
     || 'Process ' || (20000 + g) || ' waits for ShareLock on transaction 5500; blocked by process ' || (10000 + g) || '.' || chr(10)
-    || 'Process ' || (10000 + g) || ': UPDATE accounts SET pin = ''4721'' WHERE id = ' || g || chr(10)
-    || 'Process ' || (20000 + g) || ': UPDATE accounts SET pin = ''9034'' WHERE id = ' || g AS graph) AS t", connection);
+    || 'Process ' || (10000 + g) || ': UPDATE accounts SET pin = ''47Q1'' WHERE id = ' || g || chr(10)
+    || 'Process ' || (20000 + g) || ': UPDATE accounts SET pin = ''90X4'' WHERE id = ' || g AS graph) AS t", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(DateTime.SpecifyKind(from, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(ServerId);
@@ -1824,8 +1824,8 @@ VALUES ($1, $2, $3, $4, $9, 1, 'deadlocks', $7, $8, $5, split_part($7, ' → ', 
         return prefix + "ERROR:  deadlock detected\n"
             + prefix + $"DETAIL:  Process {victim} waits for ShareLock on transaction 5501; blocked by process {other}.\n"
             + $"\tProcess {other} waits for ShareLock on transaction 5500; blocked by process {victim}.\n"
-            + $"\tProcess {victim}: UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111\n"
-            + $"\tProcess {other}: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559\n"
+            + $"\tProcess {victim}: UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111\n"
+            + $"\tProcess {other}: UPDATE accounts SET pin = '90X4' WHERE card = 5500005555555559\n"
             + prefix + "HINT:  See server log for query details.\n";
     }
 

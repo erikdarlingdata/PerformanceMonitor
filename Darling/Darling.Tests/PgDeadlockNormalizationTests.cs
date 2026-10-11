@@ -48,7 +48,7 @@ public sealed class PgDeadlockNormalizationTests
     private const string LegacyVictimStatement = "UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111";
 
     /* #5675: each secret holds a character no clock id can hold, or an eleven-digit run. See
-       EverySecretIsOneNoStoredClockCanContain. A four-digit PIN was a clock: 4721 is 17:47:21 at any hour. */
+       EverySecretIsOneNoStoredClockCanContain. A four-digit numeric PIN could be a clock: an alert id built from the time of day holds any such run of digits. */
     private static readonly string[] s_secrets = ["47Q1", "90X4", "4111111111111111", "5500005555555559"];
 
     /* ───────────────────────── pure ───────────────────────── */
