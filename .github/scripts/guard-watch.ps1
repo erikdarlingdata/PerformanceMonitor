@@ -13,6 +13,7 @@
       Start  Launches a detached copy of this script in the Watch mode and returns at once.
       Watch  Polls the run's jobs through the API. When the Guard tests job ends in anything but success, it ends the
              process trees that the runner's worker is running for the CURRENT step (shell, dotnet, docker, ...).
+             It leaves the worker's console host and the runner's helpers running: ending those fails every later step (#5669).
              The step ends non-zero, the job's later default-condition steps are skipped, and the job fails.
       Check  The job's last step (if: always()). Stops the watcher, waits for the Guard tests job to finish if it has
              not (the `build` job: it is a required check and nothing else reads the guard for it), and fails the job
@@ -84,9 +85,24 @@ function Get-Descendants([hashtable] $table, [int] $root) {
     return $found
 }
 
+function Get-ProcessNames {
+    # pid -> process name (no extension), for every process.
+    $names = @{}
+    foreach ($p in Get-Process -ErrorAction SilentlyContinue) { $names[[int] $p.Id] = $p.ProcessName }
+    return $names
+}
+
+function Test-KeepRunning([string] $name) {
+    # Not part of the step: the console host the worker keeps for every step it starts (ending it makes every later
+    # step fail to start with 0xC0000142, STATUS_DLL_INIT_FAILED, measured on this PR's own CI) and the runner's own
+    # helper processes. Only the step's process tree is ended.
+    return ($name -ieq 'conhost') -or ($name -like 'Runner.*') -or ($name -like 'Agent.*')
+}
+
 function Stop-CurrentStep {
-    # The runner's worker starts one process per step. Everything under the worker except this watcher's own tree is
-    # the step that is running now. Returns how many top-level processes were ended.
+    # The runner's worker starts one process per step. Everything under the worker except this watcher's own tree and
+    # the processes the worker keeps (see Test-KeepRunning) is the step that is running now. Returns how many
+    # top-level processes were ended.
     $workers = @(Get-Process -Name 'Runner.Worker' -ErrorAction SilentlyContinue)
     Write-Host "guard-watch: $($workers.Count) Runner.Worker process(es): $(($workers | ForEach-Object { $_.Id }) -join ',')."
     if ($workers.Count -eq 0) {
@@ -94,18 +110,22 @@ function Stop-CurrentStep {
         return 0
     }
     $table = Get-ProcessTable
+    $names = Get-ProcessNames
     $ended = 0
     foreach ($worker in $workers) {
         $children = @($table.GetEnumerator() | Where-Object { $_.Value -eq $worker.Id } | ForEach-Object { [int] $_.Key })
-        Write-Host "guard-watch: worker $($worker.Id) has child processes: $($children -join ',')."
+        Write-Host "guard-watch: worker $($worker.Id) has child processes: $(($children | ForEach-Object { "$_ ($($names[$_]))" }) -join ', ')."
         foreach ($child in $children) {
+            if (Test-KeepRunning $names[$child]) { Write-Host "guard-watch: left pid $child ($($names[$child])) running; it is not the step."; continue }
             $tree = @($child) + @(Get-Descendants $table $child)
             if ($tree -contains $PID) { continue }
+            # A console host inside the step's tree is left alone too; the step's own processes end around it.
+            $tree = @($tree | Where-Object { -not (Test-KeepRunning $names[$_]) })
             # Deepest first, so a parent is not left to respawn a child.
             [array]::Reverse($tree)
             foreach ($id in $tree) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
             $ended++
-            Write-Host "guard-watch: ended the step process tree rooted at pid $child ($($tree.Count) processes)."
+            Write-Host "guard-watch: ended the step process tree rooted at pid $child ($($names[$child]); $($tree.Count) processes)."
         }
     }
     return $ended

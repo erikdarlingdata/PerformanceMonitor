@@ -425,6 +425,28 @@ public sealed class GuardStageWorkflowTests
     }
 
     /// <summary>
+    /// #5669: the kill ends only the running step's process tree. The first planted failure ended every child of the
+    /// runner's worker, the console host included, and every later step (the guard check, the failure uploads, the post
+    /// steps) died at start with 0xC0000142. The worker's console host and the runner's helpers are left running, in the
+    /// top-level children and inside the step's tree.
+    /// </summary>
+    [Fact]
+    public void TheGuardWatcher_LeavesTheConsoleHostAndRunnerHelpersRunning_SoTheLaterStepsStart()
+    {
+        var script = RepoFile.ReadRepoFileLf(".github", "scripts", "guard-watch.ps1");
+
+        var keep = script[script.IndexOf("function Test-KeepRunning", StringComparison.Ordinal)..script.IndexOf("function Stop-CurrentStep", StringComparison.Ordinal)];
+        Assert.Contains("'conhost'", keep, StringComparison.Ordinal);
+        Assert.Contains("'Runner.*'", keep, StringComparison.Ordinal);
+
+        var stop = script[script.IndexOf("function Stop-CurrentStep", StringComparison.Ordinal)..script.IndexOf("switch ($Mode)", StringComparison.Ordinal)];
+        /* Checked on the worker's direct children, then again on the members of the step's tree, before any Stop-Process. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(stop, @"\(Test-KeepRunning").Count);
+        Assert.True(stop.IndexOf("if (Test-KeepRunning", StringComparison.Ordinal) < stop.IndexOf("Stop-Process", StringComparison.Ordinal));
+        Assert.True(stop.IndexOf("-not (Test-KeepRunning", StringComparison.Ordinal) < stop.IndexOf("Stop-Process", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// #5459 change 2: the Guard job uploads the built Darling.Tests right after its build and BEFORE it runs a test (a
     /// guard failure still leaves the artifact), with the producer's workspace and sha beside it, and publishes the
     /// artifact name as a job output only when the upload succeeded. The one consumer is the whole-tree guards job; since
