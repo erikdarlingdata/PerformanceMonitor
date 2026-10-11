@@ -401,7 +401,7 @@ SELECT md5(
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
             await using (var transaction = await connection.BeginTransactionAsync(ct))
             {
-                await using var command = new NpgsqlCommand(PgMigrations.Scripts[^1].Sql, connection, transaction) { CommandTimeout = 120 };
+                await using var command = new NpgsqlCommand(PgMigrations.Scripts.Single(s => s.Version == QueryStoreComposeStamp.RungVersion).Sql, connection, transaction) { CommandTimeout = 120 };
                 await command.ExecuteNonQueryAsync(ct);
                 await transaction.CommitAsync(ct);
             }
@@ -491,7 +491,7 @@ SELECT md5(
             /* The tables are created AFTER the role's default privileges: only the schema's defaults can give it the SELECT. */
             await ExecAsync(connection, "DROP TRIGGER IF EXISTS trg_query_store_compose_stamp_late_ins ON collect.query_store_interval_wide; DROP TRIGGER IF EXISTS trg_query_store_compose_stamp_late_upd ON collect.query_store_interval_wide;"
                 + " DROP TABLE collect.query_store_compose_stamp_hours, collect.query_store_compose_stamp_built, collect.query_store_compose_stamp", ct);
-            await ExecAsync(connection, PgMigrations.Scripts[^1].Sql, ct);
+            await ExecAsync(connection, PgMigrations.Scripts.Single(s => s.Version == QueryStoreComposeStamp.RungVersion).Sql, ct);
 
             await ExecAsync(connection, "SET ROLE " + Role, ct);
             foreach (var table in new[] { QueryStoreComposeStamp.Table, QueryStoreComposeStamp.BuiltTable, QueryStoreComposeStamp.HoursTable })

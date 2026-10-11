@@ -31,7 +31,8 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
      standalone ASP.NET Core Runtime installer does not include the base runtime; the Hosting Bundle
      does. Part of the pre-flight, so -SkipPreflight skips it.
   2. Optional pre-flight: runs `--test-connection` and shows the per-server PASS/FAIL lines
-     (continue-or-abort prompt on failure; -SkipPreflight to skip).
+     (continue-or-abort prompt on failure; -SkipPreflight to skip). STOPS (exit 5) instead of prompting when
+     the exe prints "doesn't fully support CET": Windows needs its updates (#5651).
   3. Registers the Windows Event Log source 'PerformanceMonitor Darling' (requires elevation -
      the service's own virtual account cannot; without it Event Log diagnostics are silently
      dropped. The file log under %ProgramData%\PerformanceMonitorDarling\logs works regardless).
@@ -1337,12 +1338,42 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 }
 
 # -- 2. Pre-flight --------------------------------------------------------------------------------
+# A Windows that has not had its updates cannot start a .NET 10 app on a CPU with CET (#5651). The runtime
+# dies before any of our code runs, with exit code 0x80131506 and this text on stderr:
+#   Fatal error. Your Windows doesn't fully support CET. Please install all available Windows updates.
+# Without this check the failure below reads "the config is invalid or a server is unreachable", which points
+# at the wrong file. Only the message counts: 0x80131506 is .NET's general fatal-error code
+# (COR_E_EXECUTIONENGINE), not a CET-only code, so an exit code of 0x80131506 with no such text keeps the
+# ordinary failure path below. $ExitCode is kept in the signature for the call site and for a future signal.
+function Test-CetStartFailure([int64]$ExitCode, [string[]]$Output) {
+    foreach ($line in @($Output)) {
+        if ("$line" -match "doesn't fully support CET") { return $true }
+    }
+    return $false
+}
+
 if (-not $SkipPreflight) {
     Write-Host 'Pre-flight: validating darling.json and probing every configured server (--test-connection)...'
-    & $serviceExe --test-connection
-    if ($LASTEXITCODE -ne 0) {
+    # Show each line as it arrives AND keep it, so the CET check can read what the exe said. 2>&1 on a native
+    # exe turns each stderr line into an error record, which -ErrorAction Stop would throw on; the exit code
+    # below is what decides, so the preference is relaxed for this one call only.
+    $savedErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $preflightOutput = @(& $serviceExe --test-connection 2>&1 | ForEach-Object { Write-Host "$_"; "$_" })
+    $preflightExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedErrorAction
+    if (Test-CetStartFailure $preflightExit $preflightOutput) {
         Write-Host ''
-        Write-Host "Pre-flight FAILED (exit $LASTEXITCODE) - the config is invalid or a server is unreachable." -ForegroundColor Yellow
+        Write-Host 'ERROR: Windows on this machine is missing updates that .NET 10 needs, so the service cannot start.' -ForegroundColor Red
+        Write-Host 'The service exe printed the CET start error (Your Windows doesn''t fully support CET).' -ForegroundColor Red
+        Write-Host 'Install all available Windows updates, restart, and run this script again. Nothing was installed.' -ForegroundColor Yellow
+        Write-Host 'If the updates cannot go on yet, the README (Prerequisites) has a workaround. It turns off one' -ForegroundColor Yellow
+        Write-Host 'protection (UserShadowStack) for the Darling exes, and shows the command that undoes it.' -ForegroundColor Yellow
+        exit 5
+    }
+    if ($preflightExit -ne 0) {
+        Write-Host ''
+        Write-Host "Pre-flight FAILED (exit $preflightExit) - the config is invalid or a server is unreachable." -ForegroundColor Yellow
         $answer = Read-Host 'Install anyway? A monitoring service may legitimately be installed while a target is down. [y/N]'
         if ($answer -notmatch '^[Yy]') { exit 3 }
     }
