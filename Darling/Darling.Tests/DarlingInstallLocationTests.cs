@@ -4132,6 +4132,66 @@ function Get-CimInstance {
         }
     }
 
+    /// <summary>
+    /// #5673: a path value in darling.json that names a network share or a device (it starts with two slashes or two
+    /// backslashes) is not looked up and counts as Incomplete, so the refusal advice never waits on a remote host. A
+    /// value inside the folder is still listed. Both scripts, both shells.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheConfiguredPaths_DoNotLookUpAValueThatNamesANetworkShare_AndMarkTheListIncomplete(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingConfiguredPathsUnder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $old = Join-Path $env:TEMP ('pm5673-unc-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $old -Force | Out-Null
+            $json = $old -replace '\\', '\\'
+            try {
+                Set-Content -LiteralPath (Join-Path $old 'darling.json') -Value (@(
+                    '{',
+                    '  "tls": { "pfxPath": "\\\\192.0.2.1\\share\\dir~1\\x.pfx",',
+                    '            "certPath": "@@\\good\\x.pem" },',
+                    '  "smtp": { "password": "file:\\\\192.0.2.1\\share\\dir~1\\p.txt" },',
+                    '  "other": { "token": "file://192.0.2.1/share/dir~1/t.txt" }',
+                    '}') -join "`n").Replace('@@', $json)
+                $watch = [Diagnostics.Stopwatch]::StartNew()
+                $r = Get-DarlingConfiguredPathsUnder $old
+                $watch.Stop()
+                'lines=' + @($r.Lines).Count
+                'incomplete=' + $r.Incomplete
+                'quick=' + ($watch.ElapsedMilliseconds -lt 5000)
+                'good=' + (@($r.Lines | Where-Object { $_ -like '*good\x.pem*' }).Count)
+            }
+            finally {
+                Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("lines=1", answers);
+        Assert.Contains("good=1", answers);
+        Assert.Contains("incomplete=True", answers);
+        Assert.Contains("quick=True", answers);
+    }
+
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>
     private static void AppendPathHelpers(StringBuilder probe, string script)
     {

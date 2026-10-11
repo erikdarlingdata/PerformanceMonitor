@@ -797,7 +797,8 @@ function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingSe
 # comment-stripped text, as Get-DarlingExtraServiceWriteDirectories does, because Windows PowerShell 5.1's
 # ConvertFrom-Json rejects comments and trailing commas. Each value is read on its own, so one that cannot be read as a path
 # is left out and the rest still print: a value holding a control character, a line break or any of < > | " is
-# left out, so is one over 260 characters, and at most 10 are listed. A darling.json that cannot be read counts
+# left out, so is one over 260 characters, and a value that starts with two slashes or two backslashes (a network share
+# or device path) is not looked up and counts as Incomplete, and at most 10 are listed. A darling.json that cannot be read counts
 # as Incomplete; a missing one names nothing. Kept byte-identical in install-darling.ps1 and
 # upgrade-darling.ps1.
 function Get-DarlingConfiguredPathsUnder([string]$folder) {
@@ -820,6 +821,7 @@ function Get-DarlingConfiguredPathsUnder([string]$folder) {
         try {
             $value = ($pair[1] -replace '\\\\', '\').Trim()
             if ($value.Length -gt 260 -or $value -match '[\p{C}\p{Zl}\p{Zp}<>|"]') { $incomplete = $true; continue }
+            if ($value -match '^(\\\\|//)') { $incomplete = $true; continue }
             if ($value -and [IO.Path]::IsPathRooted($value) -and (Test-PathIsAtOrUnder $value $folder)) {
                 $found += "`"$value`" ($($pair[0]))"
             }
