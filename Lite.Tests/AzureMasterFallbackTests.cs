@@ -211,24 +211,65 @@ public class AzureMasterFallbackTests
     }
 
     /// <summary>
-    /// Every other reason keeps the combined message. The decision is the error number, not the words: a reason
-    /// that merely says 40615 does not get the firewall-only message when the number the caller read differs.
+    /// A known error number that is not 40615 (4060, 18456) has ruled the firewall out, so the message is the set-a-Database
+    /// advice alone. The decision is the error number, not the words: a reason that merely says 40615 gets neither the
+    /// firewall-only message nor firewall advice when the number the caller read differs.
     /// </summary>
     [Theory]
     [InlineData(4060)]
     [InlineData(18456)]
-    [InlineData(null)]
-    public void Any_Other_Reason_Keeps_The_Firewall_Then_Set_Database_Message(int? errorNumber)
+    public void A_Known_Non_Firewall_Error_Number_Has_Set_Database_Advice_And_No_Firewall_Text(int errorNumber)
     {
         var ex = Assert.Throws<InvalidOperationException>(
             () => RemoteCollectorService.FallbackDatabaseList(
                 Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
                 errorNumber: errorNumber, serverMessage: FirewallMessage));
 
-        Assert.Contains("firewall did not allow this client's IP address", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("set a Database for", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("can open a user database but not master", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("firewall", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("40615, the", ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("192.0.2.1", ex.Message, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "If this login can open a user database but not master, set a Database for 'azure-logical-server' " +
+            "so database-scoped collectors have something to read.",
+            ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>With no error number the caller cannot rule the firewall out, so the combined text stays.</summary>
+    [Fact]
+    public void No_Error_Number_Keeps_The_Firewall_Then_Set_Database_Message()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RemoteCollectorService.FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: null, serverMessage: FirewallMessage));
+
+        Assert.Contains(
+            "If the error is 40615, the Azure firewall did not allow this client's IP address: " +
+            "add a firewall rule for it, either a server-level rule or a database-level rule in master. " +
+            "If this login can open a user database but not master, set a Database for 'azure-logical-server' " +
+            "so database-scoped collectors have something to read.",
+            ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.1", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The client IP is the only thing read out of the server's text. Documentation addresses only.</summary>
+    [Theory]
+    [InlineData("Client with IP address '192.0.2.1' is not allowed to access the server.", "192.0.2.1")]
+    [InlineData("Client with IP address '2001:db8::1' is not allowed to access the server.", "2001:db8::1")]
+    public void ExtractClientIp_Reads_An_Ipv4_Or_Ipv6_Address(string message, string expected)
+    {
+        Assert.Equal(expected, AzureMasterFallbackMessage.ExtractClientIp(message));
+    }
+
+    [Theory]
+    [InlineData("Client with IP address '<b>x</b>' is not allowed to access the server.")]
+    [InlineData("Client with IP address '{0}' is not allowed to access the server.")]
+    [InlineData("Ein anderer Text ohne Adresse.")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void ExtractClientIp_Gives_Null_For_Markup_No_Address_Or_No_Text(string? message)
+    {
+        Assert.Null(AzureMasterFallbackMessage.ExtractClientIp(message));
     }
 
     /// <summary>
