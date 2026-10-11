@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Added
+
+- **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
+
 ### Fixed
 
 - **The upgrade and installer accept a hand-named `darling.json.bak-*` backup in the install folder** ([#5659]) - In 3.10.0 the check that runs before the lock refused an install folder holding a backup such as `darling.json.bak-before-edit`, because the service owns every `darling.json.bak-*` file after a start and the check trusted it only on the stamped names the CLI writes. The refusal said the folder was writable by ordinary users and told the operator to move the whole install. The check now trusts the service account on every file in the install root whose name starts with `darling.json.bak-`, the same prefix the hardening uses, and nowhere else. Any other grantee on such a file, the service on another file, a folder with that name, a link, a file with more than one name (a hard link) and a file below the root still refuse. A backup-named hard link is now reported as a finding of its own, and the lock and the install pass leave it alone, so it never gets the service as owner. When a refusal lists only backup files, it now starts with a note that names them, says they can hold the secrets that were in darling.json and can be moved to a folder only Administrators can read, and then gives the usual advice unchanged. The check, the install-time hardening, the upgrade's manifest guard, the service sweep and the CLI check now match one prefix per language by ordinal, case-insensitive name, so a Turkish-locale host reads the names the way the service does. The CLI permission check also covers the backups of the config it was given, not only `darling.json.bak-*`.
@@ -5201,4 +5205,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
 [#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
 [#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
+[#5663]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5663
 [#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659

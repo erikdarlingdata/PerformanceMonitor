@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// Wall-clock time is deliberately NOT asserted: thread-pool starvation during the parallel suite makes any
 /// elapsed-time bound noise (a healthy run takes ~25 ms and CI has measured seconds).</para>
 /// </summary>
+[Collection("clipboard-text-seams")]
 public sealed class ClipboardTextRetryBudgetTests
 {
     // Stands in for the CLIPBRD_E_CANT_OPEN a real busy clipboard throws (System.Windows.Clipboard wraps it

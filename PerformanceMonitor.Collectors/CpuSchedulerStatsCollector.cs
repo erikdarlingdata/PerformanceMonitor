@@ -151,18 +151,13 @@ SELECT /* PerformanceMonitorLite */
         ),
     total_node_count = CONVERT(integer, nodes.total_nodes),
     nodes_online_count = nodes.online_nodes,
-    offline_cpu_count = nodes.offline_cpus,
+    offline_cpu_count = CONVERT(integer, offline_cpus.offline_cpu_count),
     offline_cpu_warning =
         CONVERT
         (
             bit,
             CASE
-                WHEN
-                (
-                    SELECT COUNT_BIG(*)
-                    FROM sys.dm_os_schedulers AS dos_offline
-                    WHERE dos_offline.is_online = 0
-                ) > 0
+                WHEN offline_cpus.offline_cpu_count > 0
                 THEN 1
                 ELSE 0
             END
@@ -178,23 +173,22 @@ CROSS JOIN
             SUM
             (
                 CASE
-                    WHEN n.node_state_desc = N'ONLINE'
-                    THEN 1
-                    ELSE 0
-                END
-            ),
-        offline_cpus =
-            SUM
-            (
-                CASE
-                    WHEN n.node_state_desc <> N'ONLINE'
+                    WHEN n.node_state_desc NOT LIKE N'OFFLINE%'
                     THEN 1
                     ELSE 0
                 END
             )
     FROM sys.dm_os_nodes AS n
-    WHERE n.node_id <> 32767 /*Exclude DAC node*/
+    WHERE n.node_state_desc NOT LIKE N'%DAC%' /*Exclude the DAC node by its state, not by node_id (#5656)*/
 ) AS nodes
+CROSS JOIN
+(
+    /*Offline CPUs are user schedulers SQL Server has taken offline; the warning flag reads this same count*/
+    SELECT
+        offline_cpu_count = COUNT_BIG(*)
+    FROM sys.dm_os_schedulers AS dos_offline
+    WHERE dos_offline.status = N'VISIBLE OFFLINE'
+) AS offline_cpus
 CROSS JOIN
 (
     SELECT
@@ -251,7 +245,7 @@ GROUP BY
     osm.system_memory_state_desc,
     nodes.total_nodes,
     nodes.online_nodes,
-    nodes.offline_cpus
+    offline_cpus.offline_cpu_count
 OPTION(RECOMPILE);";
 
     public override string Name => "cpu_scheduler_stats";
