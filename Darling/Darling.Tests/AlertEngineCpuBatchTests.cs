@@ -284,6 +284,62 @@ public sealed class AlertEngineCpuBatchTests
         Assert.Single(h.Deliverer.Outcomes);
     }
 
+    /// <summary>One batch of Hot x3, Cool x2, Hot x3: the gate opens, closes and opens again (CpuBreachSamples
+    /// 3, CpuClearSamples 2), eight samples a minute apart inside the 15-minute lookback.</summary>
+    private static AlertCpuSample[] FireResolveFire(DateTime first) => new[]
+    {
+        Hot(first), Hot(first.AddMinutes(1)), Hot(first.AddMinutes(2)),
+        Cool(first.AddMinutes(3)), Cool(first.AddMinutes(4)),
+        Hot(first.AddMinutes(5)), Hot(first.AddMinutes(6)), Hot(first.AddMinutes(7))
+    };
+
+    [Fact]
+    public async Task AFireResolveFireBatch_SendsOneFire_AndNoResolve()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), FireResolveFire(Noon.AddMinutes(-10))));
+
+        /* The cooldown would swallow the second fire, leaving "CPU Resolved" as the last word while the gate is
+           firing. The resolve that a fire immediately follows is cancelled with it, so the operator's one
+           message is the fire. */
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task AResolveFireBatchFromAFiringStart_SendsNothing_TheIncidentNeverClosed()
+    {
+        var h = NewHarness();
+        var t = Noon.AddMinutes(-10);
+
+        /* The incident was already open (the persisted firing bit), and the batch clears then breaches again. */
+        h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)] = new AlertPersistenceRecord(
+            new PersistenceState(AlertEngine.CpuBreachSamples, 0, true), t.AddMinutes(-1));
+        var engine = h.Build();
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-30),
+            Cool(t), Cool(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Hot(t.AddMinutes(3)), Hot(t.AddMinutes(4))));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task AFireThenResolveBatch_StillSendsBoth_ARealSpikeWhileWeWereWatching()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(t.AddMinutes(3)), Cool(t.AddMinutes(4))));
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.Resolutions);
+    }
+
     [Fact]
     public async Task TheFiredCpuAlert_CarriesTheSampleAge_SetAtFireTime_AndTheLinePrintsOnce()
     {

@@ -804,6 +804,15 @@ public sealed class AlertEngine
             }
         }
 
+        /* A resolve that a fire immediately follows IN THIS BATCH is cancelled with that fire (#5642). Each edge
+           used to land on its own 30 s sweep with its own clock, so the cooldown had run out between them and the
+           sequence arrived in order. Replayed together against one `now`, [fire, resolve, fire] delivered the
+           first fire, then "CPU Resolved", then had the cooldown swallow the second fire: the last word was an
+           all-clear while the gate was firing. So [fire, resolve, fire] sends one fire; [resolve, fire] from a
+           firing start sends nothing (the incident never closed); [fire, resolve] still sends both (a real spike
+           while we were watching). Consecutive fires that remain collapse to the later one. */
+        events = CancelResolveBeforeFire(events);
+
         var newestCpuSampleUtc = snapshot.CpuSampleUtcOnly
             ?? (snapshot.RecentCpuSamples is { Count: > 0 } recentForAge ? recentForAge.Max(s => s.SampleTimeUtc) : (DateTime?)null);
         foreach (var (isFire, eventValue) in events)
@@ -825,6 +834,33 @@ public sealed class AlertEngine
                     $"{serverName}: {cpuMetricLabel} back to {eventValue:F0}%"), ct); /* :111 */
             }
         }
+    }
+
+    /// <summary>
+    /// The CPU edges one sweep sends, after a resolve that a fire immediately follows is dropped together with
+    /// that fire (#5642): <c>[fire, resolve, fire]</c> becomes <c>[fire]</c>, <c>[resolve, fire]</c> becomes
+    /// nothing, <c>[fire, resolve]</c> is unchanged. Two fires left adjacent collapse to the later one.
+    /// </summary>
+    internal static List<(bool IsFire, double Value)> CancelResolveBeforeFire(List<(bool IsFire, double Value)> events)
+    {
+        var kept = new List<(bool IsFire, double Value)>(events.Count);
+        foreach (var edge in events)
+        {
+            if (edge.IsFire && kept.Count > 0 && !kept[^1].IsFire)
+            {
+                kept.RemoveAt(kept.Count - 1);
+            }
+            else if (edge.IsFire && kept.Count > 0)
+            {
+                kept[^1] = edge;
+            }
+            else
+            {
+                kept.Add(edge);
+            }
+        }
+
+        return kept;
     }
 
     private double? CpuValueFor(CpuObservation obs) =>
