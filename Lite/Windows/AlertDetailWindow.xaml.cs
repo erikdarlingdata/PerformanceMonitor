@@ -28,15 +28,6 @@ public partial class AlertDetailWindow : Window
         NotificationText.Text = item.NotificationType;
         StatusText.Text = item.StatusDisplay;
 
-        /* #5642: the age the alert recorded when it fired, from the persisted context; no row when it has none. */
-        var sampleAge = item.NewestSampleDisplay;
-        if (sampleAge.Length > 0)
-        {
-            SampleAgeText.Text = sampleAge;
-            SampleAgeLabel.Visibility = Visibility.Visible;
-            SampleAgeText.Visibility = Visibility.Visible;
-        }
-
         if (item.Muted)
             MutedBanner.Visibility = Visibility.Visible;
 
@@ -53,6 +44,18 @@ public partial class AlertDetailWindow : Window
             DetailTextBox.Text = item.DetailText;
             DetailTextBox.Visibility = Visibility.Visible;
             DetailPanel.Visibility = Visibility.Visible;
+        }
+
+        /* #5642: the age the alert recorded when it fired, from the persisted context; no row when it has none. Placed after
+           the branches above so the flat-text fallback can say whether its own text already ends in the line (the engine
+           stamps it into detail_text): then the text shows it and the row stays hidden, so it prints once. */
+        var sampleAge = AlertDetailText.SampleAgeLineFromJson(
+            item.ContextJson, DetailTextBox.Visibility == Visibility.Visible ? item.DetailText : null);
+        if (sampleAge is not null)
+        {
+            SampleAgeText.Text = sampleAge;
+            SampleAgeLabel.Visibility = Visibility.Visible;
+            SampleAgeText.Visibility = Visibility.Visible;
         }
     }
 

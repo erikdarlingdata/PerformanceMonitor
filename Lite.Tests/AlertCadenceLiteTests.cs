@@ -219,7 +219,13 @@ public sealed class LiteSampleAgeHistoryTests : IClassFixture<SharedDuckDbFixtur
         Assert.Contains("Binding=\"{Binding NewestSampleDisplay}\"", tab);
 
         var window = File.ReadAllText(LiteSampleAgeDeliveryTests.RepoFile("Lite/Windows/AlertDetailWindow.xaml.cs"));
-        Assert.Contains("item.NewestSampleDisplay", window);
+        /* The flat-text fallback already ends in the line the engine stamped, so the window must hand it that text as the
+           prose (the shared helper then returns null and the line prints once, #5642 review); and the row is decided after
+           the detail branches, once DetailTextBox visibility is known. */
+        Assert.Contains("AlertDetailText.SampleAgeLineFromJson(", window);
+        Assert.Contains("DetailTextBox.Visibility == Visibility.Visible ? item.DetailText : null", window);
+        Assert.True(window.IndexOf("SampleAgeLineFromJson(", StringComparison.Ordinal) > window.IndexOf("TryBuildDetailViews(item.ContextJson", StringComparison.Ordinal));
+        Assert.DoesNotContain("item.NewestSampleDisplay", window);
         Assert.DoesNotContain("DateTime.UtcNow", window);
 
         /* The row reads the carrier; it never subtracts from the clock. */
