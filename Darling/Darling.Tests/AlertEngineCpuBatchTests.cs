@@ -352,16 +352,64 @@ public sealed class AlertEngineCpuBatchTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         var sample = fired.Context!.NewestSample!;
-        Assert.Equal("CPU", sample.Source);
         Assert.Equal(newest, sample.InstantUtc);
         Assert.Equal(TimeSpan.FromMinutes(8), sample.Age);
+        Assert.Equal("CPU reading", sample.Source);
 
         /* CPU's context holds no Details, so the hand-built text carries the line, built by SampleAgeLine. */
         var line = AlertDetailText.SampleAgeLine(sample)!;
-        Assert.Equal("Newest CPU sample: 11:52:00 UTC, 8m 0s old", line);
+        Assert.Equal("CPU reading: 11:52:00 UTC, 8m 0s old", line);
         Assert.Equal(1, CountOf(fired.DetailText!, line));
         Assert.Equal(1, CountOf(AlertDetailText.WithSampleAge(fired.DetailText, fired.Context)!, line));
         Assert.Null(AlertDetailText.SampleAgeLineFor(fired.Context, fired.DetailText));
+    }
+
+    [Fact]
+    public async Task ABatchThatEndsOnAClearSample_StampsTheBreachingReadingsInstant_ThePercentageAndTheAgeAreOneReading()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        /* Three breaching readings (the last at 95%) and then one clear one, the newest sample in the list. The
+           alert fires with the third reading's percentage, so the age must be that reading's, not the clear
+           sample's: "CPU at 95%" and "11:52:00, 8m old" describe the same measurement. */
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(t.AddMinutes(3))));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("95% (Total CPU)", fired.CurrentValue);
+        var sample = fired.Context!.NewestSample!;
+        Assert.Equal(t.AddMinutes(2), sample.InstantUtc);
+        Assert.Equal(TimeSpan.FromMinutes(8), sample.Age);
+
+        /* The newest sample is NOT what the alert fired on, so the line must not call it "Newest". */
+        Assert.Equal("CPU reading", sample.Source);
+        Assert.Equal("CPU reading: 11:52:00 UTC, 8m 0s old", AlertDetailText.SampleAgeLine(sample));
+        Assert.DoesNotContain("Newest", fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheReadingWording_RoundTripsThroughTheLineHelpers_AndTheNewestWordingIsUnchanged()
+    {
+        var instant = new DateTime(2026, 10, 11, 15, 43, 29, DateTimeKind.Utc);
+        var reading = new AlertNewestSample("CPU reading", instant, TimeSpan.FromSeconds(320));
+        var newest = new AlertNewestSample("Query Store", instant, TimeSpan.FromSeconds(320));
+
+        Assert.Equal("CPU reading: 15:43:29 UTC, 5m 20s old", AlertDetailText.SampleAgeLine(reading));
+        Assert.Equal("Newest Query Store sample: 15:43:29 UTC, 5m 20s old", AlertDetailText.SampleAgeLine(newest));
+
+        /* Both wordings are recognised as an age line already in the prose: appended once, stripped, not doubled. */
+        foreach (var sample in new[] { reading, newest })
+        {
+            var context = new AlertContext { NewestSample = sample };
+            var line = AlertDetailText.SampleAgeLine(sample)!;
+            var once = AlertDetailText.WithSampleAge("  Total CPU: 97%", context)!;
+            Assert.Equal(1, CountOf(once, line));
+            Assert.Equal(once, AlertDetailText.WithSampleAge(once, context));
+            Assert.Null(AlertDetailText.SampleAgeLineFor(context, once));
+            Assert.Equal("Total CPU: 97%", AlertDetailText.StripSampleAge(once));
+        }
     }
 
     [Fact]
