@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A collector that recovered no longer stays at WARNING** ([#5665]) - the 7-day failure rate gave WARNING above 20% errors and a later success never cleared it, so a new target with 2 errors in its first 8 runs stayed WARNING until its tenth run. The rate now counts only once the window holds 10 runs, and a collector whose newest 3 runs in a row succeeded is HEALTHY with a note "recovered: the last 3 runs succeeded; last failure <time> UTC" in the Note column of Lite, the Darling viewer and the Darling web dashboard, and as note_summary (recovered_note on the shorter rows) in the MCP get_collection_health read. A collector that alternates between failing and succeeding stays WARNING, a collector with few runs whose latest run failed stays WARNING, and the staleness, abandon-rate and lost-databases rules are unchanged. The fleet overview card still bands from the old rate alone.
+
 ## [3.10.0] - 2026-10-09
 
 Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
@@ -5197,3 +5201,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
 [#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
 [#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
+[#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665
