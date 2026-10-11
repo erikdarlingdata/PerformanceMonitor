@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -112,8 +113,11 @@ public sealed class AlertCadenceTests
         await started.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         server.NextAlertSweep = DateTime.MinValue;
-        Assert.False(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
-        Assert.False(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        /* The self-alert slot is free (#5642), so those ticks start self-alert passes; the engine pass is still running, so
+           none of them starts a second one. */
+        worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken);
+        worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken);
+        Assert.False(worker.TryStartAlertEnginePass([server], 4, null, null, null, TestContext.Current.CancellationToken));
         Assert.Equal(1, Volatile.Read(ref evaluations));
         Assert.Equal(1, Volatile.Read(ref maxConcurrent));
 
@@ -156,10 +160,8 @@ public sealed class AlertCadenceTests
     }
 
     /// <summary>
-    /// A self-alert that throws, or one that never returns, is the case that most needs the ordering to be real: the
-    /// alert step of the same server is not reached for a never-returning self-alert (the pass is serial per server), but
-    /// a throw is logged and the SAME server's alert step is still skipped only by that throw's own catch, never the
-    /// other servers'. Pinned here: the other server is still evaluated.
+    /// A self-alert that throws is logged and ends only that server's self-alert step: the other server is still
+    /// evaluated, and since the engine reads run in their own pass (#5642) the failing server's alert evaluation runs too.
     /// </summary>
     [Fact]
     public async Task OneServersThrowingSelfAlert_DoesNotKeepTheOtherServersAlertsFromRunning()
@@ -186,7 +188,9 @@ public sealed class AlertCadenceTests
         Assert.True(worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken));
         await SelfAlertFleetPassTests.WaitForPassToEndAsync(worker, 1);
 
-        Assert.Equal(["example-sql-02"], alerted);
+        /* The engine pass is its own pass since #5642: a throw in the first server's self-alert step does not skip its
+           alert evaluation either, so a failing self-alert read never silences the engine alerts on the same server. */
+        Assert.Equal(["example-sql-01", "example-sql-02"], alerted.Order().ToArray());
     }
 
     /// <summary>
@@ -351,5 +355,123 @@ public sealed class AlertCadenceTests
         var engine = pass.IndexOf("EvaluateAlertsAsync(engine!, server, config!", StringComparison.Ordinal);
         Assert.True(runtimeCheck > 0 && seam > runtimeCheck && engine > seam, "the runtime test must come first, then the seam, then the engine");
         Assert.DoesNotContain("server.Runtime is null", pass.Substring(runtimeCheck, engine - runtimeCheck), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Collection Stopped never waits for alert reads (#5642): the self-alert step for every server ends, and its
+    /// single-flight slot frees, while the engine's reads for the same tick are still running. A slow engine read (held
+    /// open here) must not delay the next self-alert pass, which starts and runs at once. RED at the head before the
+    /// split, where the engine reads sat inside the self-alert pass: the pass task stayed incomplete and the next tick
+    /// started nothing.
+    /// </summary>
+    [Fact]
+    public async Task ASlowEngineRead_DoesNotDelayTheNextSelfAlertPass()
+    {
+        var worker = SelfAlertFleetPassTests.MakeWorker();
+        var now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        worker.SelfAlertPassClock = () => now;
+        var selfAlerts = 0;
+        var engineReads = 0;
+        var engineStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseEngine = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.SelfAlertServerOverride = (_, _) => { Interlocked.Increment(ref selfAlerts); return Task.CompletedTask; };
+        worker.AlertServerOverride = async (_, _) =>
+        {
+            Interlocked.Increment(ref engineReads);
+            engineStarted.TrySetResult();
+            await releaseEngine.Task;
+        };
+        var server = SelfAlertFleetPassTests.MakeServer("example-sql-01", connected: true);
+
+        Assert.True(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        await engineStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        /* The engine read is open, and the self-alert step has ended and freed its slot. */
+        var selfPass = worker.SelfAlertPassForTests;
+        Assert.NotNull(selfPass);
+        Assert.True(
+            await SelfAlertFleetPassTests.BecomesTrueAsync(() => selfPass.IsCompleted),
+            "the self-alert pass was still running while a slow engine read was open: Collection Stopped waits for alert reads");
+        Assert.Equal(1, Volatile.Read(ref selfAlerts));
+
+        /* Thirty seconds on, with the engine read still open: the next self-alert pass starts and judges the server. */
+        now += TimeSpan.FromSeconds(30);
+        server.NextSelfAlertSweep = DateTime.MinValue;
+        Assert.True(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        Assert.True(
+            await SelfAlertFleetPassTests.BecomesTrueAsync(() => Volatile.Read(ref selfAlerts) == 2),
+            "the next self-alert pass did not run while the engine read was open");
+        Assert.Equal(1, Volatile.Read(ref engineReads));
+
+        releaseEngine.SetResult();
+        await SelfAlertFleetPassTests.WaitForPassToEndAsync(worker, 2);
+    }
+
+    /// <summary>
+    /// The engine reads have their own single-flight slot (#5642): while one engine pass is still running, a later
+    /// tick starts no second one, so a server's engine reads never overlap themselves, and it logs one Warning once the
+    /// pass has outrun the 30 s cadence, however many ticks skip. Inside the cadence a skipped tick says nothing.
+    /// </summary>
+    [Fact]
+    public async Task AnEnginePassThatOverruns_SkipsTheNextEnginePass_AndLogsOnce()
+    {
+        var logger = new CapturingTestLogger();
+        var worker = SelfAlertFleetPassTests.MakeWorker(logger);
+        var now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        worker.SelfAlertPassClock = () => now;
+        var engineReads = 0;
+        var engineStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseEngine = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.AlertServerOverride = async (_, _) =>
+        {
+            Interlocked.Increment(ref engineReads);
+            engineStarted.TrySetResult();
+            await releaseEngine.Task;
+        };
+        var server = SelfAlertFleetPassTests.MakeServer("example-sql-01", connected: true);
+
+        Assert.True(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        await engineStarted.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        /* Each tick waits for its own (instant) self-alert pass, so only the engine pass is ever running late. */
+        now += TimeSpan.FromSeconds(20);
+        server.NextAlertSweep = DateTime.MinValue;
+        worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken);
+        await worker.SelfAlertPassForTests!.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+
+        now += TimeSpan.FromSeconds(50);
+        worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken);
+        await worker.SelfAlertPassForTests!.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        now += TimeSpan.FromSeconds(15);
+        worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken);
+        await worker.SelfAlertPassForTests!.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("alert engine pass has been running for 70s", logger.Joined);
+        Assert.Equal(1, Volatile.Read(ref engineReads));
+
+        releaseEngine.SetResult();
+        await SelfAlertFleetPassTests.WaitForPassToEndAsync(worker, 1);
+    }
+
+    /// <summary>
+    /// The two passes split the store pool's alert share between them (#5642): their widths add up to
+    /// <see cref="DarlingWorker.SelfAlertPassWidthFor"/> (one each at the smallest width), so running side by side
+    /// they still leave half of the reserve for the web viewer and the MCP tools.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(16)]
+    public void TheSelfAlertAndEnginePassWidths_ShareTheAlertBudget(int sweepWidth)
+    {
+        var budget = DarlingWorker.SelfAlertPassWidthFor(sweepWidth);
+        var self = DarlingWorker.SelfAlertStepWidthFor(sweepWidth);
+        var engine = DarlingWorker.AlertEnginePassWidthFor(sweepWidth);
+
+        Assert.True(self >= 1 && engine >= 1);
+        Assert.True(self + engine <= Math.Max(2, budget), $"width {sweepWidth}: {self} + {engine} is over the budget {budget}");
     }
 }

@@ -1001,6 +1001,18 @@ public sealed class DarlingWorker : BackgroundService
        time: a pass still running at the next tick makes that tick skip, so a server is never evaluated by two threads. */
     private Task? _selfAlertPass;
 
+    /* #5642: the in-flight engine pass (the shared alert engine's per-server reads and the pileup finding), fire-and-tracked
+       from the same tick as the self-alert pass but in a single-flight slot of its own, chained after the tick's
+       self-alert step. A slow alert read holds this slot, never the self-alert one, so Collection Stopped keeps its 30 s
+       beat. A pass still running at the next tick makes that tick skip the engine pass. */
+    private Task? _alertEnginePass;
+
+    /* The engine pass's own overrun Warning latch and start time, like the self-alert pass's two fields below. Written and
+       read on the sweep loop's thread only. */
+    private bool _alertEnginePassOverranWarned;
+
+    private DateTime _alertEnginePassStartedUtc;
+
     /* Set when the running pass has outrun the 30 s server cadence and a tick has said so, cleared when the next pass
        starts: one Warning per pass, not one per 15-second tick. */
     private bool _selfAlertPassOverranWarned;
@@ -4133,6 +4145,12 @@ LIMIT 1";
             inFlightSweeps.Add(_selfAlertPass);
         }
 
+        /* #5642: and so is the engine pass. */
+        if (_alertEnginePass is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_alertEnginePass);
+        }
+
         /* #5574: the perfmon_stats re-group loop ends on the same cancellation; its chunk in flight rolls back or is left
            for the compression policy, and the loop never faults. */
         if (_perfmonRegroupDrain?.Completion is { IsCompleted: false } regroupRun)
@@ -4417,8 +4435,9 @@ LIMIT 1";
 
             /* #5642: the alert evaluation and the same-statement-pileup finding (#3467) no longer run here. They ran
                after the collector sweep, so a body that never finished (or a slow collector) silenced every alert on
-               its server, the same defect #5479 fixed for the self-alerts. They run in the fleet pass
-               (RunSelfAlertPassAsync) on the same 30 s stamps, after the self-alerts. The pass makes store reads only,
+               its server, the same defect #5479 fixed for the self-alerts. They run in the fleet's
+               engine pass (RunAlertEnginePassAsync) on the same 30 s stamps, in a single-flight slot of its own chained
+               after the self-alert step, so alert reads never delay Collection Stopped. The pass makes store reads only,
                so the two msdb facts the alert engine wants are read HERE, after the collectors, into a per-server cache
                the pass serves. */
             await RefreshMsdbCacheAsync(server, stoppingToken);
@@ -5572,6 +5591,21 @@ LIMIT 1";
     /// </summary>
     internal static int SelfAlertPassWidthFor(int sweepWidth) =>
         Math.Max(1, Math.Min(StoreConfigProvider.ClampConcurrentSweeps(sweepWidth), DailyRunPoolReserve / 2));
+
+    /// <summary>
+    /// #5642: how many servers the engine's alert reads (and the pileup finding) run at once. The self-alert step and the
+    /// engine pass are two single-flight passes that can overlap when an engine pass outlasts a cadence, so they split
+    /// the <see cref="SelfAlertPassWidthFor"/> budget instead of each taking all of it: the engine pass takes half
+    /// (at least one), <see cref="SelfAlertStepWidthFor"/> takes the rest. At the widest setting that is 2 and 2 of the
+    /// 4 the pool's alert share allows, so the web viewer's and the MCP tools' half of the reserve stays free.
+    /// </summary>
+    internal static int AlertEnginePassWidthFor(int sweepWidth) =>
+        Math.Max(1, SelfAlertPassWidthFor(sweepWidth) / 2);
+
+    /// <summary>#5642: how many servers the self-alert step (Collection Stopped and its siblings, the custom rules) runs
+    /// at once: what <see cref="AlertEnginePassWidthFor"/> leaves of the <see cref="SelfAlertPassWidthFor"/> budget.</summary>
+    internal static int SelfAlertStepWidthFor(int sweepWidth) =>
+        Math.Max(1, SelfAlertPassWidthFor(sweepWidth) - AlertEnginePassWidthFor(sweepWidth));
 
     /// <summary>
     /// #4999: the largest number of connections the store's data source will hold open, read from the connection
@@ -11702,6 +11736,9 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// </summary>
     internal Task? SelfAlertPassForTests => _selfAlertPass;
 
+    /// <summary>Test seam (#5642): the engine pass's task, null until the first one starts. Production never reads it.</summary>
+    internal Task? AlertEnginePassForTests => _alertEnginePass;
+
     /// <summary>
     /// The per-server self-alert pass's launcher (#5479): Collection Stopped and the other store-polled self-alerts, and
     /// the custom-alert rules, for every server in this tick's snapshot. They ran at the top of each server's collection
@@ -11711,11 +11748,23 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// pass still running at the next tick makes that tick skip (one Warning per pass, once it has outrun the 30 s cadence), so no server is ever
     /// evaluated by two threads at once, and the stamps in <see cref="ServerLoopState"/> are written by this pass only.
     /// </summary>
-    /// <param name="sweepWidth">The fleet gate's width (<c>max_concurrent_sweeps</c>). The pass evaluates that many servers at
-    /// once, capped by <see cref="SelfAlertPassWidthFor"/> so its reads stay inside the store pool's reserve.</param>
+    /// <param name="sweepWidth">The fleet gate's width (<c>max_concurrent_sweeps</c>). The self-alert pass and the engine pass split
+    /// <see cref="SelfAlertPassWidthFor"/> between them (<see cref="SelfAlertStepWidthFor"/> and <see cref="AlertEnginePassWidthFor"/>) so their reads stay inside the store pool's reserve.</param>
+    /// <returns>True when a new self-alert pass started. The engine pass (#5642) has its own slot, so this says nothing
+    /// about it: see <see cref="TryStartAlertEnginePass"/>.</returns>
     internal bool TryStartSelfAlertPass(
         ServerLoopState[] targets, CancellationToken stoppingToken, int sweepWidth = MaxConcurrentServerSweeps,
         AlertEngine? engine = null, DarlingConfig? config = null, AnalysisNotificationService? notifications = null)
+    {
+        var started = TryStartSelfAlertStep(targets, sweepWidth, stoppingToken);
+
+        /* #5642: the engine's alert reads and the pileup finding run in their own single-flight pass, chained AFTER the
+           self-alert step of this tick, so Collection Stopped and its siblings never wait for them. */
+        TryStartAlertEnginePass(targets, sweepWidth, engine, config, notifications, stoppingToken);
+        return started;
+    }
+
+    private bool TryStartSelfAlertStep(ServerLoopState[] targets, int sweepWidth, CancellationToken stoppingToken)
     {
         if (_selfAlertPass is { IsCompleted: false })
         {
@@ -11736,7 +11785,58 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         _selfAlertPassOverranWarned = false;
         _selfAlertPassStartedUtc = SelfAlertPassClock();
-        _selfAlertPass = RunTrackedTickAsync("per-server self-alert pass", token => RunSelfAlertPassAsync(targets, sweepWidth, engine, config, notifications, token), stoppingToken);
+        _selfAlertPass = RunTrackedTickAsync("per-server self-alert pass", token => RunSelfAlertPassAsync(targets, sweepWidth, token), stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The engine pass's launcher (#5642): the shared alert engine's per-server reads (~22 store reads a server) and the
+    /// same-statement-pileup finding, in a single-flight slot of their own. They used to ride the self-alert pass, so
+    /// the pass's length, and with it Collection Stopped's cadence, grew with every alert read: a store in a slow write
+    /// band stretched it from a few seconds to a minute or more. Now the self-alert step ends and frees its slot first;
+    /// this pass waits for the step launched in the same tick (or the one still running) and only then starts its reads,
+    /// and a pass still running at the next tick makes that tick skip it, with one Warning per pass once it has outrun
+    /// the 30 s cadence, as the self-alert pass does. The servers' alert stamps do not move on a skip, so the next free
+    /// tick picks up what was due. Not started when no engine, seam or pileup finding is configured.
+    /// </summary>
+    internal bool TryStartAlertEnginePass(
+        ServerLoopState[] targets, int sweepWidth,
+        AlertEngine? engine, DarlingConfig? config, AnalysisNotificationService? notifications, CancellationToken stoppingToken)
+    {
+        var hasEngine = AlertServerOverride is not null || (engine is not null && config is not null);
+        var hasPileup = PileupServerOverride is not null || (config is { Analysis.Enabled: true } && notifications is not null);
+        if (!hasEngine && !hasPileup)
+        {
+            return false;
+        }
+
+        if (_alertEnginePass is { IsCompleted: false })
+        {
+            var runningFor = SelfAlertPassClock() - _alertEnginePassStartedUtc;
+            if (!_alertEnginePassOverranWarned && runningFor > s_alertSweepInterval)
+            {
+                _alertEnginePassOverranWarned = true;
+                _logger.LogWarning(
+                    "the previous per-server alert engine pass has been running for {RunningFor:F0}s, longer than its {Cadence:F0}s cadence, so this tick starts no second one; the self-alerts (Collection Stopped and the rest) are not waiting on it, and the next tick after it ends starts a new engine pass",
+                    runningFor.TotalSeconds, s_alertSweepInterval.TotalSeconds);
+            }
+
+            return false;
+        }
+
+        _alertEnginePassOverranWarned = false;
+        _alertEnginePassStartedUtc = SelfAlertPassClock();
+        var selfAlertStep = _selfAlertPass;
+        _alertEnginePass = RunTrackedTickAsync("per-server alert engine pass", async token =>
+        {
+            /* RunTrackedTickAsync swallows the step's own failures, so this wait only ends: it never throws. */
+            if (selfAlertStep is not null)
+            {
+                await selfAlertStep.WaitAsync(token);
+            }
+
+            await RunAlertEnginePassAsync(targets, sweepWidth, engine, config, notifications, token);
+        }, stoppingToken);
         return true;
     }
 
@@ -11744,7 +11844,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// The pass itself (#5479): each non-retired server, up to <c>sweepWidth</c> at a time, on its own cadence stamps. A
     /// fleet pass that walked the servers one at a time took 3 or more sequential store reads per server (50 to 100 s at
     /// 500 servers), so every tick overran and Collection Stopped lagged the cadence several times over; the same calls
-    /// ran inside the bodies under the fleet gate before. The pass runs at <see cref="SelfAlertPassWidthFor"/> of the sweep width, which keeps its reads inside the store pool's reserve. Each server is still
+    /// ran inside the bodies under the fleet gate before. The pass runs at <see cref="SelfAlertStepWidthFor"/> of the sweep width (its share of the <see cref="SelfAlertPassWidthFor"/> budget, which keeps its reads inside the store pool's reserve); the engine's reads are the separate pass after it (#5642). Each server is still
     /// visited once per pass by one thread, so its stamps stay single-writer, and only one pass runs at a time.
     /// Collection-stopped is evaluated for EVERY server, connected or not and whether or not it has been seen online
     /// since this service started (#4757), because an unreachable server has stopped collecting, which is exactly the
@@ -11754,14 +11854,12 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// (#3285) read the collected store, so they evaluate for a disconnected server too. One server's throw, or a
     /// cancellation that is not the service shutting down, is logged and does not skip the rest.
     /// </summary>
-    private async Task RunSelfAlertPassAsync(
-        ServerLoopState[] targets, int sweepWidth, AlertEngine? engine, DarlingConfig? config,
-        AnalysisNotificationService? notifications, CancellationToken stoppingToken)
+    private async Task RunSelfAlertPassAsync(ServerLoopState[] targets, int sweepWidth, CancellationToken stoppingToken)
     {
         var started = Stopwatch.StartNew();
         var options = new ParallelOptions
         {
-            MaxDegreeOfParallelism = SelfAlertPassWidthFor(sweepWidth),
+            MaxDegreeOfParallelism = SelfAlertStepWidthFor(sweepWidth),
             CancellationToken = stoppingToken,
         };
 
@@ -11801,12 +11899,55 @@ AND   j.hypertable_name = '{relation}'", connection))
                         server.Config.DisplayName,
                         stoppingToken);
                 }
+            }
+            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
+            {
+                /* Any exception that is not the service shutting down, a cancellation inside one server's evaluator
+                   included (the custom-alert evaluator rethrows every OperationCanceledException): log it and go on, so
+                   the servers after it are still evaluated and a repeating one cannot starve them. */
+                _logger.LogError(ex, "[{Server}] self-alert pass failed; the remaining servers are still evaluated", server.Config.DisplayName);
+            }
+        });
 
-                /* #5642: the engine's alert evaluation, AFTER the self-alerts so a slow server's alert reads never delay
-                   Collection Stopped. It ran after the collection sweep inside the body, so a body that never finished
-                   silenced every alert on its server. A server whose runtime dropped is still evaluated, from the store,
-                   with its last known target (AlertRuntime): the server under enough pressure to drop is the one that
-                   needs the alert. The stamp is written by this pass only. */
+        if (started.Elapsed > s_alertSweepInterval)
+        {
+            _logger.LogInformation(
+                "the per-server self-alert pass took {Elapsed:F1}s for {Servers} servers at {Width} at a time, longer than its {Cadence}s cadence",
+                started.Elapsed.TotalSeconds, targets.Length, options.MaxDegreeOfParallelism, s_alertSweepInterval.TotalSeconds);
+        }
+    }
+
+    /// <summary>
+    /// The engine pass itself (#5642): for each non-retired server, up to <see cref="AlertEnginePassWidthFor"/> at a time,
+    /// the shared engine's alert evaluation and then the same-statement-pileup finding, each on its own 30 s stamp. Runs
+    /// in its own single-flight slot after the self-alert step (see <see cref="TryStartAlertEnginePass"/>), so a slow
+    /// server's alert reads never delay Collection Stopped. The stamps are written by this pass only. One server's throw
+    /// is logged and does not skip the rest.
+    /// </summary>
+    private async Task RunAlertEnginePassAsync(
+        ServerLoopState[] targets, int sweepWidth, AlertEngine? engine, DarlingConfig? config,
+        AnalysisNotificationService? notifications, CancellationToken stoppingToken)
+    {
+        var started = Stopwatch.StartNew();
+        var options = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = AlertEnginePassWidthFor(sweepWidth),
+            CancellationToken = stoppingToken,
+        };
+
+        await Parallel.ForEachAsync(targets, options, async (server, _) =>
+        {
+            if (server.Retired)
+            {
+                return;
+            }
+
+            try
+            {
+                /* #5642: the engine's alert evaluation. It ran after the collection sweep inside the body, so a body that
+                   never finished silenced every alert on its server. A server whose runtime dropped is still evaluated,
+                   from the store, with its last known target (AlertRuntime): the server under enough pressure to drop is
+                   the one that needs the alert. */
                 if ((AlertServerOverride is not null || (engine is not null && config is not null))
                     && StampIsDue(server.NextAlertSweep, s_alertSweepInterval, DateTime.UtcNow))
                 {
@@ -11849,14 +11990,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                 /* Any exception that is not the service shutting down, a cancellation inside one server's evaluator
                    included (the custom-alert evaluator rethrows every OperationCanceledException): log it and go on, so
                    the servers after it are still evaluated and a repeating one cannot starve them. */
-                _logger.LogError(ex, "[{Server}] self-alert pass failed; the remaining servers are still evaluated", server.Config.DisplayName);
+                _logger.LogError(ex, "[{Server}] alert engine pass failed; the remaining servers are still evaluated", server.Config.DisplayName);
             }
         });
 
         if (started.Elapsed > s_alertSweepInterval)
         {
             _logger.LogInformation(
-                "the per-server self-alert pass took {Elapsed:F1}s for {Servers} servers at {Width} at a time, longer than its {Cadence}s cadence",
+                "the per-server alert engine pass took {Elapsed:F1}s for {Servers} servers at {Width} at a time, longer than its {Cadence}s cadence",
                 started.Elapsed.TotalSeconds, targets.Length, options.MaxDegreeOfParallelism, s_alertSweepInterval.TotalSeconds);
         }
     }

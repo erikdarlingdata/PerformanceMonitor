@@ -92,6 +92,12 @@ public sealed class SelfAlertFleetPassTests
         try
         {
             await pass.WaitAsync(Patience, TestContext.Current.CancellationToken);
+
+            /* #5642: the engine pass is its own task, started in the same call after the self-alert step. */
+            if (worker.AlertEnginePassForTests is { } enginePass)
+            {
+                await enginePass.WaitAsync(Patience, TestContext.Current.CancellationToken);
+            }
         }
         catch (TimeoutException)
         {
@@ -329,12 +335,12 @@ public sealed class SelfAlertFleetPassTests
     [Fact]
     public async Task TheFleetPass_EvaluatesAtTheSweepWidth_NotOneServerAtATime()
     {
-        var (peak, perServer, gateFailure) = await RunTwentyServersAsync(sweepWidth: 4, expectedPeak: 4);
+        var (peak, perServer, gateFailure) = await RunTwentyServersAsync(sweepWidth: 4, expectedPeak: DarlingWorker.SelfAlertStepWidthFor(4));
 
         Assert.Null(gateFailure);
         Assert.Equal(20, perServer.Count);
         Assert.All(perServer.Values, n => Assert.Equal(1, n));
-        Assert.Equal(DarlingWorker.SelfAlertPassWidthFor(4), peak);
+        Assert.Equal(DarlingWorker.SelfAlertStepWidthFor(4), peak);
     }
 
     /// <summary>
@@ -363,8 +369,8 @@ public sealed class SelfAlertFleetPassTests
     [Fact]
     public async Task TheFleetPass_AtSweepWidthSixteen_NeverEvaluatesMoreThanTheCappedWidthAtOnce()
     {
-        var capped = DarlingWorker.SelfAlertPassWidthFor(16);
-        Assert.Equal(DarlingWorker.DailyRunPoolReserve / 2, capped);
+        var capped = DarlingWorker.SelfAlertStepWidthFor(16);
+        Assert.Equal(DarlingWorker.DailyRunPoolReserve / 4, capped);
 
         var (peak, perServer, gateFailure) = await RunTwentyServersAsync(sweepWidth: 16, expectedPeak: capped);
 
