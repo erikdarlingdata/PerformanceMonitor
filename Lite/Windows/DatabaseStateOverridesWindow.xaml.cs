@@ -226,15 +226,61 @@ public partial class DatabaseStateOverridesWindow : Window
             return;
         }
 
+        if (_writeInFlight)
+        {
+            return;
+        }
+
+        SetWriteInFlight(true, $"resetting {row.DatabaseName}");
         try
         {
             var databaseName = row.DatabaseName;
             await System.Threading.Tasks.Task.Run(() => _dataService.ResetDatabaseStateExpectedToCurrentAsync(serverId, databaseName));
+            if (!IsLoaded)
+            {
+                return;   // closed while it waited
+            }
+
+            SetWriteInFlight(false);
             await LoadAsync();
+        }
+        catch (StoreLockTimeoutException ex)
+        {
+            if (IsLoaded)
+            {
+                StatusText.Text = StoreBusyReport.Report("DatabaseStates", $"Reset {row.DatabaseName} to current", ex, $"resetting {row.DatabaseName}");
+            }
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Could not reset {row.DatabaseName}: {ex.Message}";
+        }
+        finally
+        {
+            if (IsLoaded)
+            {
+                SetWriteInFlight(false);
+            }
+        }
+    }
+
+    /* #5650: a save or a reset can wait up to 30 s for the local database (LocalDataService.OpenUserWriteConnectionAsync)
+       while archival or a collector write holds it. While it waits, the grid, the server picker and both write buttons
+       are off, so a second click cannot start another write, and the line above the buttons says what is happening.
+       Close stays enabled; the continuations check IsLoaded so a window closed during the wait is left alone. */
+    private bool _writeInFlight;
+
+    private void SetWriteInFlight(bool inFlight, string? doing = null)
+    {
+        _writeInFlight = inFlight;
+        StatesGrid.IsEnabled = !inFlight;
+        ServerCombo.IsEnabled = !inFlight;
+        RefreshButton.IsEnabled = !inFlight;
+        ResetButton.IsEnabled = !inFlight;
+        SaveButton.IsEnabled = !inFlight;
+        if (inFlight && doing is not null)
+        {
+            StatusText.Text = StoreBusyReport.WaitingText(doing);
         }
     }
 
@@ -249,21 +295,52 @@ public partial class DatabaseStateOverridesWindow : Window
             return;
         }
 
+        if (_writeInFlight)
+        {
+            return;
+        }
+
+        var changed = _rows.Where(r => !string.Equals(r.ExpectedState, r.OriginalExpected, StringComparison.Ordinal)).ToList();
+        var saved = 0;
+        SetWriteInFlight(true, "saving the overrides");
         try
         {
-            var changed = _rows.Where(r => !string.Equals(r.ExpectedState, r.OriginalExpected, StringComparison.Ordinal)).ToList();
             foreach (var row in changed)
             {
                 var databaseName = row.DatabaseName;
                 var expectedState = row.ExpectedState;
                 await System.Threading.Tasks.Task.Run(() => _dataService.SetDatabaseStateExpectedAsync(serverId, databaseName, expectedState));
+                row.OriginalExpected = expectedState;
+                saved++;
             }
 
-            DialogResult = true;
+            if (IsLoaded)
+            {
+                DialogResult = true;
+            }
+        }
+        catch (StoreLockTimeoutException ex)
+        {
+            if (IsLoaded)
+            {
+                /* Each row is its own write, so a timeout after the first leaves the earlier ones saved. Say which, and
+                   mark them as no longer changed, so the retry writes only the rest. */
+                var outcome = saved == 0
+                    ? "nothing was changed"
+                    : $"{saved} of {changed.Count} change(s) were saved and the rest were not";
+                StatusText.Text = StoreBusyReport.Report("DatabaseStates", "Save database state overrides", ex, "saving the overrides", outcome);
+            }
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Could not save: {ex.Message}";
+        }
+        finally
+        {
+            if (IsLoaded)
+            {
+                SetWriteInFlight(false);
+            }
         }
     }
 

@@ -27,6 +27,43 @@ internal static class StoreBusyReport
         return $"The local database was busy, so {actionDone}.{cause}\n\nPlease try again in a few minutes.";
     }
 
+    /// <summary>
+    /// The one sentence every user-started write other than Dismiss shows when the lock wait ran out: a status bar
+    /// line or a message box body. <paramref name="doing"/> names the action ("renaming the tag"), and
+    /// <paramref name="outcome"/> says what the user can rely on, "nothing was changed" unless a caller knows that
+    /// part of a multi-step write had already gone through. The holder is named under the same rule as
+    /// <see cref="DialogText"/>.
+    /// </summary>
+    internal static string Text(TimeoutException ex, string doing, string outcome = "nothing was changed")
+    {
+        var cause = ex is StoreLockTimeoutException typed && typed.Holders.Count > 0
+            ? $" It was in use by {FriendlyName(typed.Holders[0])}."
+            : string.Empty;
+        return $"The local database was busy while {doing}, so {outcome}.{cause} Please try again in a few minutes.";
+    }
+
+    /// <summary>
+    /// The shared catch body for those writes: one Warning line to the log (like Dismiss), and the text to show.
+    /// A timeout is an expected outcome of colliding with archival or a collector write, not a fault, so it is
+    /// Warn and not Error.
+    /// </summary>
+    internal static string Report(string logArea, string logAction, TimeoutException ex, string doing, string outcome = "nothing was changed")
+    {
+        AppLogger.Warn(logArea, LogLine(logAction, ex));
+        return Text(ex, doing, outcome);
+    }
+
+    /// <summary>
+    /// What a surface shows while a user write waits for the lock, so the wait is not mistaken for a hang. The
+    /// 30 s is the shipped <see cref="LocalDataService.UserWriteLockBudget"/>.
+    /// </summary>
+    internal static string WaitingText(string doing)
+    {
+        var seconds = (int)LocalDataService.UserWriteLockBudget.TotalSeconds;
+        return string.Create(CultureInfo.InvariantCulture,
+            $"{char.ToUpperInvariant(doing[0])}{doing[1..]}... waiting up to {seconds} seconds if the local database is busy.");
+    }
+
     /// <summary>One Warning line for the log: the action, how long it waited, and who held the lock.</summary>
     internal static string LogLine(string action, TimeoutException ex)
     {

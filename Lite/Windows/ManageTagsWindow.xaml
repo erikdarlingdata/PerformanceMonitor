@@ -19,7 +19,7 @@
                    TextWrapping="Wrap"
                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="1" x:Name="TagWorkArea">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="300"/>
                 <ColumnDefinition Width="12"/>
@@ -117,6 +117,11 @@
                 </Border>
             </DockPanel>
         </Grid>
+
+        <!-- #5650: a write can wait up to 30 s for the local database; this line says so while TagWorkArea is greyed out. -->
+        <TextBlock Grid.Row="2" x:Name="WriteWaitText" Visibility="Collapsed" HorizontalAlignment="Left"
+                   VerticalAlignment="Center" Margin="0,12,100,0" TextWrapping="Wrap" FontStyle="Italic"
+                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <!-- IsCancel keeps Esc closing the window; IsDefault is gone because Enter in the server

@@ -2006,7 +2006,21 @@ public partial class MainWindow : Window
         {
             try
             {
+                /* #5650: the clear can wait up to 30 s for the local database, so the status bar says so. There is no
+                   control to grey out here (the removal comes from a context menu and from Manage Servers' own window)
+                   and the removal is not cancellable once started, so a second Remove of the same server is not
+                   refused: the second clear finds nothing to clear. */
+                StatusText.Text = StoreBusyReport.WaitingText($"removing '{server.DisplayName}'");
                 await Task.Run(() => _dataService.ClearServerTagsForServerAsync(removedServerId));
+                StatusText.Text = string.Empty;
+            }
+            catch (StoreLockTimeoutException ex)
+            {
+                /* The removal goes on without the clear, as it always has on a failure here; what the user needs to
+                   know is that this one piece did not happen, and that adding the server again could bring its old tags back. */
+                StatusText.Text = StoreBusyReport.Report("Tags", $"Remove server '{server.DisplayName}': clear its tag assignments", ex,
+                    $"removing '{server.DisplayName}'",
+                    "the server was removed but its tag assignments were not cleared, and they come back if it is added again");
             }
             catch (PendingRestoreException ex)
             {
