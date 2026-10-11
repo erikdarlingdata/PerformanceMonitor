@@ -1296,7 +1296,7 @@ internal static partial class AlertNotebookEndpoint
     /// <summary>One alert-history row plus its dedup-matched incident's facts, in the SAME wire shape
     /// <see cref="DarlingTriageEndpoint"/>'s own row node uses, extended with the incident facts the spec
     /// requires (Incident Since, Involved Objects, Database, Total Occurrences).</summary>
-    private static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row, AlertIncident? incident)
+    internal static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row, AlertIncident? incident)
     {
         var node = new JsonObject
         {

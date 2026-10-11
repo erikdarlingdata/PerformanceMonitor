@@ -865,7 +865,7 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>One alert-history row in the SAME wire shape <c>get_alert_history</c> serves, so the page and
     /// any automation parse one shape whichever surface they read.</summary>
-    private static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row) => new()
+    internal static JsonObject AlertRowNode(DarlingAlertReader.AlertHistoryReadRow row) => new()
     {
         ["alert_time"] = row.AlertTime.ToString("o", CultureInfo.InvariantCulture),
         ["server_id"] = row.ServerId,
