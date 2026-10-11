@@ -1,0 +1,148 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using DuckDB.NET.Data;
+using Microsoft.Extensions.Logging;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
+using Xunit;
+
+namespace Lite.Tests;
+
+/// <summary>
+/// #5653: the startup repair's cost and its failure behaviour. A reporter's start ran the archive survey twice,
+/// rewrote a 199 MiB file with a 2.7 GiB spill, and failed with the disk full.
+/// </summary>
+public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>, IDisposable
+{
+    private const int ServerId = 9653;
+
+    private readonly DuckDbInitializer _duckDb;
+    private readonly string _archivePath;
+
+    public SliceRepairStartupTests(SharedDuckDbFixture fixture)
+    {
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
+        _archivePath = Path.Combine(Path.GetTempPath(), $"pm-5653-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(_archivePath);
+
+        /* The marker and attempt tables survive ResetData by design; drop them so each test starts unrepaired. */
+        using var connection = _duckDb.CreateConnection();
+        connection.Open();
+        using var drop = connection.CreateCommand();
+        drop.CommandText =
+            $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.MarkerTable}; " +
+            $"DROP TABLE IF EXISTS {QueryStoreSliceRepairService.AttemptTable}";
+        drop.ExecuteNonQuery();
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            if (Directory.Exists(_archivePath))
+            {
+                Directory.Delete(_archivePath, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+            /* A scratch directory that outlives one test run is noise, not a failure. */
+        }
+    }
+
+    /// <summary>
+    /// A startup that has work to do surveys exactly once. The survey is a hot-table GROUP BY plus three scans of
+    /// every archive file, and the repair used to run it again as its own first step.
+    /// </summary>
+    [Fact]
+    public async Task StartupRepair_SurveysOnce_NotOncePerStep()
+    {
+        await WriteSplitArchiveAsync(Path.Combine(_archivePath, "202605_query_store_stats.parquet"));
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(1, service.SurveysRun);
+    }
+
+    /// <summary>The public API still surveys for itself: a caller that hands over no survey gets a fresh one.</summary>
+    [Fact]
+    public async Task RepairAsync_WithoutASurvey_StillSurveysForItself()
+    {
+        await WriteSplitArchiveAsync(Path.Combine(_archivePath, "202605_query_store_stats.parquet"));
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        var result = await service.RepairAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(result.FullyRepaired);
+        Assert.Equal(1, service.SurveysRun);
+    }
+
+    /// <summary>
+    /// The survey handed in at startup can be stale by the time the repair uses it: archiving or compaction may
+    /// have removed a file in between. A vanished file is skipped, not reported as a repair failure that would
+    /// withhold the completion marker for good.
+    /// </summary>
+    [Fact]
+    public async Task RepairWithAHandedInSurvey_SkipsAFileThatHasVanished()
+    {
+        var file = Path.Combine(_archivePath, "202605_query_store_stats.parquet");
+        await WriteSplitArchiveAsync(file);
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        var survey = await service.SurveyAsync(TestContext.Current.CancellationToken);
+        Assert.True(survey.HasWork);
+        File.Delete(file);
+
+        var result = await service.RepairAsync(survey: survey, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(result.FullyRepaired);
+        Assert.Equal(1, service.SurveysRun);
+    }
+
+    private async Task WriteSplitArchiveAsync(string file)
+    {
+        using var readLock = _duckDb.AcquireReadLock(TestContext.Current.CancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $@"
+COPY (
+    SELECT * FROM (VALUES
+        (1::BIGINT, TIMESTAMP '2026-05-10 10:00:00', {ServerId}::INTEGER, 'SRV', 'DB', 1::BIGINT, 11::BIGINT, 'Regular',
+         TIMESTAMP '2026-05-10 09:55:00', TIMESTAMP '2026-05-10 10:00:00', 'SELECT 1', '0xH', 100::BIGINT, 1778::BIGINT, 998::BIGINT, 4708::BIGINT),
+        (2::BIGINT, TIMESTAMP '2026-05-10 10:00:00', {ServerId}::INTEGER, 'SRV', 'DB', 1::BIGINT, 11::BIGINT, 'Regular',
+         TIMESTAMP '2026-05-10 09:55:00', TIMESTAMP '2026-05-10 10:00:00', 'SELECT 1', '0xH', 25::BIGINT, 2245::BIGINT, 998::BIGINT, 5100::BIGINT),
+        (3::BIGINT, TIMESTAMP '2026-05-10 10:05:00', {ServerId}::INTEGER, 'SRV', 'DB', 2::BIGINT, 22::BIGINT, 'Regular',
+         TIMESTAMP '2026-05-10 10:01:00', TIMESTAMP '2026-05-10 10:05:00', 'SELECT 2', '0xH2', 55::BIGINT, 500::BIGINT, 400::BIGINT, 600::BIGINT)
+    ) AS t(collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
+           execution_type_desc, first_execution_time, last_execution_time, query_text, query_hash,
+           execution_count, avg_duration_us, min_duration_us, max_duration_us)
+) TO '{file.Replace("'", "''", StringComparison.Ordinal)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+        await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    internal sealed class CapturingLogger(List<(LogLevel Level, string Message)> sink) : ILogger<QueryStoreSliceRepairService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => sink.Add((logLevel, formatter(state, exception)));
+    }
+}

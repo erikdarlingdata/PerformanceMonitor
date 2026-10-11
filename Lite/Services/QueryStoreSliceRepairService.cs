@@ -71,6 +71,14 @@ public sealed partial class QueryStoreSliceRepairService
     private readonly DuckDbInitializer _duckDb;
     private readonly string _archivePath;
     private readonly ILogger<QueryStoreSliceRepairService>? _logger;
+    private int _surveysRun;
+
+    /// <summary>
+    /// How many times <see cref="SurveyAsync"/> has run on this instance (#5653). A survey is the most
+    /// expensive thing this service does, so a startup that runs one more than it needs is a defect the
+    /// tests can pin by number.
+    /// </summary>
+    internal int SurveysRun => Volatile.Read(ref _surveysRun);
 
     public QueryStoreSliceRepairService(DuckDbInitializer duckDb, string archivePath, ILogger<QueryStoreSliceRepairService>? logger = null)
     {
@@ -396,6 +404,7 @@ SELECT
 
             var result = await RepairAsync(
                 new Progress<string>(message => _logger?.LogInformation("#1912 {Message}", message)),
+                survey,
                 cancellationToken);
 
             if (result.FullyRepaired)
@@ -454,6 +463,7 @@ SELECT
     /// </summary>
     public async Task<Survey> SurveyAsync(CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref _surveysRun);
         long groups = 0;
         long rows = 0;
 
@@ -584,9 +594,13 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
     /// archive. The COPY carries <c>COMPRESSION ZSTD</c> because that is what wrote these files — omitting it
     /// silently switches codec and inflates them (measured: 28 MB becoming 69 MB).</para>
     /// </summary>
-    public async Task<RepairResult> RepairAsync(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    public async Task<RepairResult> RepairAsync(
+        IProgress<string>? progress = null, Survey? survey = null, CancellationToken cancellationToken = default)
     {
-        var survey = await SurveyAsync(cancellationToken);
+        /* #5653: the startup path already surveyed to decide whether there is work and to record the attempt,
+           and hands that survey over. Surveying again here ran the hot GROUP BY and three scans of every archive
+           file twice per start. A caller with no survey (the public API) still gets a fresh one. */
+        survey ??= await SurveyAsync(cancellationToken);
         long removed = 0;
         var failures = new List<string>(survey.Unreadable);
 
@@ -679,6 +693,15 @@ HAVING COUNT(*) > 1";
         var rewroteArchive = false;
         foreach (var file in survey.Archive.Where(a => a.Groups > 0))
         {
+            /* A handed-in survey can be older than the file set: archiving or compaction may have replaced or
+               removed a file since it ran. A file that is gone has nothing left to repair, and treating it as a
+               failure would withhold the completion marker for good. */
+            if (!File.Exists(file.Path))
+            {
+                _logger?.LogInformation("#1912 archive file {File} no longer exists; nothing to repair", file.Path);
+                continue;
+            }
+
             try
             {
                 removed += await RewriteArchiveFileAsync(file, progress, cancellationToken);
