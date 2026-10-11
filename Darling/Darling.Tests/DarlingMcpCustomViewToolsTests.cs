@@ -660,7 +660,7 @@ public sealed class ComposeUnknownServerMessageTests
     {
         var outcome = DarlingWebEndpoints.ComposeRunOutcome.NotFound("No server named 'x' is registered, and nothing is stored under that name in this time range.");
         Assert.True(outcome.IsNotFound);
-        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 1);
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 1, System.Threading.CancellationToken.None);
         Assert.Equal(404, (result as Microsoft.AspNetCore.Http.IStatusCodeHttpResult)?.StatusCode);
     }
 }

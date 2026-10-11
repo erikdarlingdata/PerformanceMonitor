@@ -110,7 +110,7 @@ public sealed class DarlingWebFailureHandlingTests
         var logger = new CapturingTestLogger();
         var ex = new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
 
-        DarlingWebFailureLog.Report(logger, "/api/ag", 15650, ex);
+        DarlingWebFailureLog.Report(logger, "/api/ag", 15650, ex, System.Threading.CancellationToken.None);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
@@ -127,7 +127,7 @@ public sealed class DarlingWebFailureHandlingTests
         var logger = new CapturingTestLogger();
         var ex = new InvalidOperationException("boom");
 
-        DarlingWebFailureLog.Report(logger, "/api/fleet", 42, ex);
+        DarlingWebFailureLog.Report(logger, "/api/fleet", 42, ex, System.Threading.CancellationToken.None);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
@@ -147,7 +147,7 @@ public sealed class DarlingWebFailureHandlingTests
         var logger = new CapturingTestLogger();
         var ex = new InvalidOperationException("boom");
 
-        DarlingWebFailureLog.Report(logger, "/api/ag\r\nForged: line", 5, ex);
+        DarlingWebFailureLog.Report(logger, "/api/ag\r\nForged: line", 5, ex, System.Threading.CancellationToken.None);
 
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
@@ -173,6 +173,37 @@ public sealed class DarlingWebFailureHandlingTests
             => Inner.Log(logLevel, eventId, state, exception, formatter);
     }
 
+    /// <summary>What <see cref="BuildServer"/> hands back: the server and the shared logger, and ownership of the
+    /// <see cref="NpgsqlDataSource"/> the host was built over, which the test disposes with <c>using</c>. It deconstructs like the
+    /// tuple it replaced.</summary>
+    private sealed class BuiltServer : IDisposable
+    {
+        private readonly NpgsqlDataSource _store;
+
+        public BuiltServer(TestServer server, CapturingTestLogger logger, NpgsqlDataSource store)
+        {
+            Server = server;
+            Logger = logger;
+            _store = store;
+        }
+
+        public TestServer Server { get; }
+
+        public CapturingTestLogger Logger { get; }
+
+        public void Deconstruct(out TestServer server, out CapturingTestLogger logger)
+        {
+            server = Server;
+            logger = Logger;
+        }
+
+        public void Dispose() => _store.Dispose();
+    }
+
+    /// <summary>Runs of <c>/api/__test/store-timeout</c>, so a test can show the route really ran under a cancelled token rather
+    /// than the harness refusing the request first. Tests in one class run one at a time.</summary>
+    private static int s_storeTimeoutRuns;
+
     /// <summary>
     /// Builds a <see cref="TestServer"/> over the REAL <c>ConfigureResponseCompression</c> + <c>ConfigurePipeline</c>
     /// (the #4128 pattern <see cref="DarlingWebResponseCompressionTests"/> established), plus three test-only
@@ -183,8 +214,7 @@ public sealed class DarlingWebFailureHandlingTests
     /// middleware registered textually before it — the same nesting these test-only routes rely on. No live
     /// Postgres needed: every route here throws before ever opening the (unopened) pool.
     /// </summary>
-    private static async Task<(TestServer Server, CapturingTestLogger Logger)> BuildServer(
-        CollectorRuntimeState? collectorState = null, NpgsqlDataSource? store = null)
+    private static async Task<BuiltServer> BuildServer(CollectorRuntimeState? collectorState = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -194,7 +224,7 @@ public sealed class DarlingWebFailureHandlingTests
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
 
-        var postgres = store ?? NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
 
         DarlingWebHostService.ConfigureResponseCompression(builder.Services);
@@ -227,6 +257,15 @@ public sealed class DarlingWebFailureHandlingTests
         app.MapGet("/api/__test/generic", (HttpContext _) =>
             throw new InvalidOperationException("super secret internal connection string detail"));
 
+        /* #5678: the exception a store connect that ran out of time throws, whether or not the caller is still there. */
+        app.MapGet("/api/__test/store-timeout", (HttpContext context) =>
+        {
+            Interlocked.Increment(ref s_storeTimeoutRuns);
+            throw context.Request.Query.ContainsKey("refused")
+                ? new NpgsqlException("Exception while connecting", new IOException("connection refused"))
+                : new NpgsqlException("Exception while connecting", new TimeoutException());
+        });
+
         app.MapGet("/api/__test/abort", (HttpContext context) =>
         {
             /* The shape a real aborted read throws: OperationCanceledException carrying the SAME token
@@ -251,7 +290,7 @@ public sealed class DarlingWebFailureHandlingTests
         });
 
         await app.StartAsync();
-        return (app.GetTestServer(), capturing.Inner);
+        return new BuiltServer(app.GetTestServer(), capturing.Inner, postgres);
     }
 
     private static Task<HttpContext> Send(TestServer server, string path, CancellationToken? requestAborted = null)
@@ -280,7 +319,8 @@ public sealed class DarlingWebFailureHandlingTests
     [Fact]
     public async Task StatementTimeout_Returns503_WithTheRuledJsonBody_AndWritesOneWarning()
     {
-        var (server, logger) = await BuildServer();
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
 
         var ctx = await Send(server, "/api/__test/timeout");
@@ -300,7 +340,8 @@ public sealed class DarlingWebFailureHandlingTests
     [Fact]
     public async Task A503TheRouteAnsweredWithoutReporting_StillWritesOneWarning_NamingTheEndpointAndTheServer()
     {
-        var (server, logger) = await BuildServer();
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
 
         var ctx = await Send(server, "/api/__test/unreported-503?server=example-sql-01");
@@ -324,7 +365,8 @@ public sealed class DarlingWebFailureHandlingTests
     {
         var stopped = new CollectorRuntimeState();
         stopped.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
-        var (server, logger) = await BuildServer(stopped);
+        using var built = await BuildServer(stopped);
+        var (server, logger) = built;
         using var _ = server;
 
         var ctx = await Send(server, "/api/ping");
@@ -338,7 +380,8 @@ public sealed class DarlingWebFailureHandlingTests
     [Fact]
     public async Task AReportedTimeout_StillWritesOnlyOneLine_AndNowNamesTheCause()
     {
-        var (server, logger) = await BuildServer();
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
 
         var ctx = await Send(server, "/api/__test/timeout");
@@ -370,7 +413,8 @@ public sealed class DarlingWebFailureHandlingTests
     [Fact]
     public async Task GenericException_Returns500_WithNoExceptionText_AndWritesOneError()
     {
-        var (server, logger) = await BuildServer();
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
 
         var ctx = await Send(server, "/api/__test/generic");
@@ -391,7 +435,8 @@ public sealed class DarlingWebFailureHandlingTests
     [Fact]
     public async Task BrowserAbort_WritesNoLogLine_AndNoBody()
     {
-        var (server, logger) = await BuildServer();
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
 
         using var cts = new CancellationTokenSource();
@@ -424,7 +469,8 @@ public sealed class DarlingWebFailureHandlingTests
     [Fact]
     public async Task BrowserAbort_AsIOException_WritesNoErrorLine()
     {
-        var (server, logger) = await BuildServer();
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
 
         try
@@ -441,85 +487,90 @@ public sealed class DarlingWebFailureHandlingTests
         Assert.Equal("(no log lines captured)", logger.Joined);
     }
 
-    /* ═══════════════════════════ a tool-caught failure for a browser that left (#5678) ═══════════════════════════ */
+    /* ═══════════════════════════ a failure for a browser that left (#5678) ═══════════════════════════ */
 
-    /* The race behind #5678 made deterministic, as WebDataStartNoteEventReadsTests does: the connect budget (1 s) is spent by the time
-       Npgsql would look at the request token, so a read under an already-cancelled token meets a connect TIMEOUT -- an
-       NpgsqlException, not an OperationCanceledException. The tool's catch (`when ex is not OperationCanceledException`) takes it
-       and returns an "Error during ..." sentence normally. A logger that is slow on every call spends the budget: Npgsql logs while
-       it opens a connection, after the budget has started. */
-    private sealed class SlowLogger : ILogger, ILoggerFactory
-    {
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Thread.Sleep(1200);
-
-        public ILogger CreateLogger(string categoryName) => this;
-
-        public void AddProvider(ILoggerProvider provider)
-        {
-        }
-
-        public void Dispose()
-        {
-        }
-    }
-
-    private static NpgsqlDataSource UnreachableStore()
-    {
-        var builder = new NpgsqlDataSourceBuilder("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
-        builder.UseLoggerFactory(new SlowLogger());
-        return builder.Build();
-    }
-
-    /* get_fleet_overview reads the store without resolving a server first, so its own catch is the one that answers. */
-    private const string ToolCaughtRead = "/api/read/get_fleet_overview";
-
-    /// <summary>
-    /// #5678: a read whose tool caught its own failure and returned an <c>Error during ...</c> sentence, for a browser that
-    /// has already left, writes no failure line and no body: the request ends as #4276 ends a cancelled one. Before the fix the
-    /// sentence went on to ToHttpResult, which logged it and wrote a 500/503 for a caller who was gone.
-    /// </summary>
+    /// <summary>#5678: the backstop classifies a gone caller by the request token, not by the exception's type. A store connect
+    /// that timed out (an NpgsqlException) under a cancelled token writes no failure line and no body, on a route that has no
+    /// catch of its own.</summary>
     [Fact]
-    public async Task AToolCaughtFailure_ForABrowserThatLeft_WritesNoFailureLine()
+    public async Task TheBackstop_WritesNoLineAndNoBody_ForAStoreTimeoutUnderACancelledToken()
     {
-        var (server, logger) = await BuildServer(store: UnreachableStore());
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
         using var gone = new CancellationTokenSource();
         await gone.CancelAsync();
+        var runsBefore = Volatile.Read(ref s_storeTimeoutRuns);
 
-        try
-        {
-            var ctx = await Send(server, ToolCaughtRead, gone.Token);
-            Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
-        }
-        catch (OperationCanceledException)
-        {
-            /* The harness may surface the aborted request as its own cancellation; the log is what is under test. */
-        }
+        var ctx = await Send(server, "/api/__test/store-timeout", gone.Token);
 
+        Assert.Equal(runsBefore + 1, Volatile.Read(ref s_storeTimeoutRuns));
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
         Assert.Equal("(no log lines captured)", logger.Joined);
+        using var reader = new StreamReader(ctx.Response.Body);
+        Assert.Equal(string.Empty, await reader.ReadToEndAsync());
     }
 
-    /// <summary>Control for <see cref="AToolCaughtFailure_ForABrowserThatLeft_WritesNoFailureLine"/>: the same read with a live
-    /// token still answers the server-error status and writes its one line.</summary>
-    [Fact]
-    public async Task AToolCaughtFailure_ForALiveBrowser_StillAnswersServerError_AndWritesOneLine()
+    /// <summary>Control for <see cref="TheBackstop_WritesNoLineAndNoBody_ForAStoreTimeoutUnderACancelledToken"/>: the same route
+    /// with a live token still writes its one line and answers its status: a Warning and 503 for the timeout, an Error and 500
+    /// for a connect that was refused.</summary>
+    [Theory]
+    [InlineData("/api/__test/store-timeout", StatusCodes.Status503ServiceUnavailable, LogLevel.Warning)]
+    [InlineData("/api/__test/store-timeout?refused=1", StatusCodes.Status500InternalServerError, LogLevel.Error)]
+    public async Task TheBackstop_StillWritesOneLineAndAnswersItsStatus_ForTheSameFailureUnderALiveToken(
+        string path, int status, LogLevel level)
     {
-        var (server, logger) = await BuildServer(store: UnreachableStore());
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
 
-        var ctx = await Send(server, ToolCaughtRead);
+        var ctx = await Send(server, path);
 
-        Assert.True(
-            ctx.Response.StatusCode is StatusCodes.Status500InternalServerError or StatusCodes.Status503ServiceUnavailable,
-            $"expected the server-error status, got {ctx.Response.StatusCode}");
+        Assert.Equal(status, ctx.Response.StatusCode);
+        Assert.Equal(1, logger.CountAtLevel(level));
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning) + logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Debug));
+    }
+
+    /// <summary>The backstop's rule on its own, with no pipeline: a fired token makes any exception the caller leaving, except
+    /// Kestrel's rejection of a malformed request, which keeps its own arm; a live token never does.</summary>
+    [Fact]
+    public void IsCallerGone_IsTheTokenNotTheType_ExceptForABadHttpRequest()
+    {
+        var gone = new CancellationToken(canceled: true);
+        var timeout = new NpgsqlException("Exception while connecting", new TimeoutException());
+
+        Assert.True(DarlingWebFailureObserver.IsCallerGone(timeout, gone));
+        Assert.True(DarlingWebFailureObserver.IsCallerGone(new OperationCanceledException(gone), gone));
+        Assert.True(DarlingWebFailureObserver.IsCallerGone(new IOException("reset"), gone));
+        Assert.False(DarlingWebFailureObserver.IsCallerGone(new BadHttpRequestException("too large", 413), gone));
+        Assert.False(DarlingWebFailureObserver.IsCallerGone(timeout, CancellationToken.None));
+        Assert.False(DarlingWebFailureObserver.IsCallerGone(new OperationCanceledException(), CancellationToken.None));
+    }
+
+    /// <summary>#5678: a failure reported for a caller who has left writes one Debug line and no Warning or Error, on both
+    /// overloads, and still counts as reported so the observer writes nothing after it.</summary>
+    [Fact]
+    public void Report_UnderACancelledToken_WritesOneDebugLine_AndNoWarningOrError()
+    {
+        var gone = new CancellationToken(canceled: true);
+        var logger = new CapturingTestLogger();
+        var tracking = DarlingWebFailureLog.BeginRequestTracking();
+        var ex = new NpgsqlException("Exception while connecting", new TimeoutException());
+
+        DarlingWebFailureLog.Report(logger, "/api/ag", 1010, ex, gone);
+        DarlingWebFailureLog.Report(logger, "/api/fleet", 2020, "Error during get_fleet_overview: boom", gone);
+
+        Assert.Equal(2, logger.CountAtLevel(LogLevel.Debug));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Contains("/api/ag", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("1010", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains(nameof(NpgsqlException), logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("Error during get_fleet_overview: boom", logger.Joined, StringComparison.Ordinal);
+        Assert.True(tracking.Reported);
     }
 
     /// <summary>The helper's own rule, with no pipeline: a cancelled token ends a server-error sentence with a cancellation
@@ -538,29 +589,48 @@ public sealed class DarlingWebFailureHandlingTests
         DarlingWebEndpoints.ThrowIfCallerGone("{\"rows\":[]}", cancelled);
     }
 
-    /// <summary>#5678: every web handler that hands a tool's string, or a store fault, to a failure log with the request token in
-    /// reach ends a gone caller's request first. Source pin over the sites, so a new copy of the old shape is noticed.</summary>
+    /// <summary>Source pin for one wiring spot: the <c>/api/read/*</c> loop ends a gone caller's tool-caught sentence before it
+    /// reaches <c>ToHttpResult</c>. Reads only; the writes (server tags, mute rules) have no such guard on purpose, because
+    /// <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string,System.Threading.CancellationToken)"/> leaves their one
+    /// Debug line.</summary>
     [Fact]
-    public void EveryWebSiteThatLogsAToolCaughtFailure_EndsAGoneCallersRequestFirst()
+    public void TheReadDispatchLoop_EndsAGoneCallersToolCaughtSentence_BeforeToHttpResult()
     {
-        var service = "Darling/PerformanceMonitor.Darling.Service/";
-        var endpoints = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(service + "DarlingWebEndpoints.cs"));
+        var endpoints = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs"));
         var loopAt = endpoints.IndexOf("foreach (var (name, handler) in BuildReadDispatch", StringComparison.Ordinal);
         var loopEnd = endpoints.IndexOf("return ToHttpResult(result,", loopAt, StringComparison.Ordinal);
         Assert.Contains("ThrowIfCallerGone(result, context.RequestAborted)", endpoints[loopAt..loopEnd], StringComparison.Ordinal);
 
         var tagAt = endpoints.IndexOf("internal static IResult ServerTagToolResult(", StringComparison.Ordinal);
-        Assert.Contains("ThrowIfCallerGone(result, requestAborted)", endpoints[tagAt..(tagAt + 600)], StringComparison.Ordinal);
+        var tagEnd = endpoints.IndexOf("internal static IResult MuteRuleToolResult(", tagAt, StringComparison.Ordinal);
+        Assert.DoesNotContain("ThrowIfCallerGone", endpoints[tagAt..tagEnd], StringComparison.Ordinal);
+    }
 
+    /// <summary>Source pin for one wiring spot: the compose route ends a gone caller's request for any failed run that is not a
+    /// 404, including a panel author's own query error, which the Warning inside <c>ComposeRunFailureResult</c> would otherwise
+    /// log.</summary>
+    [Fact]
+    public void TheComposeRunRoute_EndsAGoneCallersFailedRun_ExceptANotFound_BeforeItsFailureMapping()
+    {
+        var endpoints = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs"));
         var composeAt = endpoints.IndexOf("return ComposeRunFailureResult(outcome,", StringComparison.Ordinal);
-        Assert.Contains("context.RequestAborted.ThrowIfCancellationRequested()", endpoints[(composeAt - 300)..composeAt], StringComparison.Ordinal);
+        var window = endpoints[(composeAt - 300)..composeAt];
+        Assert.Contains("outcome.Payload is null && !outcome.IsNotFound", window, StringComparison.Ordinal);
+        Assert.Contains("context.RequestAborted.ThrowIfCancellationRequested()", window, StringComparison.Ordinal);
+    }
 
-        var databases = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(service + "DarlingServerDatabasesEndpoint.cs"));
-        Assert.Contains("DarlingWebEndpoints.ThrowIfCallerGone(error, context.RequestAborted)", databases, StringComparison.Ordinal);
-
-        var triage = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(service + "DarlingTriageEndpoint.cs"));
-        var sentenceAt = triage.IndexOf("var sentence = McpHelpers.ErrorMessageOf(raw);", StringComparison.Ordinal);
-        Assert.Contains("requestContext.RequestAborted.ThrowIfCancellationRequested()", triage[sentenceAt..(sentenceAt + 300)], StringComparison.Ordinal);
+    /// <summary>The triage section runner's doc says it never throws, so it must not throw for a gone caller; the observer and
+    /// <c>Report</c> carry that rule instead.</summary>
+    [Fact]
+    public void TheTriageSectionRunner_DoesNotThrowForAGoneCaller()
+    {
+        var triage = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingTriageEndpoint.cs"));
+        var runAt = triage.IndexOf("private static async Task<JsonObject> RunSectionAsync(", StringComparison.Ordinal);
+        var runEnd = triage.IndexOf("internal static string BuildSectionQuery(", runAt, StringComparison.Ordinal);
+        Assert.DoesNotContain("ThrowIfCancellationRequested", triage[runAt..runEnd], StringComparison.Ordinal);
     }
 
     /* ═══════════════════════════ the wired pipeline: BadHttpRequestException (#4281 review, finding 3) ═══════════════════════════ */
@@ -574,7 +644,8 @@ public sealed class DarlingWebFailureHandlingTests
     [Fact]
     public async Task BadHttpRequestException_AnswersItsOwnStatus_WritesNoBody_LogsAtDebugNeverError()
     {
-        var (server, logger) = await BuildServer();
+        using var built = await BuildServer();
+        var (server, logger) = built;
         using var _ = server;
 
         var ctx = await Send(server, "/api/__test/bad-request");

@@ -65,7 +65,7 @@ internal static class DarlingServerDatabasesEndpoint
             var stopwatch = Stopwatch.StartNew();
             if (!TryBindSearch(context.Request.Query, out var search, out var refusal))
             {
-                return DarlingWebEndpoints.ToHttpResult(refusal!, Route, logger, stopwatch.ElapsedMilliseconds);
+                return DarlingWebEndpoints.ToHttpResult(refusal!, Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
 
             var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(
@@ -74,7 +74,7 @@ internal static class DarlingServerDatabasesEndpoint
             {
                 /* #5678: a registry fault for a browser that has left is not logged (see ThrowIfCallerGone). */
                 DarlingWebEndpoints.ThrowIfCallerGone(error, context.RequestAborted);
-                return DarlingWebEndpoints.ToHttpResult(error, Route, logger, stopwatch.ElapsedMilliseconds);
+                return DarlingWebEndpoints.ToHttpResult(error, Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
 
             try
@@ -92,7 +92,7 @@ internal static class DarlingServerDatabasesEndpoint
                 context.RequestAborted.ThrowIfCancellationRequested();
 
                 /* The real exception reaches the service log once; the body is the fixed message, never ex.Message. */
-                DarlingWebFailureLog.Report(logger, Route, stopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, Route, stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });

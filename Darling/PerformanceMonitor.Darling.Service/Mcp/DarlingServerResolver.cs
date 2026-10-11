@@ -137,9 +137,17 @@ ORDER BY server_name";
                timeout (an NpgsqlException wrapping a TimeoutException) rather than OperationCanceledException when the
                connect budget runs out before it looks at the token, so a cancelled caller on a stalled machine would
                otherwise be told the registry could not be read. */
-            cancellationToken.ThrowIfCancellationRequested();
-            return (new List<RegisteredServer>(), $"{RegistryReadFaultPrefix}{ex.Message}");
+            return FaultOrCancel(ex, cancellationToken);
         }
+    }
+
+    /// <summary>#5678: what a failed registry read becomes. A caller whose token has fired gets the cancellation, whatever type
+    /// the failure had; any other caller gets the fault sentence. Its own method so the rule is tested on a hand-built exception
+    /// and token, with no connection attempt whose timing the test would depend on.</summary>
+    internal static (List<RegisteredServer> Servers, string? Fault) FaultOrCancel(Exception ex, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return (new List<RegisteredServer>(), $"{RegistryReadFaultPrefix}{ex.Message}");
     }
 
     /// <summary>

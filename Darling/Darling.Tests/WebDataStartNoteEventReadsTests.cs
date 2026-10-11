@@ -35,74 +35,37 @@ public sealed class WebDataStartNoteEventReadsTests
 
     private static readonly CancellationToken Cancelled = new(canceled: true);
 
-    /* A logger that is slow on every call: Npgsql logs while it opens a connection, after it has started its 1-second connect
-       budget, so the budget is spent by the time it would look at the token. (Slow on the first call only is not enough: the
-       first log line comes before the budget starts.) */
-    private sealed class SlowLogger : ILogger, ILoggerFactory
-    {
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    /* #5678: the connect timeout that beats Npgsql's look at the request token, as the exception itself: an NpgsqlException that
+       wraps a TimeoutException, not an OperationCanceledException. The rule under test takes the exception and the token, so a
+       hand-built exception stands in for the race with no connection attempt to time. */
+    private static NpgsqlException ConnectTimeout() => new("Exception while connecting", new TimeoutException());
 
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-        {
-            Thread.Sleep(1200);
-        }
-
-        public ILogger CreateLogger(string categoryName) => this;
-
-        public void AddProvider(ILoggerProvider provider)
-        {
-        }
-
-        public void Dispose()
-        {
-        }
-    }
-
-    /* The race behind #5678 made deterministic: with the connect budget spent, a pre-cancelled token still meets a connect timeout,
-       an NpgsqlException that wraps a TimeoutException, not an OperationCanceledException. */
-    private static NpgsqlDataSource ConnectBudgetSpent()
-    {
-        var builder = new NpgsqlDataSourceBuilder("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
-        builder.UseLoggerFactory(new SlowLogger());
-        return builder.Build();
-    }
-
-    /// <summary>The control for the two pins below: the store open really does throw a connect timeout, not a cancellation, when its
-    /// budget is spent under an already-cancelled token. Without this, the pins would pass on a Npgsql that stopped doing so.</summary>
+    /// <summary>#5678: a cancelled caller gets the cancellation from a failed registry read, never the registry-fault sentence,
+    /// whatever type the failure had; a live caller still gets the sentence.</summary>
     [Fact]
-    public async Task ASpentConnectBudget_ThrowsATimeout_NotACancellation_UnderACancelledToken()
+    public void AFailedRegistryRead_SurfacesCancellation_ForACancelledCaller_AndTheFaultSentenceForALiveOne()
     {
-        await using var store = ConnectBudgetSpent();
+        Assert.Throws<OperationCanceledException>(() => DarlingServerResolver.FaultOrCancel(ConnectTimeout(), Cancelled));
 
-        var thrown = await Assert.ThrowsAnyAsync<Exception>(async () => { await using var _ = await store.OpenConnectionAsync(Cancelled); });
-
-        Assert.IsNotAssignableFrom<OperationCanceledException>(thrown);
+        var (servers, fault) = DarlingServerResolver.FaultOrCancel(ConnectTimeout(), CancellationToken.None);
+        Assert.Empty(servers);
+        Assert.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, fault, StringComparison.Ordinal);
     }
 
-    /// <summary>#5678: a cancelled caller gets the cancellation from the registry read, never the registry-fault sentence, whatever
-    /// exception type the connect attempt ends in.</summary>
+    /// <summary>#5678: a cancelled caller gets the cancellation from a failed data-start probe, not an unannotated grid, whatever
+    /// type the failure had; a live caller still gets the grid untouched and one Debug line.</summary>
     [Fact]
-    public async Task TheRegistryRead_SurfacesCancellation_WhenTheConnectBudgetIsSpent()
+    public void AFailedDataStartProbe_SurfacesCancellation_ForACancelledCaller_AndTheGridForALiveOne()
     {
-        await using var store = ConnectBudgetSpent();
+        const string grid = "{\"rows\":[]}";
+        var logger = new CapturingTestLogger();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => DarlingServerResolver.LoadEnabledOrFaultAsync(store, Cancelled));
-    }
+        Assert.Throws<OperationCanceledException>(
+            () => WebDataStartNote.ProbeFailed(grid, ConnectTimeout(), "get_health_parser_system_health", logger, Cancelled));
+        Assert.Equal("(no log lines captured)", logger.Joined);
 
-    /// <summary>#5678: a page that is not capped reaches the store and surfaces cancellation, even when the store's connect ends in a
-    /// timeout rather than a cancellation. This is the call that failed once on a loaded runner.</summary>
-    [Fact]
-    public async Task AnUncappedPage_SurfacesCancellation_WhenTheConnectBudgetIsSpent()
-    {
-        await using var store = ConnectBudgetSpent();
-        const string page = "{\"server\":\"sql01\",\"hours_back\":48,\"total_entries\":2,\"shown\":2,\"entries\":["
-            + "{\"event_time\":\"2026-01-02T18:00:00.0000000Z\"},{\"event_time\":\"2026-01-02T12:30:00.0000000Z\"}]}";
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => WebDataStartNote.AddAsync(store, "get_health_parser_system_health", "sql01", 48, WindowEnd, page, null, Cancelled));
+        Assert.Same(grid, WebDataStartNote.ProbeFailed(grid, ConnectTimeout(), "get_health_parser_system_health", logger, CancellationToken.None));
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Debug));
     }
 
     private const string DefaultTraceCapped =

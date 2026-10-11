@@ -744,15 +744,22 @@ internal static class WebDataStartNote
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* #5678: a cancelled caller is not a failed probe. A connect timeout that beats Npgsql's look at the token arrives
-               as a different exception type, and answering the grid would hide that the request was abandoned. */
-            cancellationToken.ThrowIfCancellationRequested();
-
-            /* Debug, like the Custom Views runner's probe: the grid is still answered, and this runs once per grid
-               refresh, so a standing fault at Warning would put a line in the log on every one. */
-            logger?.LogDebug(ex, "The data-start probe for {Tool} failed; the grid is answered without a partial-window notice.", tool);
-            return result;
+            return ProbeFailed(result, ex, tool, logger, cancellationToken);
         }
+    }
+
+    /// <summary>What a failed data-start probe becomes. #5678: a cancelled caller is not a failed probe. A connect timeout that
+    /// beats Npgsql's look at the token arrives as a different exception type, and answering the grid would hide that the request
+    /// was abandoned, so the cancellation wins whatever the exception's type. Anything else is a Debug line and the unannotated
+    /// grid. Its own method so the rule is tested on a hand-built exception and token, with no connection attempt to time.</summary>
+    internal static string ProbeFailed(string result, Exception exception, string tool, ILogger? logger, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        /* Debug, like the Custom Views runner's probe: the grid is still answered, and this runs once per grid
+           refresh, so a standing fault at Warning would put a line in the log on every one. */
+        logger?.LogDebug(exception, "The data-start probe for {Tool} failed; the grid is answered without a partial-window notice.", tool);
+        return result;
     }
 
     /// <summary>Where the data starts, as a UTC instant: the coverage note's first field (<see cref="AddAsync"/>).</summary>

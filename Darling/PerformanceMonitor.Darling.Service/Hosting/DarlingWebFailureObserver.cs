@@ -8,7 +8,7 @@
 
 using System;
 using System.Diagnostics;
-using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// The web host's one failure observer (#4276, W12): the FIRST middleware registered, ahead of response compression, the
 /// Host-allowlist guard, the method gate and the auth gate, so a throw from any of them is logged too. It replaces the #4276
 /// backstop that sat behind the gates and could not see them; a request still gets exactly one failure line, because the
-/// routes' own <see cref="DarlingWebFailureLog.Report(ILogger,string,long,Exception)"/> calls tick the per-request tracking this
+/// routes' own <see cref="DarlingWebFailureLog.Report(ILogger,string,long,Exception,System.Threading.CancellationToken)"/> calls tick the per-request tracking this
 /// reads, and a thrown exception is reported here only when nothing reported it first.
 ///
 /// <para>It decides nothing about a request before <c>next</c> runs (no refusal, no write), so putting it ahead of the Host guard
@@ -44,6 +44,15 @@ internal sealed class DarlingWebFailureObserver
         _preAuthThrottle = preAuthThrottle;
     }
 
+    /// <summary>
+    /// #5678: true when the request's caller has gone and <paramref name="exception"/> is therefore not the service's failure to
+    /// report: the request token has fired, and the exception is not Kestrel's own rejection of a malformed request
+    /// (<see cref="BadHttpRequestException"/>, which has its own arm and answers its status). Takes the exception and the token
+    /// so the rule is testable without a pipeline.
+    /// </summary>
+    internal static bool IsCallerGone(Exception exception, CancellationToken requestAborted) =>
+        requestAborted.IsCancellationRequested && exception is not BadHttpRequestException;
+
     public async Task InvokeAsync(HttpContext context)
     {
         var stopwatch = Stopwatch.StartNew();
@@ -52,13 +61,14 @@ internal sealed class DarlingWebFailureObserver
         {
             await _next(context);
         }
-        catch (Exception ex) when ((ex is OperationCanceledException or IOException)
-            && context.RequestAborted.IsCancellationRequested)
+        catch (Exception ex) when (IsCallerGone(ex, context.RequestAborted))
         {
-            /* #4286 review, Low 2: a client that resets an upload or an HTTP/2 stream during a body read does not always
-               surface as OperationCanceledException -- Kestrel can report it as an IOException (a TCP reset, or "The client
-               reset the request stream." on HTTP/2). Same filter ASP.NET Core's own exception handler middleware uses to
-               classify a client abort: no line, no body. */
+            /* #5678: the caller's cancelled token decides, not the exception's type. A caller who left while the store was being
+               reached can surface as an OperationCanceledException, as an IOException (a TCP reset, or "The client reset the
+               request stream." on HTTP/2 -- #4286 review, Low 2) or, when a connect timeout beats the driver's look at the token,
+               as an NpgsqlException that no cancellation filter would match. Same classification ASP.NET Core's own exception
+               handler middleware makes for a client abort: no line, no body. A handler that logs a failure itself sends the same
+               caller one Debug line (DarlingWebFailureLog.Report, given the request token). */
         }
         catch (BadHttpRequestException bad)
         {
@@ -79,7 +89,7 @@ internal sealed class DarlingWebFailureObserver
                below is unchanged. A request that got through the gate keeps the unthrottled line it always had. */
             if (tracking.PassedAuth)
             {
-                DarlingWebFailureLog.Report(_logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(_logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
             }
             else
             {
@@ -87,7 +97,7 @@ internal sealed class DarlingWebFailureObserver
                     DarlingRefusalGate.PreAuthFailure, DarlingHttpRefusalLog.DescribeSource(context.Connection.RemoteIpAddress), DateTime.UtcNow);
                 if (decision.Log)
                 {
-                    DarlingWebFailureLog.Report(_logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex);
+                    DarlingWebFailureLog.Report(_logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 }
                 else
                 {

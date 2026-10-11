@@ -402,7 +402,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
 
     private static async Task<(int Status, string Body)> WebReadAsync(string tool, string raw)
     {
-        var result = DarlingWebEndpoints.ToHttpResult(raw, "/api/read/" + tool, NullLogger.Instance, 1);
+        var result = DarlingWebEndpoints.ToHttpResult(raw, "/api/read/" + tool, NullLogger.Instance, 1, System.Threading.CancellationToken.None);
         var context = new DefaultHttpContext { RequestServices = new ServiceCollection().AddLogging().BuildServiceProvider() };
         context.Response.Body = new MemoryStream();
         await result.ExecuteAsync(context);
