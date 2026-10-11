@@ -4509,6 +4509,66 @@ function Get-CimInstance {
         Assert.Contains("elsewhere=False", answers);
     }
 
+    /// <summary>
+    /// #5673: the check that the service runs from the folder being upgraded compares the folders on disk as well as their
+    /// spelling, so an install folder typed as a junction to the registered folder is the registered folder, while another
+    /// folder is still refused. The check is cut out of the script and run with a stand-in <c>Fail</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheUpgrade_ReadsAJunctionToTheRegisteredFolderAsTheRegisteredFolder(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var start = script.IndexOf("elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)", StringComparison.Ordinal);
+        Assert.True(start >= 0, "upgrade-darling.ps1 no longer has the registered-folder refusal (#5673)");
+        var end = script.IndexOf("\n}", start, StringComparison.Ordinal) + 2;
+        var check = "if (" + script.Substring(start + "elseif (".Length, end - start - "elseif (".Length);
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSamePath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSameFolderIdentity"));
+        probe.AppendLine("function Fail([string]$message) { 'refused' }");
+        probe.AppendLine("$serviceName = 'DarlingTest'");
+        probe.AppendLine("function Check { " + check.Replace("\r", "") + " }");
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $base = Join-Path $env:TEMP ('pm5673-reg-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory("$base\real")
+            [void][IO.Directory]::CreateDirectory("$base\other")
+            try {
+                [void](New-Item -ItemType Junction -Path "$base\link" -Target "$base\real")
+                $registeredRoot = "$base\real"
+                $InstallRoot = "$base\link"
+                'junction=' + (@(Check).Count)
+                $InstallRoot = "$base\real"
+                'same=' + (@(Check).Count)
+                $InstallRoot = "$base\other"
+                'other=' + (@(Check).Count)
+            }
+            finally {
+                if (Test-Path -LiteralPath "$base\link") { [IO.Directory]::Delete("$base\link") }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("junction=0", answers);
+        Assert.Contains("same=0", answers);
+        Assert.Contains("other=1", answers);
+    }
+
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>
     private static void AppendPathHelpers(StringBuilder probe, string script)
     {

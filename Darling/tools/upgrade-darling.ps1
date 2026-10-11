@@ -2670,7 +2670,7 @@ if ([string]::IsNullOrWhiteSpace($registeredRoot)) {
     # assume it was.
     Warn "Could not read the '$serviceName' service's ImagePath, so this could not confirm that '$InstallRoot' is the directory the service actually runs from. Check that before trusting the result."
 }
-elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot)) {
+elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot) -and -not (Test-DarlingSameFolderIdentity $registeredRoot $InstallRoot)) {
     Fail "The '$serviceName' service runs from '$registeredRoot', not from '$InstallRoot'. NOTHING has been stopped or copied. Stopping and starting act on the service by NAME, so upgrading '$InstallRoot' would have taken the real service down, written the new build somewhere it does not read, and brought it back up on its old binaries - reporting success the whole way. Drop -InstallRoot to upgrade the registered install, or pass -InstallRoot '$registeredRoot' if that is really the one you meant."
 }
 
