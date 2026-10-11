@@ -236,7 +236,7 @@ public sealed class AlertSampleAgeSurfaceTests
         catch (System.ComponentModel.Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
-            return;
+            throw;
         }
 
         using (proc)
