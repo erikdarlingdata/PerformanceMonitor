@@ -232,7 +232,7 @@ public partial class MainWindow
 
         try
         {
-            await _dataService.RenameServerTagAsync(header.Tag.Id, name);
+            await Task.Run(() => _dataService.RenameServerTagAsync(header.Tag.Id, name));
             await ReloadTagsAndReprojectAsync();
             StatusText.Text = $"Renamed tag to '{name}'.";
         }
@@ -264,7 +264,7 @@ public partial class MainWindow
 
         try
         {
-            await _dataService.DeleteServerTagAsync(header.Tag.Id);
+            await Task.Run(() => _dataService.DeleteServerTagAsync(header.Tag.Id));
             await ReloadTagsAndReprojectAsync();
             StatusText.Text = $"Deleted tag '{header.Tag.Name}'.";
         }
@@ -284,7 +284,7 @@ public partial class MainWindow
 
         try
         {
-            await _dataService.CreateServerTagAsync(name, parentId);
+            await Task.Run(() => _dataService.CreateServerTagAsync(name, parentId));
             await ReloadTagsAndReprojectAsync();
             StatusText.Text = $"Created tag '{name}'.";
         }
@@ -437,11 +437,11 @@ public partial class MainWindow
             /* A checkable MenuItem toggles IsChecked before Click fires, so it now holds the desired state. */
             if (item.IsChecked)
             {
-                await _dataService.AssignServerTagAsync(new[] { target.ServerId }, target.TagId);
+                await Task.Run(() => _dataService.AssignServerTagAsync(new[] { target.ServerId }, target.TagId));
             }
             else
             {
-                await _dataService.UnassignServerTagAsync(new[] { target.ServerId }, target.TagId);
+                await Task.Run(() => _dataService.UnassignServerTagAsync(new[] { target.ServerId }, target.TagId));
             }
 
             await ReloadTagsAndReprojectAsync();

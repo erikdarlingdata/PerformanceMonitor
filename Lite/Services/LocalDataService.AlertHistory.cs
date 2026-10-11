@@ -239,7 +239,7 @@ AND   dismissed = TRUE";
         if (App.LogAlertDismissals)
             AppLogger.Info("AlertDismiss", $"Action=DismissSelected, Requested={alerts.Count}");
 
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
         int archivedDismissed = 0;
 
@@ -354,7 +354,7 @@ AND NOT EXISTS (
         if (App.LogAlertDismissals)
             AppLogger.Info("AlertDismiss", $"Action=DismissAll, Since={sinceUtc:O}, Until={(untilUtc.HasValue ? untilUtc.Value.ToString("O") : "now")}, ServerId={serverId?.ToString() ?? "all"}");
 
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
         using var command = connection.CreateCommand();
 

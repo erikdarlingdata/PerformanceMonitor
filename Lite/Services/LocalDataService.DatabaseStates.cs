@@ -500,7 +500,7 @@ ORDER BY l.database_name";
            NOT swallow a timeout: it is a user action, and StoreLockTimeoutException says how long it
            waited and who held the lock (#5650), so the caller can show it. Silently dropping an operator's declared expected state would be
            the worst outcome available here. */
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         using var command = connection.CreateCommand();
         /* now()::TIMESTAMP, not a bare current_timestamp: DuckDB resolves a bare current_timestamp against
            the table's columns (and errors) inside a VALUES row and an ON CONFLICT DO UPDATE SET, so the
@@ -527,7 +527,7 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = true,
     {
         /* #2208: an upsert, so the WRITE lock, and the timeout surfaces for the same reason as the override
            write above — this is the operator pressing a button. */
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         /* Chosen under the write lock this write holds, so the archive-and-reset cannot empty it in between. */
         var src = (await ChooseDatabaseStatesSourceAsync(connection, serverId)).Table;
         using var command = connection.CreateCommand();

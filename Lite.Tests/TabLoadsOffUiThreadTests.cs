@@ -21,8 +21,8 @@ namespace PerformanceMonitorLite.Tests;
 /// this census holds the rest of <c>Lite/Controls</c>, the main window's Overview tag read, and every window under
 /// <c>Lite/Windows</c> to it. A window's click handlers are the same case as a tab's: Manage Tags, the Database State
 /// Overrides editor and the history and drill-down windows each awaited the store from the dispatcher. Their WRITES go
-/// through <c>Task.Run</c> too (the budgeted-write exemption below is for the main window only): a write waits up to 5 s
-/// for the store write lock, and a window that waited that long on the UI thread looked hung for the whole wait.
+/// through <c>Task.Run</c> too, the main window's included (#5650 removed its old exemption): a user write waits up to
+/// 30 s for the store write lock, and a window that waited that long on the UI thread looked hung for the whole wait.
 /// </summary>
 public class TabLoadsOffUiThreadTests
 {
@@ -33,16 +33,6 @@ public class TabLoadsOffUiThreadTests
     {
         ("Lite/Controls/AlertsHistoryTab.xaml.cs", "GetServerClockAsync", "ReadCollectedClocksAsync"),
         ("Lite/Controls/ServerTab.Refresh.cs", "GetBaselineDiscontinuitiesAsync", "SafeDiscontinuitiesAsync"),
-    };
-
-    /* The tag clear the main window starts when a server is removed. It takes OpenWriteConnectionAsync, which waits for the write
-       lock for WriteLockBudget (5 s in the shipped app) and then throws, so it cannot park the dispatcher behind the store lock
-       the way the untimed read lock can. The exemption is the main window's only: a window under Lite/Windows moves its writes
-       into Task.Run as well, so a click never holds the dispatcher for the budget. */
-    private static readonly HashSet<string> BudgetedWrites = new(StringComparer.Ordinal)
-    {
-        "CreateServerTagAsync", "RenameServerTagAsync", "DeleteServerTagAsync",
-        "AssignServerTagAsync", "UnassignServerTagAsync", "ClearServerTagsForServerAsync",
     };
 
     /* A call on the data service, or the one static helper that reads on the caller's thread (McpEngineCapability.EngineEditionAsync(_dataService, id)),
@@ -68,11 +58,6 @@ public class TabLoadsOffUiThreadTests
             var code = Strip(File.ReadAllText(path));
             foreach (var violation in FindCallsOutsideTaskRun(code))
             {
-                if (BudgetedWrites.Contains(violation.Method) && !relative.StartsWith("Lite/Windows/", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
                 seen++;
                 if (HelpersOnlyCalledOffTheUiThread.Any(h => h.File == relative && h.Call == violation.Method))
                 {

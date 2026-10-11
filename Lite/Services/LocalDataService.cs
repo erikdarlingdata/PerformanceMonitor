@@ -29,9 +29,25 @@ public partial class LocalDataService
 {
     private readonly DuckDbInitializer _duckDb;
 
+    private readonly TimeSpan _backgroundWriteLockBudget;
+    private readonly TimeSpan _userWriteLockBudget;
+
     public LocalDataService(DuckDbInitializer duckDb)
+        : this(duckDb, WriteLockBudget, UserWriteLockBudget)
+    {
+    }
+
+    /// <summary>
+    /// The same service with its own write-lock waits (#5650), so a test can run both entry points in
+    /// milliseconds instead of sleeping through the shipped 5 s and 30 s. Per instance, not per process:
+    /// <see cref="WriteLockBudget"/> stays the host's number for the reasons on it, and an instance built
+    /// here changes only what its own callers wait.
+    /// </summary>
+    internal LocalDataService(DuckDbInitializer duckDb, TimeSpan backgroundWriteLockBudget, TimeSpan userWriteLockBudget)
     {
         _duckDb = duckDb;
+        _backgroundWriteLockBudget = backgroundWriteLockBudget;
+        _userWriteLockBudget = userWriteLockBudget;
     }
 
     /// <summary>Lite's own database after a fatal error, for Collection Health. Read from memory, never the database.</summary>
@@ -128,6 +144,26 @@ public partial class LocalDataService
     internal static readonly TimeSpan WriteLockBudget =
         ResolveWriteLockBudget(AppContext.GetData(WriteLockBudgetConfigKey));
 
+    /// <summary>The user-write wait in a host that declares nothing larger: 30 seconds (#5650).</summary>
+    internal static readonly TimeSpan DefaultUserWriteLockBudget = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long a write the USER started (Dismiss, Dismiss All, a tag edit, a database-state override) waits
+    /// for the write lock before <see cref="StoreLockTimeoutException"/> (#5650). The shipped app's host
+    /// declares no <see cref="WriteLockBudget"/>, so this is 30 s there. It is never below the host's own
+    /// <see cref="WriteLockBudget"/>: a host that declared a longer wait (Lite.Tests: two minutes) keeps it.
+    ///
+    /// <para><b>Why a user write can afford 30 s and a background caller cannot be given it.</b> The
+    /// collector writers wait with no limit at all, and each already holds back new reads while it waits, so
+    /// a user write that waits up to 30 s adds no new kind of stall - and it has a bound. A background
+    /// writer (the database-state sweep, the post-collection CHECKPOINT) skips and retries on its own, so
+    /// 5 s is right for it and a longer wait would only park a worker. Only
+    /// <see cref="OpenUserWriteConnectionAsync"/> reads this, and a census in <c>WriteLockBudgetTests</c>
+    /// names every caller of it, so a new background caller cannot pick it up unnoticed.</para>
+    /// </summary>
+    internal static readonly TimeSpan UserWriteLockBudget =
+        WriteLockBudget > DefaultUserWriteLockBudget ? WriteLockBudget : DefaultUserWriteLockBudget;
+
     /// <summary>
     /// The seconds a host declared, as a budget. Absent, unparseable, non-positive, above
     /// <see cref="MaxWriteLockBudget"/>, and small enough to round away all resolve
@@ -168,7 +204,9 @@ public partial class LocalDataService
 
     /// <summary>
     /// Creates and opens a DuckDB connection wrapped in an exclusive write lock, bounded by
-    /// <see cref="WriteLockBudget"/> so the UI thread cannot freeze behind an in-flight archival.
+    /// <see cref="WriteLockBudget"/> (5 s in the shipped app) so a background caller gives up and retries
+    /// rather than park behind an in-flight archival. This is the BACKGROUND entry point (#5650); a write
+    /// the user started calls <see cref="OpenUserWriteConnectionAsync"/>.
     ///
     /// <para><b>This doc comment used to say "use for UPDATE/DELETE/INSERT operations that must not race
     /// with archival or compaction", and was read as the house rule for the whole app (#2463).</b> It is
@@ -187,7 +225,28 @@ public partial class LocalDataService
     /// </summary>
     internal async Task<LockedConnection> OpenWriteConnectionAsync()
     {
-        var writeLock = _duckDb.AcquireWriteLock(timeout: WriteLockBudget);
+        var writeLock = _duckDb.AcquireWriteLock(timeout: _backgroundWriteLockBudget);
+        return await OpenLockedAsync(writeLock);
+    }
+
+    /// <summary>
+    /// <see cref="OpenWriteConnectionAsync"/> for a write the USER started from the UI, waiting up to
+    /// <see cref="UserWriteLockBudget"/> (30 s in the shipped app) instead of 5 s (#5650). Reserved for a
+    /// click: a background caller that skips and retries on its own uses <see cref="OpenWriteConnectionAsync"/>.
+    /// A census in <c>WriteLockBudgetTests</c> lists every caller of this method, so adding one is a
+    /// decision that test makes you write down.
+    ///
+    /// <para>The wait blocks the calling thread, so a UI caller runs it inside <c>Task.Run</c> and shows
+    /// that it is waiting (Dismiss in <c>AlertsHistoryTab</c> disables its buttons and says so).</para>
+    /// </summary>
+    internal async Task<LockedConnection> OpenUserWriteConnectionAsync()
+    {
+        var writeLock = _duckDb.AcquireWriteLock(timeout: _userWriteLockBudget);
+        return await OpenLockedAsync(writeLock);
+    }
+
+    private async Task<LockedConnection> OpenLockedAsync(IDisposable writeLock)
+    {
         try
         {
             var connection = _duckDb.CreateConnection();

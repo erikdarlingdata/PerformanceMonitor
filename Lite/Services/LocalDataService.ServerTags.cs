@@ -81,7 +81,7 @@ public partial class LocalDataService
     /// </summary>
     public async Task<int> CreateServerTagAsync(string name, int? parentId)
     {
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
 
         await ThrowIfDuplicateNameAsync(connection, parentId, name, excludeTagId: null);
@@ -111,7 +111,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     /// <summary>Renames a tag, rejecting a duplicate name under its parent (excluding itself).</summary>
     public async Task RenameServerTagAsync(int tagId, string name)
     {
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
 
         var parentId = await GetParentIdAsync(connection, tagId);
@@ -127,7 +127,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     /// <summary>Sets a tag's colour, or clears it to neutral when <paramref name="colour"/> is null.</summary>
     public async Task SetServerTagColorAsync(int tagId, string? colour)
     {
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE server_tags SET colour = $2 WHERE id = $1";
@@ -140,7 +140,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     /// caller's job against its in-memory tree, exactly as in the viewer.</summary>
     public async Task ReparentServerTagAsync(int tagId, int? newParentId)
     {
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
         using var command = connection.CreateCommand();
         command.CommandText = "UPDATE server_tags SET parent_id = $2 WHERE id = $1";
@@ -157,7 +157,7 @@ SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
     /// </summary>
     public async Task DeleteServerTagAsync(int tagId)
     {
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
 
         var subtree = new List<int> { tagId };
@@ -207,7 +207,7 @@ SELECT id FROM subtree WHERE id <> $1";
     /// <summary>Assigns a tag to servers. Already-assigned servers are no-ops (composite PK + ON CONFLICT).</summary>
     public async Task AssignServerTagAsync(IEnumerable<int> serverIds, int tagId)
     {
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
         foreach (var serverId in serverIds)
         {
@@ -222,7 +222,7 @@ SELECT id FROM subtree WHERE id <> $1";
     /// <summary>Removes a tag from servers.</summary>
     public async Task UnassignServerTagAsync(IEnumerable<int> serverIds, int tagId)
     {
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
         foreach (var serverId in serverIds)
         {
@@ -239,7 +239,7 @@ SELECT id FROM subtree WHERE id <> $1";
     /// resurrect its old tags. Same rationale as the Darling twin.</summary>
     public async Task ClearServerTagsForServerAsync(int serverId)
     {
-        using var connection = await OpenWriteConnectionAsync();
+        using var connection = await OpenUserWriteConnectionAsync();
         ThrowIfTagRestorePending();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM server_tag_map WHERE server_id = $1";

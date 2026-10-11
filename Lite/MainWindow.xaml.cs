@@ -2006,7 +2006,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                await _dataService.ClearServerTagsForServerAsync(removedServerId);
+                await Task.Run(() => _dataService.ClearServerTagsForServerAsync(removedServerId));
             }
             catch (PendingRestoreException ex)
             {

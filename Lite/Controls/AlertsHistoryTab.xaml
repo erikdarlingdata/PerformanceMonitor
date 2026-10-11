@@ -88,8 +88,10 @@
             <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
             <Button x:Name="DismissSelectedButton" Content="Dismiss Selected" Click="DismissSelected_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90" IsEnabled="False"/>
-            <Button Content="Dismiss All" Click="DismissAll_Click"
+            <Button x:Name="DismissAllButton" Content="Dismiss All" Click="DismissAll_Click"
                     Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
+            <TextBlock x:Name="DismissWaitIndicator" Text="Waiting for the local database..." Margin="10,0,0,0"
+                       VerticalAlignment="Center" FontStyle="Italic" Foreground="#FFCC6600" Visibility="Collapsed"/>
             <TextBlock x:Name="AlertCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"

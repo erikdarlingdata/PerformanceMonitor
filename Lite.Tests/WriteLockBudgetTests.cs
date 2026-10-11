@@ -283,8 +283,83 @@ public sealed class WriteLockBudgetTests
     {
         var source = ParitySource.ReadFile("Lite/Services/LocalDataService.cs");
 
-        Assert.Contains("AcquireWriteLock(timeout: WriteLockBudget)", source, StringComparison.Ordinal);
+        /* #5650: two entry points, each taking its instance's budget, which defaults to the host's static. */
+        Assert.Contains("AcquireWriteLock(timeout: _backgroundWriteLockBudget)", source, StringComparison.Ordinal);
+        Assert.Contains("AcquireWriteLock(timeout: _userWriteLockBudget)", source, StringComparison.Ordinal);
+        Assert.Contains(": this(duckDb, WriteLockBudget, UserWriteLockBudget)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("AcquireWriteLock(timeout: TimeSpan.", source, StringComparison.Ordinal);
+    }
+
+    /* #5650: the callers of the two entry points, each named. A user write (a click) gets the 30 s budget; a
+       background caller that skips and retries on its own gets 5 s. A NEW caller of either fails this test until it
+       is added to the right list - which is the point: 30 s must be a decision, not an accident. */
+    private static readonly string[] UserWriteCallers =
+    {
+        "LocalDataService.AlertHistory.cs: DismissAlertsAsync",
+        "LocalDataService.AlertHistory.cs: DismissAllVisibleAlertsWindowAsync",
+        "LocalDataService.DatabaseStates.cs: ResetDatabaseStateExpectedToCurrentAsync",
+        "LocalDataService.DatabaseStates.cs: SetDatabaseStateExpectedAsync",
+        "LocalDataService.ServerTags.cs: AssignServerTagAsync",
+        "LocalDataService.ServerTags.cs: ClearServerTagsForServerAsync",
+        "LocalDataService.ServerTags.cs: CreateServerTagAsync",
+        "LocalDataService.ServerTags.cs: DeleteServerTagAsync",
+        "LocalDataService.ServerTags.cs: RenameServerTagAsync",
+        "LocalDataService.ServerTags.cs: ReparentServerTagAsync",
+        "LocalDataService.ServerTags.cs: SetServerTagColorAsync",
+        "LocalDataService.ServerTags.cs: UnassignServerTagAsync",
+    };
+
+    private static readonly string[] BackgroundWriteCallers =
+    {
+        /* The best-effort maintenance sweep: skips the cycle when the lock is busy. */
+        "LocalDataService.DatabaseStates.cs: GetDatabaseStateDeviationsAsync",
+        /* The retention purge CollectionBackgroundService runs: it runs again next cycle. */
+        "LocalDataService.AlertHistory.cs: PurgeOldDismissedArchiveAlertsAsync",
+    };
+
+    [Fact]
+    public void EveryUserWriteCallerIsNamed()
+    {
+        Assert.Equal(UserWriteCallers.OrderBy(c => c, StringComparer.Ordinal), CallersOf("OpenUserWriteConnectionAsync"));
+    }
+
+    [Fact]
+    public void EveryBackgroundWriteCallerIsNamed()
+    {
+        Assert.Equal(BackgroundWriteCallers.OrderBy(c => c, StringComparer.Ordinal), CallersOf("OpenWriteConnectionAsync"));
+    }
+
+    private static List<string> CallersOf(string entryPoint)
+    {
+        var callers = new List<string>();
+        var call = new Regex(@"\b" + entryPoint + @"\(\)", RegexOptions.Compiled);
+        var declaration = new Regex(@"^    (?:public|internal|private|protected)[^\r\n(=]*?\b(\w+)\(", RegexOptions.Multiline | RegexOptions.Compiled);
+        var liteRoot = Path.Combine(ParitySource.RepoRoot(), "Lite");
+        foreach (var path in Directory.EnumerateFiles(liteRoot, "*.cs", SearchOption.AllDirectories)
+                     .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal) &&
+                                 !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal)))
+        {
+            var relative = Path.GetFileName(path);
+            var code = File.ReadAllText(path);
+            foreach (Match site in call.Matches(code))
+            {
+                var line = code.LastIndexOf('\n', site.Index);
+                var lineText = code.Substring(line + 1, code.IndexOf('\n', site.Index) - line - 1);
+                if (lineText.TrimStart().StartsWith("//", StringComparison.Ordinal) ||
+                    lineText.TrimStart().StartsWith("*", StringComparison.Ordinal) ||
+                    lineText.Contains("///", StringComparison.Ordinal) ||
+                    lineText.Contains("internal async Task<LockedConnection>", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var method = declaration.Matches(code[..site.Index]).Last().Groups[1].Value;
+                callers.Add($"{relative}: {method}");
+            }
+        }
+
+        callers.Sort(StringComparer.Ordinal);
+        return callers;
     }
 
     /* ── derivations ── */
