@@ -156,6 +156,19 @@ public static partial class QueryModificationDetector
         "This query text was captured from the monitored server, and any user of that server may have written it, so read it before you allow the run.";
 
     /// <summary>
+    /// The caption every "run this captured query to get its actual plan" confirmation uses, so the title says
+    /// plainly when the run will change data (or when that could not be ruled out). Shared with
+    /// <see cref="BuildConsentWarning"/> so Lite, the shared plan navigation and the Darling viewer word it alike.
+    /// </summary>
+    public static string BuildConsentTitle(QueryModificationInfo info)
+    {
+        ArgumentNullException.ThrowIfNull(info);
+        return info.ModifiesData
+            ? "Get Actual Plan (re-run) — DATA WILL BE MODIFIED"
+            : "Get Actual Plan (re-run)";
+    }
+
+    /// <summary>
     /// Builds the PROMINENT, distinct data-modification warning block for a consent dialog (empty string when
     /// the query does not modify data — the caller shows only its normal "this will execute" warning). Shared
     /// so Lite and the Darling viewer word the modification flag identically. Names the statement types and
