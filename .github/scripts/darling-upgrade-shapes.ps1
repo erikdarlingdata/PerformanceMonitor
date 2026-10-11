@@ -13,8 +13,10 @@
 
   Shapes (the leg name is <shape>-<script>):
     U1  current release in C:\Program Files\PerformanceMonitorDarling, service stopped.      must PASS
-    U2  as U1, service logon changed to a non-default local account and started once on it.  must PASS
-    U3  as U1, service deleted. install-darling.ps1 must PASS; upgrade-darling.ps1 has no
+        The folder also holds a hand-named darling.json.bak-before-edit, service-owned after the
+        base install and its service start (#5649); it must not refuse either script.
+    U2  as U1 without the backup file, service logon changed to a non-default local account and started once on it.  must PASS
+    U3  as U1 without the backup file, service deleted. install-darling.ps1 must PASS; upgrade-darling.ps1 has no
         service to upgrade and must say so, without listing the product's own files.
     U4  pre-3.9 release in C:\PerformanceMonitorDarling. install-darling.ps1 must REFUSE, list only the
         folder's own write entry, and print the move steps.
@@ -28,6 +30,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $shape, $which = $Leg.Split('-')
 $svc = 'PerformanceMonitor Darling'
+$HandNamedBackupName = 'darling.json.bak-before-edit'
 $work = 'C:\darling-shapes-work'
 $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { 'erikdarlingdata/PerformanceMonitor' }
 $tools = Join-Path $Workspace 'Darling\tools'
@@ -107,13 +110,17 @@ function Stop-Darling {
 
 # Installs <version> into <root> the way an operator does (extract, write darling.json, run its install script) and
 # lets the SERVICE extract pg-runtime. A base without pg-runtime.stamp is not the shape under test, so it fails the leg.
-function New-Base([string]$version, [string]$root, [bool]$acceptWritable) {
+function New-Base([string]$version, [string]$root, [bool]$acceptWritable, [bool]$handNamedBackup = $false) {
     Say "BASE: install $version into $root"
     $zip = Get-Zip $version
     New-Item -ItemType Directory -Force -Path $root | Out-Null
     tar -xf $zip -C $root
     $cfg = '{ "postgres": { "managed": true, "port": 5641, "dataDirectory": null, "connectAs": "admin" }, "servers": [ { "name": "nosuch", "host": "nosuch.invalid", "auth": "integrated" } ] }'
     Set-Content -LiteralPath (Join-Path $root 'darling.json') -Value $cfg
+    # #5649: a backup the operator named by hand, put there before the base install so the release's own install
+    # script and the service (both harden every darling.json.bak-* file) make it service-owned, the way a real one is
+    # after a service start. The script under test must then accept it.
+    if ($handNamedBackup) { Set-Content -LiteralPath (Join-Path $root $HandNamedBackupName) -Value $cfg }
     $script = Join-Path $root 'install-darling.ps1'
     $declared = @(Select-String -LiteralPath $script -Pattern '^\s*\[switch\]\$(\w+)' | ForEach-Object { $_.Matches[0].Groups[1].Value })
     $a = @(); foreach ($w in 'SkipPreflight', 'NoShortcuts') { if ($declared -contains $w) { $a += "-$w" } }
@@ -130,6 +137,16 @@ function New-Base([string]$version, [string]$root, [bool]$acceptWritable) {
     }
     Start-Sleep -Seconds 10
     Stop-Darling
+    if ($handNamedBackup) {
+        # The shape only means something if the file really is the service's now. If the hardening did not make it so,
+        # the leg is not testing the refusal it exists to prevent, so it fails here instead of passing for nothing.
+        $backup = Join-Path $root $HandNamedBackupName
+        if (-not (Test-Path -LiteralPath $backup)) { Fail-Leg "the hand-named backup $HandNamedBackupName is gone from $root after the base install" }
+        $owner = (Get-Acl -LiteralPath $backup).GetOwner([System.Security.Principal.SecurityIdentifier])
+        $ownerName = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { '(untranslatable)' }
+        Write-Host "owner of ${backup}: $ownerName"
+        if ($ownerName -notlike "NT SERVICE\$svc") { Fail-Leg "the hand-named backup is owned by $ownerName after the base install, not by the service, so the leg would not exercise the check" }
+    }
     Write-Host "BASE: $version installed in $root, pg-runtime extracted by its service, service stopped"
 }
 
@@ -178,7 +195,8 @@ Say "LEG $Leg on $([Environment]::OSVersion.VersionString) (current $CurrentVers
 
 # -- the base for the shape ----------------------------------------------------------------------------------------
 $root = if ($shape -eq 'U4') { 'C:\PerformanceMonitorDarling' } else { 'C:\Program Files\PerformanceMonitorDarling' }
-New-Base $(if ($shape -eq 'U4') { $OldVersion } else { $CurrentVersion }) $root $false
+# U1 (both its install and its upgrade leg) carries a hand-named backup in the root (#5649).
+New-Base $(if ($shape -eq 'U4') { $OldVersion } else { $CurrentVersion }) $root $false ($shape -eq 'U1')
 
 switch ($shape) {
     'U2' {
@@ -233,7 +251,13 @@ else {
 
 # -- the expectation of the leg ------------------------------------------------------------------------------------
 switch ($Leg) {
-    { $_ -in 'U1-install', 'U1-upgrade', 'U2-install', 'U2-upgrade' } { Expect-Success $r "$which-darling.ps1" }
+    { $_ -in 'U1-install', 'U1-upgrade', 'U2-install', 'U2-upgrade' } {
+        Expect-Success $r "$which-darling.ps1"
+        if ($shape -eq 'U1') {
+            # #5649: the service-owned hand-named backup does not refuse the run (Expect-Success above) and stays where it was.
+            if (-not (Test-Path -LiteralPath (Join-Path $root $HandNamedBackupName))) { Fail-Leg "$which-darling.ps1 removed the hand-named backup $HandNamedBackupName" }
+        }
+    }
     'U3-install' {
         Expect-Success $r 'install-darling.ps1'
         if (-not (Get-Service -Name $svc -ErrorAction SilentlyContinue)) { Fail-Leg 'install-darling.ps1 exited 0 but left no service registered' }

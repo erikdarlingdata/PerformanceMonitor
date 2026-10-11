@@ -223,6 +223,64 @@ public class DarlingHardenFilesVerbTests
         Assert.Contains("LocalSystem", body, StringComparison.Ordinal);
         Assert.Contains("WellKnownSidType.LocalSystemSid", body, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #5649: the verb hardens the backups of the config it was given, named the way the config verbs and the service's
+    /// start-up sweep name them (<c>prod.json.bak-x</c> for <c>prod.json</c>), not the default config's
+    /// <c>darling.json.bak-*</c> that may sit in the same folder for another install. The name test is ordinal and
+    /// ignores case whatever the culture (Turkish dotted and dotless I), and the service's own sweep lists the same files.
+    /// </summary>
+    [Fact]
+    public void TheVerb_HardensTheBackupsOfTheConfigItWasGiven_ByAnOrdinalNameTest()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "pm5649-cli-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(directory);
+        var previous = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            foreach (var name in new[]
+            {
+                "prod.json", "prod.json.bak-20260101-120000", "PROD.JSON.BAK-Upper", "prod.json.bak-before-edit",
+                "prod.json.bak", "prod.jsonx.bak-x", "darling.json", "darling.json.bak-other-install", "DARLING.JSON.BAK-Upper",
+            })
+            {
+                File.WriteAllText(Path.Combine(directory, name), "{}");
+            }
+
+            var expectedProd = new[] { "PROD.JSON.BAK-Upper", "prod.json.bak-20260101-120000", "prod.json.bak-before-edit" };
+            var expectedDefault = new[] { "DARLING.JSON.BAK-Upper", "darling.json.bak-other-install" };
+
+            foreach (var culture in new[] { "en-US", "tr-TR" })
+            {
+                System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo(culture);
+
+                var prod = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.OrderBy(
+                    System.Linq.Enumerable.Select(DarlingCliCommands.ConfigBackupFiles(directory, "prod.json"), Path.GetFileName), n => n, StringComparer.Ordinal));
+                Assert.Equal(expectedProd, prod);
+
+                var defaults = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.OrderBy(
+                    System.Linq.Enumerable.Select(DarlingCliCommands.ConfigBackupFiles(directory, "darling.json"), Path.GetFileName), n => n, StringComparer.Ordinal));
+                Assert.Equal(expectedDefault, defaults);
+
+                var swept = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.OrderBy(
+                    System.Linq.Enumerable.Select(DarlingConfigBackup.ListBackups(directory, "prod.json"), Path.GetFileName), n => n, StringComparer.Ordinal));
+                Assert.Equal(expectedProd, swept);
+
+                Assert.True(DarlingConfigBackup.IsBackupName("darling.json", "DARLING.JSON.BAK-X"), culture);
+                Assert.True(DarlingConfigBackup.IsBackupName("darling.json", "darling.json.bak-x"), culture);
+                Assert.False(DarlingConfigBackup.IsBackupName("darling.json", "DARLİNG.JSON.BAK-X"), culture);
+                Assert.False(DarlingConfigBackup.IsBackupName("darling.json", "darling.json.bak"), culture);
+                Assert.False(DarlingConfigBackup.IsBackupName("prod.json", "darling.json.bak-x"), culture);
+            }
+
+            Assert.Equal("darling.json.bak-", DarlingConfigBackup.Prefix);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = previous;
+            Directory.Delete(directory, recursive: true);
+        }
+    }
 }
 
 /// <summary>
@@ -490,5 +548,48 @@ public class DarlingHardenFilesJunctionTests
         process.StandardOutput.ReadToEnd();
         process.StandardError.ReadToEnd();
         process.WaitForExit();
+    }
+
+    /// <summary>
+    /// #5649: a name Windows folds into another (a trailing dot or a trailing space) is never a backup, the same answer the
+    /// install and upgrade scripts give (<c>Test-DarlingServiceWrittenFileName</c>): it resolves to a DIFFERENT file, so the
+    /// service must not harden it or the CLI list it as the config's backup. The files are made through a <c>\\?\</c> path,
+    /// the only way to create such a name, and both listings (the CLI's and the service's start-up sweep) skip them while the
+    /// plain backup name still counts.
+    /// </summary>
+    [Fact]
+    public void TheBackupNameTest_RefusesANameWindowsFolds_InTheNameTestAndBothListings()
+    {
+        Assert.True(DarlingConfigBackup.IsBackupName("darling.json", "darling.json.bak-x"));
+        Assert.False(DarlingConfigBackup.IsBackupName("darling.json", "darling.json.bak-x."));
+        Assert.False(DarlingConfigBackup.IsBackupName("darling.json", "darling.json.bak-x "));
+        Assert.False(DarlingConfigBackup.IsBackupName("darling.json", "darling.json.bak-x.. "));
+        Assert.False(DarlingConfigBackup.IsBackupName("darling.json", "darling.json.bak-."));
+        Assert.False(DarlingConfigBackup.IsBackupName("prod.json", "prod.json.bak-x."));
+
+        var directory = Path.Combine(Path.GetTempPath(), "pm5649-fold-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllText(Path.Combine(directory, "darling.json.bak-x"), "{}");
+            foreach (var folded in new[] { "darling.json.bak-y.", "darling.json.bak-y " })
+            {
+                File.WriteAllText(@"\\?\" + Path.Combine(directory, folded), "{}");
+            }
+
+            var cli = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(DarlingCliCommands.ConfigBackupFiles(directory, "darling.json"), Path.GetFileName));
+            var sweep = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(DarlingConfigBackup.ListBackups(directory, "darling.json"), Path.GetFileName));
+            Assert.Equal(new[] { "darling.json.bak-x" }, cli);
+            Assert.Equal(new[] { "darling.json.bak-x" }, sweep);
+        }
+        finally
+        {
+            foreach (var folded in new[] { "darling.json.bak-y.", "darling.json.bak-y " })
+            {
+                try { File.Delete(@"\\?\" + Path.Combine(directory, folded)); } catch (IOException) { }
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
     }
 }

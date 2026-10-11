@@ -8,6 +8,7 @@
 
 using System;
 using System.Text.Json.Nodes;
+using System.Threading;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Common;
@@ -54,18 +55,19 @@ internal static class DarlingWebStatementSweep
     }
 
     /// <summary>The answer for a body the sweep refused: logged once, then a 500 carrying the one sentence.</summary>
-    internal static IResult Refusal(string route, ILogger? logger, long elapsedMs)
+    internal static IResult Refusal(string route, ILogger? logger, long elapsedMs, CancellationToken requestAborted)
     {
-        if (logger is not null) DarlingWebFailureLog.Report(logger, route, elapsedMs, SensitiveStatements.JsonRefusal);
+        if (logger is not null) DarlingWebFailureLog.Report(logger, route, elapsedMs, SensitiveStatements.JsonRefusal, requestAborted);
         return Results.Json(new { error = SensitiveStatements.JsonRefusal }, statusCode: StatusCodes.Status500InternalServerError);
     }
 
     /// <summary>Writes a JSON body the endpoint built itself, after sweeping it.</summary>
-    internal static IResult JsonText(JsonNode body, string route, ILogger? logger, long elapsedMs, int statusCode = StatusCodes.Status200OK)
+    internal static IResult JsonText(JsonNode body, string route, ILogger? logger, long elapsedMs, CancellationToken requestAborted,
+        int statusCode = StatusCodes.Status200OK)
     {
         var swept = Apply(body.ToJsonString());
         return swept.Refused
-            ? Refusal(route, logger, elapsedMs)
+            ? Refusal(route, logger, elapsedMs, requestAborted)
             : Results.Text(swept.Text, "application/json", statusCode: statusCode);
     }
 }

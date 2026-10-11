@@ -8,6 +8,7 @@
 
 using System;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
@@ -108,7 +109,7 @@ internal static class DarlingWebFailureLog
     /// registry gave the read (<see cref="NoteResolvedServer"/>).</summary>
     internal sealed class RequestTracking
     {
-        /// <summary>True once <see cref="Report(ILogger,string,long,Exception)"/> or its sentence twin wrote the request's line.</summary>
+        /// <summary>True once <see cref="Report(ILogger,string,long,Exception,System.Threading.CancellationToken)"/> or its sentence twin wrote the request's line.</summary>
         public bool Reported { get; set; }
 
         /// <summary>The name the registry resolved the read's server to, or null when the read resolved none.</summary>
@@ -123,7 +124,7 @@ internal static class DarlingWebFailureLog
     private static readonly System.Threading.AsyncLocal<RequestTracking?> s_requestReported = new();
 
     /// <summary>W12: starts tracking whether the current request's failure got a log line. The outermost observer calls it
-    /// before anything else runs; <see cref="Report(ILogger,string,long,Exception)"/> and its sentence twin tick the
+    /// before anything else runs; <see cref="Report(ILogger,string,long,Exception,System.Threading.CancellationToken)"/> and its sentence twin tick the
     /// box, so a 5xx answered WITHOUT a report is the one the observer reports (<see cref="ReportUnlogged"/>).</summary>
     internal static RequestTracking BeginRequestTracking()
     {
@@ -212,11 +213,28 @@ internal static class DarlingWebFailureLog
     /// request-supplied (the backstop passes <c>context.Request.Path.Value</c> straight off the wire), so it
     /// goes through <see cref="DarlingHttpRefusalLog.Sanitize"/> the same way that log sanitizes a Host
     /// header, before either branch below writes it.
+    ///
+    /// <para><paramref name="requestAborted"/> (#5678) is REQUIRED so a site that forgets it is a compile error: when the caller's
+    /// token has fired, the failure belongs to a request nobody is waiting on (a store connect that timed out after the browser
+    /// left is the usual case), so the one line is written at Debug, with the same route, elapsed time, type and SQLSTATE, and
+    /// not as the Warning or Error that blames the service. A site with no request in reach passes
+    /// <see cref="CancellationToken.None"/> on purpose.</para>
     /// </summary>
-    internal static void Report(ILogger logger, string route, long elapsedMs, Exception exception)
+    internal static void Report(ILogger logger, string route, long elapsedMs, Exception exception, CancellationToken requestAborted)
     {
         var safeRoute = DarlingHttpRefusalLog.Sanitize(route, 256);
         MarkReported();
+
+        if (requestAborted.IsCancellationRequested)
+        {
+            // #5678: the caller left, so what failed was a request nobody is waiting on (a store connect that timed out after the
+            // browser went away is the usual shape). One Debug line keeps the trace; no Warning or Error blames the service.
+            logger.LogDebug(
+                exception,
+                "Web dashboard read {Route} failed after {ElapsedMs} ms for a caller that had already left ({Kind}): {ExceptionType}, SQLSTATE {SqlState}",
+                safeRoute, elapsedMs, "caller_gone", exception.GetType().Name, SqlState(exception));
+            return;
+        }
 
         if (IsStatementTimeout(exception))
         {
@@ -234,16 +252,25 @@ internal static class DarlingWebFailureLog
     }
 
     /// <summary>
-    /// <see cref="Report(ILogger,string,long,Exception)"/>'s twin for a tool-caught failure (#4283): no
+    /// <see cref="Report(ILogger,string,long,Exception,System.Threading.CancellationToken)"/>'s twin for a tool-caught failure (#4283): no
     /// <see cref="Exception"/> survives, so the log line carries the sentence itself (the same text a
     /// pre-#4283 response would have put on the wire) instead of an exception object and its type name.
     /// <paramref name="route"/> is sanitized exactly as the exception overload sanitizes it; the sentence is
     /// NOT — it is our own <c>McpHelpers.ErrorSentence</c> output, not request-supplied.
     /// </summary>
-    internal static void Report(ILogger logger, string route, long elapsedMs, string sentence)
+    internal static void Report(ILogger logger, string route, long elapsedMs, string sentence, CancellationToken requestAborted)
     {
         var safeRoute = DarlingHttpRefusalLog.Sanitize(route, 256);
         MarkReported();
+
+        if (requestAborted.IsCancellationRequested)
+        {
+            // #5678: as the exception overload: a caller who left gets one Debug line, not a failure line.
+            logger.LogDebug(
+                "Web dashboard read {Route} failed after {ElapsedMs} ms for a caller that had already left ({Kind}): {Sentence}",
+                safeRoute, elapsedMs, "caller_gone", sentence);
+            return;
+        }
 
         if (IsStatementTimeoutSentence(sentence))
         {

@@ -62,6 +62,7 @@ public sealed class DarlingDeployStaleFileTests
     private static readonly string[] s_functions =
     [
         "Test-DarlingRollbackBackupName",
+        "Get-DarlingServiceWrittenNames",
         "Format-DarlingBytes",
         "ConvertTo-DarlingManifestPath",
         "Join-DarlingInstallPath",
@@ -618,7 +619,8 @@ public sealed class DarlingDeployStaleFileTests
     {
         var script = InstallScript;
 
-        Assert.Contains("Get-ChildItem -LiteralPath $root -Filter 'darling.json.bak-*' -File -ErrorAction SilentlyContinue", script, StringComparison.Ordinal);
+        Assert.Contains("Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue", script, StringComparison.Ordinal);
+        Assert.Contains("Get-DarlingServiceWrittenRootFiles $root -BackupsOnly", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Get-ChildItem -Path $root", script, StringComparison.Ordinal);
     }
 

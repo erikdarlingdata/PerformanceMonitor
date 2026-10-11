@@ -1818,7 +1818,7 @@ public sealed class DarlingMcpDataTools
                 /* The same string both WPF grids render, composed on this side so the web dashboard and
                    any other consumer cannot re-derive it differently. */
                 note_summary = CollectorHealthClassifier.FormatCollectionNote(
-                    r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases),
+                    r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases, r.RecoveredNote),
                 /* #2472: the per-database breakdown of a collector that fans out, null for one that does
                    not. Emitted as a nested object rather than sibling fields so a consumer cannot read a
                    slowest item without the width it has to be judged against — the parts only mean
@@ -2233,6 +2233,8 @@ public sealed class DarlingMcpDataTools
                output_finding: both regression sentences are fixed templates around a count, an instant and
                a status word (about 200 characters at most), and only a regressed row carries one at all. */
             regression_finding = r.AnyRegressionFinding,
+            /* #5646: the recovery sentence, with the last failure time. */
+            recovered_note = r.RecoveredNote,
             output_finding = McpHelpers.Truncate(outputFinding, findingPreview),
             output_finding_truncated = outputFinding is not null && outputFinding.Length > findingPreview,
         }
@@ -2260,6 +2262,8 @@ public sealed class DarlingMcpDataTools
             denied_since_last_success = r.DeniedSinceLastSuccess,
             regressed_from_productive = r.AnyRegression,
             regression_finding = r.AnyRegressionFinding,
+            /* #5646: the recovery sentence, with the last failure time. */
+            recovered_note = r.RecoveredNote,
             output_finding = McpHelpers.Truncate(outputFinding, findingPreview),
             output_finding_truncated = outputFinding is not null && outputFinding.Length > findingPreview,
             run_at = (string?)runTime.RunAt,

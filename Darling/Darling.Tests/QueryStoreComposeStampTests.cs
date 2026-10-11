@@ -356,18 +356,21 @@ public sealed class QueryStoreComposeStampTests
     /* ---- the rung ------------------------------------------------------------------------------------- */
 
     [Fact]
-    public void TheRung_IsTheTopOfTheLadder_AndTheStorageVersion()
+    public void TheRung_IsV173_AboveV172_AndBelowTheStorageVersion()
     {
+        /* V173's own content. Newer rungs land above it (V174, #5655), so this pins its place, not the top of the ladder. */
         Assert.Equal(173, QueryStoreComposeStamp.RungVersion);
-        var top = PgMigrations.Scripts[^1];
-        Assert.Equal(StorageVersion.SchemaVersion, top.Version);
-        Assert.Equal(QueryStoreComposeStamp.RungVersion, top.Version);
-        Assert.Equal("query-store-compose-stamp", top.Name);
-        Assert.Equal(172, PgMigrations.Scripts[^2].Version);
+        var rung = PgMigrations.Scripts.Single(s => s.Version == QueryStoreComposeStamp.RungVersion);
+        Assert.True(QueryStoreComposeStamp.RungVersion <= StorageVersion.SchemaVersion);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+        Assert.Equal("query-store-compose-stamp", rung.Name);
+        var below = PgMigrations.Scripts.Where(s => s.Version < rung.Version).Max(s => s.Version);
+        Assert.Equal(172, below);
         Assert.Equal(PgMigrations.Scripts.Count, PgMigrations.Scripts.Select(s => s.Version).Distinct().Count());
-        Assert.EndsWith(QueryStoreComposeStamp.CreateSql, top.Sql, StringComparison.Ordinal);
-        Assert.StartsWith("SET LOCAL lock_timeout", top.Sql, StringComparison.Ordinal);
+        Assert.EndsWith(QueryStoreComposeStamp.CreateSql, rung.Sql, StringComparison.Ordinal);
+        Assert.StartsWith("SET LOCAL lock_timeout", rung.Sql, StringComparison.Ordinal);
     }
+
 
     [Fact]
     public void TheRungText_HasTheTablesTheIndexTheFunctionAndBothTriggers_OnTheParent_WithTheWriterClock()
@@ -421,26 +424,35 @@ public sealed class QueryStoreComposeStampTests
     /* ---- the sentinel, the version map, the tick ---------------------------------------------------- */
 
     [Fact]
-    public void TheProbe_MapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbe_HasThisRungsSentinelAndMapsItsArmToV173()
     {
         Assert.Contains("to_regclass('collect.query_store_compose_stamp_hours')", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* V174's sentinel (#5655) sits above this one; the probe's last ordinal is the newest rung's. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.Equal(ProbeOrdinal + 1, arity - 1);
+        Assert.Equal("hasQueryStoreComposeStamp", method.GetParameters()[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
         var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
+        behind[ProbeOrdinal + 1] = false;
         Assert.Equal(172, (int)method.Invoke(null, behind)!);
+
+        /* Everything through V173's sentinel true and the newer one false maps to V173 itself. */
+        var atThisRung = (object[])all.Clone();
+        atThisRung[ProbeOrdinal + 1] = false;
+        Assert.Equal(QueryStoreComposeStamp.RungVersion, (int)method.Invoke(null, atThisRung)!);
 
         var arm = viewer.IndexOf("if (hasQueryStoreComposeStamp)", StringComparison.Ordinal);
         var below = viewer.IndexOf("if (hasQueryStoreIntervalLatestPartitioned)", StringComparison.Ordinal);

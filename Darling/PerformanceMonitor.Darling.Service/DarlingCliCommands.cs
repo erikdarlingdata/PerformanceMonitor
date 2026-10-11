@@ -3216,10 +3216,10 @@ public static class DarlingCliCommands
         try
         {
             var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-            var backupPath = resolvedPath + ".bak-" + stamp;
+            var backupPath = DarlingConfigBackup.BackupPath(resolvedPath, stamp);
             for (var suffix = 2; File.Exists(backupPath); suffix++)
             {
-                backupPath = $"{resolvedPath}.bak-{stamp}-{suffix}";
+                backupPath = DarlingConfigBackup.BackupPath(resolvedPath, stamp, suffix);
             }
 
             File.Copy(resolvedPath, backupPath, overwrite: false);
@@ -3255,8 +3255,9 @@ public static class DarlingCliCommands
     /// <b>LocalMachine</b> blobs with an entropy constant that ships in an open-source repo, so READ access
     /// IS the secret. The live config grants INTERACTIVE read because things genuinely read it as the
     /// interactive operator — the Viewer (<c>ViewerSettings.TryLoad</c>) and the CLI verbs. <b>Nothing reads
-    /// a backup.</b> The only references to the <c>.bak-</c> name in non-test code are the two lines above
-    /// that CONSTRUCT it, and restoring one is a hand operation that already requires elevation, because
+    /// a backup.</b> The service builds the name in <c>DarlingConfigBackup.BackupPath</c> and lists
+    /// it in <c>DarlingConfigBackup.ListBackups</c> (the start-up hardening and the CLI permission check); it only ever
+    /// hardens a backup, never reads one. Restoring one is a hand operation that already requires elevation, because
     /// writing <c>darling.json</c> does — INTERACTIVE only ever had Read here, never Write. So the grant
     /// bought nothing and cost a second copy of every secret, readable by any interactively-logged-on user.</para>
     ///
@@ -4122,7 +4123,7 @@ public static class DarlingCliCommands
             new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
         };
 
-        foreach (var backup in SafeEnumerate(Path.GetDirectoryName(resolvedConfig), "darling.json.bak-*"))
+        foreach (var backup in ConfigBackupFiles(Path.GetDirectoryName(resolvedConfig), Path.GetFileName(resolvedConfig)))
         {
             targets.Add(new(backup, AllowInteractive: false, IsDirectory: false, "a config backup"));
         }
@@ -4335,6 +4336,14 @@ public static class DarlingCliCommands
     /// <summary>Whether <paramref name="path"/> is strictly below <paramref name="directory"/>, a volume root included
     /// (<see cref="DarlingPathContainment.IsStrictlyBelow"/>, #4004 review, round 3).</summary>
     internal static bool IsBelow(string directory, string path) => DarlingPathContainment.IsStrictlyBelow(directory, path);
+
+    /// <summary>The backups of the config file named <paramref name="configFileName"/> in <paramref name="directory"/>
+    /// (#5649): the files that start with that file's own name plus <c>.bak-</c> (<c>prod.json.bak-x</c> for
+    /// <c>prod.json</c>), which is what the config verbs write and what the service's start-up hardening takes, not the
+    /// default config's backups. The directory listing's pattern only narrows the list; the ordinal name test decides.</summary>
+    internal static IEnumerable<string> ConfigBackupFiles(string? directory, string configFileName) =>
+        SafeEnumerate(directory, configFileName + DarlingConfigBackup.GlobSuffix)
+            .Where(file => DarlingConfigBackup.IsBackupName(configFileName, Path.GetFileName(file)));
 
     /// <summary>Directory enumeration that treats an unreadable or missing folder as empty — this verb runs
     /// precisely when permissions are broken, so a throw here would defeat its purpose.</summary>

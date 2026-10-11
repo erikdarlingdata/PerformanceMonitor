@@ -39,6 +39,29 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 - **Windows** for the service host (Windows-service lifetime, DPAPI password protection) and for the viewer (WPF). Monitored servers can be SQL Server 2016 SP2–2025 (2017 needs CU3 or later), Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
 - **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, the minimum is PostgreSQL 16, and the service is developed and validated against PostgreSQL 18. The store needs a database and a login the service can create tables in. If that store has TimescaleDB, size its background workers before you rely on compression. The stock PostgreSQL defaults cannot run the policies (see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)). On SSD-backed storage, also set `random_page_cost = 1.1` (the managed store does): with the default of 4 the planner prices a BRIN index's heap reads as random I/O and can pick a sequential scan over the index for windows of 12 hours or more. The BRIN index on the per-interval Query Store table is skipped below PostgreSQL 16, because HOT updates past a BRIN index need PostgreSQL 16 or newer.
 - **TimescaleDB is optional and auto-adopted.** If the extension is installed (or pre-created by an administrator) in the store database, the service detects it at startup and automatically converts the collector tables to hypertables with compression; without it, the service runs in plain-PostgreSQL mode, which is fully supported. No configuration flag either way. The detection is also **re-run hourly for as long as it says no** (#3815), so a service that fell back because the store was restarting, failing over or momentarily unreachable at its own start returns to hypertable mode within the hour instead of at the next restart.
+- **A Windows that is current on its updates.** .NET 10 apps need them to start on a CPU with CET (a hardware protection). We saw this on Windows Server 2022 build 20348.1366. Without them the service and the viewer both stop at start. The exit code is `0x80131506` and stderr shows this message:
+
+  ```text
+  Fatal error. Your Windows doesn't fully support CET. Please install all available Windows updates.
+  ```
+
+  `install-darling.ps1` recognises that message in its pre-flight and stops with a plain message instead of asking whether to install anyway. The fix is to install all available Windows updates and restart. If you cannot do that yet, there is a short-term workaround. Run these from an elevated PowerShell before you install or start. Each turns off one protection (`UserShadowStack`, the hardware-enforced stack protection) for one Darling exe:
+
+  ```powershell
+  Set-ProcessMitigation -Name PerformanceMonitor.Darling.Service.exe -Disable UserShadowStack
+  Set-ProcessMitigation -Name PerformanceMonitor.Darling.Viewer.exe -Disable UserShadowStack
+  ```
+
+  This weakens that program's protection, so treat it as a stopgap. To undo it once Windows is patched, remove the values the first command wrote:
+
+  ```powershell
+  $ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
+  foreach ($exe in 'PerformanceMonitor.Darling.Service.exe', 'PerformanceMonitor.Darling.Viewer.exe') {
+      Remove-ItemProperty -Path "$ifeo\$exe" -Name MitigationOptions, MitigationAuditOptions, EAFModules -ErrorAction SilentlyContinue
+  }
+  ```
+
+  On Windows Server 2022 build 20348.5622, `Set-ProcessMitigation -Remove -Disable UserShadowStack` did not remove the setting (it returned `C000000D`). `Set-ProcessMitigation -Reset` failed too ("Invalid input parameters"). The registry way above worked. The `Set-ProcessMitigation -Disable` command writes three values (`MitigationOptions`, `MitigationAuditOptions`, `EAFModules`) under the exe's key in `Image File Execution Options`. The undo removes only those values and leaves any other value on that key alone. Restart the program afterwards. The first command is described in Microsoft's [Set-ProcessMitigation](https://learn.microsoft.com/en-us/powershell/module/processmitigations/set-processmitigation) reference.
 - **.NET 10 runtimes on the host**, from <https://dotnet.microsoft.com/download/dotnet/10.0>. Both
   shipped binaries are framework-dependent, and a stock Windows Server image has none of them:
   - **.NET Runtime 10 and ASP.NET Core Runtime 10** for the service. The simplest way to get both is the

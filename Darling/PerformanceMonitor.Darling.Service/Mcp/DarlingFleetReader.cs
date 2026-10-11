@@ -1903,18 +1903,31 @@ GROUP BY server_id, collector_name";
                 command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
             }
         }
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var rows = new List<(int ServerId, CollectorHealth Health)>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            var serverId = reader.GetInt32(0);
-            if (!overridesByServer.TryGetValue(serverId, out var serverOverrides))
+            while (await reader.ReadAsync(cancellationToken))
             {
-                serverOverrides = scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList();
-                overridesByServer[serverId] = serverOverrides;
+                var serverId = reader.GetInt32(0);
+                if (!overridesByServer.TryGetValue(serverId, out var serverOverrides))
+                {
+                    serverOverrides = scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList();
+                    overridesByServer[serverId] = serverOverrides;
+                }
+
+                rows.Add((serverId, MapFleetHealthRow(reader, serverId, serverOverrides)));
             }
+        }
 
-            var health = MapFleetHealthRow(reader, serverId, serverOverrides);
+        /* #5666: the plain aggregates above cannot see a collector's newest runs, so a collector that recovered
+           would band WARNING here beside a server tab that says HEALTHY. The streak is read for only the rows whose
+           band it could change, in ONE follow-up statement after the aggregate's reader has closed (one
+           connection at a time), and not at all when no row needs it. The aggregate itself stays plain: no
+           fleet-wide sort of a week of collection_log in front of its GROUP BY (#3735). */
+        await ApplyTrailingSuccessRunsAsync(postgres, rows, windowStart, cancellationToken);
 
+        foreach (var (serverId, health) in rows)
+        {
             counts.TryGetValue(serverId, out var existing);
             var status = health.HealthStatus;
             counts[serverId] = new CollectorCounts(
@@ -1949,6 +1962,43 @@ GROUP BY server_id, collector_name";
         }
 
         return counts;
+    }
+
+    /// <summary>
+    /// #5666: sets <see cref="CollectorHealth.TrailingSuccessRuns"/> on the rows whose band the newest runs could change
+    /// (<see cref="CollectorHealthClassifier.RecoveryCouldChangeBand"/>), through
+    /// <see cref="CollectorTrailingRuns"/>, the one definition of the streak the per-server read shares. Runs no statement
+    /// when no row needs it. A row left unset keeps 0, which is the right value for it: its band does not turn on the streak.
+    /// </summary>
+    internal static async Task ApplyTrailingSuccessRunsAsync(
+        NpgsqlDataSource postgres,
+        IReadOnlyList<(int ServerId, CollectorHealth Health)> rows,
+        DateTime windowStart,
+        CancellationToken cancellationToken)
+    {
+        var pairs = new List<(int ServerId, string CollectorName)>();
+        foreach (var (serverId, h) in rows)
+        {
+            if (h.RecoveryCouldChangeBand)
+            {
+                pairs.Add((serverId, h.CollectorName));
+            }
+        }
+
+        if (pairs.Count == 0)
+        {
+            return;
+        }
+
+        var streaks = await CollectorTrailingRuns.ReadAsync(
+            postgres, pairs, windowStart, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        foreach (var (serverId, h) in rows)
+        {
+            if (streaks.TryGetValue((serverId, h.CollectorName), out var streak))
+            {
+                h.TrailingSuccessRuns = streak;
+            }
+        }
     }
 
     /// <summary>Maps one row of <see cref="FleetCollectionHealthSql"/> / its composed twin (fourteen columns,

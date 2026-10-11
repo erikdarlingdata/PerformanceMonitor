@@ -177,13 +177,14 @@ public class AzureMasterFallbackTests
 
     /// <summary>
     /// #5647: error 40615 is a firewall rejection, which a missing Database setting never causes. The message names
-    /// the firewall and the client IP the server reported and carries no set-a-Database advice.
+    /// the firewall and the client IP the server reported, then offers setting the Database for a client that a
+    /// database-level rule on a user database allows (Azure checks that rule only for that database).
     /// </summary>
     [Theory]
     [InlineData("master")]
     [InlineData("")]
     [InlineData(null)]
-    public void Error_40615_Names_The_Firewall_And_Client_Ip_With_No_Set_Database_Advice(string? targetDb)
+    public void Error_40615_Names_The_Firewall_And_Client_Ip_Then_Offers_Setting_The_Database(string? targetDb)
     {
         var ex = Assert.Throws<InvalidOperationException>(
             () => RemoteCollectorService.FallbackDatabaseList(
@@ -194,12 +195,14 @@ public class AzureMasterFallbackTests
         Assert.Contains("The Azure firewall did not allow this client's IP address (192.0.2.1)", ex.Message, StringComparison.Ordinal);
         Assert.Contains("dd a firewall rule", ex.Message, StringComparison.Ordinal);
         Assert.Contains("either a server-level rule or a database-level rule in master", ex.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("set a Database", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(
+            "If a database-level rule in a user database already allows this IP, set the Database for 'azure-logical-server' to that database instead.",
+            ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("can open a user database", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Error_40615_Without_An_Ip_In_The_Server_Text_Still_Has_No_Set_Database_Advice()
+    public void Error_40615_Without_An_Ip_In_The_Server_Text_Still_Offers_Setting_The_Database()
     {
         var ex = Assert.Throws<InvalidOperationException>(
             () => RemoteCollectorService.FallbackDatabaseList(
@@ -207,7 +210,9 @@ public class AzureMasterFallbackTests
                 errorNumber: 40615, serverMessage: "Ein anderer Text ohne Adresse."));
 
         Assert.Contains("did not allow this client's IP address. Add a firewall rule", ex.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("set a Database", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(
+            "If a database-level rule in a user database already allows this IP, set the Database for 'azure-logical-server' to that database instead.",
+            ex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

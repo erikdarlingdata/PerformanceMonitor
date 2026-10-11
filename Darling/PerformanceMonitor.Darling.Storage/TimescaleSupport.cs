@@ -10831,7 +10831,11 @@ WHERE ca.view_schema = 'collect'
     /// </summary>
     internal const string HourlyDdlLockTimeout = "3s";
 
-    /// <summary>Consecutive busy results per object across hourly passes; process lifetime. Tests reset it.</summary>
+    /// <summary>
+    /// Consecutive busy results per object across hourly passes; process lifetime. Tests reset it, and a reset clears EVERY
+    /// key, so a test that counts passes hands <see cref="TryRunBoundedDdlAsync(NpgsqlConnection, IReadOnlyList{string}, ILogger, string, CancellationToken, BoundedDdlBusyStreaks)"/>
+    /// its own registry instead of sharing this one (#5672).
+    /// </summary>
     internal static readonly BoundedDdlBusyStreaks BusyStreaks = new();
 
     /// <summary>What <see cref="TryRunBoundedDdlAsync"/> did.</summary>
@@ -10859,7 +10863,7 @@ WHERE ca.view_schema = 'collect'
     /// <summary>
     /// Runs DDL that takes an AccessExclusiveLock (the compression-settings ALTER on a hypertable or a continuous
     /// aggregate) without letting it queue indefinitely. The statements run in ONE explicit transaction behind
-    /// <c>SET LOCAL lock_timeout</c> (<see cref="HourlyDdlLockTimeout"/>), because <c>SET LOCAL</c> outside a
+    /// <c>SET LOCAL lock_timeout</c> (<see cref="HourlyDdlLockTimeout"/>, or the internal <c>lockTimeoutOverride</c> a test passes), because <c>SET LOCAL</c> outside a
     /// transaction is a no-op and a waiting AccessExclusiveLock request holds up every collector write to the
     /// table behind it. A busy lock (<c>55P03</c>) costs one Information line and the next hourly pass tries again;
     /// the same <paramref name="what"/> busy <see cref="BoundedDdlBusyStreaks.EscalateAfter"/> passes in a row also
@@ -10869,7 +10873,8 @@ WHERE ca.view_schema = 'collect'
     /// isolation; cancellation still propagates.
     /// </summary>
     internal static Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
-        NpgsqlConnection connection, IReadOnlyList<string> statements, ILogger? logger, string what, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IReadOnlyList<string> statements, ILogger? logger, string what, CancellationToken cancellationToken,
+        BoundedDdlBusyStreaks? streaks = null)
         => TryRunBoundedDdlAsync(
             connection,
             async transaction =>
@@ -10880,22 +10885,34 @@ WHERE ca.view_schema = 'collect'
                     await command.ExecuteNonQueryAsync(cancellationToken);
                 }
             },
-            logger, what, cancellationToken);
+            logger, what, cancellationToken, streaks: streaks);
 
     /// <summary>
-    /// <see cref="TryRunBoundedDdlAsync(NpgsqlConnection, IReadOnlyList{string}, ILogger, string, CancellationToken)"/>
+    /// <see cref="TryRunBoundedDdlAsync(NpgsqlConnection, IReadOnlyList{string}, ILogger, string, CancellationToken, BoundedDdlBusyStreaks)"/>
     /// for a body that needs a statement's result (#5574: the chunk re-group counts its rows between the decompress and
     /// the compress). <paramref name="body"/> runs in the same transaction, behind the same <c>SET LOCAL
     /// lock_timeout</c>, and the same outcomes and log lines apply. The list overload is this one with a loop for a body.
     /// </summary>
+    /// <param name="streaks">
+    /// #5672: the test seam for the busy streak. Production passes null and shares <see cref="BusyStreaks"/>; a test that
+    /// counts passes passes its own registry, because other classes' <c>BusyStreaks.Reset()</c> clears every key, not just
+    /// theirs, and a reset between two of the test's passes restarts its count (no Warning) or drops its streak before the
+    /// Applied pass (no "busy passes" line).
+    /// </param>
     internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
         NpgsqlConnection connection, Func<NpgsqlTransaction, Task> body, ILogger? logger, string what, CancellationToken cancellationToken,
-        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false)
+        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false, string? lockTimeoutOverride = null,
+        BoundedDdlBusyStreaks? streaks = null)
     {
+        /* #5667: the test seam. Production passes null and gets HourlyDdlLockTimeout; a test whose statement cap has to be the
+           only timeout that can fire on a held chunk passes a lock timeout far above the cap. */
+        var lockTimeout = lockTimeoutOverride ?? HourlyDdlLockTimeout;
+
+        var busyStreaks = streaks ?? BusyStreaks;
         try
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{HourlyDdlLockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+            using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{lockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
             {
                 await timeout.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -10903,7 +10920,7 @@ WHERE ca.view_schema = 'collect'
             await body(transaction);
 
             await transaction.CommitAsync(cancellationToken);
-            if (BusyStreaks.Clear(what, out var busyPasses))
+            if (busyStreaks.Clear(what, out var busyPasses))
             {
                 logger?.LogInformation(
                     "TimescaleDB: {What} changed after {Passes} busy passes in a row; the table is no longer held",
@@ -10916,12 +10933,12 @@ WHERE ca.view_schema = 'collect'
         {
             logger?.LogInformation(
                 "TimescaleDB: {What} not changed this pass: another session held the table for {Timeout}, and waiting longer would hold up every collector's writes to it; the next hourly pass tries again",
-                what, HourlyDdlLockTimeout);
+                what, lockTimeout);
             var now = DateTime.UtcNow;
 
             /* #5574: the compress half's in-call retries (three tries inside ten seconds) are not "passes", and counting
                them would add a "busy for 3 passes in a row" Warning to the one the half logs itself. */
-            if (recordBusyStreak && BusyStreaks.RecordBusy(what, now, out var passes, out var firstBusyUtc))
+            if (recordBusyStreak && busyStreaks.RecordBusy(what, now, out var passes, out var firstBusyUtc))
             {
                 logger?.LogWarning(
                     "TimescaleDB: {What} has been busy for {Passes} passes in a row, since {Since:u} UTC ({Elapsed} ago); its settings stay as they are until another session releases the table",
@@ -10935,13 +10952,13 @@ WHERE ca.view_schema = 'collect'
         {
             /* #5574: probably a chunk dropped (retention) between the candidates read and the statement; the caller re-reads the
                chunk catalog to tell (ResolveMissingRelationAsync), because a chunk that still exists is a failure. */
-            BusyStreaks.Clear(what, out _);
+            busyStreaks.Clear(what, out _);
             logger?.LogDebug("TimescaleDB: {What} stopped: the server reported that a relation does not exist ({Message})", what, ex.Message);
             return BoundedDdlOutcome.RelationMissing;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            BusyStreaks.Clear(what, out _);
+            busyStreaks.Clear(what, out _);
             logger?.LogWarning(
                 "TimescaleDB: {What} could not be changed, so the change was rolled back and the table keeps its current settings: {Message}",
                 what, ex.Message);
@@ -12531,7 +12548,7 @@ ORDER BY c.range_start DESC";
     /// </summary>
     internal static async Task<PerfmonRegroupChunkOutcome> RegroupPerfmonChunkAsync(
         NpgsqlConnection connection, ILogger? logger, PerfmonRegroupCandidate candidate, CancellationToken cancellationToken,
-        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds)
+        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds, string? lockTimeoutOverride = null)
     {
         if (connection is null)
         {
@@ -12549,7 +12566,7 @@ ORDER BY c.range_start DESC";
                 await decompress.ExecuteNonQueryAsync(cancellationToken);
             },
             logger, $"re-grouping perfmon_stats chunk {chunk} (decompress)", cancellationToken,
-            distinguishTimeoutAndMissing: true);
+            distinguishTimeoutAndMissing: true, lockTimeoutOverride: lockTimeoutOverride);
 
         if (decompressed != BoundedDdlOutcome.Applied)
         {
@@ -12576,7 +12593,7 @@ ORDER BY c.range_start DESC";
             logger?.LogDebug("TimescaleDB: could not count the rows of perfmon_stats chunk {Chunk} before compressing it again: {Message}", chunk, ex.Message);
         }
 
-        var compressResult = await CompressRegroupedChunkAsync(connection, logger, chunk, PerfmonRegroupCompressAttempts, PerfmonRegroupCompressRetryDelay, cancellationToken, statementTimeoutSeconds);
+        var compressResult = await CompressRegroupedChunkAsync(connection, logger, chunk, PerfmonRegroupCompressAttempts, PerfmonRegroupCompressRetryDelay, cancellationToken, statementTimeoutSeconds, lockTimeoutOverride);
         if (compressResult == PerfmonRegroupChunkResult.Regrouped)
         {
             logger?.LogInformation(
@@ -12630,21 +12647,21 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
     /// <summary>
     /// The compress half of a chunk's re-group (#5574): the chunk was decompressed in a transaction that has committed,
     /// so it is uncompressed now and a busy lock is worth <paramref name="attempts"/> tries, <paramref name="retryDelay"/>
-    /// apart, each behind the 3 s lock timeout. Returns <see cref="PerfmonRegroupChunkResult.Regrouped"/> when the chunk is compressed again,
+    /// apart, each behind the lock timeout (<see cref="HourlyDdlLockTimeout"/> unless the caller passes <paramref name="lockTimeoutOverride"/>). Returns <see cref="PerfmonRegroupChunkResult.Regrouped"/> when the chunk is compressed again,
     /// <see cref="PerfmonRegroupChunkResult.Gone"/> when the chunk is really gone (retention dropped it between the halves),
     /// and <see cref="PerfmonRegroupChunkResult.LeftUncompressed"/> otherwise. When every try failed the
     /// chunk stays uncompressed, with one Warning, and the compression policy compresses it with the hypertable's grouping
     /// at its next run. <c>if_not_compressed</c> makes a policy run that got there first a success, not an error.
     /// A cancellation (the service stopping) leaves the chunk the same way, says so at Information, and propagates.
     ///
-    /// <para><b>Only a busy lock is retried</b> (55P03, behind the 3 s lock timeout): any other error, a statement that ran
+    /// <para><b>Only a busy lock is retried</b> (55P03, behind that lock timeout): any other error, a statement that ran
     /// into its cap included, ends the tries at once, because a second try of a compression that just failed (or ran
     /// 30 minutes) is another whole compression. The busy tries are not fed to <see cref="BusyStreaks"/>: three tries inside
     /// ten seconds are not "three passes", and the Warning below is the one line an all-busy half logs.</para>
     /// </summary>
     internal static async Task<PerfmonRegroupChunkResult> CompressRegroupedChunkAsync(
         NpgsqlConnection connection, ILogger? logger, string chunk, int attempts, TimeSpan retryDelay, CancellationToken cancellationToken,
-        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds)
+        int statementTimeoutSeconds = PerfmonRegroupStatementTimeoutSeconds, string? lockTimeoutOverride = null)
     {
         try
         {
@@ -12659,7 +12676,7 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
                         await compress.ExecuteNonQueryAsync(cancellationToken);
                     },
                     logger, $"re-grouping perfmon_stats chunk {chunk} (compress)", cancellationToken,
-                    recordBusyStreak: false, distinguishTimeoutAndMissing: true);
+                    recordBusyStreak: false, distinguishTimeoutAndMissing: true, lockTimeoutOverride: lockTimeoutOverride);
 
                 if (compressed == BoundedDdlOutcome.Applied)
                 {

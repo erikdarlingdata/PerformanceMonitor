@@ -418,6 +418,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
                 catch (Exception ex)
                 {
+                    /* #5678: the browser left and the store's connect timed out before it could raise a cancellation
+                       (Npgsql can do that for an already-cancelled token): still the #4276 not-a-failure case. */
+                    context.RequestAborted.ThrowIfCancellationRequested();
+
                     /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
                        McpHelpers.FormatError's envelope and return normally, so this is only a backstop).
                        Reported and answered directly from the real Exception here — ServerErrorResult's
@@ -426,7 +430,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        too, rather than falling through to ToHttpResult, keeps the ONE log line #4276 added:
                        routing this through FormatError first would make ToHttpResult's classifier re-derive
                        from text what this catch already knows structurally, and log it a second time. */
-                    DarlingWebFailureLog.Report(logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex);
+                    DarlingWebFailureLog.Report(logger, DarlingWebFailureLog.RouteOf(context.Request), stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                     var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
                     RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds);
                     OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
@@ -446,7 +450,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
                     resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
 
-                return ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds);
+                /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
+                ThrowIfCallerGone(result, context.RequestAborted);
+                return ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             });
         }
 
@@ -674,7 +680,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return JsonNodeResult(outcome.Payload);
             }
 
-            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds);
+            /* #5678: any failed run for a browser that has left is not logged: a store fault, the generic catch's sentence, and a
+               panel author's own query error (ComposeRunFailureResult's 400 Warning) all end the request instead. A 404 is
+               answered as before. */
+            if (outcome.Payload is null && !outcome.IsNotFound)
+            {
+                context.RequestAborted.ThrowIfCancellationRequested();
+            }
+
+            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
     }
 
@@ -815,11 +829,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         /* The starter templates (#3325): the SAME code-defined set the list_custom_alert_templates MCP tool
            returns, byte-identical (wraps that tool), mapped through the shared ToHttpResult exactly as the
            /api/read/* tool endpoints map their string results. Read-only, touches no store; open to any seat. */
-        app.MapGet("/api/alert-templates", async () =>
+        app.MapGet("/api/alert-templates", async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpCustomAlertTools.ListCustomAlertTemplates();
-            return ToHttpResult(result, "/api/alert-templates", logger, stopwatch.ElapsedMilliseconds);
+            return ToHttpResult(result, "/api/alert-templates", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
 
         /* Validate — dry-run a definition WITHOUT persisting; returns {valid, error}. The definition rides as an
@@ -872,7 +886,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson);
-            return ToHttpResult(result, "/api/alerts/test", logger, stopwatch.ElapsedMilliseconds);
+            return ToHttpResult(result, "/api/alerts/test", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
     }
 
@@ -946,7 +960,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context), serverNameLookup);
-            return MuteRuleToolResult(result, "/api/mute-rules", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
+            return MuteRuleToolResult(result, "/api/mute-rules", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status201Created);
         });
 
         /* Update — PARTIAL, the merged update_mute_rule semantics verbatim: the body carries ONLY the fields to
@@ -963,7 +977,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context), serverNameLookup);
-            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
 
         /* Set-enabled — the reversible flag flip that keeps the rule's id, scope, reason and creation date (the
@@ -998,7 +1012,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled);
-            return MuteRuleToolResult(result, "/api/mute-rules/{id}/enabled", logger, stopwatch.ElapsedMilliseconds);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}/enabled", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
 
         /* Delete — 200 with the verb's {status:"deleted", rule_id} envelope rather than the views surface's
@@ -1014,7 +1028,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id);
-            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
     }
 
@@ -1134,7 +1148,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
             {
-                return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+                return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
 
             var answer = RedactAddAnswer(result, secrets);
@@ -1209,11 +1223,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 {
                     /* A store whose roles predate the edit function (#5240): still a 500, but the body says what to do
                        instead of the generic sentence. The text is ours; PostgreSQL's own error never reaches this far. */
-                    DarlingWebFailureLog.Report(logger, "/api/servers/{id}", ran.Stopwatch!.ElapsedMilliseconds, sentence);
+                    DarlingWebFailureLog.Report(logger, "/api/servers/{id}", ran.Stopwatch!.ElapsedMilliseconds, sentence, context.RequestAborted);
                     return ErrorResult(DarlingMcpServerAdminTools.EditStoreNeedsRolesText, StatusCodes.Status500InternalServerError);
                 }
 
-                return ServerErrorResult(sentence, "/api/servers/{id}", logger, ran.Stopwatch!.ElapsedMilliseconds);
+                return ServerErrorResult(sentence, "/api/servers/{id}", logger, ran.Stopwatch!.ElapsedMilliseconds, context.RequestAborted);
             }
 
             var answer = RedactEditAnswer(result, secrets);
@@ -1242,7 +1256,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                return ServerErrorResult($"admin server read failed ({ex.GetType().Name})", "/api/admin/servers/{id}", logger, stopwatch.ElapsedMilliseconds);
+                return ServerErrorResult($"admin server read failed ({ex.GetType().Name})", "/api/admin/servers/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
 
             if (row is null)
@@ -1454,7 +1468,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                catch would hold it for the life of the process and answer 429 forever. */
             slot.Release();
             return new ServerWriteRun(
-                ServerErrorResult($"{labels.ToolName} failed ({ex.GetType().Name})", labels.Route, logger, stopwatch.ElapsedMilliseconds), null, null);
+                ServerErrorResult($"{labels.ToolName} failed ({ex.GetType().Name})", labels.Route, logger, stopwatch.ElapsedMilliseconds, CancellationToken.None), null, null);
         }
 
         /* The slot is freed by the core itself, once, when it finishes (completed or faulted) - never by the wait's
@@ -1483,7 +1497,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             /* The cores catch their own faults, so this is a backstop; only the TYPE is logged. */
             return new ServerWriteRun(
-                ServerErrorResult($"{labels.ToolName} failed ({ex.GetType().Name})", labels.Route, logger, stopwatch.ElapsedMilliseconds), null, null);
+                ServerErrorResult($"{labels.ToolName} failed ({ex.GetType().Name})", labels.Route, logger, stopwatch.ElapsedMilliseconds, CancellationToken.None), null, null);
         }
         finally
         {
@@ -1824,7 +1838,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-history/dismiss", stopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-history/dismiss", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
@@ -2003,7 +2017,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.CreateServerTagCore(store, name, parentId, colour, context.RequestAborted);
             LogServerTagWrite(logger, context, "create", null, result, 0);
-            return ServerTagToolResult(result, "/api/server-tags", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
+            return ServerTagToolResult(result, "/api/server-tags", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status201Created);
         });
 
         app.MapPatch("/api/server-tags/{id:int}", async (HttpContext context, int id) =>
@@ -2026,7 +2040,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.UpdateServerTagCore(store, id, changes, context.RequestAborted);
             LogServerTagWrite(logger, context, "update", id, result, 0);
-            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds);
+            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
 
         app.MapDelete("/api/server-tags/{id:int}", async (HttpContext context, int id) =>
@@ -2045,7 +2059,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.DeleteServerTagCore(store, id, confirm, context.RequestAborted);
             LogServerTagWrite(logger, context, "delete", id, result, 0);
-            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds);
+            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
 
         app.MapPost("/api/server-tags/{id:int}/servers", async (HttpContext context, int id) =>
@@ -2064,7 +2078,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.AssignServerTagCore(store, id, serverIds, context.RequestAborted);
             LogServerTagWrite(logger, context, "assign", id, result, serverIds.Count);
-            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds);
+            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
 
         app.MapDelete("/api/server-tags/{id:int}/servers", async (HttpContext context, int id) =>
@@ -2083,7 +2097,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.UnassignServerTagCore(store, id, serverIds, context.RequestAborted);
             LogServerTagWrite(logger, context, "unassign", id, result, serverIds.Count);
-            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds);
+            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
         });
     }
 
@@ -2277,12 +2291,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The envelope pass-through the server-tag routes share: <see cref="MuteRuleToolResult"/>'s error
     /// handling (the caught-exception sentence never reaches the wire) with <see cref="ServerTagEnvelopeStatus"/>'s
     /// status.</summary>
-    internal static IResult ServerTagToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
+    internal static IResult ServerTagToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
+        int successStatus = StatusCodes.Status200OK)
     {
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
         {
-            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs);
+            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted);
         }
 
         var httpStatus = ServerTagEnvelopeStatus(result, successStatus);
@@ -2357,17 +2372,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// ONCE, the body a fixed message, 503 when the sentence carries a caught statement_timeout's 57014 token,
     /// 500 otherwise. Any other error (a bare non-JSON string) is still wrapped as <c>{"error": sentence}</c>.</para>
     /// </summary>
-    internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
+    internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
+        int successStatus = StatusCodes.Status200OK)
     {
         /* #4348: swept first, like ToHttpResult. A mute rule echoes the pattern it was given, which can be a statement. */
         var swept = DarlingWebStatementSweep.Apply(result);
-        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
         result = swept.Text;
 
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
         {
-            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs);
+            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted);
         }
 
         var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
@@ -3259,7 +3275,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="ToHttpResult"/>'s ServerError arm reclassifies a tool's envelope, since by this point the
     /// real Exception is equally gone — only the sentence survived the round trip through
     /// <see cref="ComposeRunOutcome"/>.</summary>
-    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs)
+    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted)
     {
         /* W13: an unknown server is a plain 404 with its message, never a quiet empty answer. */
         if (outcome.IsNotFound)
@@ -3269,7 +3285,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         if (outcome.Fault is not null)
         {
-            DarlingWebFailureLog.Report(logger, route, elapsedMs, outcome.Fault);
+            DarlingWebFailureLog.Report(logger, route, elapsedMs, outcome.Fault, requestAborted);
             return Results.Json(DarlingWebFailureLog.Body(outcome.Fault), statusCode: DarlingWebFailureLog.StatusCode(outcome.Fault));
         }
 
@@ -3284,7 +3300,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return outcome.IsServerError
-            ? ServerErrorResult(outcome.Error!, route, logger, elapsedMs)
+            ? ServerErrorResult(outcome.Error!, route, logger, elapsedMs, requestAborted)
             : ErrorResult(outcome.Error!, StatusCodes.Status400BadRequest);
     }
 
@@ -6019,36 +6035,55 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// tool's own catch turns <c>ex.Message</c> into <c>McpHelpers.ErrorMessageOf(result)</c> — a PostgreSQL
     /// error starting with its SQLSTATE and the server's message, or a failed store connection naming its host
     /// and port — before this method ever sees it. The sentence is logged ONCE through
-    /// <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string)"/> (so the service log still names
+    /// <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string,System.Threading.CancellationToken)"/> (so the service log still names
     /// what failed) and the body becomes <see cref="DarlingWebFailureLog.Body(string)"/>'s fixed message, under
     /// <see cref="DarlingWebFailureLog.StatusCode(string)"/> — 503 when the sentence carries a caught
     /// statement_timeout's 57014 token, 500 otherwise, the same split #4281's backstop gives an UNCAUGHT one.
     /// The bare <c>"Error during "</c> arm <see cref="ClassifyToolResponse"/> keeps for an un-migrated producer
     /// maps here too, for the same reason.</para>
     /// </summary>
-    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs)
+    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted)
     {
         /* #4348: the statement filter's web sweep. It runs BEFORE ClassifyToolResponse, so the error sentence
            ServerErrorResult echoes is swept too, and a body it cannot read is never written. */
         var swept = DarlingWebStatementSweep.Apply(result);
-        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
         result = swept.Text;
 
         return ClassifyToolResponse(result) switch
         {
             ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
             ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
-            ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs),
+            ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs, requestAborted),
             _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
         };
+    }
+
+    /// <summary>
+    /// #5678: ends the request the way #4276 does when the browser has left and a tool's own caught failure is about to be
+    /// logged for it. A tool that catches its own exception hands back an <c>Error during ...</c> sentence and returns
+    /// normally, so the <c>OperationCanceledException</c> catch never sees it; when the cause was the caller going away (a
+    /// cancelled token can surface as a connect timeout rather than a cancellation), logging it as a read failure blames the
+    /// service for a request nobody is waiting on. Throwing <c>OperationCanceledException(requestAborted)</c> hands it to the
+    /// top-of-pipeline backstop (<see cref="DarlingWebFailureObserver"/>), which writes no line and no body for it. Only a
+    /// result that classifies as <see cref="ToolResponseKind.ServerError"/> is touched: a payload or a client-correctable
+    /// refusal is answered as before. Call it AFTER any latency sample, which is already right for a gone caller
+    /// (<see cref="ReadOutcomeClassifier.ClassifySentence"/> says Cancelled).
+    /// </summary>
+    internal static void ThrowIfCallerGone(string result, CancellationToken requestAborted)
+    {
+        if (requestAborted.IsCancellationRequested && ClassifyToolResponse(result) == ToolResponseKind.ServerError)
+        {
+            throw new OperationCanceledException(requestAborted);
+        }
     }
 
     /// <summary>The ServerError arm's body, factored out so both <see cref="ToHttpResult"/> and the
     /// <c>/api/read/*</c> loop's binding-layer catch (which holds the real <see cref="Exception"/>, not just
     /// its sentence) answer with the identical fixed shape.</summary>
-    internal static IResult ServerErrorResult(string sentence, string route, ILogger logger, long elapsedMs)
+    internal static IResult ServerErrorResult(string sentence, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted)
     {
-        DarlingWebFailureLog.Report(logger, route, elapsedMs, sentence);
+        DarlingWebFailureLog.Report(logger, route, elapsedMs, sentence, requestAborted);
         return Results.Json(DarlingWebFailureLog.Body(sentence), statusCode: DarlingWebFailureLog.StatusCode(sentence));
     }
 

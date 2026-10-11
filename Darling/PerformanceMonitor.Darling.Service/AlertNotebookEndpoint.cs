@@ -99,7 +99,7 @@ internal static partial class AlertNotebookEndpoint
                 var resolveStopwatch = Stopwatch.StartNew();
                 try
                 {
-                    var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery);
+                    var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery, context.RequestAborted);
                     if (error is null)
                     {
                         serverId = resolved.ServerId;
@@ -107,7 +107,7 @@ internal static partial class AlertNotebookEndpoint
                     }
                     else if (error.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
                     {
-                        DarlingWebFailureLog.Report(logger, "/api/alert-notebook:resolve-server", resolveStopwatch.ElapsedMilliseconds, error);
+                        DarlingWebFailureLog.Report(logger, "/api/alert-notebook:resolve-server", resolveStopwatch.ElapsedMilliseconds, error, context.RequestAborted);
                         notes.Add((JsonNode)(DarlingWebFailureLog.IsStatementTimeoutSentence(error)
                             ? DarlingWebFailureLog.TimeoutMessage
                             : DarlingWebFailureLog.GenericMessage));
@@ -119,7 +119,7 @@ internal static partial class AlertNotebookEndpoint
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    DarlingWebFailureLog.Report(logger, "/api/alert-notebook:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex);
+                    DarlingWebFailureLog.Report(logger, "/api/alert-notebook:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                     notes.Add((JsonNode)"Server resolution failed. The service log names what failed.");
                 }
             }
@@ -161,7 +161,7 @@ internal static partial class AlertNotebookEndpoint
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
 
@@ -186,7 +186,7 @@ internal static partial class AlertNotebookEndpoint
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:status-history", statusHistoryStopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:status-history", statusHistoryStopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 notes.Add((JsonNode)"Status lookup failed. The service log names what failed.");
             }
 
@@ -246,7 +246,7 @@ internal static partial class AlertNotebookEndpoint
             }
 
             /* #4348: the notebook's own body carries the alert row's text, so it is swept whole. */
-            return DarlingWebStatementSweep.JsonText(body, "/api/alert-notebook", logger, 0);
+            return DarlingWebStatementSweep.JsonText(body, "/api/alert-notebook", logger, 0, context.RequestAborted);
         });
     }
 
@@ -299,7 +299,7 @@ internal static partial class AlertNotebookEndpoint
         var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {
-            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:scope-server", stopwatch.ElapsedMilliseconds, fault);
+            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:scope-server", stopwatch.ElapsedMilliseconds, fault, cancellationToken);
             var note = DarlingWebFailureLog.IsStatementTimeoutSentence(fault)
                 ? DarlingWebFailureLog.TimeoutMessage
                 : DarlingWebFailureLog.GenericMessage;
@@ -725,7 +725,7 @@ internal static partial class AlertNotebookEndpoint
         {
             if (logger is not null)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex, ct);
             }
 
             notes?.Add((JsonNode)"The rule could not be read.");
@@ -767,7 +767,7 @@ internal static partial class AlertNotebookEndpoint
         {
             if (logger is not null)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex, ct);
             }
 
             notes?.Add((JsonNode)"The finding could not be read.");
@@ -1043,7 +1043,7 @@ internal static partial class AlertNotebookEndpoint
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:collector-freshness", freshnessStopwatch.ElapsedMilliseconds, ex);
+            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:collector-freshness", freshnessStopwatch.ElapsedMilliseconds, ex, cancellationToken);
         }
 
         return "Unknown (not collected since " + anchorStamp + ")";

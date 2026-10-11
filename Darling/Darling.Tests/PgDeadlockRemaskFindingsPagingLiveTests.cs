@@ -127,7 +127,7 @@ public sealed class PgDeadlockRemaskFindingsPagingLiveTests
         Assert.Equal(0, again);
         Assert.Equal(
             0L,
-            await ScalarAsync(connection, "SELECT count(*) FROM analysis_findings WHERE story_text LIKE '%4721%' OR drill_down_json LIKE '%4111111111111111%'", ct));
+            await ScalarAsync(connection, "SELECT count(*) FROM analysis_findings WHERE story_text LIKE '%47Q1%' OR drill_down_json LIKE '%4111111111111111%'", ct));
     }
 
     /// <summary>A table rewrite (<c>VACUUM FULL</c>, <c>CLUSTER</c>, <c>pg_repack</c>) between two pages sends the walk
@@ -191,7 +191,7 @@ public sealed class PgDeadlockRemaskFindingsPagingLiveTests
         while (cursor is not null);
 
         Assert.Equal(1, rewritten);
-        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM analysis_findings WHERE story_text LIKE '%4721%' OR drill_down_json LIKE '%4111111111111111%'", ct));
+        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM analysis_findings WHERE story_text LIKE '%47Q1%' OR drill_down_json LIKE '%4111111111111111%'", ct));
     }
 
     /// <summary>The stage counts a walk that was restarted by a table rewrite as cut short: it is walked once more

@@ -90,6 +90,14 @@ WHERE s.server_id <> 0";
 
 
     /// <summary>
+    /// Each service host's recorded product version (#5655), from <c>config.service_version</c>. No rows when the table is
+    /// empty (a store whose service has not started since the upgrade) and when the table is missing (an older service's
+    /// store): <see cref="ServiceVersionTable.ReadAsync"/> answers only the undefined-table error (42P01) that way.
+    /// </summary>
+    public Task<IReadOnlyList<ServiceVersionRow>> GetServiceVersionsAsync(CancellationToken cancellationToken = default) =>
+        ServiceVersionTable.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
     /// Reads MAX(collection_time) for every server in a single query, keyed by server_id. A server with no
     /// collection rows simply isn't in the dictionary (the caller treats a miss as "no collection" → Offline).
     /// </summary>
