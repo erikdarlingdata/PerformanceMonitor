@@ -35,7 +35,8 @@ SELECT
     oldest_active_transaction_id,
     oldest_aborted_transaction_id,
     aborted_version_cleaner_start_time,
-    aborted_version_cleaner_end_time
+    aborted_version_cleaner_end_time,
+    collection_time
 FROM v_pvs_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -64,7 +65,9 @@ ORDER BY
                 OldestActiveTransactionId = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 OldestAbortedTransactionId = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
                 /* MS's documented shape for "cleanup is ongoing": a start time with no end time. */
-                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7)
+                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7),
+                /* #5642: the snapshot's own collection_time (naive UTC), for the alert's newest-sample age line. */
+                NewestSampleUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
             });
         }
 

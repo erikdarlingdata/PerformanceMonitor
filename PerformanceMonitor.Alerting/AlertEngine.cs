@@ -743,10 +743,7 @@ public sealed class AlertEngine
     {
         /* Mode selection INSIDE the engine — ServerSummaryItem.CpuPercentForAlert semantics
            (Lite LocalDataService.Overview.cs:143-144): Total → TotalCpuPercent ?? CpuPercent;
-           SqlOnly → CpuPercent. */
-        var alertCpuValue = _settings.CpuAlertMode == CpuAlertMode.TotalServer
-            ? (snapshot.TotalCpuPercent ?? snapshot.SqlCpuPercent)
-            : snapshot.SqlCpuPercent;
+           SqlOnly → CpuPercent. Applied per observation (CpuValueFor). */
         string cpuMetricLabel = _settings.CpuAlertMode == CpuAlertMode.TotalServer ? "Total CPU" : "SQL CPU"; /* :64 */
 
         if (!_settings.CpuEnabled)
@@ -758,19 +755,6 @@ public sealed class AlertEngine
             return;
         }
 
-        if (!alertCpuValue.HasValue)
-        {
-            /* NO-DATA FREEZES THE GATE — never a breach, never a clear. The pre-#3282 code fell through to
-               its resolve arm here, so a CPU sample that simply went missing announced a recovery nobody
-               measured, rendered "<server>: Total CPU back to %" because the value it interpolated was
-               null. Freezing is the same call CustomAlertEvaluator makes on a null scalar, and the same
-               reason every per-check catch in this class logs and skips: resolving on absent evidence
-               fabricates a recovery exactly as firing on it fabricates an alert. */
-            return;
-        }
-
-        bool breaching = alertCpuValue.Value >= _settings.CpuThresholdPercent;      /* :65-67 */
-
         /* The observation is the ring-buffer SAMPLE, identified by snapshot.CpuSampleTimeUtc: the sweep runs
            on s_alertSweepInterval (30 s) while that sample advances about once a minute, so without the
            instant the SAME sample would advance the streak on consecutive sweeps and CpuBreachSamples would
@@ -780,116 +764,259 @@ public sealed class AlertEngine
            second arm behind the same gate. The instant is the row's UTC twin where the store has one and the
            target's local stamp before V134 (#3744); the gate compares it for EQUALITY, so which clock stamped
            it is not a gate input — see ObservePersistenceAsync for why order was the wrong test. */
-        var (outcome, incidentOpen) = await ObservePersistenceAsync(
-            _cpuPersistence, CpuPersistenceMetric, key, snapshot.CpuSampleTimeUtc, breaching,
-            CpuBreachSamples, CpuClearSamples);
-
-        if (incidentOpen && breaching)
+        var observations = SelectCpuObservations(snapshot, key, now);
+        var events = new List<(bool IsFire, double Value)>();
+        foreach (var obs in observations)
         {
-            if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
+            var sampleValue = CpuValueFor(obs);
+            if (!sampleValue.HasValue)
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
-                bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
-                _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
+                /* NO-DATA FREEZES THE GATE — never a breach, never a clear. The pre-#3282 code fell through to
+                   its resolve arm here, so a CPU sample that simply went missing announced a recovery nobody
+                   measured, rendered "<server>: Total CPU back to %" because the value it interpolated was
+                   null. Freezing is the same call CustomAlertEvaluator makes on a null scalar, and the same
+                   reason every per-check catch in this class logs and skips: resolving on absent evidence
+                   fabricates a recovery exactly as firing on it fabricates an alert. */
+                continue;
+            }
 
-                /* #3495: name the active backup on the card. Everything the annotation needs was knowable
-                   at fire time from the same active-session surface the operator ended up reading by hand
-                   (get_active_queries' underlying table — the query_snapshots read the LRQ alert already
-                   rides), so this is one read of data the store already holds on the same sweep: no new
-                   collector, no new cadence. Inside the fire branch deliberately — cooldown-bounded, so a
-                   quiet sweep pays nothing — and taken for muted fires too, so the history row carries the
-                   same detail the delivered card would have.
+            bool breaching = sampleValue.Value >= _settings.CpuThresholdPercent;      /* :65-67 */
+            var (outcome, incidentOpen) = await ObservePersistenceAsync(
+                _cpuPersistence, CpuPersistenceMetric, key, obs.Instant, breaching,
+                CpuBreachSamples, CpuClearSamples);
 
-                   ANNOTATION, NEVER SUPPRESSION: the threshold compare, the persistence gate, the tiers and
-                   the fire above are all decided before this read exists; it can only ever ADD a line.
-
-                   Every filter is off and the exclusion list empty, on purpose: the LRQ alert's noise
-                   opt-outs exist to keep maintenance OFF that alert (excludeBackups drops BACKUPTHREAD/
-                   BACKUPIO waits), and this probe wants exactly the population those filters remove — the
-                   backup filtered out of the long-running alert is precisely what this line names. An
-                   excluded DATABASE stays visible too: the exclusion setting governs alert noise, and a
-                   backup of an excluded database still burns this server's CPU. Threshold 0 = every session
-                   in the latest fresh snapshot; the read's own 10-minute staleness floor still applies, so a
-                   dead collector cannot dress an old backup up as a live one. The #3653 (Q5) opt-out knob is
-                   passed as None for the same reason the five filters are off: an operator excludes their
-                   permanent background requests from the LONG-RUNNING alert, and a backup run by an excluded
-                   service login is still the thing burning this server's CPU.
-
-                   Log-and-degrade: a failed annotation read costs the card its maintenance line and NOTHING
-                   else — the alert already fired above this read in every sense that matters, and the empty
-                   string leaves cpuDetailText byte-identical to the pre-#3495 card. Counted on #3013's
-                   surface because it IS a store read the alert pass swallowed; Warning rather than Error
-                   because the CONDITION was evaluated correctly — only the annotation went blind. */
-                string maintenanceDetail = "";
-                var maintenanceClock = Stopwatch.StartNew();
-                try
+            if (incidentOpen && breaching)
+            {
+                /* Consecutive fire candidates collapse to the last one: one announcement per batch, carrying
+                   the newest breaching reading. The cooldown inside FireCpuAsync still decides delivery. */
+                if (events.Count > 0 && events[^1].IsFire)
                 {
-                    var activeSessions = await _readAdapter.GetLongRunningQueriesAsync(
-                        key,
-                        thresholdMinutes: 0,
-                        maxResults: ActiveMaintenanceProbeMaxRows,
-                        excludeSpServerDiagnostics: false,
-                        excludeWaitFor: false,
-                        excludeBackups: false,
-                        excludeMiscWaits: false,
-                        excludeCdc: false,
-                        Array.Empty<string>(),
-                        LongRunningQueryExclusions.None,
-                        ct);
-                    maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions.Sessions);
+                    events[^1] = (true, sampleValue.Value);
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                else
                 {
-                    throw;
+                    events.Add((true, sampleValue.Value));
                 }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning("Could not read active sessions for the High CPU card's maintenance annotation on {Server} after {ElapsedMs} ms — the alert fires without it: {Message}",
-                        serverName, maintenanceClock.ElapsedMilliseconds, ex.Message);
-                    _readFailures?.RecordReadFailure(key, "CPU maintenance annotation", maintenanceClock.ElapsedMilliseconds);
-                }
-
-                var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%{maintenanceDetail}"; /* :89 + #3495 */
-
-                /* :91-98 — ShortMessage = the toast body of :84 minus the server-name prefix. The numerics
-                   are REQUIRED, not optional (#1830): the ported no-numerics form left the history stores
-                   parsing "87% (Total CPU)", which fails on the parenthesized label, so every High CPU row
-                   stored current_value 0 in Lite AND Darling while the toast/email/webhook text stayed
-                   correct. alertCpuValue.HasValue is guaranteed here — the null arm above returns.
-
-                   #3653 (A8e): CPU used to pass NO context, and so no tier — every row rendered amber by
-                   name, a 100% fire indistinguishable from an 80% one while the card beside it was red. The
-                   context now exists for exactly one member: the grade (GradeCpuFire — the CPU health
-                   band's Critical bar). Details stay empty and DetailText stays the hand-built block above,
-                   byte-identical, so every channel renders what it rendered before plus the tier. Set on
-                   BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
-                   Lite's deliverer persists only the context, Darling's folds the outcome in. */
-                var cpuGrade = GradeCpuFire(alertCpuValue.Value);
-                var delivery = await FireAsync(new AlertOutcome(
-                    key, serverName, "High CPU",
-                    $"{alertCpuValue:F0}% ({cpuMetricLabel})",
-                    $"{_settings.CpuThresholdPercent}%",
-                    Context: new AlertContext { SeverityOverride = cpuGrade }, DetailText: cpuDetailText,
-                    NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
-                    Muted: isMuted, Severity: cpuGrade,
-                    ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
-                AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
+            }
+            else if (outcome == PersistenceOutcome.Resolve)                          /* :101 */
+            {
+                events.Add((false, sampleValue.Value));
             }
         }
-        else if (outcome == PersistenceOutcome.Resolve)                              /* :101 */
+
+        var newestCpuSampleUtc = snapshot.CpuSampleUtcOnly
+            ?? (snapshot.RecentCpuSamples is { Count: > 0 } recentForAge ? recentForAge.Max(s => s.SampleTimeUtc) : (DateTime?)null);
+        foreach (var (isFire, eventValue) in events)
         {
-            /* The FALLING EDGE now comes from the gate rather than from a single sample dropping under the
-               bar, which is the other half of #3282: the pre-gate code resolved on the first clear sample,
-               so a 93%-for-two-minutes excursion produced a fire and a resolve 147 seconds apart and an
-               operator got both before either meant anything. The gate fires this exactly once, after
-               CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
-            if (!suppressed)
+            if (isFire)
             {
+                await FireCpuAsync(key, serverName, serverId, now, alertCooldown, suppressed, eventValue, cpuMetricLabel, newestCpuSampleUtc, ct);
+            }
+            else if (!suppressed)
+            {
+                /* The FALLING EDGE comes from the gate rather than from a single sample dropping under the
+                   bar, which is the other half of #3282: the pre-gate code resolved on the first clear sample,
+                   so a 93%-for-two-minutes excursion produced a fire and a resolve 147 seconds apart and an
+                   operator got both before either meant anything. The gate fires this exactly once, after
+                   CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "High CPU",
                     "CPU Resolved",                                                 /* :110 */
-                    $"{serverName}: {cpuMetricLabel} back to {alertCpuValue:F0}%"), ct); /* :111 */
+                    $"{serverName}: {cpuMetricLabel} back to {eventValue:F0}%"), ct); /* :111 */
             }
+        }
+    }
+
+    private double? CpuValueFor(CpuObservation obs) =>
+        _settings.CpuAlertMode == CpuAlertMode.TotalServer ? (obs.Total ?? obs.Sql) : obs.Sql;
+
+    /// <summary>The CPU persistence gate's lookback (#5642): the PostgreSQL check's bound, so a reconnect
+    /// backfill folds at most this far back.</summary>
+    internal static readonly TimeSpan CpuSampleLookback = TimeSpan.FromMinutes(15);
+
+    /// <summary>The most samples one sweep feeds the CPU gate (#5642): the PostgreSQL check's bound.</summary>
+    internal const int CpuSampleBatchLimit = 32;
+
+    private readonly record struct CpuObservation(double? Sql, double? Total, DateTime? Instant);
+
+    /// <summary>
+    /// Fills <see cref="AlertContext.NewestSample"/> at FIRE time (#5642): the source's label, the newest
+    /// sample's UTC instant and its age against the engine's clock, computed once and persisted with the alert's
+    /// context. A null instant, a LOCAL-kind one (a pre-V134 stamp on the monitored server's clock) or the
+    /// <see cref="DateTime.MinValue"/> sentinel gives no age and leaves the context as it was; a sample dated
+    /// later than now ages as zero. The context is created only when there is an age to carry, so a site whose
+    /// context was null stays null without one.
+    /// </summary>
+    internal static AlertContext? StampNewestSample(AlertContext? context, string source, DateTime? instantUtc, DateTime now)
+    {
+        if (!instantUtc.HasValue || instantUtc.Value.Kind == DateTimeKind.Local || instantUtc.Value == DateTime.MinValue)
+        {
+            return context;
+        }
+
+        var age = now - instantUtc.Value;
+        context ??= new AlertContext();
+        context.NewestSample = new AlertNewestSample(
+            source, DateTime.SpecifyKind(instantUtc.Value, DateTimeKind.Utc), age < TimeSpan.Zero ? TimeSpan.Zero : age);
+        return context;
+    }
+
+    /// <summary>The newest of a set of nullable sample instants, or null when none carries one.</summary>
+    private static DateTime? NewestOf(IEnumerable<DateTime?> instants)
+    {
+        DateTime? newest = null;
+        foreach (var instant in instants)
+        {
+            if (instant.HasValue && (!newest.HasValue || instant.Value > newest.Value))
+            {
+                newest = instant;
+            }
+        }
+
+        return newest;
+    }
+
+    /// <summary>
+    /// The observations the CPU gate sees this sweep (#5642), oldest first. Every sample of the host's recent
+    /// list that was collected while we were watching (at or after <see cref="AlertServerSnapshot.WatchingSinceUtc"/>)
+    /// and is newer than the persisted watermark goes through the gate one by one, so three readings over the
+    /// line fire as soon as the third lands, however the collector batched them. Bounded to
+    /// <see cref="CpuSampleLookback"/> and <see cref="CpuSampleBatchLimit"/>; a sample later than now is ignored.
+    /// NO REPLAY: older, backfilled samples are never judged one by one (a spike that ended before a restart
+    /// or reconnect must not alert, an episode already announced must not be announced again); they collapse
+    /// to the single latest sample, which is today's path with today's equality reasoning (see
+    /// <see cref="ObservePersistenceAsync"/>). A persisted watermark LATER than the newest sample (a frame or
+    /// clock skew, or a pre-V134 local stamp east of UTC) takes that path too, which re-anchors it once.
+    /// </summary>
+    private IReadOnlyList<CpuObservation> SelectCpuObservations(AlertServerSnapshot snapshot, string key, DateTime now)
+    {
+        var single = new[] { new CpuObservation(snapshot.SqlCpuPercent, snapshot.TotalCpuPercent, snapshot.CpuSampleTimeUtc) };
+        if (snapshot.RecentCpuSamples is not { Count: > 0 } recent)
+        {
+            return single;
+        }
+
+        var floor = now - CpuSampleLookback;
+        if (snapshot.WatchingSinceUtc is { } watchingSince && watchingSince > floor)
+        {
+            floor = watchingSince;
+        }
+
+        var inBounds = recent
+            .Where(s => s.SampleTimeUtc <= now)
+            .OrderBy(s => s.SampleTimeUtc)
+            .ToList();
+        if (inBounds.Count == 0)
+        {
+            return single;
+        }
+
+        DateTime? watermark = _cpuPersistence.TryGetValue(key, out var prior) ? prior.LastObservedSampleUtc : null;
+        if (watermark.HasValue && watermark.Value > inBounds[^1].SampleTimeUtc)
+        {
+            return single;
+        }
+
+        var live = inBounds
+            .Where(s => s.SampleTimeUtc >= floor && (!watermark.HasValue || s.SampleTimeUtc > watermark.Value))
+            .TakeLast(CpuSampleBatchLimit)
+            .Select(s => new CpuObservation(s.SqlCpuPercent, s.TotalCpuPercent, s.SampleTimeUtc))
+            .ToList();
+        return live.Count == 0 ? single : live;
+    }
+
+    private async Task FireCpuAsync(
+        string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed,
+        double alertCpuValue, string cpuMetricLabel, DateTime? newestSampleUtc, CancellationToken ct)
+    {
+        if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
+        {
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
+            bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
+            _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
+
+            /* #3495: name the active backup on the card. Everything the annotation needs was knowable
+               at fire time from the same active-session surface the operator ended up reading by hand
+               (get_active_queries' underlying table — the query_snapshots read the LRQ alert already
+               rides), so this is one read of data the store already holds on the same sweep: no new
+               collector, no new cadence. Inside the fire branch deliberately — cooldown-bounded, so a
+               quiet sweep pays nothing — and taken for muted fires too, so the history row carries the
+               same detail the delivered card would have.
+
+               ANNOTATION, NEVER SUPPRESSION: the threshold compare, the persistence gate, the tiers and
+               the fire above are all decided before this read exists; it can only ever ADD a line.
+
+               Every filter is off and the exclusion list empty, on purpose: the LRQ alert's noise
+               opt-outs exist to keep maintenance OFF that alert (excludeBackups drops BACKUPTHREAD/
+               BACKUPIO waits), and this probe wants exactly the population those filters remove — the
+               backup filtered out of the long-running alert is precisely what this line names. An
+               excluded DATABASE stays visible too: the exclusion setting governs alert noise, and a
+               backup of an excluded database still burns this server's CPU. Threshold 0 = every session
+               in the latest fresh snapshot; the read's own 10-minute staleness floor still applies, so a
+               dead collector cannot dress an old backup up as a live one. The #3653 (Q5) opt-out knob is
+               passed as None for the same reason the five filters are off: an operator excludes their
+               permanent background requests from the LONG-RUNNING alert, and a backup run by an excluded
+               service login is still the thing burning this server's CPU.
+
+               Log-and-degrade: a failed annotation read costs the card its maintenance line and NOTHING
+               else — the alert already fired above this read in every sense that matters, and the empty
+               string leaves cpuDetailText byte-identical to the pre-#3495 card. Counted on #3013's
+               surface because it IS a store read the alert pass swallowed; Warning rather than Error
+               because the CONDITION was evaluated correctly — only the annotation went blind. */
+            string maintenanceDetail = "";
+            var maintenanceClock = Stopwatch.StartNew();
+            try
+            {
+                var activeSessions = await _readAdapter.GetLongRunningQueriesAsync(
+                    key,
+                    thresholdMinutes: 0,
+                    maxResults: ActiveMaintenanceProbeMaxRows,
+                    excludeSpServerDiagnostics: false,
+                    excludeWaitFor: false,
+                    excludeBackups: false,
+                    excludeMiscWaits: false,
+                    excludeCdc: false,
+                    Array.Empty<string>(),
+                    LongRunningQueryExclusions.None,
+                    ct);
+                maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions.Sessions);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Could not read active sessions for the High CPU card's maintenance annotation on {Server} after {ElapsedMs} ms — the alert fires without it: {Message}",
+                    serverName, maintenanceClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "CPU maintenance annotation", maintenanceClock.ElapsedMilliseconds);
+            }
+
+            var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%{maintenanceDetail}"; /* :89 + #3495 */
+
+            /* :91-98 — ShortMessage = the toast body of :84 minus the server-name prefix. The numerics
+               are REQUIRED, not optional (#1830): the ported no-numerics form left the history stores
+               parsing "87% (Total CPU)", which fails on the parenthesized label, so every High CPU row
+               stored current_value 0 in Lite AND Darling while the toast/email/webhook text stayed
+               correct. alertCpuValue.HasValue is guaranteed here — the null arm above returns.
+
+               #3653 (A8e): CPU used to pass NO context, and so no tier — every row rendered amber by
+               name, a 100% fire indistinguishable from an 80% one while the card beside it was red. The
+               context now exists for exactly one member: the grade (GradeCpuFire — the CPU health
+               band's Critical bar). Details stay empty and DetailText stays the hand-built block above,
+               byte-identical, so every channel renders what it rendered before plus the tier. Set on
+               BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
+               Lite's deliverer persists only the context, Darling's folds the outcome in. */
+            var cpuGrade = GradeCpuFire(alertCpuValue);
+            var delivery = await FireAsync(new AlertOutcome(
+                key, serverName, "High CPU",
+                $"{alertCpuValue:F0}% ({cpuMetricLabel})",
+                $"{_settings.CpuThresholdPercent}%",
+                Context: StampNewestSample(new AlertContext { SeverityOverride = cpuGrade }, "CPU", newestSampleUtc, now), DetailText: cpuDetailText,
+                NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
+                Muted: isMuted, Severity: cpuGrade,
+                ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
+            AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
         }
     }
 
@@ -948,10 +1075,13 @@ public sealed class AlertEngine
     /// for which hosts supply none): the persistence is then weaker, but the alert still fires, and silence
     /// is the one failure a monitoring product cannot distinguish from health.</para>
     ///
-    /// <para>Where two samples land between sweeps the older one is skipped, so a sustained excursion can
-    /// need one extra sample to reach the bar. That undercounts and therefore UNDER-fires, which is the
-    /// correct direction for an alert that pages — the same reasoning <c>PostgresAlertEvaluator</c>'s
-    /// poison-wait window states for its own partial coverage.</para>
+    /// <para><b>Where two samples land between sweeps, the CPU arm feeds BOTH (#5642).</b> The collector lands
+    /// its samples in batches, so counting only the newest row of a batch made "three samples" mean three
+    /// collection passes, and an excursion of five minutes could page ten minutes late. The CPU check now hands
+    /// this method every new sample of the host's recent list, oldest first (<c>SelectCpuObservations</c>), so
+    /// the bar is K consecutive SAMPLES again. Equality still decides what is fresh; the order of the list is
+    /// the only order the gate relies on. Samples collected before the connection began (a restart or
+    /// reconnect backfill) are never fed one by one, so nothing is judged twice.</para>
     ///
     /// <para><b>The write is skipped when nothing moved.</b> Value equality on the record is what makes
     /// that safe: on the vast majority of sweeps nothing about the subject changes, and a store write per
@@ -1116,6 +1246,7 @@ public sealed class AlertEngine
                reuses this sweep's fetch (identical query/window). */
             var blockingContext = AlertContextBuilders.BuildBlockingContext(
                 fingerprintServer, blockingRows, excludedDatabases, blockingOccurrences.Decorate);
+            blockingContext = StampNewestSample(blockingContext, "blocked process", NewestOf(blockingRows!.Select(r => r.EventTime)), now);
             var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
             /* :175-183 — SendDetectedAlertAsync's #1141/#1236 delivery-mode fan-out is an
@@ -1469,6 +1600,7 @@ public sealed class AlertEngine
                     ?? new AlertContext();
                 blockingContext.Details.Insert(0, AlertContextBuilders.BuildBlockingWaitGateItem(
                     current, thresholdSeconds, singleSnapshot ? BlockingWaitFiredBySingleSnapshot : BlockingWaitFiredByConsecutive));
+                StampNewestSample(blockingContext, "blocking wait", current.SnapshotTime, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(blockingContext);
 
                 /* REAL numerics (#1830): the display text is prose ("745s across 3 blocked session(s)"),
@@ -1594,6 +1726,7 @@ public sealed class AlertEngine
                by construction, the Poison Wait precedent). */
             deadlockContext ??= new AlertContext();
             deadlockContext.SeverityOverride = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
+            StampNewestSample(deadlockContext, "deadlock", NewestOf(deadlockRows!.Select(r => r.NewestSampleUtc)), now);
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
@@ -1716,6 +1849,7 @@ public sealed class AlertEngine
                        context above already keys on — an alert-notebook reader can branch on it without
                        parsing the detail heading or the prose. */
                     var poisonContext = new AlertContext { SeverityOverride = worst.Severity, WaitType = worst.WaitType };
+                    StampNewestSample(poisonContext, "wait stats", newestCollectionTime, now);
                     foreach (var finding in findings)
                     {
                         poisonContext.Details.Add(new AlertDetailItem
@@ -1946,6 +2080,7 @@ public sealed class AlertEngine
                         lrqContext.Details.Add(AlertContextBuilders.BuildLongRunningQueryExcludedDatabasesItem(_settings.ExcludedDatabases, read.ExcludedByDatabase));
                     }
 
+                    lrqContext = StampNewestSample(lrqContext, "query snapshot", NewestOf(longRunning.Select(q => q.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */
@@ -2056,6 +2191,7 @@ public sealed class AlertEngine
                        a Warning the operator configured at TempDbSpaceThresholdPercent, honestly labelled. */
                     tempDbContext ??= new AlertContext();
                     tempDbContext.SeverityOverride = AlertSeverityLevel.Warning;
+                    StampNewestSample(tempDbContext, "tempdb", tempDb.CollectionTimeUtc, now);
                     var detailText = AlertContextBuilders.ContextToDetailText(tempDbContext); /* :441 */
 
                     /* :443-453. ShortMessage = the toast body of :435. */
@@ -2152,6 +2288,7 @@ public sealed class AlertEngine
                     {
                         lowDiskContext.SeverityOverride = AlertSeverityLevel.Critical;
                     }
+                    lowDiskContext = StampNewestSample(lowDiskContext, "volume", NewestOf(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(lowDiskContext); /* :523 */
 
                     /* :525-535. ShortMessage = the toast body of :510. */
@@ -2254,6 +2391,7 @@ public sealed class AlertEngine
                     _lastAlertedPvsPercent[key] = worst.PvsPercent;
 
                     var pvsContext = AlertContextBuilders.BuildPvsPressureContext(fingerprintServer, breached, pvsOccurrences.Decorate);
+                    pvsContext = StampNewestSample(pvsContext, "PVS", NewestOf(breached.Select(v => v.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
 
                     var delivery = await FireAsync(new AlertOutcome(
@@ -2418,6 +2556,7 @@ public sealed class AlertEngine
 
                     var context = AlertContextBuilders.BuildFileGrowthContext(
                         fingerprintServer, breached, fileGrowthOccurrences.Decorate);
+                    context = StampNewestSample(context, "file growth", NewestOf(breached.Select(f => f.ObservedAtUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                     /* The headline names the file, its size and its share of the volume — the three facts that
@@ -2564,6 +2703,7 @@ public sealed class AlertEngine
                     _lastLongRunningJobAlert[jobKey] = now;                         /* :587 */
 
                     var jobContext = AlertContextBuilders.BuildAnomalousJobContext(fingerprintServer, anomalousJobs, jobOccurrences.Decorate); /* :600 */
+                    jobContext = StampNewestSample(jobContext, "running job", NewestOf(anomalousJobs.Select(j => j.NewestSampleUtc)), now);
                     var detailText = AlertContextBuilders.ContextToDetailText(jobContext);                     /* :601 */
 
                     /* :603-613. ShortMessage = the toast body of :595. */
@@ -2881,6 +3021,7 @@ public sealed class AlertEngine
                     }
                 });
 
+                StampNewestSample(stateContext, "database state", db.NewestSampleUtc, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(stateContext);
 
                 var delivery = await FireAsync(new AlertOutcome(
@@ -3116,6 +3257,7 @@ public sealed class AlertEngine
                     }
                 });
 
+                StampNewestSample(context, "query store", failure.ObservedAtUtc, now);
                 var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                 var delivery = await FireAsync(new AlertOutcome(

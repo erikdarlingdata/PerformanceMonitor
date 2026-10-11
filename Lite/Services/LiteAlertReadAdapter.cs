@@ -98,6 +98,13 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         /* On collection_time, as the blocked-process read above: a delivery cursor, so a late-collected deadlock
            still alerts. */
         var rows = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
+        /* #5642: the row's own collection_time (a naive-UTC store stamp) is the newest-sample instant the alert's age
+           line reads. The DeadlockRow grid type carries it already; the shared DTO had no place for it. */
+        foreach (var row in rows)
+        {
+            row.NewestSampleUtc = DateTime.SpecifyKind(row.CollectionTime, DateTimeKind.Utc);
+        }
+
         return new List<DeadlockAlertRow>(rows);
     }
 
@@ -183,6 +190,13 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         }
 
         var jobs = await Task.Run(() => _dataService.GetAnomalousJobsAsync(serverId, multiplier), cancellationToken);
+        /* #5642: the snapshot time read above is the newest collection_time this check reads; the rows come from that
+           same newest snapshot, so it is each row's newest-sample instant for the alert's age line. */
+        foreach (var job in jobs)
+        {
+            job.NewestSampleUtc = DateTime.SpecifyKind(snapshotTime.Value, DateTimeKind.Utc);
+        }
+
         return new AnomalousJobsResult(SnapshotIsFresh: true, jobs);
     }
 

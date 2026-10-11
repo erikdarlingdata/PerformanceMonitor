@@ -115,7 +115,9 @@ public sealed class AlertPassCommandTimeoutTests
     /// whether it really shares this budget, rather than letting it inherit the answer from the call
     /// that happens to reach it.</para>
     /// </summary>
-    private const int ExpectedEntryPointCommandSites = 1;
+    /* #5642: 2 (was 1). The recent-CPU-samples read (RecentCpuSamplesSql) runs in the same pass step as the latest-CPU
+       read, on the same deadline, so it is a second command in the walk. Deliberate, not a drift. */
+    private const int ExpectedEntryPointCommandSites = 2;
 
     /// <summary>
     /// Every way a command is constructed in this codebase. <c>new NpgsqlCommand(</c> is the shape

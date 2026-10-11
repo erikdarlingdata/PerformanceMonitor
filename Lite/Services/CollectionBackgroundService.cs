@@ -72,6 +72,17 @@ public class CollectionBackgroundService : BackgroundService
        id and whose notification the cooldown suppresses. */
     private readonly ConcurrentDictionary<int, DateTime> _lastPileupSnapshotEvaluated = new();
 
+    /* #5642: how often the same-statement-pileup check runs. It used to run once per collection cycle, behind the
+       collectors, so a cycle held up by a slow server held the check up with it. It now has its own loop on this
+       cadence, the same 30 seconds as Lite's alert timer; the evaluate-once-per-snapshot stamp above makes a pass
+       that finds nothing new cheap. */
+    internal static readonly TimeSpan PileupInterval = TimeSpan.FromSeconds(30);
+
+    /* #5642: held while a pileup pass is running. One pass at a time: the loop awaits each pass before it waits for
+       the next, and this gate refuses a second caller outright, so two passes can never interleave their reads and
+       their per-server evaluated stamps. */
+    private readonly SemaphoreSlim _pileupPassGate = new(1, 1);
+
     /* How far past its budget an in-flight pass must be before the loop starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored
        the cancellation raised at that budget — wedged inside a single store read, or waiting on
@@ -175,6 +186,17 @@ public class CollectionBackgroundService : BackgroundService
         /* #4640: the logical cycle time sits on a fixed grid (CollectionInterval apart), independent of how long
            a cycle's work takes, so a collector's due check compares exact grid times. */
         var cycleStart = DateTime.UtcNow;
+
+        /* #5642: the pileup check runs on its own cadence beside the collection loop, not behind it. It keeps the
+           loop's two gates (a paused service and a down local database) and ends with the stopping token. */
+        var pileupLoop = RunPileupCadenceAsync(
+            PileupInterval,
+            () => !IsPaused && !_collectorService.LocalDatabaseIsDown(),
+            token => RunExclusiveAsync(_pileupPassGate, () => RunPileupSweepAsync(token)),
+            (wait, token) => Task.Delay(wait, token),
+            ex => _logger?.LogWarning("Same-statement pileup pass faulted — the next pass re-evaluates: {Message}", ex.Message),
+            stoppingToken);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             /* While Lite's local database is down after a fatal error, the whole cycle skips, housekeeping included:
@@ -228,11 +250,11 @@ public class CollectionBackgroundService : BackgroundService
                 /* Periodic dismissed-archive-alert sidecar retention (rolling 180-day purge) */
                 await RunDismissedAlertsCleanupIfDueAsync();
 
-                /* #3467: the same-statement-pileup finding, evaluated at collection cadence — NOT on
-                   the analysis interval, which is the whole point (the measured incident's evidence sat
-                   in the store 21 minutes before the scheduled pass described it). Runs every loop tick,
-                   right behind the collectors that write its input. */
-                await RunPileupSweepAsync(stoppingToken);
+                /* #3467: the same-statement-pileup finding is evaluated on a cadence, NOT on the analysis
+                   interval, which is the whole point (the measured incident's evidence sat in the store 21
+                   minutes before the scheduled pass described it). #5642: that cadence is its own loop
+                   (RunPileupCadenceAsync, started above), no longer a step of this one, so a slow collection
+                   cycle does not hold the check back. */
 
                 /* Periodic scheduled analysis + high-severity finding notifications */
                 await RunAnalysisIfDueAsync(stoppingToken);
@@ -256,7 +278,83 @@ public class CollectionBackgroundService : BackgroundService
             }
         }
 
+        /* The pileup loop ends on the same token; wait for a pass still in flight to leave. */
+        try
+        {
+            await pileupLoop;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Pileup loop ended with: {Message}", ex.Message);
+        }
+
         _logger?.LogInformation("Collection background service stopped");
+    }
+
+    /// <summary>
+    /// #5642: the pileup check's own loop. It waits <paramref name="interval"/>, runs one pass when
+    /// <paramref name="canRun"/> says the service may, and waits again; the pass is awaited before the next wait
+    /// starts, so passes never overlap. A pass that throws costs that pass (reported to <paramref name="onFault"/>),
+    /// never the loop. Only the stopping token ends it, and a stop during the wait or the pass leaves quietly.
+    /// Static, with the delay passed in, so a test drives it with a fake delay and no real waiting.
+    /// </summary>
+    internal static async Task RunPileupCadenceAsync(
+        TimeSpan interval,
+        Func<bool> canRun,
+        Func<CancellationToken, Task> pass,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        Action<Exception> onFault,
+        CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await delay(interval, stoppingToken);
+                if (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                if (!canRun())
+                {
+                    continue;
+                }
+
+                await pass(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                onFault(ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #5642: runs <paramref name="body"/> only when <paramref name="gate"/> is free, holding it until the body
+    /// leaves, and returns false without running when another call holds it. The pileup pass uses it so one pass
+    /// runs at a time however it is reached.
+    /// </summary>
+    internal static async Task<bool> RunExclusiveAsync(SemaphoreSlim gate, Func<Task> body)
+    {
+        if (!await gate.WaitAsync(0))
+        {
+            return false;
+        }
+
+        try
+        {
+            await body();
+            return true;
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     /// <summary>
