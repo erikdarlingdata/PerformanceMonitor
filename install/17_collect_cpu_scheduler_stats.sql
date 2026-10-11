@@ -180,15 +180,10 @@ BEGIN
                 END,
             total_node_count = nodes.total_nodes,
             nodes_online_count = nodes.online_nodes,
-            offline_cpu_count = nodes.offline_cpus,
+            offline_cpu_count = CONVERT(integer, offline_cpus.offline_cpu_count),
             offline_cpu_warning =
                 CASE
-                    WHEN 
-                    (
-                        SELECT COUNT_BIG(*) 
-                        FROM sys.dm_os_schedulers dos 
-                        WHERE dos.is_online = 0
-                    ) > 0
+                    WHEN offline_cpus.offline_cpu_count > 0
                     THEN 1
                     ELSE 0
                 END
@@ -203,23 +198,22 @@ BEGIN
                     SUM
                     (
                         CASE
-                            WHEN n.node_state_desc = N'ONLINE'
-                            THEN 1
-                            ELSE 0
-                        END
-                    ),
-                offline_cpus =
-                    SUM
-                    (
-                        CASE
-                            WHEN n.node_state_desc <> N'ONLINE'
+                            WHEN n.node_state_desc NOT LIKE N'OFFLINE%'
                             THEN 1
                             ELSE 0
                         END
                     )
             FROM sys.dm_os_nodes AS n
-            WHERE n.node_id <> 32767 /*Exclude DAC node*/
+            WHERE n.node_state_desc NOT LIKE N'%DAC%' /*Exclude the DAC node by its state, not by node_id (#5656)*/
         ) AS nodes
+        CROSS JOIN
+        (
+            /*Offline CPUs are user schedulers SQL Server has taken offline; the warning flag reads this same count*/
+            SELECT
+                offline_cpu_count = COUNT_BIG(*)
+            FROM sys.dm_os_schedulers AS dos_offline
+            WHERE dos_offline.status = N'VISIBLE OFFLINE'
+        ) AS offline_cpus
         CROSS JOIN
         (
             SELECT
@@ -280,7 +274,7 @@ BEGIN
             osm.system_memory_state_desc,
             nodes.total_nodes,
             nodes.online_nodes,
-            nodes.offline_cpus
+            offline_cpus.offline_cpu_count
         OPTION(RECOMPILE);
 
         SET @rows_collected = ROWCOUNT_BIG();
@@ -393,7 +387,7 @@ BEGIN
 
             IF @offline_cpu_warning = 1
             BEGIN
-                RAISERROR(N'CRITICAL: Offline CPUs detected: %d offline nodes', 0, 1, @current_offline_cpus) WITH NOWAIT;
+                RAISERROR(N'CRITICAL: Offline CPUs detected: %d offline CPUs', 0, 1, @current_offline_cpus) WITH NOWAIT;
             END;
         END;
 

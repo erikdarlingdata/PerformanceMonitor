@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -98,18 +99,13 @@ SELECT /* PerformanceMonitorLite */
         ),
     total_node_count = CONVERT(integer, nodes.total_nodes),
     nodes_online_count = nodes.online_nodes,
-    offline_cpu_count = nodes.offline_cpus,
+    offline_cpu_count = CONVERT(integer, offline_cpus.offline_cpu_count),
     offline_cpu_warning =
         CONVERT
         (
             bit,
             CASE
-                WHEN
-                (
-                    SELECT COUNT_BIG(*)
-                    FROM sys.dm_os_schedulers AS dos_offline
-                    WHERE dos_offline.is_online = 0
-                ) > 0
+                WHEN offline_cpus.offline_cpu_count > 0
                 THEN 1
                 ELSE 0
             END
@@ -125,23 +121,22 @@ CROSS JOIN
             SUM
             (
                 CASE
-                    WHEN n.node_state_desc = N'ONLINE'
-                    THEN 1
-                    ELSE 0
-                END
-            ),
-        offline_cpus =
-            SUM
-            (
-                CASE
-                    WHEN n.node_state_desc <> N'ONLINE'
+                    WHEN n.node_state_desc NOT LIKE N'OFFLINE%'
                     THEN 1
                     ELSE 0
                 END
             )
     FROM sys.dm_os_nodes AS n
-    WHERE n.node_id <> 32767 /*Exclude DAC node*/
+    WHERE n.node_state_desc NOT LIKE N'%DAC%' /*Exclude the DAC node by its state, not by node_id (#5656)*/
 ) AS nodes
+CROSS JOIN
+(
+    /*Offline CPUs are user schedulers SQL Server has taken offline; the warning flag reads this same count*/
+    SELECT
+        offline_cpu_count = COUNT_BIG(*)
+    FROM sys.dm_os_schedulers AS dos_offline
+    WHERE dos_offline.status = N'VISIBLE OFFLINE'
+) AS offline_cpus
 CROSS JOIN
 (
     SELECT
@@ -198,7 +193,7 @@ GROUP BY
     osm.system_memory_state_desc,
     nodes.total_nodes,
     nodes.online_nodes,
-    nodes.offline_cpus
+    offline_cpus.offline_cpu_count
 OPTION(RECOMPILE);";
 
     [Fact]
@@ -210,6 +205,44 @@ OPTION(RECOMPILE);";
         Assert.Null(CpuSchedulerStatsCollector.Instance.WatermarkColumn);
         Assert.Equal("cpu_scheduler_stats", CpuSchedulerStatsCollector.Instance.Name);
         Assert.Equal("cpu_scheduler_stats", CpuSchedulerStatsCollector.Instance.TargetTable);
+    }
+
+    /* #5656: the shared collector SQL and the Dashboard's install/17 script both counted the DAC node as
+       an offline node (it was filtered by node_id, but the DAC node's id is 64), matched "online" with an
+       exact N'ONLINE' (so ONLINE DAC, IDLE and the combined states read as offline), and reported nodes as
+       "offline CPUs" while the warning flag counted schedulers. Pin both copies so they cannot drift back. */
+    [Theory]
+    [InlineData("collector")]
+    [InlineData("install")]
+    public void NodeAndOfflineCpuCounts_UseStateRulesAndOneSchedulerPredicate(string copy)
+    {
+        var sql = copy == "collector"
+            ? CpuSchedulerStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(new RecordingCollectorDeltaCalculator())).Text
+            : File.ReadAllText(FindRepoFile(Path.Combine("install", "17_collect_cpu_scheduler_stats.sql")));
+
+        /* The DAC node is left out by its state, never by a node_id; "online" is every state except OFFLINE. */
+        Assert.Contains("n.node_state_desc NOT LIKE N'%DAC%'", sql);
+        Assert.Contains("n.node_state_desc NOT LIKE N'OFFLINE%'", sql);
+        Assert.DoesNotContain("32767", sql);
+        Assert.DoesNotContain("node_id <>", sql);
+        Assert.DoesNotContain("node_state_desc = N'ONLINE'", sql);
+        Assert.DoesNotContain("node_state_desc <> N'ONLINE'", sql);
+
+        /* Offline CPUs are counted from the user schedulers SQL Server took offline, once, and the warning
+           flag reads that same count (no second is_online = 0 subquery that can disagree with it). */
+        Assert.Equal(1, CountOccurrences(sql, "= N'VISIBLE OFFLINE'"));
+        Assert.DoesNotContain("is_online", sql);
+        Assert.Contains("offline_cpu_count = CONVERT(integer, offline_cpus.offline_cpu_count)", sql);
+        Assert.Contains("WHEN offline_cpus.offline_cpu_count > 0", sql);
+        Assert.DoesNotContain("nodes.offline_cpus", sql);
+    }
+
+    [Fact]
+    public void InstallScript_DebugMessage_NamesOfflineCpusNotNodes()
+    {
+        var sql = File.ReadAllText(FindRepoFile(Path.Combine("install", "17_collect_cpu_scheduler_stats.sql")));
+        Assert.Contains("Offline CPUs detected: %d offline CPUs", sql);
+        Assert.DoesNotContain("offline nodes", sql);
     }
 
     [Fact]
@@ -326,5 +359,32 @@ OPTION(RECOMPILE);";
 
         /* Point-in-time snapshot — no delta calculator interaction at all. */
         Assert.Empty(deltas.Calls);
+    }
+
+    private static int CountOccurrences(string text, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+        return count;
+    }
+
+    private static string FindRepoFile(string relativePath)
+    {
+        var dir = AppContext.BaseDirectory;
+        for (var i = 0; i < 8 && dir is not null; i++)
+        {
+            var candidate = Path.Combine(dir, relativePath);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+            dir = Path.GetDirectoryName(dir);
+        }
+        throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
     }
 }
