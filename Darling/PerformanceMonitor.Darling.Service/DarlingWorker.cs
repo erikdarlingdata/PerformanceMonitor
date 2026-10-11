@@ -7373,6 +7373,43 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// Fills <see cref="AlertContext.NewestSample"/> for a PostgreSQL family at FIRE time (#5642, ruling 6), from the
+    /// instant that family's own read already returned: the twin of <c>AlertEngine.StampNewestSample</c>, which is
+    /// internal to the engine project. The age is computed here once and rides the persisted context; the deliverer
+    /// appends the "Newest ... sample" line to the detail text once, whichever way the family built it. A null or
+    /// MinValue instant, or a Local-kind one, gives no age and leaves the context as it was (null stays null); a
+    /// sample dated later than now ages as zero.
+    /// </summary>
+    internal static AlertContext? StampPgNewestSample(AlertContext? context, string source, DateTime? instantUtc, DateTime now)
+    {
+        if (!instantUtc.HasValue || instantUtc.Value.Kind == DateTimeKind.Local || instantUtc.Value == DateTime.MinValue)
+        {
+            return context;
+        }
+
+        var age = now - instantUtc.Value;
+        context ??= new AlertContext();
+        context.NewestSample = new AlertNewestSample(
+            source, DateTime.SpecifyKind(instantUtc.Value, DateTimeKind.Utc), age < TimeSpan.Zero ? TimeSpan.Zero : age);
+        return context;
+    }
+
+    /// <summary>The newest of a PostgreSQL family's row instants, or null when there are none (a default instant is none).</summary>
+    internal static DateTime? NewestPgInstant(IEnumerable<DateTime> instants)
+    {
+        DateTime? newest = null;
+        foreach (var instant in instants)
+        {
+            if (instant != default && (!newest.HasValue || instant > newest.Value))
+            {
+                newest = instant;
+            }
+        }
+
+        return newest;
+    }
+
+    /// <summary>
     /// Runs after a PostgreSQL family's fire (#4795), the twin of <c>AlertEngine.AfterFire</c> (#4752) for the
     /// six families that fire from this file. They stamp their cooldown BEFORE delivery, so an alert whose
     /// every channel failed (<see cref="FailedSendBackoff.EveryChannelFailed"/>) used to be silent for the
@@ -7938,7 +7975,7 @@ LIMIT 1";
                         metricName,
                         $"{lastCapacityPercent!.Value:F0}%",
                         $"{alertSettings.CpuThresholdPercent}%",
-                        Context: null,
+                        Context: StampPgNewestSample(null, "CPU", reading.SampleTimeUtc, now),
                         /* Both figures, each labelled with what it is a fraction OF — the whole defect
                            #3281 names is a reader taking one for the other. The sustained-for line is
                            #3282's: without it a reader cannot tell this from the single-sample alert that
@@ -8132,10 +8169,12 @@ LIMIT 1";
                         metricName,
                         count.ToString(CultureInfo.InvariantCulture),
                         threshold.ToString(CultureInfo.InvariantCulture),
-                        Context: new AlertContext
-                        {
-                            Incidents = rows.Select(BuildPgDeadlockIncident).ToList(),
-                        },
+                        Context: StampPgNewestSample(
+                            new AlertContext
+                            {
+                                Incidents = rows.Select(BuildPgDeadlockIncident).ToList(),
+                            },
+                            "deadlock", NewestPgInstant(rows.Select(r => r.OccurredAtUtc)), now),
                         DetailText: null,
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
@@ -8308,10 +8347,12 @@ LIMIT 1";
                         metricName,
                         count.ToString(CultureInfo.InvariantCulture),
                         threshold.ToString(CultureInfo.InvariantCulture),
-                        Context: new AlertContext
-                        {
-                            Incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList(),
-                        },
+                        Context: StampPgNewestSample(
+                            new AlertContext
+                            {
+                                Incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList(),
+                            },
+                            "blocking capture", NewestPgInstant(worstPerRoot.Select(r => r.CapturedAt)), now),
                         DetailText: null,
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
@@ -8788,8 +8829,9 @@ LIMIT 1";
                         finding.ThresholdValue,
                         /* The subject as the #1140 incident fingerprint, identity only — same shape and
                            reasoning as the Tier 0 delivery loop above. */
-                        Context: new AlertContext
-                        {
+                        Context: StampPgNewestSample(
+                            new AlertContext
+                            {
                             Incidents = new List<AlertIncident>
                             {
                                 new(finding.Subject, new[] { finding.CurrentValue }),
@@ -8798,7 +8840,10 @@ LIMIT 1";
                                below already keys on (WaitType = finding.Subject) — an alert-notebook reader
                                can branch on it without parsing the subject back out of the incident. */
                             WaitType = finding.Subject,
-                        },
+                            },
+                            "wait stats",
+                            newestCollectionBySubject.TryGetValue(finding.Subject, out var newestWaitCollection) ? newestWaitCollection : null,
+                            now),
                         DetailText: null,
                         finding.NumericCurrentValue,
                         finding.NumericThresholdValue,
