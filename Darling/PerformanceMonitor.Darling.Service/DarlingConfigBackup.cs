@@ -34,8 +34,13 @@ internal static class DarlingConfigBackup
     /// <summary>The start of every backup name of the default <c>darling.json</c>.</summary>
     public const string Prefix = "darling.json" + Tail;
 
-    /// <summary>The search pattern for every backup of the default <c>darling.json</c>.</summary>
-    public const string Glob = Prefix + "*";
+    /// <summary>The name the config verbs give the backup they write beside <paramref name="configPath"/>: the config path, then
+    /// <see cref="Tail"/>, then <paramref name="stamp"/>, and <c>-N</c> after the stamp when <paramref name="suffix"/> is 2 or more
+    /// (the stamp has one-second resolution, so a second edit in the same second takes the next free number).
+    /// The writer builds its name here, so <see cref="Tail"/> is the one spelling for both the name that is written and the
+    /// names <see cref="IsBackupName"/> reads back.</summary>
+    public static string BackupPath(string configPath, string stamp, int suffix = 1) =>
+        suffix <= 1 ? configPath + Tail + stamp : configPath + Tail + stamp + "-" + suffix.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Whether <paramref name="fileName"/> is a backup of the config file named <paramref name="configFileName"/>:
     /// it starts with that name plus <see cref="Tail"/>, compared ordinally and ignoring case, as Windows compares names.

@@ -449,7 +449,7 @@ public static class DarlingNativePaths
 function Get-DarlingSegmentsBelowRoot([string]$root, [string]$candidate) {
     if ([string]::IsNullOrWhiteSpace($candidate) -or $candidate -notmatch '^([A-Za-z]:[\\/]|\\\\)') { return $null }
     $given = @($candidate.TrimEnd('\', '/') -split '[\\/]')
-    $first = if ($candidate.StartsWith('\\')) { 3 } else { 1 }
+    $first = if ($candidate.StartsWith('\\')) { 2 } else { 1 }
     for ($i = $first; $i -lt $given.Count; $i++) {
         $name = $given[$i]
         if ($name -eq '' -or $name -eq '.' -or $name -eq '..' -or $name.EndsWith('.') -or $name.EndsWith(' ')) { return $null }
@@ -482,7 +482,9 @@ function Get-DarlingServiceWrittenRootFiles([string]$root, [switch]$BackupsOnly)
 # Windows would fold into another ('pg-runtime.', a '..' step) matches nothing. The install root itself and every
 # other file or folder in it are not on the list. $item is what the caller's own walk listed for $candidate: a
 # listed file is trusted by name only when it is a plain file (not a folder, a link or a file with more than one
-# name), and with no item a root file is not trusted, so the answer never rests on a second look at the disk.
+# name), and with no item a root file is not trusted. Whether it is a file or a folder and whether it is a link are read from
+# $item, the item the walk listed; the number of names is read live, because Get-DarlingFileNameCount opens the file (for
+# attributes only) each time it is called.
 function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [string[]]$extraDirectories = @(), $item = $null) {
     $segments = Get-DarlingSegmentsBelowRoot $root $candidate
     if ($null -eq $segments) { return $false }
@@ -1208,6 +1210,13 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         $explicit = @($acl.GetAccessRules($true, $false, $sidType) | Where-Object {
             $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trustedHere -notcontains $_.IdentityReference })
         if ($explicit.Count -gt 0) {
+            # Any file that has more than one name (a hard link anywhere in the tree, not only a backup), or whose names cannot be
+            # counted, is reported and left as it is: /remove:g and /reset write to the one set of permissions all its names share,
+            # and a reset would put the tree's inherited entries on the other name (#5649). Directories have one name.
+            if ((-not $target.PSIsContainer) -and (Get-DarlingFileNameCount $path) -ne 1) {
+                $open += "$path (a hard link: this file has more than one name, or its names could not be counted, and its permissions are the same under every one; its permissions were not changed)"
+                continue
+            }
             if ($isSecretFile) {
                 foreach ($rule in $explicit) { $null = & icacls.exe $path /remove:g "*$($rule.IdentityReference.Value)" /L /Q 2>&1 }
             }

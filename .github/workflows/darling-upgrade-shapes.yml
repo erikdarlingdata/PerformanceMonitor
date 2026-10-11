@@ -6,8 +6,8 @@ name: Darling upgrade shapes
 # under test:
 #   U1  the current release in C:\Program Files\PerformanceMonitorDarling                  must pass
 #       (with a hand-named darling.json.bak-before-edit in the folder, service-owned, #5649)
-#   U2  as U1, the service logon changed to a non-default local account and run once on it must pass
-#   U3  as U1, the service deleted: install passes, upgrade says there is no service        see the leg's expectation
+#   U2  as U1 without the backup file, the service logon changed to a non-default local account and run once on it must pass
+#   U3  as U1 without the backup file, the service deleted: install passes, upgrade says there is no service        see the leg's expectation
 #   U4  a release before 3.9 in C:\PerformanceMonitorDarling: install refuses, names only
 #       the folder's own write entry, and prints the move steps
 # U1, U2 and U3 run both install-darling.ps1 and upgrade-darling.ps1 as separate legs; U4 runs install-darling.ps1.

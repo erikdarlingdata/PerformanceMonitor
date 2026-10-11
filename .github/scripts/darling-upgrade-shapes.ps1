@@ -15,8 +15,8 @@
     U1  current release in C:\Program Files\PerformanceMonitorDarling, service stopped.      must PASS
         The folder also holds a hand-named darling.json.bak-before-edit, service-owned after the
         base install and its service start (#5649); it must not refuse either script.
-    U2  as U1, service logon changed to a non-default local account and started once on it.  must PASS
-    U3  as U1, service deleted. install-darling.ps1 must PASS; upgrade-darling.ps1 has no
+    U2  as U1 without the backup file, service logon changed to a non-default local account and started once on it.  must PASS
+    U3  as U1 without the backup file, service deleted. install-darling.ps1 must PASS; upgrade-darling.ps1 has no
         service to upgrade and must say so, without listing the product's own files.
     U4  pre-3.9 release in C:\PerformanceMonitorDarling. install-darling.ps1 must REFUSE, list only the
         folder's own write entry, and print the move steps.
