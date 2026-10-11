@@ -11732,13 +11732,16 @@ AND   j.hypertable_name = '{relation}'", connection))
                     && StampIsDue(server.NextAlertSweep, s_alertSweepInterval, DateTime.UtcNow))
                 {
                     server.NextAlertSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
-                    if (AlertServerOverride is { } evaluateAlerts)
+                    if (server.AlertRuntime is not null)
                     {
-                        await evaluateAlerts(server, stoppingToken);
-                    }
-                    else if (server.AlertRuntime is not null)
-                    {
-                        await EvaluateAlertsAsync(engine!, server, config!, stoppingToken);
+                        if (AlertServerOverride is { } evaluateAlerts)
+                        {
+                            await evaluateAlerts(server, stoppingToken);
+                        }
+                        else
+                        {
+                            await EvaluateAlertsAsync(engine!, server, config!, stoppingToken);
+                        }
                     }
                 }
 
