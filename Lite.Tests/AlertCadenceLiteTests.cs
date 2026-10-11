@@ -217,6 +217,12 @@ public sealed class LiteSampleAgeHistoryTests : IClassFixture<SharedDuckDbFixtur
     {
         var tab = File.ReadAllText(LiteSampleAgeDeliveryTests.RepoFile("Lite/Controls/AlertsHistoryTab.xaml"));
         Assert.Contains("Binding=\"{Binding NewestSampleDisplay}\"", tab);
+        /* The column carries a filter button like its siblings: the grid's filter manager finds the column's value by the
+           button's Tag, read as a property name of the row type, so the Tag must name a public string property. */
+        Assert.Matches(@"Tag=""NewestSampleDisplay""\s+Click=""FilterButton_Click""[\s\S]{0,200}Text=""Newest Sample""", tab);
+        var filterProperty = typeof(AlertHistoryRow).GetProperty("NewestSampleDisplay");
+        Assert.NotNull(filterProperty);
+        Assert.Equal(typeof(string), filterProperty!.PropertyType);
 
         var window = File.ReadAllText(LiteSampleAgeDeliveryTests.RepoFile("Lite/Windows/AlertDetailWindow.xaml.cs"));
         /* The flat-text fallback already ends in the line the engine stamped, so the window must hand it that text as the
