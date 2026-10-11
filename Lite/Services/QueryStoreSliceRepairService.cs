@@ -753,22 +753,54 @@ HAVING COUNT(*) > 1";
     /// <summary>The file could not be rewritten safely right now; nothing was written. Carries the reason for the log.</summary>
     private sealed class RewriteSkippedException(string message) : Exception(message);
 
-    /// <summary>
-    /// How much DuckDB may spill to its temp folder while one archive file is rewritten (#5653): 16 times the
-    /// file, within 512 MiB and 4 GiB. The factor comes from the one measurement there is, a 199 MiB file that
-    /// spilled 2.7 GiB (13.6 times), so a file that behaves like that one fits; the ceiling stops a very large
-    /// file from taking the rest of the disk, and the floor keeps a small file from failing on a few blocks.
-    /// </summary>
-    internal static long RewriteSpillCapBytes(long fileBytes) =>
-        Math.Clamp(fileBytes * 16, 512L * 1024 * 1024, 4L * 1024 * 1024 * 1024);
+    /// <summary>The most DuckDB may spill to its temp folder while one archive file is rewritten (#5653).</summary>
+    internal const long RewriteSpillCeilingBytes = 4L * 1024 * 1024 * 1024;
+
+    /// <summary>Below this much temp room the rewrite is not started: it would only fail part way through.</summary>
+    internal const long RewriteSpillFloorBytes = 256L * 1024 * 1024;
 
     /// <summary>
-    /// Free space the volume must have before one file is rewritten: the rewritten copy (the file plus half
-    /// again, since a rewrite has been seen to grow), the spill cap, and the reserve the store itself keeps
-    /// writing into.
+    /// The rewritten copy that has to fit beside the original: the file plus half again, since a rewrite has been
+    /// seen to grow (before the row order was kept, a file that lost 40 rows grew by a third).
     /// </summary>
-    internal static long RewriteDiskNeedBytes(long fileBytes, long reserveBytes) =>
-        fileBytes + (fileBytes / 2) + RewriteSpillCapBytes(fileBytes) + reserveBytes;
+    internal static long RewriteCopyBytes(long fileBytes) => fileBytes + (fileBytes / 2);
+
+    /// <summary>
+    /// How much DuckDB may spill to its temp folder while one archive file is rewritten (#5653), taken from what
+    /// the volume can give rather than from a guess about the file: the free space, less the rewritten copy and
+    /// less the reserve the store itself keeps writing into, within <see cref="RewriteSpillCeilingBytes"/>. It can
+    /// come out negative on a nearly full disk. An unreadable volume (null) gets the ceiling, as compaction treats
+    /// it as enough. The caller skips the file when this is under <see cref="RewriteSpillFloorBytes"/>.
+    ///
+    /// <para>The cap is not a prediction. An earlier version asked for 16 times the file, from one 199 MiB file that
+    /// spilled 2.7 GiB under the old query, which carried the text and plan columns through the aggregate. The
+    /// current query aggregates only the key and the measurements, and its spill is a small fraction of that (see
+    /// the measurement on the PR), so sizing the ask from the file would skip files the disk can hold. If the
+    /// rewrite does run out of its cap, DuckDB fails the statement, the temp file goes, and the original stays.</para>
+    /// </summary>
+    internal static long RewriteSpillCapBytes(long? freeBytes, long fileBytes, long reserveBytes) =>
+        freeBytes is long free
+            ? Math.Min(RewriteSpillCeilingBytes, free - RewriteCopyBytes(fileBytes) - reserveBytes)
+            : RewriteSpillCeilingBytes;
+
+    /// <summary>
+    /// True when a DuckDB failure is the temp folder filling up: its own cap (<c>max_temp_directory_size</c>) or the
+    /// disk under it.
+    /// </summary>
+    internal static bool IsOutOfTempSpace(Exception ex)
+    {
+        var text = ex.ToString();
+        return text.Contains("max_temp_directory_size", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Out of Disk Space", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("not enough space", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Smallest spill cap a rewrite will start with. Settable so a test can lower it; production keeps the floor.</summary>
+    internal long SpillFloorBytes { get; set; } = RewriteSpillFloorBytes;
+
+    /// <summary>Test seam: runs inside the spill cap, just before the COPY, on the COPY's own connection.</summary>
+    internal Func<DuckDBConnection, Task>? InsideSpillCapHook { get; set; }
 
     /// <summary>
     /// Runs <paramref name="action"/> with DuckDB's temp-folder size capped, then puts the setting back. Same
@@ -819,19 +851,24 @@ HAVING COUNT(*) > 1";
         var temp = file.Path + ".repair-tmp";
         var beforeBytes = new FileInfo(file.Path).Length;
 
-        /* #5653: look at the disk BEFORE the COPY. A reporter's 199 MiB file spilled 2.7 GiB into DuckDB's temp
-           folder with 322 MiB free and the rewrite died on "not enough space on the disk" part way through. The
-           check uses the same free-space reader compaction uses (#5377); an unreadable volume (null) counts as
-           enough, as it does there. */
-        var spillCapBytes = RewriteSpillCapBytes(beforeBytes);
+        /* #5653: look at the disk BEFORE the COPY, and size the spill allowance from what the volume can give: the
+           free space less the rewritten copy and the reserve, up to 4 GiB. A file is skipped only when that leaves
+           under the floor, so a nearly full disk is not asked for more than it has, and a roomy one is not turned
+           away by a guess about how much this file will spill. If the rewrite then runs out of its cap, DuckDB
+           fails the statement and the catch around the COPY below turns it into a failure that names temp space.
+           The reader is the one compaction uses (#5377); an unreadable volume (null) counts as enough. */
+        var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
         var reserveBytes = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
-        var neededBytes = RewriteDiskNeedBytes(beforeBytes, reserveBytes);
-        if (_duckDb.AvailableFreeBytesProvider(_archivePath) is long freeBytes && freeBytes < neededBytes)
+        var copyBytes = RewriteCopyBytes(beforeBytes);
+        var spillCapBytes = RewriteSpillCapBytes(freeBytes, beforeBytes, reserveBytes);
+        if (spillCapBytes < SpillFloorBytes)
         {
             throw new RewriteSkippedException(
-                $"not enough free disk space to rewrite this file safely: {FormatBytes(freeBytes)} free, " +
-                $"{FormatBytes(neededBytes)} needed ({FormatBytes(beforeBytes)} file, up to {FormatBytes(spillCapBytes)} of temporary " +
-                "spill and the rewritten copy). The file was left as it is.");
+                $"not enough free disk space to rewrite this file safely: {FormatBytes(freeBytes ?? 0)} free, " +
+                $"{FormatBytes(copyBytes)} needed for the rewritten copy ({FormatBytes(beforeBytes)} file), " +
+                $"{FormatBytes(reserveBytes)} kept as the reserve, which leaves {FormatBytes(Math.Max(0, spillCapBytes))} for " +
+                $"temporary spill, under the {FormatBytes(SpillFloorBytes)} a rewrite needs. The file was left as it is. " +
+                "This start's repair attempt was used.");
         }
 
         long rewrittenRows;
@@ -856,15 +893,33 @@ HAVING COUNT(*) > 1";
             var key = KeyColumnsFor(columns);
             var rewrite = BuildRewriteSelect(columnTypes, key, EscapePath(file.Path));
 
-            await ArchiveService.WithRaisedCopyMemoryLimit(connection, () => WithRewriteSpillCap(connection, spillCapBytes, async () =>
+            try
             {
-                using var command = connection.CreateCommand();
-                command.CommandText = $@"
+                await ArchiveService.WithRaisedCopyMemoryLimit(connection, () => WithRewriteSpillCap(connection, spillCapBytes, async () =>
+                {
+                    if (InsideSpillCapHook is { } hook)
+                    {
+                        await hook(connection);
+                    }
+
+                    using var command = connection.CreateCommand();
+                    command.CommandText = $@"
 COPY (
 {rewrite}
 ) TO '{EscapePath(temp)}' ({ParquetCompaction.ArchiveCopyOptions})";
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }));
+                    await command.ExecuteNonQueryAsync(cancellationToken);
+                }));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && IsOutOfTempSpace(ex))
+            {
+                /* The statement failed and the original was only read, so it is untouched. A half-written sibling
+                   would only take disk the next try needs. */
+                try { File.Delete(temp); } catch (IOException) { /* the retry's COPY overwrites it */ }
+                throw new InvalidOperationException(
+                    $"the rewrite ran out of temporary space (DuckDB was allowed {FormatBytes(spillCapBytes)} of temp folder, " +
+                    $"with {FormatBytes(freeBytes ?? 0)} free on the volume). The original was left untouched. " +
+                    $"DuckDB said: {ex.Message}", ex);
+            }
 
             (rewrittenRows, rewrittenExecutions) = await MeasureRewrittenAsync(connection, temp, cancellationToken);
         }

@@ -136,7 +136,31 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(before, File.ReadAllBytes(file));
         Assert.False(File.Exists(file + ".repair-tmp"));
         Assert.False(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
-        Assert.Contains(log, l => l.Level == LogLevel.Warning && l.Message.Contains("free disk space", StringComparison.Ordinal));
+        Assert.Contains(log, l => l.Level == LogLevel.Warning && l.Message.Contains("free disk space", StringComparison.Ordinal)
+            && l.Message.Contains("reserve", StringComparison.Ordinal) && l.Message.Contains("rewritten copy", StringComparison.Ordinal)
+            && l.Message.Contains("temporary spill", StringComparison.Ordinal) && l.Message.Contains("attempt was used", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #5653: free space that the old check refused (it asked for 512 MiB of spill on top of the copy and the
+    /// reserve) but that leaves the cap above its floor: the file is rewritten. Each skip used one of two startup
+    /// attempts, so a roomy-enough disk that was skipped twice never got its repair.
+    /// </summary>
+    [Fact]
+    public async Task Rewrite_WithRoomForTheCapAboveItsFloor_RewritesTheFile()
+    {
+        const long MiB = 1024 * 1024;
+        var file = Path.Combine(_archivePath, "202605_query_store_stats.parquet");
+        await WriteSplitArchiveAsync(file);
+        var fileBytes = new FileInfo(file).Length;
+        var reserve = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
+        _duckDb.AvailableFreeBytesProvider = _ => reserve + fileBytes + (fileBytes / 2) + (300 * MiB);
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
+        Assert.False(File.Exists(file + ".repair-tmp"));
     }
 
     /// <summary>
@@ -180,23 +204,66 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         Assert.True(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
     }
 
-    /// <summary>The spill cap scales with the file and stays between its floor and ceiling.</summary>
+    /// <summary>The spill cap is what the volume can give after the copy and the reserve, within the ceiling.</summary>
     [Fact]
-    public void SpillCap_ScalesWithTheFile_WithinItsFloorAndCeiling()
+    public void SpillCap_IsWhatTheVolumeCanGive_WithinTheCeiling()
     {
         const long MiB = 1024 * 1024;
-        Assert.Equal(512 * MiB, QueryStoreSliceRepairService.RewriteSpillCapBytes(1 * MiB));
-        Assert.Equal(16 * 100 * MiB, QueryStoreSliceRepairService.RewriteSpillCapBytes(100 * MiB));
-        Assert.Equal(4096 * MiB, QueryStoreSliceRepairService.RewriteSpillCapBytes(10_000 * MiB));
 
-        /* The reporter's 199 MiB file spilled 2.7 GiB; its cap must cover that. */
-        Assert.True(QueryStoreSliceRepairService.RewriteSpillCapBytes(199 * MiB) > 2764 * MiB);
-
-        /* Need = rewritten copy (1.5x) + cap + reserve. */
+        /* free 3.58 GiB, a 199 MiB file (copy 298.5 MiB), a 64 MiB reserve: the cap is the rest. */
+        var free = 3666L * MiB;
         Assert.Equal(
-            (150 * MiB) + (1600 * MiB) + (64 * MiB),
-            QueryStoreSliceRepairService.RewriteDiskNeedBytes(100 * MiB, 64 * MiB));
+            free - (199 * MiB) - (199 * MiB / 2) - (64 * MiB),
+            QueryStoreSliceRepairService.RewriteSpillCapBytes(free, 199 * MiB, 64 * MiB));
+
+        Assert.Equal(4096 * MiB, QueryStoreSliceRepairService.RewriteSpillCapBytes(100_000 * MiB, 199 * MiB, 64 * MiB));
+        Assert.Equal(4096 * MiB, QueryStoreSliceRepairService.RewriteSpillCapBytes(null, 199 * MiB, 64 * MiB));
+        Assert.True(QueryStoreSliceRepairService.RewriteSpillCapBytes(100 * MiB, 199 * MiB, 64 * MiB) < 0);
+
+        Assert.Equal(150 * MiB, QueryStoreSliceRepairService.RewriteCopyBytes(100 * MiB));
+        Assert.Equal(256 * MiB, QueryStoreSliceRepairService.RewriteSpillFloorBytes);
     }
+
+    /// <summary>
+    /// #5653: the rewrite runs out of its temp allowance. DuckDB fails the statement; the original is byte for byte
+    /// as it was, no sibling is left behind, the file counts as a failure (so the marker is withheld), and the log
+    /// line names temp space.
+    /// </summary>
+    [Fact]
+    public async Task Rewrite_WhenItRunsOutOfTempSpace_LeavesTheOriginal_AndCountsAFailure()
+    {
+        const long MiB = 1024 * 1024;
+        var file = Path.Combine(_archivePath, "202605_query_store_stats.parquet");
+        await WriteSplitArchiveAsync(file);
+        var before = File.ReadAllBytes(file);
+        var reserve = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
+
+        /* A 2 MiB allowance (floor lowered so the file starts), then a statement that must spill far more. */
+        _duckDb.AvailableFreeBytesProvider = _ => reserve + RewriteCopy(before.Length) + (2 * MiB);
+        var log = new List<(LogLevel Level, string Message)>();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, new CapturingLogger(log))
+        {
+            SpillFloorBytes = 1 * MiB,
+            InsideSpillCapHook = async connection =>
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = "SET memory_limit = '16MB'";
+                await cmd.ExecuteNonQueryAsync();
+                cmd.CommandText = "SELECT count(*) FROM (SELECT i, hash(i) AS h, repeat('x', 100) AS pad FROM range(5000000) t(i) ORDER BY h)";
+                await cmd.ExecuteScalarAsync();
+            },
+        };
+
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(before, File.ReadAllBytes(file));
+        Assert.False(File.Exists(file + ".repair-tmp"));
+        Assert.False(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
+        Assert.Contains(log, l => l.Level == LogLevel.Error && l.Message.Contains("202605_query_store_stats", StringComparison.Ordinal));
+        Assert.Contains(log, l => l.Level == LogLevel.Warning && l.Message.Contains("temporary space", StringComparison.Ordinal));
+    }
+
+    private static long RewriteCopy(long fileBytes) => QueryStoreSliceRepairService.RewriteCopyBytes(fileBytes);
 
     /// <summary>The cap is in force while the action runs and the setting is put back after, even when the action throws.</summary>
     [Fact]
