@@ -170,6 +170,67 @@ public class AzureMasterFallbackTests
         Assert.Contains("can open a user database but not master", ex.Message, StringComparison.Ordinal);
     }
 
+    private const string FirewallMessage =
+        "Cannot open server 'example' requested by the login. Client with IP address '192.0.2.1' is not allowed to " +
+        "access the server. To enable access, use the Azure Management Portal or run sp_set_firewall_rule on the " +
+        "master database to create a firewall rule for this IP address or address range.";
+
+    /// <summary>
+    /// #5647: error 40615 is a firewall rejection, which a missing Database setting never causes. The message names
+    /// the firewall and the client IP the server reported and carries no set-a-Database advice.
+    /// </summary>
+    [Theory]
+    [InlineData("master")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Error_40615_Names_The_Firewall_And_Client_Ip_With_No_Set_Database_Advice(string? targetDb)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RemoteCollectorService.FallbackDatabaseList(
+                Server(), targetDb, reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: 40615, serverMessage: FirewallMessage));
+
+        Assert.StartsWith("master DB inaccessible (SQL error 40615), and this connection has no target database", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("The Azure firewall did not allow this client's IP address (192.0.2.1)", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("dd a firewall rule", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("either a server-level rule or a database-level rule in master", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("set a Database", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("can open a user database", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Error_40615_Without_An_Ip_In_The_Server_Text_Still_Has_No_Set_Database_Advice()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RemoteCollectorService.FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: 40615, serverMessage: "Ein anderer Text ohne Adresse."));
+
+        Assert.Contains("did not allow this client's IP address. Add a firewall rule", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("set a Database", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Every other reason keeps the combined message. The decision is the error number, not the words: a reason
+    /// that merely says 40615 does not get the firewall-only message when the number the caller read differs.
+    /// </summary>
+    [Theory]
+    [InlineData(4060)]
+    [InlineData(18456)]
+    [InlineData(null)]
+    public void Any_Other_Reason_Keeps_The_Firewall_Then_Set_Database_Message(int? errorNumber)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => RemoteCollectorService.FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: errorNumber, serverMessage: FirewallMessage));
+
+        Assert.Contains("firewall did not allow this client's IP address", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("set a Database for", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("can open a user database but not master", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.1", ex.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// RunCollectorAsync catches InvalidOperationException TWICE: once filtered on
     /// `ex.Message.Contains("MFA authentication cancelled")` — which records the benign status

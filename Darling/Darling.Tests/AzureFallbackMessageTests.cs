@@ -38,18 +38,58 @@ public sealed class AzureFallbackMessageTests
         ServerId = 5498,
     };
 
+    private const string FirewallMessage =
+        "Cannot open server 'example' requested by the login. Client with IP address '192.0.2.1' is not allowed to " +
+        "access the server. To enable access, use the Azure Management Portal or run sp_set_firewall_rule on the " +
+        "master database to create a firewall rule for this IP address or address range.";
+
     [Theory]
     [InlineData("master")]
     [InlineData("")]
     [InlineData(null)]
-    public void NoDatabaseToFallBackTo_NamesTheFirewallFirst(string? targetDb)
+    public void Error40615_NamesTheFirewallAndTheClientIp_WithNoSetDatabaseAdvice(string? targetDb)
     {
         var ex = Assert.Throws<InvalidOperationException>(
-            () => Runner().FallbackDatabaseList(Server(), targetDb, reason: "master DB inaccessible (SQL error 40615)"));
+            () => Runner().FallbackDatabaseList(
+                Server(), targetDb, reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: 40615, serverMessage: FirewallMessage));
 
         var message = ex.Message;
         Assert.StartsWith("master DB inaccessible (SQL error 40615), and this connection has no target database", message, StringComparison.Ordinal);
+        Assert.Contains("The Azure firewall did not allow this client's IP address (192.0.2.1)", message, StringComparison.Ordinal);
+        Assert.Contains("dd a firewall rule", message, StringComparison.Ordinal);
+        Assert.Contains("either a server-level rule or a database-level rule in master", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("set a database", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("can open a user database", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("AzureTest1007", message, StringComparison.Ordinal);
+    }
 
+    [Fact]
+    public void Error40615_WithoutAnIpInTheServerText_StillHasNoSetDatabaseAdvice()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Runner().FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: 40615, serverMessage: "Ein anderer Text ohne Adresse."));
+
+        Assert.Contains("did not allow this client's IP address. Add a firewall rule", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("set a database", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(4060)]
+    [InlineData(18456)]
+    [InlineData(null)]
+    public void AnyOtherReason_KeepsTheFirewallThenSetDatabaseMessage(int? errorNumber)
+    {
+        /* The decision is the error number, not the words: a reason that merely says 40615 does not get the
+           firewall-only message when the number the caller read is something else. */
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => Runner().FallbackDatabaseList(
+                Server(), "master", reason: "master DB inaccessible (SQL error 40615)",
+                errorNumber: errorNumber, serverMessage: FirewallMessage));
+
+        var message = ex.Message;
         var firewall = message.IndexOf("firewall did not allow this client's IP address", StringComparison.Ordinal);
         var rule = message.IndexOf("add a firewall rule", StringComparison.Ordinal);
         var setDatabase = message.IndexOf("set a database for 'AzureTest1007'", StringComparison.Ordinal);
@@ -59,6 +99,7 @@ public sealed class AzureFallbackMessageTests
         Assert.Contains("either a server-level rule or a database-level rule in master", message, StringComparison.Ordinal);
         Assert.True(setDatabase > rule, "Setting a database comes after the firewall, as the master-only case's fix.");
         Assert.Contains("can open a user database but not master", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.1", message, StringComparison.Ordinal);
     }
 
     [Fact]
