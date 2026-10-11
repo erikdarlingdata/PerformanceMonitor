@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Added
+
+- **Deadlock graph window: a visible Copy button for the SQL text** ([#5663]) - the only ways to copy a process's SQL text were the right-click "Copy SQL Text" menu item or selecting the text box and pressing Ctrl+C, and the menu was easy to miss. The Properties panel now has a Copy button on the same row as the "SQL Text" heading, in Lite and the Darling viewer. It copies the same full SQL text as the menu item, through the same code, and is only shown when the process has SQL text.
+
 ### Fixed
 
 - **A collector that recovered no longer stays at WARNING** ([#5665]) - the 7-day failure rate gave WARNING above 20% errors and a later success never cleared it, so a new target with 2 errors in its first 8 runs stayed WARNING until its tenth run. The rate now counts only once the window holds 10 runs, and a collector whose newest 3 runs in a row succeeded is HEALTHY with a note "recovered: the last 3 runs succeeded; last failure <time> UTC" in the Note column of Lite, the Darling viewer and the Darling web dashboard, and as note_summary (recovered_note on the shorter rows) in the MCP get_collection_health read. A collector that alternates between failing and succeeding stays WARNING, a collector with few runs whose latest run failed stays WARNING, and the staleness, abandon-rate and lost-databases rules are unchanged. The fleet overview card and the Darling viewer's Overview cards agree: when a collector's failure rate alone would band it WARNING, the roll-up reads that collector's newest 3 runs in one follow-up statement (none when no collector needs it), so a recovered collector reads HEALTHY on the fleet card as on its own tab and an alternating one stays WARNING.
@@ -5201,4 +5205,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
 [#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
 [#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
+[#5663]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5663
 [#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665

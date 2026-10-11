@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -634,11 +635,29 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         if (!string.IsNullOrEmpty(node.SqlText))
         {
             var copySql = new MenuItem { Header = "Copy SQL Text" };
-            copySql.Click += (_, _) => ClipboardText.TrySetText(node.SqlText);
+            copySql.Click += (_, _) => CopySqlText(node);
             menu.Items.Add(copySql);
         }
 
         return menu;
+    }
+
+    /// <summary>
+    /// The text the "Copy SQL Text" menu item and the Properties panel's Copy button put on the clipboard
+    /// (#5660): the process's full SQL text, or <c>null</c> when there is nothing to copy (no process, or an
+    /// empty SQL text). One definition, so the two entry points cannot drift.
+    /// </summary>
+    internal static string? SqlTextToCopy(DeadlockProcessNode? node) =>
+        node == null || string.IsNullOrEmpty(node.SqlText) ? null : node.SqlText;
+
+    /// <summary>
+    /// Copies <paramref name="node"/>'s SQL text through the guarded <see cref="ClipboardText.TrySetText"/>.
+    /// Returns <c>false</c> when there is nothing to copy or the clipboard could not be opened.
+    /// </summary>
+    internal static bool CopySqlText(DeadlockProcessNode? node)
+    {
+        var text = SqlTextToCopy(node);
+        return text != null && ClipboardText.TrySetText(text);
     }
 
     private void ShowProperties(DeadlockProcessNode node)
@@ -664,14 +683,33 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
 
         if (!string.IsNullOrEmpty(node.SqlText))
         {
-            PropertiesContent.Children.Add(new TextBlock
+            // The heading row carries a visible Copy button (#5660) so the SQL text is copyable without
+            // finding the right-click menu. It goes through the same CopySqlText the menu item uses.
+            var copyButton = new Button
+            {
+                Content = "Copy",
+                ToolTip = "Copy SQL text to the clipboard",
+                Padding = new Thickness(8, 0, 8, 0),
+                Height = 22,
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center,
+                IsEnabled = SqlTextToCopy(node) != null
+            };
+            AutomationProperties.SetName(copyButton, "Copy SQL text");
+            copyButton.Click += (_, _) => CopySqlText(node);
+            DockPanel.SetDock(copyButton, Dock.Right);
+
+            var sqlHeading = new DockPanel { Margin = new Thickness(0, 10, 0, 4), LastChildFill = true };
+            sqlHeading.Children.Add(copyButton);
+            sqlHeading.Children.Add(new TextBlock
             {
                 Text = "SQL Text",
                 FontWeight = FontWeights.SemiBold,
                 Foreground = MutedBrush,
                 FontSize = 11,
-                Margin = new Thickness(0, 10, 0, 4)
+                VerticalAlignment = VerticalAlignment.Center
             });
+            PropertiesContent.Children.Add(sqlHeading);
             PropertiesContent.Children.Add(new TextBox
             {
                 Text = node.SqlText,
