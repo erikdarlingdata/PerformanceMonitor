@@ -10893,6 +10893,12 @@ WHERE ca.view_schema = 'collect'
     /// the compress). <paramref name="body"/> runs in the same transaction, behind the same <c>SET LOCAL
     /// lock_timeout</c>, and the same outcomes and log lines apply. The list overload is this one with a loop for a body.
     /// </summary>
+    /// <param name="streaks">
+    /// #5672: the test seam for the busy streak. Production passes null and shares <see cref="BusyStreaks"/>; a test that
+    /// counts passes passes its own registry, because other classes' <c>BusyStreaks.Reset()</c> clears every key, not just
+    /// theirs, and a reset between two of the test's passes restarts its count (no Warning) or drops its streak before the
+    /// Applied pass (no "busy passes" line).
+    /// </param>
     internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
         NpgsqlConnection connection, Func<NpgsqlTransaction, Task> body, ILogger? logger, string what, CancellationToken cancellationToken,
         bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false, string? lockTimeoutOverride = null,
@@ -10902,10 +10908,6 @@ WHERE ca.view_schema = 'collect'
            only timeout that can fire on a held chunk passes a lock timeout far above the cap. */
         var lockTimeout = lockTimeoutOverride ?? HourlyDdlLockTimeout;
 
-        /* #5672: the same kind of seam for the busy streak. Production passes null and shares BusyStreaks; a test that counts
-           passes passes its own registry, because other classes' BusyStreaks.Reset() clears every key, not just theirs, and a
-           reset between two of the test's passes restarts its count (no Warning) or drops its streak before the Applied pass
-           (no "busy passes" line). */
         var busyStreaks = streaks ?? BusyStreaks;
         try
         {

@@ -95,8 +95,10 @@ public sealed class BoundedDdlBusyStreakTests
         /* #5672: the body counts through the registry the caller handed in (a test's own) or, when it handed none, the shared
            BusyStreaks. It must never name the shared one directly again: another class's BusyStreaks.Reset() clears every key. */
         Assert.Contains("var busyStreaks = streaks ?? BusyStreaks;", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("BusyStreaks.RecordBusy(", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("BusyStreaks.Clear(", body, StringComparison.Ordinal);
+        /* The anti-pattern half sweeps the whole file (REVIEW-TRAPS: rosters are for the positive contract only): no other method,
+           and no second helper, names the shared registry for either call. The field and the streaks ?? BusyStreaks fallback match neither. */
+        Assert.DoesNotContain("BusyStreaks.RecordBusy(", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("BusyStreaks.Clear(", text, StringComparison.Ordinal);
         Assert.Contains("busyStreaks.RecordBusy(what", body, StringComparison.Ordinal);
         /* Applied, Failed, and (#5574) a relation that is gone: a chunk dropped by retention must not leave its streak behind. */
         Assert.Equal(3, body.Split("busyStreaks.Clear(what", StringSplitOptions.None).Length - 1);
@@ -287,9 +289,18 @@ FROM timescaledb_information.jobs j LEFT JOIN timescaledb_information.job_stats 
             {
                 await _loop;
             }
+
+            /* Start() runs once per pass and makes a fresh source each time: dispose the one this pass is done with, so none is abandoned. */
+            _stop?.Dispose();
+            _stop = null;
         }
 
-        public void Dispose() => _stop?.Dispose();
+        /* Cancel before disposing: a test that threw before StopAsync would otherwise leave the loop polling on a disposed source's token. */
+        public void Dispose()
+        {
+            _stop?.Cancel();
+            _stop?.Dispose();
+        }
     }
 
     private static async Task Exec(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
