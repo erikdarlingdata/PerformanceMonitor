@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The upgrade and installer accept a hand-named `darling.json.bak-*` backup in the install folder** ([#5659]) - In 3.10.0 the check that runs before the lock refused an install folder holding a backup such as `darling.json.bak-before-edit`, because the service owns every `darling.json.bak-*` file after a start and the check trusted it only on the stamped names the CLI writes. The refusal said the folder was writable by ordinary users and told the operator to move the whole install. The check now trusts the service account on every `darling.json.bak-*` file in the install root, the same glob the hardening uses, and nowhere else. Any other grantee on such a file, the service on another file, a folder with that name, and a file below the root still refuse. When a refusal lists only backup files, it now names them and says to move just those files to a folder only Administrators can read, then run the command again. The check, the install-time hardening, the upgrade's manifest guard, the service sweep and the CLI check now read one glob per language.
+
 ## [3.10.0] - 2026-10-09
 
 Full entries: [docs/changelog/3.10.md](docs/changelog/3.10.md)
@@ -5197,3 +5201,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
 [#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
 [#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
+[#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659
