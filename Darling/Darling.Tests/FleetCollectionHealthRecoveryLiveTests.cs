@@ -152,7 +152,11 @@ FROM generate_series(1, 6) c, generate_series(1, 2000) g", ServerId, ServerName)
             var plan = ((string)(await explain.ExecuteScalarAsync(ct))!).Replace("\": \"", "\":\"");
 
             Assert.Contains("Index", plan, StringComparison.Ordinal);
-            Assert.Contains("idx_collection_log_", plan, StringComparison.Ordinal);
+            var indexes = System.Text.RegularExpressions.Regex.Matches(plan, "\"Index Name\":\"([^\"]+)\"")
+                .Select(m => m.Groups[1].Value).Distinct().ToList();
+            Console.WriteLine("PLAN5666 indexes=" + string.Join(",", indexes));
+            Assert.NotEmpty(indexes);
+            Assert.All(indexes, i => Assert.StartsWith("idx_collection_log_", i, StringComparison.Ordinal));
             Assert.DoesNotContain("\"Node Type\":\"Seq Scan\"", plan, StringComparison.Ordinal);
             /* No sort of the window: the three-row array_agg order is inside the aggregate, not a plan node. */
             Assert.DoesNotContain("\"Node Type\":\"Sort\"", plan, StringComparison.Ordinal);

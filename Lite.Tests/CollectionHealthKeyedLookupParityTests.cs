@@ -285,7 +285,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
     private static List<string> Differences(Result oracle, Result candidate)
     {
         var diffs = new List<string>();
-        if (oracle.Names.Length != candidate.Names.Length)
+        /* #5646: the shipped statement carries ONE more column than the pre-change oracle, appended last
+           (trailing_success_runs, the recovery rule's input). Every column the oracle has is compared. */
+        if (oracle.Names.Length + 1 != candidate.Names.Length || candidate.Names[^1] != "trailing_success_runs")
         {
             diffs.Add($"column count {oracle.Names.Length} vs {candidate.Names.Length}");
             return diffs;
