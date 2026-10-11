@@ -1,0 +1,105 @@
+# TEMPORARY (#5672): repeats the live busy-streak test beside the other scratch-database TimescaleDB live classes.
+# Triggered only by a push to the fix branch; removed before the PR is finished.
+name: tmp-5672-loop
+
+on:
+  push:
+    branches: [fix/5672-busy-streak-race]
+
+jobs:
+  loop:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+      - name: Build Darling.Tests
+        run: |
+          dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+          dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+      - name: Start PostgreSQL (the same settings as the Darling PG job)
+        shell: pwsh
+        run: |
+          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
+          $logFile = "$env:RUNNER_TEMP\darling-pg.log"
+          & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
+          if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
+          & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
+          if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed ($LASTEXITCODE)" }
+          & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
+          if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
+      - name: Loop the busy-streak class beside the other scratch TimescaleDB live classes
+        shell: pwsh
+        env:
+          DARLING_TEST_PG: Host=127.0.0.1;Port=5541;Username=darling;Database=darling
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          # Every live class that mints a scratch database and enables TimescaleDB, plus the class under test.
+          $classes = New-Object System.Collections.Generic.List[string]
+          $classes.Add('BoundedDdlBusyStreakLiveTests')
+          foreach ($file in Get-ChildItem Darling/Darling.Tests -Filter *.cs) {
+            $text = Get-Content $file.FullName -Raw
+            if ($text -match 'LiveTimescaleProbe' -and $text -match 'ScratchPostgres\.CreateAsync') {
+              foreach ($m in [regex]::Matches($text, 'public\s+(?:sealed\s+)?class\s+(\w*Live\w*)')) { if (-not $classes.Contains($m.Groups[1].Value)) { $classes.Add($m.Groups[1].Value) } }
+            }
+          }
+          Write-Host "$($classes.Count) classes"
+          $args2 = foreach ($c in $classes) { '-class'; $c }
+          $exe = (Get-ChildItem Darling/Darling.Tests/bin/Release -Recurse -Filter Darling.Tests.exe | Select-Object -First 1).FullName
+          $deadline = (Get-Date).AddMinutes(11)
+          $iteration = 0
+          $busyFailures = 0
+          while ((Get-Date) -lt $deadline) {
+            $iteration++
+            $log = "$env:RUNNER_TEMP\iter-$iteration.txt"
+            & $exe @args2 -maxThreads unlimited > $log 2>&1
+            $summary = Select-String -Path $log -Pattern 'Total:' | Select-Object -Last 1
+            Write-Host "iteration $iteration (copy ${{ matrix.copy }}): $($summary.Line.Trim())"
+            $hit = Select-String -Path $log -Pattern 'ABusyTable_WarnsOnceOnTheThirdPass' | Where-Object { $_.Line -match 'FAIL' }
+            if ($hit) {
+              $busyFailures++
+              Write-Host "::error::busy-streak test FAILED in iteration $iteration"
+              $lines = Get-Content $log
+              $at = ($lines | Select-String -Pattern 'ABusyTable_WarnsOnceOnTheThirdPass' | Where-Object { $_.Line -match 'FAIL' } | Select-Object -First 1).LineNumber
+              $lines[($at - 1)..([Math]::Min($at + 25, $lines.Count - 1))] | ForEach-Object { if ($_.Length -gt 3000) { $_.Substring(0, 3000) } else { $_ } }
+            }
+          }
+          Write-Host "RESULT copy ${{ matrix.copy }}: $iteration iterations, $busyFailures busy-streak failures"
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: |
+          $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          & "$bin\pg_ctl.exe" -D "$env:RUNNER_TEMP\darling-pgdata" -m immediate stop
+          exit 0
