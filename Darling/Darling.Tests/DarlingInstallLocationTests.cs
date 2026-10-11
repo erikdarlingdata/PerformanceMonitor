@@ -4372,6 +4372,73 @@ function Get-CimInstance {
         Assert.Contains("emptySame=False", answers);
     }
 
+    /// <summary>
+    /// #5673: the two refusals themselves, run the way the script has them. A folder reached through a junction to the install
+    /// folder has a different spelling, so the text comparison alone lets it through; the volume-and-file-index check after
+    /// each refusal is what stops it. The block is cut out of the script (from the self-overwrite refusal up to the zip
+    /// handling) and run with a stand-in <c>Fail</c> that records which message was raised.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheUpgrade_RefusesARunningScriptAndASourceThatReachTheInstallFolderThroughAJunction(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var start = script.IndexOf("if (Test-DarlingSamePath $runningFrom $InstallRoot) {", StringComparison.Ordinal);
+        Assert.True(start >= 0, "upgrade-darling.ps1 no longer has the self-overwrite refusal (#5673)");
+        var end = script.IndexOf("\nif ($sourceIsZip) {", start, StringComparison.Ordinal);
+        Assert.True(end > start, "upgrade-darling.ps1 no longer has the zip handling after the refusals (#5673)");
+        var refusals = script.Substring(start, end - start);
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSamePath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSameFolderIdentity"));
+        probe.AppendLine("function Fail([string]$message) { 'refused: ' + $message }");
+        probe.AppendLine("$refusals = {");
+        probe.AppendLine(refusals);
+        probe.AppendLine("}");
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $base = Join-Path $env:TEMP ('pm5673-ref-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory("$base\real")
+            [void][IO.Directory]::CreateDirectory("$base\other")
+            try {
+                [void](New-Item -ItemType Junction -Path "$base\link" -Target "$base\real")
+                $InstallRoot = "$base\real"
+                $sourceIsZip = $false
+
+                $runningFrom = "$base\link"; $sourceRoot = "$base\other"
+                'running=' + (@(& $refusals | Where-Object { $_ -like '*script is running from the install directory*' }).Count)
+
+                $runningFrom = "$base\other"; $sourceRoot = "$base\link"
+                'source=' + (@(& $refusals | Where-Object { $_ -like '*source folder is the install directory*' }).Count)
+
+                $runningFrom = "$base\other"; $sourceRoot = "$base\other"
+                'neither=' + (@(& $refusals).Count)
+            }
+            finally {
+                if (Test-Path -LiteralPath "$base\link") { [IO.Directory]::Delete("$base\link") }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("running=1", answers);
+        Assert.Contains("source=1", answers);
+        Assert.Contains("neither=0", answers);
+    }
+
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>
     private static void AppendPathHelpers(StringBuilder probe, string script)
     {
