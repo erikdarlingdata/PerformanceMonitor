@@ -2820,13 +2820,10 @@ public class CrossAppGuardCiGateTests
 
         foreach (var name in new[] { "Setup .NET 10.0", "Restore Lite.Tests", "Build Lite.Tests", "Run Lite tests (shard)" })
         {
-            /* Restore and build also wait for the Guard-build check (#5459 change 2): they run only when the shard did
-               not use the Guard job's build, and still only where the scope step says the suite runs. */
-            var restoreOrBuild = name is "Restore Lite.Tests" or "Build Lite.Tests";
+            /* The shard builds for itself since #5669 (it starts beside the Guard job, so there is no Guard build to
+               wait for): every work step, restore and build included, runs on the scope step's answer alone. */
             Assert.Contains(
-                restoreOrBuild
-                    ? "\n        if: steps.scope.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'\n"
-                    : "\n        if: steps.scope.outputs.run == 'true'\n",
+                "\n        if: steps.scope.outputs.run == 'true'\n",
                 StepBlock(job, name),
                 StringComparison.Ordinal);
         }
@@ -3143,14 +3140,15 @@ public class CrossAppGuardCiGateTests
         }
 
         var build = File.ReadAllText(Path.Combine(workflows, "build.yml")).Replace("\r\n", "\n", StringComparison.Ordinal);
-        /* The one download-artifact use is the shards' fetch of THIS run's Guard build (#5459 change 2): the three jobs that
-           build the same test projects, each naming the Guard job's output and no run-id (the loop above pins that). A
-           fourth use, or one that names anything else, is a second reader the cancel-in-progress argument does not cover. */
+        /* The one Guard-build download is the whole-tree guards job's fetch of THIS run's Guard build (#5459 change 2,
+           #5669: the shards build for themselves now), naming the Guard job's output and no run-id (the loop above pins
+           that). A second use, or one that names anything else, is a second reader the cancel-in-progress argument does
+           not cover. */
         var buildCode = string.Join('\n', build.Split('\n').Where(l => !l.TrimStart().StartsWith('#')));
         /* Five more (#5459): the shadow-check job fetches THIS run's selection and THIS run's shard reports, and the
            build, darling-pg and lite-tests jobs each fetch THIS run's selection before they narrow their classes.
            Same run, no run-id (the loop above pins that), so a cancelled run's output is never read by another run. */
-        Assert.Equal(8, Regex.Matches(buildCode, "download-artifact").Count);
+        Assert.Equal(6, Regex.Matches(buildCode, "download-artifact").Count);
         Assert.Equal(2, Regex.Matches(JobBlock(build, "shadow-check"), "uses: actions/download-artifact@v6").Count);
         foreach (var jobKey in new[] { "build", "darling-pg", "lite-tests" })
         {
@@ -3159,12 +3157,9 @@ public class CrossAppGuardCiGateTests
             Assert.Contains("name: test-map-selection", selection, StringComparison.Ordinal);
         }
 
-        foreach (var jobKey in new[] { "darling-pg", "darling-tree-guards", "lite-tests" })
-        {
-            var fetch = StepBlock(JobBlock(build, jobKey), "Fetch the Guard job's build of the test project");
-            Assert.Contains("uses: actions/download-artifact@v6", fetch, StringComparison.Ordinal);
-            Assert.Contains("name: ${{ needs.guard-tests.outputs.", fetch, StringComparison.Ordinal);
-        }
+        var guardFetch = StepBlock(JobBlock(build, "darling-tree-guards"), "Fetch the Guard job's build of the test project");
+        Assert.Contains("uses: actions/download-artifact@v6", guardFetch, StringComparison.Ordinal);
+        Assert.Contains("name: ${{ needs.guard-tests.outputs.", guardFetch, StringComparison.Ordinal);
 
         /* The packer's download sits in the Lite shard script that the shard step calls (#5616), which is also what the
            comment above the concurrency block names, so the prose and the code cannot part ways quietly. The script

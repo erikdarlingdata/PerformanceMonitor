@@ -15,18 +15,19 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// build.yml runs the Stage=Guard classes first and fails fast (#5459). These pins hold the wiring: the guard
-/// job runs both suites by trait, every job that waits on it says so, the shards start on a pull request only
-/// after it succeeded, and the two result jobs turn every skip that was not planned into a failure.
+/// build.yml runs the Stage=Guard classes in their own job and fails fast (#5459, #5669). These pins hold the
+/// wiring: the guard job runs both suites by trait, the jobs that read it say so, the long jobs start beside it and
+/// stop themselves through a watcher when it fails, and the two result jobs turn every skip that was not planned
+/// into a failure.
 ///
-/// <para><b>What is pinned, and why each piece.</b> The guard job is not a required check, so the four required
-/// checks (<c>build</c>, <c>Darling PostgreSQL tests</c>, <c>Lite tests (result)</c> and the review guard, which
-/// lives in another workflow) are what show a guard failure. That only works while each of the first three lists
-/// the guard job in its <c>needs</c> and reads its result, so a rename of the job, or a result job that stops
-/// reading it, would let a skipped matrix read as green again. The exact <c>if:</c> of each shard job is pinned
-/// as the census of by-design skips: <c>darling-pg</c> and <c>darling-linux</c> are skipped only when the gate
-/// declined the run or the guards failed on a pull request, and <c>lite-tests</c> also on a release. A fourth
-/// reason would be an unplanned skip, and the result jobs' <c>skipped</c> arm is an error.</para>
+/// <para><b>What is pinned, and why each piece.</b> The guard job is not a required check, so the required checks
+/// (<c>build</c>, <c>Darling PostgreSQL tests</c>, <c>Lite tests (result)</c> and the review guard, which lives in
+/// another workflow) are what show a guard failure. <c>build</c> shows it through its watcher and its last step; the
+/// two result jobs list the guard job in their <c>needs</c> and read its result, so a rename of the job, or a result
+/// job that stops reading it, would let a skipped matrix read as green again. The exact <c>if:</c> of each shard job
+/// is pinned as the census of by-design skips: <c>darling-pg</c> and <c>darling-linux</c> are skipped only when the
+/// gate declined the run, and <c>lite-tests</c> also on a release. A third reason would be an unplanned skip, and
+/// the result jobs' <c>skipped</c> arm is an error.</para>
 ///
 /// <para><b>Docs-only pull requests</b> still report success on all four required checks: the guard job's
 /// filter is a copy of the build job's docs entries and every step after its decision is gated on it, so the
@@ -36,11 +37,16 @@ namespace Darling.Tests;
 [Trait("Reads", "Lite")]
 public sealed class GuardStageWorkflowTests
 {
+    // #5669: the shards and the Linux build start beside the guard job, so their condition no longer reads its result.
     private const string ShardIf =
-        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}";
+        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' }}";
 
     private const string LiteShardIf =
-        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}";
+        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && github.event_name != 'release' }}";
+
+    // The whole-tree guards job still waits for the guard job (and for `build`), and skips when the guards failed.
+    private const string TreeGuardsIf =
+        "if: ${{ !cancelled() && needs.gate.outputs.run == 'true' && (needs.guard-tests.result == 'success' || github.event_name != 'pull_request') }}";
 
     [Fact]
     public void TheGuardJob_IsNamedOnceNotRequiredByName_AndRunsBothSuitesByTrait()
@@ -79,8 +85,8 @@ public sealed class GuardStageWorkflowTests
         Assert.DoesNotContain("DARLING_TEST_", job, StringComparison.Ordinal);
         Assert.DoesNotContain("pg-runtime", job, StringComparison.Ordinal);
         Assert.DoesNotContain("lite-tests-timing", job, StringComparison.Ordinal);
-        /* The uploads are the two built test projects (#5459 change 2, pinned by TheGuardJobUploadsTheBuiltTestProjects_... below) and the two xunit reports the shadow check reads (#5459). */
-        Assert.Equal(4, Regex.Matches(job, "actions/upload-artifact@").Count);
+        /* The uploads are the built Darling test project (#5459 change 2, pinned by TheGuardJobUploadsTheBuiltDarlingTests_... below; the Lite one went with the shards' fetch, #5669) and the two xunit reports the shadow check reads (#5459). */
+        Assert.Equal(3, Regex.Matches(job, "actions/upload-artifact@").Count);
     }
 
     /// <summary>
@@ -121,7 +127,7 @@ public sealed class GuardStageWorkflowTests
         var at = yaml.IndexOf("\n  darling-tree-guards:\n", StringComparison.Ordinal);
         Assert.True(at >= 0);
 
-        var header = yaml[Math.Max(0, at - 700)..at];
+        var header = yaml[Math.Max(0, at - 1400)..at];
         Assert.DoesNotContain("always reports a result, so it can be a required check", header, StringComparison.Ordinal);
         Assert.Contains("on a pull request whose Guard tests job did not", header, StringComparison.Ordinal);
         Assert.Contains("is NOT a required check", header, StringComparison.Ordinal);
@@ -227,35 +233,43 @@ public sealed class GuardStageWorkflowTests
         }
     }
 
+    /// <summary>
+    /// #5669: the report jobs and the whole-tree guards job read the guard job, so they list it. `build`, the shards and
+    /// the Linux build do NOT: they start with the guard job, and a `needs` on it would put the ten-minute wait back.
+    /// </summary>
     [Fact]
-    public void EveryJobThatTheGuardJobGates_ListsItInNeeds()
+    public void TheJobsThatReadTheGuardJob_ListItInNeeds_AndTheJobsThatStartBesideItDoNot()
     {
         var yaml = Yaml();
 
-        foreach (var key in new[]
-                 {
-                     "build", "darling-pg", "darling-linux", "lite-tests", "darling-pg-result", "lite-tests-result",
-                     "darling-tree-guards",
-                 })
+        foreach (var key in new[] { "darling-pg-result", "lite-tests-result", "darling-tree-guards", "shadow-check" })
         {
-            var job = JobBlock(yaml, key);
-            var needs = Regex.Match(job, @"\n    needs: \[(?<list>[^\]]*)\]\n");
-            Assert.True(needs.Success, $"{key} has no `needs: [..]` list");
-            Assert.Contains(
-                "guard-tests",
-                needs.Groups["list"].Value.Split(',').Select(n => n.Trim()),
-                StringComparer.Ordinal);
+            Assert.Contains("guard-tests", NeedsList(JobBlock(yaml, key)), StringComparer.Ordinal);
         }
 
         /* The result jobs keep the pinned `needs: [gate, ` prefix and add the guard before the matrix. */
         Assert.Contains("\n    needs: [gate, guard-tests, darling-pg]\n", JobBlock(yaml, "darling-pg-result"), StringComparison.Ordinal);
         Assert.Contains("\n    needs: [gate, guard-tests, lite-tests]\n", JobBlock(yaml, "lite-tests-result"), StringComparison.Ordinal);
+
+        foreach (var key in new[] { "build", "darling-pg", "darling-linux", "lite-tests" })
+        {
+            var list = NeedsList(JobBlock(yaml, key));
+            Assert.DoesNotContain("guard-tests", list, StringComparer.Ordinal);
+            Assert.Contains("gate", list, StringComparer.Ordinal);
+        }
+
+        /* The whole-tree guards job reads `build`'s outputs (darling-tests, docs-fastpath), so it keeps that wait. */
+        var treeGuards = JobBlock(yaml, "darling-tree-guards");
+        Assert.Contains("build", NeedsList(treeGuards), StringComparer.Ordinal);
+        Assert.Contains("needs.build.outputs.darling-tests", treeGuards, StringComparison.Ordinal);
+        Assert.Contains("needs.build.outputs.docs-fastpath", treeGuards, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The census of by-design skips. A shard job is skipped only when the gate declined the run, when the
-    /// guard job did not succeed on a pull request, and (the Lite shards) on a release. Pinned as the whole
-    /// condition so a new skip cause is a deliberate edit of this test, with the result job's reaction to it.
+    /// The census of by-design skips. A shard job is skipped only when the gate declined the run, and (the Lite shards)
+    /// on a release. The guard job no longer skips any of them (#5669): they start beside it. The whole-tree guards job
+    /// still waits for the guard job and skips when it failed on a pull request. Pinned as the whole condition so a new
+    /// skip cause is a deliberate edit of this test, with the result job's reaction to it.
     /// </summary>
     [Fact]
     public void TheShardJobs_AreSkippedOnlyForThePlannedReasons()
@@ -266,8 +280,8 @@ public sealed class GuardStageWorkflowTests
         Assert.Contains("\n    " + ShardIf + "\n", JobBlock(yaml, "darling-linux"), StringComparison.Ordinal);
         Assert.Contains("\n    " + LiteShardIf + "\n", JobBlock(yaml, "lite-tests"), StringComparison.Ordinal);
 
-        /* The darling-tree-guards job, not a shard, takes the same fail-fast so it does not start a runner. */
-        Assert.Contains("\n    " + ShardIf + "\n", JobBlock(yaml, "darling-tree-guards"), StringComparison.Ordinal);
+        /* The darling-tree-guards job, not a shard, takes the guard fail-fast so it does not start a runner. */
+        Assert.Contains("\n    " + TreeGuardsIf + "\n", JobBlock(yaml, "darling-tree-guards"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -303,16 +317,21 @@ public sealed class GuardStageWorkflowTests
         }
     }
 
+    /// <summary>
+    /// #5669: `build` starts with the guard job, on the Windows runner whenever the gate ran the run, and no longer fails
+    /// a step on the guard's result. Its second step is the checkout; the guard is read by the watcher and by the last step.
+    /// </summary>
     [Fact]
-    public void TheBuildJob_FailsItsSecondStepWhenTheGuardsFailedOnAPullRequest()
+    public void TheBuildJob_StartsBesideTheGuardJob_AndStopsItselfThroughTheWatcher()
     {
         var build = JobBlock(Yaml(), "build");
 
         Assert.Contains("\n    if: ${{ !cancelled() }}\n", build, StringComparison.Ordinal);
         Assert.Contains(
-            "needs.gate.outputs.run == 'true' && (github.event_name != 'pull_request' || needs.guard-tests.result == 'success') && 'windows-latest' || 'ubuntu-latest'",
+            "runs-on: ${{ needs.gate.outputs.run == 'true' && 'windows-latest' || 'ubuntu-latest' }}",
             build,
             StringComparison.Ordinal);
+        Assert.DoesNotContain("needs.guard-tests", build, StringComparison.Ordinal);
 
         var steps = build[build.IndexOf("    steps:\n", StringComparison.Ordinal)..]
             .Split("\n      - ", StringSplitOptions.None)
@@ -321,35 +340,110 @@ public sealed class GuardStageWorkflowTests
             .ToList();
 
         Assert.StartsWith("name: Fail when CI did not run", steps[0], StringComparison.Ordinal);
-        Assert.StartsWith("name: Fail when the guard tests failed", steps[1], StringComparison.Ordinal);
-        Assert.StartsWith("uses: actions/checkout@v7", steps[2], StringComparison.Ordinal);
-
-        Assert.Contains(
-            "if: ${{ github.event_name == 'pull_request' && needs.gate.outputs.run == 'true' && needs.guard-tests.result != 'success' }}",
-            steps[1],
-            StringComparison.Ordinal);
-        Assert.Contains("::error title=Guard tests failed::The Guard tests job", steps[1], StringComparison.Ordinal);
-        Assert.Contains("exit 1", steps[1], StringComparison.Ordinal);
+        Assert.StartsWith("uses: actions/checkout@v7", steps[1], StringComparison.Ordinal);
+        Assert.StartsWith("name: Watch the Guard tests job", steps[2], StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// #5459 change 2: the Guard job uploads each built test project right after its build and BEFORE it runs a test (a
-    /// guard failure still leaves the artifacts), with the producer's workspace and sha beside them, and publishes the
-    /// artifact names as job outputs only when the upload succeeded. A reorder that put the tests first would lose the
-    /// artifacts exactly when a guard fails on a push, where the shards still run.
+    /// #5669: every job that starts beside the guard job runs the watcher right after its checkout, on a pull request that
+    /// the gate ran, and ends with the check step (<c>if: always()</c>, the last step). The token can read the run's jobs.
+    /// `build` is the one required check with no result job reading the guard for it, so its check waits for a guard that
+    /// has not finished; the others report without waiting (their result jobs read the guard's result).
+    /// </summary>
+    [Theory]
+    [InlineData("build", false)]
+    [InlineData("darling-pg", true)]
+    [InlineData("lite-tests", true)]
+    [InlineData("darling-linux", true)]
+    public void EveryJobThatStartsBesideTheGuardJob_RunsTheWatcherAfterCheckout_AndChecksTheGuardAtTheEnd(string key, bool noWait)
+    {
+        var job = JobBlock(Yaml(), key);
+
+        var steps = job[job.IndexOf("    steps:\n", StringComparison.Ordinal)..]
+            .Split("\n      - ", StringSplitOptions.None)
+            .Skip(1)
+            .ToList();
+
+        var watch = steps.Single(s => s.StartsWith("name: Watch the Guard tests job", StringComparison.Ordinal));
+        Assert.Contains("if: ${{ github.event_name == 'pull_request' && needs.gate.outputs.run == 'true' }}", watch, StringComparison.Ordinal);
+        Assert.Contains("shell: pwsh", watch, StringComparison.Ordinal);
+        Assert.Contains("GH_TOKEN: ${{ github.token }}", watch, StringComparison.Ordinal);
+        Assert.Contains("./.github/scripts/guard-watch.ps1 -Mode Start", watch, StringComparison.Ordinal);
+
+        var checkout = steps.FindIndex(s => s.StartsWith("uses: actions/checkout@v7", StringComparison.Ordinal));
+        Assert.True(checkout >= 0 && steps.IndexOf(watch) == checkout + 1,
+            $"{key}: the watcher must start right after the checkout, before any work");
+
+        /* The block runs to the next job's key line, so it carries that job's leading comment: cut it off. */
+        var last = steps[^1].Split("\n\n  ")[0];
+        Assert.StartsWith("name: Fail with the guard when the Guard tests job did not succeed", last, StringComparison.Ordinal);
+        Assert.Contains("if: ${{ always() && github.event_name == 'pull_request' && needs.gate.outputs.run == 'true' }}", last, StringComparison.Ordinal);
+        Assert.Contains("GH_TOKEN: ${{ github.token }}", last, StringComparison.Ordinal);
+        Assert.Contains(
+            noWait ? "guard-watch.ps1 -Mode Check -NoWait" : "guard-watch.ps1 -Mode Check\n",
+            last + "\n",
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("continue-on-error", last, StringComparison.Ordinal);
+
+        /* A job-level permissions block replaces the workflow default; the watcher needs `actions: read`. */
+        var head = job.Split("\n    steps:\n")[0] + "\n";
+        if (head.Contains("\n    permissions:\n", StringComparison.Ordinal))
+        {
+            Assert.Contains("\n      actions: read\n", head, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("\n  actions: read\n", Yaml().Split("\njobs:\n")[0], StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The watcher script, pinned for the one property the ruling needs: a guard failure ends the running step so the job
+    /// FAILS, and the job's own check names the guard. It never cancels the run (a run-level cancel would turn a required
+    /// check into "cancelled"), and it never reports a verdict from an API call that failed.
     /// </summary>
     [Fact]
-    public void TheGuardJobUploadsTheBuiltTestProjects_BeforeAnyTestRuns_WithTheWorkspaceAndShaBesideThem()
+    public void TheGuardWatcher_StopsTheRunningStep_NeverCancelsTheRun_AndNamesTheGuard()
+    {
+        var script = RepoFile.ReadRepoFileLf(".github", "scripts", "guard-watch.ps1");
+
+        Assert.DoesNotContain("/cancel", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("gh run cancel", script, StringComparison.Ordinal);
+        Assert.Contains("actions/runs/$($env:GITHUB_RUN_ID)/jobs?filter=latest", script, StringComparison.Ordinal);
+        Assert.Contains("-Name 'Runner.Worker'", script, StringComparison.Ordinal);
+        Assert.Contains("Stop-Process", script, StringComparison.Ordinal);
+        Assert.Contains("::error title=Guard tests failed::", script, StringComparison.Ordinal);
+        Assert.Contains("exit 1", script, StringComparison.Ordinal);
+
+        /* An unreadable job list is not a verdict: the read returns $null and the caller polls again. */
+        var read = script[script.IndexOf("function Get-GuardJob", StringComparison.Ordinal)..script.IndexOf("function Test-GuardFailed", StringComparison.Ordinal)];
+        Assert.Contains("catch", read, StringComparison.Ordinal);
+        Assert.Contains("return $null", read, StringComparison.Ordinal);
+
+        /* Only a completed job that did not succeed counts as failed. */
+        Assert.Contains("($job.status -eq 'completed') -and ($job.conclusion -ne 'success')", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5459 change 2: the Guard job uploads the built Darling.Tests right after its build and BEFORE it runs a test (a
+    /// guard failure still leaves the artifact), with the producer's workspace and sha beside it, and publishes the
+    /// artifact name as a job output only when the upload succeeded. The one consumer is the whole-tree guards job; since
+    /// #5669 the shards build for themselves, so no Lite artifact is uploaded.
+    /// </summary>
+    [Fact]
+    public void TheGuardJobUploadsTheBuiltDarlingTests_BeforeAnyTestRuns_WithTheWorkspaceAndShaBesideIt()
     {
         var job = JobBlock(Yaml(), "guard-tests");
 
         var build = job.IndexOf("- name: Build both test projects\n", StringComparison.Ordinal);
         var origin = job.IndexOf("- name: Record where this build was made\n", StringComparison.Ordinal);
-        var uploadDarling = job.IndexOf("- name: Upload the built Darling.Tests for the shards\n", StringComparison.Ordinal);
-        var uploadLite = job.IndexOf("- name: Upload the built Lite.Tests for the shards\n", StringComparison.Ordinal);
+        var uploadDarling = job.IndexOf("- name: Upload the built Darling.Tests for the whole-tree guards job\n", StringComparison.Ordinal);
         var run = job.IndexOf("- name: Run the Stage=Guard classes of both suites\n", StringComparison.Ordinal);
-        Assert.True(build > 0 && build < origin && origin < uploadDarling && uploadDarling < uploadLite && uploadLite < run,
-            "the Guard job must build, record the origin, upload both test projects, and only then run the guard classes");
+        Assert.True(build > 0 && build < origin && origin < uploadDarling && uploadDarling < run,
+            "the Guard job must build, record the origin, upload the Darling test project, and only then run the guard classes");
+
+        Assert.DoesNotContain("guard-test-build-lite", job, StringComparison.Ordinal);
+        Assert.DoesNotContain("lite_build_artifact", job, StringComparison.Ordinal);
 
         var recorded = Step(job, "Record where this build was made");
         Assert.Contains("workspace=$env:PRODUCER_WORKSPACE", recorded, StringComparison.Ordinal);
@@ -357,59 +451,57 @@ public sealed class GuardStageWorkflowTests
         Assert.Contains("PRODUCER_WORKSPACE: ${{ github.workspace }}", recorded, StringComparison.Ordinal);
         Assert.Contains("PRODUCER_SHA: ${{ github.sha }}", recorded, StringComparison.Ordinal);
 
-        foreach (var (stepName, name, project, output, id) in new[]
-        {
-            ("Upload the built Darling.Tests for the shards", "guard-test-build-darling", "Darling/Darling.Tests", "darling_build_artifact", "upload-darling-build"),
-            ("Upload the built Lite.Tests for the shards", "guard-test-build-lite", "Lite.Tests", "lite_build_artifact", "upload-lite-build"),
-        })
-        {
-            var upload = Step(job, stepName);
-            Assert.Contains("id: " + id, upload, StringComparison.Ordinal);
-            Assert.Contains("if: steps.decide.outputs.run == 'true'", upload, StringComparison.Ordinal);
-            Assert.Contains("uses: actions/upload-artifact@v6", upload, StringComparison.Ordinal);
-            Assert.Contains("name: " + name + "\n", upload, StringComparison.Ordinal);
-            Assert.Contains("guard-build-origin.txt", upload, StringComparison.Ordinal);
-            Assert.Contains(project + "/bin/Release", upload, StringComparison.Ordinal);
-            Assert.Contains(project + "/obj/project.assets.json", upload, StringComparison.Ordinal);
-            /* Tests that read another project's build output through the repo layout (the first version failed both). */
-            Assert.Contains(
-                project == "Lite.Tests" ? "Lite/bin/**/PerformanceMonitorLite.runtimeconfig.json" : "Darling/PerformanceMonitor.Darling.Service/bin/Release",
-                upload,
-                StringComparison.Ordinal);
-            Assert.Contains("retention-days: 1\n", upload, StringComparison.Ordinal);
-            Assert.Contains("overwrite: true", upload, StringComparison.Ordinal);
-            Assert.Contains("if-no-files-found: error", upload, StringComparison.Ordinal);
-            Assert.Contains(
-                output + ": ${{ steps." + id + ".outcome == 'success' && '" + name + "' || '' }}",
-                job,
-                StringComparison.Ordinal);
-        }
+        var upload = Step(job, "Upload the built Darling.Tests for the whole-tree guards job");
+        Assert.Contains("id: upload-darling-build", upload, StringComparison.Ordinal);
+        Assert.Contains("if: steps.decide.outputs.run == 'true'", upload, StringComparison.Ordinal);
+        Assert.Contains("uses: actions/upload-artifact@v6", upload, StringComparison.Ordinal);
+        Assert.Contains("name: guard-test-build-darling\n", upload, StringComparison.Ordinal);
+        Assert.Contains("guard-build-origin.txt", upload, StringComparison.Ordinal);
+        Assert.Contains("Darling/Darling.Tests/bin/Release", upload, StringComparison.Ordinal);
+        Assert.Contains("Darling/Darling.Tests/obj/project.assets.json", upload, StringComparison.Ordinal);
+        /* A test that reads another project's build output through the repo layout (the first version failed it). */
+        Assert.Contains("Darling/PerformanceMonitor.Darling.Service/bin/Release", upload, StringComparison.Ordinal);
+        Assert.Contains("retention-days: 1\n", upload, StringComparison.Ordinal);
+        Assert.Contains("overwrite: true", upload, StringComparison.Ordinal);
+        Assert.Contains("if-no-files-found: error", upload, StringComparison.Ordinal);
+        Assert.Contains(
+            "darling_build_artifact: ${{ steps.upload-darling-build.outcome == 'success' && 'guard-test-build-darling' || '' }}",
+            job,
+            StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// #5459 change 2, rulings 2 and 3, for the three jobs that build the same test projects the Guard job built. Each
-    /// fetches the artifact of THIS run (no run-id), fails with an error when its workspace or sha differs, skips its
-    /// restore and build and turns off the NuGet cache only when it used the artifact, and leaves Stage=Guard out of
-    /// the class listing it cuts from only then. Without the artifact it builds and runs every class, as before.
+    /// #5459 change 2, rulings 2 and 3, for the one job that still builds from the Guard job's artifact: the whole-tree
+    /// guards job. It fetches the artifact of THIS run (no run-id), fails with an error when its workspace or sha differs,
+    /// skips its restore and build and turns off the NuGet cache only when it used the artifact, and leaves Stage=Guard
+    /// out of the class listing only then. Without the artifact it builds and runs every class. The PostgreSQL and Lite
+    /// shards fetch nothing since #5669: they start beside the Guard job, so there is no build to wait for.
     /// </summary>
-    [Theory]
-    [InlineData("darling-pg", "darling", "steps.filter.outputs.darling == 'true'", "Restore Darling.Tests", "Build Darling.Tests", "Run Darling PG tests")]
-    [InlineData("darling-tree-guards", "darling", "steps.gate.outputs.run == 'true'", "Restore Darling.Tests", "Build Darling.Tests", "Run the whole-tree guards")]
-    [InlineData("lite-tests", "lite", "steps.scope.outputs.run == 'true'", "Restore Lite.Tests", "Build Lite.Tests", "Run Lite tests (shard)")]
-    public void TheConsumers_UseTheGuardBuildOnlyForThisRunAndWorkspace_AndLeaveGuardOutOnlyThen(
-        string jobKey, string suite, string gate, string restoreStep, string buildStep, string runStep)
+    [Fact]
+    public void TheWholeTreeGuardsJob_UsesTheGuardBuildOnlyForThisRunAndWorkspace_AndLeavesGuardOutOnlyThen()
     {
-        var job = JobBlock(Yaml(), jobKey);
+        const string gate = "steps.gate.outputs.run == 'true'";
+        var yaml = Yaml();
+        var job = JobBlock(yaml, "darling-tree-guards");
         Assert.Contains("needs: [gate, ", job.Split("\n    steps:\n")[0], StringComparison.Ordinal);
         Assert.Contains("guard-tests", job.Split("\n    steps:\n")[0], StringComparison.Ordinal);
+
+        foreach (var key in new[] { "darling-pg", "lite-tests", "build", "darling-linux" })
+        {
+            var other = JobBlock(yaml, key);
+            Assert.DoesNotContain("guard-build", other, StringComparison.Ordinal);
+            Assert.DoesNotContain("GUARD_BUILD_USED", other, StringComparison.Ordinal);
+            Assert.DoesNotContain("-GuardBuildUsed", other, StringComparison.Ordinal);
+            Assert.DoesNotContain("guard-tests.outputs", other, StringComparison.Ordinal);
+        }
 
         /* The fetch: this run's artifact, by the producer's output, nothing from another run; a miss is a notice. */
         var fetch = Step(job, "Fetch the Guard job's build of the test project");
         Assert.Contains("id: guard-build\n", fetch, StringComparison.Ordinal);
-        Assert.Contains($"if: {gate} && needs.guard-tests.outputs.{suite}_build_artifact != ''", fetch, StringComparison.Ordinal);
+        Assert.Contains($"if: {gate} && needs.guard-tests.outputs.darling_build_artifact != ''", fetch, StringComparison.Ordinal);
         Assert.Contains("continue-on-error: true", fetch, StringComparison.Ordinal);
         Assert.Contains("uses: actions/download-artifact@v6", fetch, StringComparison.Ordinal);
-        Assert.Contains($"name: ${{{{ needs.guard-tests.outputs.{suite}_build_artifact }}}}", fetch, StringComparison.Ordinal);
+        Assert.Contains("name: ${{ needs.guard-tests.outputs.darling_build_artifact }}", fetch, StringComparison.Ordinal);
         Assert.DoesNotContain("run-id", fetch, StringComparison.Ordinal);
         Assert.DoesNotContain("github-token", fetch, StringComparison.Ordinal);
 
@@ -428,45 +520,27 @@ public sealed class GuardStageWorkflowTests
 
         /* Restore, build and the NuGet cache wait for the check and run only when the artifact was not used. */
         const string notUsed = "steps.guard-build-check.outputs.used != 'true'";
-        Assert.Contains($"if: {gate} && {notUsed}\n", Step(job, restoreStep), StringComparison.Ordinal);
-        Assert.Contains($"if: {gate} && {notUsed}\n", Step(job, buildStep), StringComparison.Ordinal);
+        Assert.Contains($"if: {gate} && {notUsed}\n", Step(job, "Restore Darling.Tests"), StringComparison.Ordinal);
+        Assert.Contains($"if: {gate} && {notUsed}\n", Step(job, "Build Darling.Tests"), StringComparison.Ordinal);
         Assert.Contains($"cache: ${{{{ {notUsed} }}}}", Step(job, "Setup .NET 10.0"), StringComparison.Ordinal);
         Assert.True(
             job.IndexOf("- name: Check the fetched build", StringComparison.Ordinal) < job.IndexOf("- name: Setup .NET 10.0", StringComparison.Ordinal),
             "the check has to come before setup-dotnet, whose cache input reads its output");
 
         /* Guard is left out only through the one filter the check's output feeds; there is no literal exclusion. */
-        var step = Step(job, runStep);
-        Assert.Contains("GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}", step, StringComparison.Ordinal);
-        /* #5616: the two shard jobs hand the flag to a shard script (run-darling-pg-shard.ps1, run-lite-shard.ps1) that holds
-           the listing, so the filter is read from the script; the tree-guards job keeps its listing inline. */
-        var run = step;
-        var filterLine = "$guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })";
-        if (jobKey != "darling-tree-guards")
-        {
-            Assert.Contains("-GuardBuildUsed $env:GUARD_BUILD_USED", step, StringComparison.Ordinal);
-            run = RepoFile.ReadRepoFileLf(".github", "scripts", jobKey == "darling-pg" ? "run-darling-pg-shard.ps1" : "run-lite-shard.ps1");
-            filterLine = "$guardFilter = @(if ($GuardBuildUsed -eq 'true') { '-trait-'; 'Stage=Guard' })";
-        }
-        Assert.Contains(filterLine, run, StringComparison.Ordinal);
+        var run = Step(job, "Run the whole-tree guards");
+        Assert.Contains("GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}", run, StringComparison.Ordinal);
+        Assert.Contains("$guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })", run, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(run, "'-trait-'"));
         Assert.DoesNotContain("-trait- Stage=Guard", run, StringComparison.Ordinal);
+        Assert.Contains("--no-build -- @guardFilter", run, StringComparison.Ordinal);
+    }
 
-        if (jobKey == "darling-pg")
-        {
-            // The script's listing also takes the caller's -ScopeFilter (#5459: the build job runs part of the suite through
-            // it), after the Guard exclusion; the exclusion is still the listing's first filter.
-            Assert.Contains("-- -list classes/json @guardFilter @scopeFilter)", run, StringComparison.Ordinal);
-        }
-        else if (jobKey == "lite-tests")
-        {
-            /* Every listing, the Darling-reads one included, so the cut and the run agree. */
-            Assert.Contains("-- -list classes/json @guardFilter @filter)", run, StringComparison.Ordinal);
-        }
-        else
-        {
-            Assert.Contains("--no-build -- @guardFilter", run, StringComparison.Ordinal);
-        }
+    private static List<string> NeedsList(string job)
+    {
+        var needs = Regex.Match(job, @"\n    needs: \[(?<list>[^\]]*)\]\n");
+        Assert.True(needs.Success, "the job has no `needs: [..]` list");
+        return needs.Groups["list"].Value.Split(',').Select(n => n.Trim()).ToList();
     }
 
     private static string Yaml() => RepoFile.ReadRepoFileLf(".github", "workflows", "build.yml");
