@@ -26,6 +26,16 @@ public sealed class WatchingSinceTracker
 {
     private readonly ConcurrentDictionary<string, DateTime> _since = new(StringComparer.Ordinal);
 
+    /// <param name="appStartUtc">When this app began watching (a test seam); production leaves it null (UtcNow).</param>
+    public WatchingSinceTracker(DateTime? appStartUtc = null)
+    {
+        AppStartUtc = appStartUtc ?? DateTime.UtcNow;
+    }
+
+    /// <summary>When this tracker, and so this app run, began watching. Nothing Lite collected before it was
+    /// watched, so it is the floor for a server with no connection value of its own.</summary>
+    public DateTime AppStartUtc { get; }
+
     /// <summary>Records one connection reading for <paramref name="serverId"/> at <paramref name="nowUtc"/>.</summary>
     public void Observe(string serverId, bool isOnline, DateTime nowUtc)
     {
@@ -41,6 +51,11 @@ public sealed class WatchingSinceTracker
 
     /// <summary>The instant the current connection began collecting, or null while the server is not online.</summary>
     public DateTime? Get(string serverId) => _since.TryGetValue(serverId, out var since) ? since : null;
+
+    /// <summary>The value to hand the engine: the current connection's, else the app start. Never null, because
+    /// the shared engine reads a null as "unknown" and collapses to the newest sample, which would cost the sweep
+    /// its batch gate for a server that is merely offline or not yet observed.</summary>
+    public DateTime GetOrAppStart(string serverId) => Get(serverId) ?? AppStartUtc;
 
     /// <summary>Drops a removed server so a later add of the same id starts from nothing.</summary>
     public void Forget(string serverId) => _since.TryRemove(serverId, out _);

@@ -923,7 +923,8 @@ public sealed class AlertEngine
     /// line fire as soon as the third lands, however the collector batched them. Bounded to
     /// <see cref="CpuSampleLookback"/> and <see cref="CpuSampleBatchLimit"/>; a sample later than now is ignored.
     /// NO REPLAY: older, backfilled samples are never judged one by one (a spike that ended before a restart
-    /// or reconnect must not alert, an episode already announced must not be announced again); they collapse
+    /// or reconnect must not alert, an episode already announced must not be announced again), and a snapshot
+    /// with no <see cref="AlertServerSnapshot.WatchingSinceUtc"/> has no sample that is individually eligible; they collapse
     /// to the single latest sample, which is today's path with today's equality reasoning (see
     /// <see cref="ObservePersistenceAsync"/>). A persisted watermark LATER than the newest sample (a frame or
     /// clock skew, or a pre-V134 local stamp east of UTC) takes that path too, which re-anchors it once.
@@ -938,8 +939,17 @@ public sealed class AlertEngine
             return single;
         }
 
+        /* An UNKNOWN watching-since collapses to the single newest sample (#5642), the same path a missing list
+           takes: unknown is never "every sample eligible". A host that cannot say when it began watching cannot
+           tell the samples collected while it watched from the backfilled history of a spike that ended before
+           it started, and judging those one by one would open an incident nobody saw happen. */
+        if (snapshot.WatchingSinceUtc is not { } watchingSince)
+        {
+            return single;
+        }
+
         var floor = now - CpuSampleLookback;
-        if (snapshot.WatchingSinceUtc is { } watchingSince && watchingSince > floor)
+        if (watchingSince > floor)
         {
             floor = watchingSince;
         }

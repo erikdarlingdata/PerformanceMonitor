@@ -213,6 +213,45 @@ public sealed class AlertEngineCpuBatchTests
     }
 
     [Fact]
+    public async Task AnUnknownWatchingSince_CollapsesToTheSingleNewestSample_NeverEverySampleEligible()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        /* No watching-since (the host could not tell). Three breaching readings from before the host started
+           looking, then a quiet newest one: judged one by one they would open an incident. Unknown must mean
+           "collapse to the newest sample" (today's path), so only the quiet one is counted and nothing is sent. */
+        await engine.EvaluateServerAsync(Batch(
+            null, Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(Noon.AddMinutes(-1))));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+        Assert.Equal(0, h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)].State.ConsecutiveBreaches);
+    }
+
+    [Fact]
+    public async Task AnUnknownWatchingSince_CountsOnlyTheNewestOfThreeHotSamples_OneBreach()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        await engine.EvaluateServerAsync(Batch(null, Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2))));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        var record = h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)];
+        Assert.Equal(1, record.State.ConsecutiveBreaches);
+        Assert.Equal(t.AddMinutes(2), record.LastObservedSampleUtc);
+
+        /* The sweeps after it advance the streak one new sample at a time, as before the batch gate existed. */
+        h.Now = Noon.AddMinutes(1);
+        await engine.EvaluateServerAsync(Batch(null, Hot(t.AddMinutes(2)), Hot(t.AddMinutes(3))));
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(2, h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)].State.ConsecutiveBreaches);
+    }
+
+    [Fact]
     public async Task AReconnect_ANewWatchingSince_SendsNothingForTheBacklog_AndCountsLiveSamplesAfterIt()
     {
         var h = NewHarness();
