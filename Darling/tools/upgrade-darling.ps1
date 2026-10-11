@@ -308,15 +308,20 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
 # (what it creates, grants and keeps the service's ownership of) and by the pre-lock walk (where the service's own
 # account is trusted as owner and as a write grantee), so the two cannot drift apart. Directories are always
 # created and granted; KeyDirectories only on a bring-your-own PostgreSQL install (Get-DarlingExtraServiceWriteDirectories
-# returns them, and only then are they on the list). Files are matched by exact name in the install root only: darling.json,
-# and its backups, which the config-editing verbs name darling.json.bak-yyyyMMdd-HHmmss with an optional -N counter
-# (BackupPattern). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# returns them, and only then are they on the list). Files are matched in the install root only, and only files (a folder of the same name is not on the
+# list): darling.json, and every darling.json.bak-* file (BackupGlob, #5649). That is the glob the hardening covers: the
+# install-time pass in install-darling.ps1, the service's TryHardenConfigBackups and the CLI's backup enumeration all
+# take every darling.json.bak-* name, not only the darling.json.bak-yyyyMMdd-HHmmss(-N) names the config-editing verbs
+# write, so a backup an operator named by hand (darling.json.bak-before-edit) becomes service-owned at the next start
+# and must not read as a stranger's file. A backup is data the service reads and writes, never code that runs. This is
+# the ONE spelling of that glob in these scripts; DarlingConfigBackup.Glob in the service is the one in C#, and a test
+# pins the two to the same text. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingServiceWrittenNames {
     return [pscustomobject]@{
         Directories    = @('pg-runtime', 'pg-runtime-prev')
         KeyDirectories = @('darling-keys')
         Files          = @('darling.json')
-        BackupPattern  = '^darling\.json\.bak-[0-9]{8}-[0-9]{6}(-[0-9]+)?$'
+        BackupGlob     = 'darling.json.bak-*'
     }
 }
 
@@ -326,7 +331,7 @@ function Test-DarlingServiceWrittenFileName([string]$name) {
     foreach ($file in @($names.Files)) {
         if ($name -ieq $file) { return $true }
     }
-    return [bool]($name -match $names.BackupPattern)
+    return [bool]($name -like $names.BackupGlob)
 }
 
 # True when $candidate is a folder on the list above inside $root (or anything below it), or one of the listed
@@ -346,7 +351,8 @@ function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [stri
     foreach ($directory in (@($names.Directories) + @($extraDirectories | Where-Object { $_ }))) {
         if ($segments[0] -ieq $directory) { return $true }
     }
-    return [bool]($segments.Count -eq 1 -and (Test-DarlingServiceWrittenFileName $segments[0]))
+    # Files only (#5649): a folder that carries a listed name is not a file the service writes.
+    return [bool]($segments.Count -eq 1 -and (Test-DarlingServiceWrittenFileName $segments[0]) -and -not (Test-Path -LiteralPath $candidate -PathType Container))
 }
 
 # The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
@@ -542,11 +548,49 @@ Then run install-darling.ps1 from there.
 "@
 }
 
+# The file names, when EVERY finding of a refusal is on a darling.json.bak-* file directly in $root (#5649): a grant
+# on it ("<account> on <path>") or its owner ("<path> (owned by <account>)"). Anything else among the findings, a
+# folder, a link, a file that is not a backup, a finding about a path that could not be read, returns nothing, and the
+# refusal keeps its install-replacement advice. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingBackupFileFindingNames([string]$root, [array]$findings) {
+    if (@($findings).Count -eq 0) { return @() }
+    try { $rootText = [IO.Path]::GetFullPath($root).TrimEnd('\') }
+    catch { return @() }
+    $escaped = [regex]::Escape($rootText)
+    $names = @()
+    foreach ($finding in @($findings)) {
+        $m = [regex]::Match("$finding", "^.+ on (?<path>$escaped\\[^\\]+)$", 'IgnoreCase')
+        if (-not $m.Success) { $m = [regex]::Match("$finding", "^(?<path>$escaped\\[^\\]+) \(owned by .+\)$", 'IgnoreCase') }
+        if (-not $m.Success) { return @() }
+        $path = $m.Groups['path'].Value
+        $leaf = $path.Substring($rootText.Length + 1)
+        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or $leaf -ieq 'darling.json') { return @() }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
+        if ($names -notcontains $leaf) { $names += $leaf }
+    }
+    return @($names)
+}
+
+# The advice for a refusal that lists only darling.json.bak-* files (#5649): move those files, not the install.
+# Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingBackupFileAdvice([string[]]$names) {
+    $shown = (@($names) | Select-Object -First 10) -join ', '
+    $more = if (@($names).Count -gt 10) { " and $(@($names).Count - 10) more" } else { '' }
+    return @"
+Every entry above is a darling.json.bak-* backup file in this folder: $shown$more.
+You do not need to move the install. Move just those files out of this folder, into a folder only
+Administrators can read, because a backup can hold the secrets that were in darling.json. Then run
+this command again.
+"@
+}
+
 # The refusal's advice (#5627): the numbered steps when the registered service runs from $folder itself, that is,
 # when its ImagePath folder ($registeredFolder, from Get-DarlingInstallRootFromService) is $folder, so this folder IS
 # the install being replaced; a fresh folder otherwise, including when no service is registered or its path cannot be
 # read. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
-function Get-DarlingRefusalAdvice([string]$folder, [string]$serviceName, [string]$registeredFolder) {
+function Get-DarlingRefusalAdvice([string]$folder, [string]$serviceName, [string]$registeredFolder, [array]$findings = @()) {
+    $backupNames = @(Get-DarlingBackupFileFindingNames $folder $findings)
+    if ($backupNames.Count -gt 0) { return Get-DarlingBackupFileAdvice $backupNames }
     if ($registeredFolder -and (Test-DarlingSamePath $registeredFolder $folder)) { return Get-DarlingExistingInstallSteps $folder $serviceName }
     return Get-DarlingFreshFolderAdvice $folder
 }
@@ -1268,7 +1312,7 @@ function Test-DarlingManifestPathIsPreserved([string]$relativePath) {
     # the assertion that the manifest is what it claims to be, placed where being wrong costs a monitoring
     # host its configuration.
     if ($leaf.Equals('darling.json', [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    if ($leaf.StartsWith('darling.json.bak-', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    if ($leaf -like (Get-DarlingServiceWrittenNames).BackupGlob) { return $true }
 
     # DPAPI credential blobs. LocalMachine-scoped with an entropy constant that ships in an open-source
     # repo, so READ access is the secret - but they are also not recoverable from anywhere else, and a
@@ -1826,7 +1870,7 @@ A tree installed before #4038 was writable by the accounts above for its whole l
 only copies over what this build ships. It does not check the rest, so other files in the tree can differ
 from what an earlier build shipped.
 
-$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName))
+$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName) $writable)
 
 If you accept the risk of upgrading this tree in place anyway, re-run with -AcceptWritableExtraction.
 

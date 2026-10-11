@@ -4122,7 +4122,7 @@ public static class DarlingCliCommands
             new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
         };
 
-        foreach (var backup in SafeEnumerate(Path.GetDirectoryName(resolvedConfig), "darling.json.bak-*"))
+        foreach (var backup in SafeEnumerate(Path.GetDirectoryName(resolvedConfig), DarlingConfigBackup.Glob))
         {
             targets.Add(new(backup, AllowInteractive: false, IsDirectory: false, "a config backup"));
         }
