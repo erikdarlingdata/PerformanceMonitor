@@ -2245,7 +2245,7 @@ LIMIT 1";
                 return;
             }
 
-            backups = Directory.GetFiles(directory, Path.GetFileName(configPath) + DarlingConfigBackup.GlobSuffix);
+            backups = DarlingConfigBackup.ListBackups(directory, Path.GetFileName(configPath));
         }
         catch (Exception ex)
         {

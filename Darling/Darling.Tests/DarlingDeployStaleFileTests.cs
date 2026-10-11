@@ -619,7 +619,8 @@ public sealed class DarlingDeployStaleFileTests
     {
         var script = InstallScript;
 
-        Assert.Contains("Get-ChildItem -LiteralPath $root -Filter (Get-DarlingServiceWrittenNames).BackupGlob -File -ErrorAction SilentlyContinue", script, StringComparison.Ordinal);
+        Assert.Contains("Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue", script, StringComparison.Ordinal);
+        Assert.Contains("Get-DarlingServiceWrittenRootFiles $root -BackupsOnly", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Get-ChildItem -Path $root", script, StringComparison.Ordinal);
     }
 

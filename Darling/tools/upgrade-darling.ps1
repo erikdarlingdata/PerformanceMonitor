@@ -201,7 +201,11 @@ function Note([string]$message) { Write-Host $message }
 # any other account: the lock gives the service read and execute on $path, so a write right there is not one
 # the lock put there. A caller that passes none (a source build, which the service never writes to) trusts
 # them nowhere.
-function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Recurse, [array]$serviceSids = @(), [array]$serviceDirectories = @()) {
+#
+# The return is the finding TEXTS, or with -AsRecords one object per finding (Kind: Grant, Owner, Link, HardLink,
+# Unreadable or Unlisted; Path; Text, the same line the text form returns; IsFile, from the item the walk itself
+# listed) for the callers that decide something from what a finding IS, never from its text (#5649).
+function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Recurse, [array]$serviceSids = @(), [array]$serviceDirectories = @(), [switch]$AsRecords) {
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
     $sidType = [System.Security.Principal.SecurityIdentifier]
@@ -213,25 +217,31 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
         (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorGroupServerSid, $null)))
     $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::WriteAttributes -bor $rights::WriteExtendedAttributes -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
 
-    function Get-DarlingOneObjectWriteFindings([string]$itemPath, [bool]$includeInherited) {
+    function New-DarlingWriteFinding([string]$kind, [string]$findingPath, [string]$text, [bool]$isFile = $false) {
+        return [pscustomobject]@{ Kind = $kind; Path = $findingPath; Text = $text; IsFile = $isFile }
+    }
+    # $item is what the walk listed for $itemPath ($null for $path itself). The file-or-folder answer comes from it,
+    # never from a second look at the disk, so the check and the listing cannot disagree (#5649).
+    function Get-DarlingOneObjectWriteFindings([string]$itemPath, [bool]$includeInherited, $item = $null) {
+        $isFile = [bool]($null -ne $item -and -not $item.PSIsContainer)
         try { $acl = Get-Acl -LiteralPath $itemPath -ErrorAction Stop }
-        catch { return @("$itemPath (its permissions could not be read: $($_.Exception.Message))") }
+        catch { return @(New-DarlingWriteFinding 'Unreadable' $itemPath "$itemPath (its permissions could not be read: $($_.Exception.Message))" $isFile) }
         $ownerTrusted = $trusted
         $granteeTrusted = $trusted
         if (@($serviceSids).Count -gt 0) {
-            if (Test-DarlingServiceWrittenPath $path $itemPath $serviceDirectories) { $ownerTrusted = @($trusted) + @($serviceSids); $granteeTrusted = $ownerTrusted }
+            if (Test-DarlingServiceWrittenPath $path $itemPath $serviceDirectories $item) { $ownerTrusted = @($trusted) + @($serviceSids); $granteeTrusted = $ownerTrusted }
         }
         $bad = @($acl.GetAccessRules($true, $includeInherited, $sidType) | Where-Object {
             $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $granteeTrusted -notcontains $_.IdentityReference -and $inheritOnlyTemplates -notcontains $_.IdentityReference })
         $result = @($bad | ForEach-Object {
             $grantee = $_.IdentityReference
             $name = try { $grantee.Translate([System.Security.Principal.NTAccount]).Value } catch { $grantee.Value }
-            "$name on $itemPath"
+            New-DarlingWriteFinding 'Grant' $itemPath "$name on $itemPath" $isFile
         })
         $owner = $acl.GetOwner($sidType)
         if ($ownerTrusted -notcontains $owner) {
             $name = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { $owner.Value }
-            $result += "$itemPath (owned by $name)"
+            $result += New-DarlingWriteFinding 'Owner' $itemPath "$itemPath (owned by $name)" $isFile
         }
         return @($result)
     }
@@ -240,21 +250,31 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
     if ($Recurse) {
         # -ErrorVariable, so a folder the walk cannot list is a finding of its own (#4043 round-2 review).
         # Skipped silently, nothing under it reached the checks above and the tree read as clean.
+        $rootFull = try { [IO.Path]::GetFullPath($path).TrimEnd('\') } catch { $path.TrimEnd('\') }
         foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable listFailures)) {
             if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                $result += "$($child.FullName) (a junction or link)"
+                $result += New-DarlingWriteFinding 'Link' $child.FullName "$($child.FullName) (a junction or link)"
                 continue
             }
-            $result += Get-DarlingOneObjectWriteFindings $child.FullName $false
+            # A file with more than one name (a hard link) shares its permissions and its owner under every name, so
+            # one of them in the root with a name the service is trusted on would carry the other name's rights into
+            # the lock and the install pass (#5649). Reported like a link, for the root files the service writes.
+            if (-not $child.PSIsContainer -and $child.LinkType -eq 'HardLink' -and (Test-DarlingServiceWrittenFileName $child.Name) -and ([IO.Path]::GetDirectoryName($child.FullName).TrimEnd('\') -ieq $rootFull)) {
+                $result += New-DarlingWriteFinding 'HardLink' $child.FullName "$($child.FullName) (a hard link: this file has more than one name, and its permissions are the same under every one)" $true
+            }
+            $result += Get-DarlingOneObjectWriteFindings $child.FullName $false $child
         }
         foreach ($failure in @($listFailures)) {
             $unlisted = if ($failure.TargetObject) { "$($failure.TargetObject)" } else { $path }
-            $result += "$unlisted (its contents could not be listed: $($failure.CategoryInfo.Reason))"
+            $result += New-DarlingWriteFinding 'Unlisted' $unlisted "$unlisted (its contents could not be listed: $($failure.CategoryInfo.Reason))"
         }
     }
     # Each finding once: a folder made under C:\ inherits BUILTIN\Users as two ACEs (one grants append, one
     # grants write), and without this every caller named that principal twice for the same path.
-    return @($result | Select-Object -Unique)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $unique = @(foreach ($found in $result) { if ($seen.Add($found.Text)) { $found } })
+    if ($AsRecords) { return @($unique) }
+    return @($unique | ForEach-Object { $_.Text })
 }
 
 # Every SID that is a DIRECT member of BUILTIN\Administrators right now (round-1 review, #4043, M2): an
@@ -309,19 +329,23 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
 # account is trusted as owner and as a write grantee), so the two cannot drift apart. Directories are always
 # created and granted; KeyDirectories only on a bring-your-own PostgreSQL install (Get-DarlingExtraServiceWriteDirectories
 # returns them, and only then are they on the list). Files are matched in the install root only, and only files (a folder of the same name is not on the
-# list): darling.json, and every darling.json.bak-* file (BackupGlob, #5649). That is the glob the hardening covers: the
+# list): darling.json, and every file whose name starts with darling.json.bak- (BackupPrefix, #5649). That is the prefix the hardening covers: the
 # install-time pass in install-darling.ps1, the service's TryHardenConfigBackups and the CLI's backup enumeration all
 # take every darling.json.bak-* name, not only the darling.json.bak-yyyyMMdd-HHmmss(-N) names the config-editing verbs
 # write, so a backup an operator named by hand (darling.json.bak-before-edit) becomes service-owned at the next start
 # and must not read as a stranger's file. A backup is data the service reads and writes, never code that runs. This is
-# the ONE spelling of that glob in these scripts; DarlingConfigBackup.Glob in the service is the one in C#, and a test
-# pins the two to the same text. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# the ONE spelling of that prefix in these scripts, and every PowerShell site tests it with
+# StartsWith(prefix, OrdinalIgnoreCase): -like and -Filter fold case by the current culture (Turkish I) and, in Windows
+# PowerShell 5.1, match some look-alike characters, so they can disagree with the service. DarlingConfigBackup.Prefix
+# in the service is the one in C#, and a test pins the two to the same text. A file with more than one name (a hard
+# link) is never one the service writes: the root files this list covers come from Get-DarlingServiceWrittenRootFiles,
+# which leaves those out. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingServiceWrittenNames {
     return [pscustomobject]@{
         Directories    = @('pg-runtime', 'pg-runtime-prev')
         KeyDirectories = @('darling-keys')
         Files          = @('darling.json')
-        BackupGlob     = 'darling.json.bak-*'
+        BackupPrefix   = 'darling.json.bak-'
     }
 }
 
@@ -329,17 +353,33 @@ function Get-DarlingServiceWrittenNames {
 function Test-DarlingServiceWrittenFileName([string]$name) {
     $names = Get-DarlingServiceWrittenNames
     foreach ($file in @($names.Files)) {
-        if ($name -ieq $file) { return $true }
+        if ([string]::Equals($name, $file, [StringComparison]::OrdinalIgnoreCase)) { return $true }
     }
-    return [bool]($name -like $names.BackupGlob)
+    return [bool]$name.StartsWith($names.BackupPrefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# The files directly in $root that the service writes (the names on the list above): the ones the lock makes the
+# service the owner of, and with -BackupsOnly the darling.json.bak-* ones the install pass hardens. A file with more
+# than one name (a hard link) and a file that is a link are left out, so neither gets the service as its owner or a
+# FullControl grant: those rights would land on the other names too (#5649). Hidden files are included. Kept
+# byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingServiceWrittenRootFiles([string]$root, [switch]$BackupsOnly) {
+    $names = Get-DarlingServiceWrittenNames
+    return @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object {
+        (Test-DarlingServiceWrittenFileName $_.Name) -and
+        (-not $BackupsOnly -or $_.Name.StartsWith($names.BackupPrefix, [StringComparison]::OrdinalIgnoreCase)) -and
+        $_.LinkType -ne 'HardLink' -and
+        -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) })
 }
 
 # True when $candidate is a folder on the list above inside $root (or anything below it), or one of the listed
 # files directly in $root. $extraDirectories are the key folders Get-DarlingExtraServiceWriteDirectories returns
 # for this install, the same ones the lock is handed. The FIRST name below $root is compared exactly, and a name
 # Windows would fold into another ('pg-runtime.', a '..' step) matches nothing. The install root itself and every
-# other file or folder in it are not on the list.
-function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [string[]]$extraDirectories = @()) {
+# other file or folder in it are not on the list. $item is what the caller's own walk listed for $candidate: a
+# listed file is trusted by name only when it is a plain file (not a folder, a link or a file with more than one
+# name), and with no item a root file is not trusted, so the answer never rests on a second look at the disk.
+function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [string[]]$extraDirectories = @(), $item = $null) {
     try { $rootText = [IO.Path]::GetFullPath($root).TrimEnd('\') }
     catch { return $false }
     if (-not $candidate.StartsWith($rootText + '\', [StringComparison]::OrdinalIgnoreCase)) { return $false }
@@ -351,8 +391,9 @@ function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [stri
     foreach ($directory in (@($names.Directories) + @($extraDirectories | Where-Object { $_ }))) {
         if ($segments[0] -ieq $directory) { return $true }
     }
-    # Files only (#5649): a folder that carries a listed name is not a file the service writes.
-    return [bool]($segments.Count -eq 1 -and (Test-DarlingServiceWrittenFileName $segments[0]) -and -not (Test-Path -LiteralPath $candidate -PathType Container))
+    # Files only (#5649): a folder that carries a listed name is not a file the service writes, and neither is a link or
+    # a file with more than one name. The answer comes from the item the walk listed.
+    return [bool]($segments.Count -eq 1 -and (Test-DarlingServiceWrittenFileName $segments[0]) -and $null -ne $item -and -not $item.PSIsContainer -and $item.LinkType -ne 'HardLink' -and -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
 }
 
 # The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
@@ -548,51 +589,53 @@ Then run install-darling.ps1 from there.
 "@
 }
 
-# The file names, when EVERY finding of a refusal is on a darling.json.bak-* file directly in $root (#5649): a grant
-# on it ("<account> on <path>") or its owner ("<path> (owned by <account>)"). Anything else among the findings, a
-# folder, a link, a file that is not a backup, a finding about a path that could not be read, returns nothing, and the
-# refusal keeps its install-replacement advice. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# The file names, when EVERY finding of a refusal is on a darling.json.bak-* file directly in $root (#5649). $findings
+# are the records Get-UntrustedWriteGrantees returns with -AsRecords, and the decision is made from each record's Kind
+# and Path, never from its text: only a Grant or an Owner finding on a file (as the walk listed it) sitting directly in
+# $root with a backup name counts. Anything else among the findings, a folder, a link, a file with more than one
+# name, a file that is not a backup, a finding about a path that could not be read or listed, returns nothing, and
+# the refusal keeps its standard advice alone. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingBackupFileFindingNames([string]$root, [array]$findings) {
     if (@($findings).Count -eq 0) { return @() }
     try { $rootText = [IO.Path]::GetFullPath($root).TrimEnd('\') }
     catch { return @() }
-    $escaped = [regex]::Escape($rootText)
     $names = @()
     foreach ($finding in @($findings)) {
-        $m = [regex]::Match("$finding", "^.+ on (?<path>$escaped\\[^\\]+)$", 'IgnoreCase')
-        if (-not $m.Success) { $m = [regex]::Match("$finding", "^(?<path>$escaped\\[^\\]+) \(owned by .+\)$", 'IgnoreCase') }
-        if (-not $m.Success) { return @() }
-        $path = $m.Groups['path'].Value
+        if ($finding.Kind -ne 'Grant' -and $finding.Kind -ne 'Owner') { return @() }
+        if (-not $finding.IsFile) { return @() }
+        $path = "$($finding.Path)"
+        if (-not $path.StartsWith($rootText + '\', [StringComparison]::OrdinalIgnoreCase)) { return @() }
         $leaf = $path.Substring($rootText.Length + 1)
-        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or $leaf -ieq 'darling.json') { return @() }
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
+        if ($leaf.Contains('\') -or -not (Test-DarlingServiceWrittenFileName $leaf) -or [string]::Equals($leaf, 'darling.json', [StringComparison]::OrdinalIgnoreCase)) { return @() }
         if ($names -notcontains $leaf) { $names += $leaf }
     }
     return @($names)
 }
 
-# The advice for a refusal that lists only darling.json.bak-* files (#5649): move those files, not the install.
-# Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# The note a refusal that lists only darling.json.bak-* files carries ahead of its standard advice (#5649). With the
+# service's own backups trusted, a file listed here belongs to, or is writable by, some other account. Kept
+# byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingBackupFileAdvice([string[]]$names) {
     $shown = (@($names) | Select-Object -First 10) -join ', '
     $more = if (@($names).Count -gt 10) { " and $(@($names).Count - 10) more" } else { '' }
     return @"
 Every entry above is a darling.json.bak-* backup file in this folder: $shown$more.
-You do not need to move the install. Move just those files out of this folder, into a folder only
-Administrators can read, because a backup can hold the secrets that were in darling.json. Then run
-this command again.
+A backup can hold the secrets that were in darling.json. These files can be moved out of this folder, into a
+folder only Administrators can read.
 "@
 }
 
 # The refusal's advice (#5627): the numbered steps when the registered service runs from $folder itself, that is,
 # when its ImagePath folder ($registeredFolder, from Get-DarlingInstallRootFromService) is $folder, so this folder IS
 # the install being replaced; a fresh folder otherwise, including when no service is registered or its path cannot be
-# read. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# read. When every finding is a backup file (Get-DarlingBackupFileFindingNames), the note on those files comes first
+# and the advice above follows it unchanged (#5649). $findings are the records from Get-UntrustedWriteGrantees
+# -AsRecords. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingRefusalAdvice([string]$folder, [string]$serviceName, [string]$registeredFolder, [array]$findings = @()) {
+    $default = if ($registeredFolder -and (Test-DarlingSamePath $registeredFolder $folder)) { Get-DarlingExistingInstallSteps $folder $serviceName } else { Get-DarlingFreshFolderAdvice $folder }
     $backupNames = @(Get-DarlingBackupFileFindingNames $folder $findings)
-    if ($backupNames.Count -gt 0) { return Get-DarlingBackupFileAdvice $backupNames }
-    if ($registeredFolder -and (Test-DarlingSamePath $registeredFolder $folder)) { return Get-DarlingExistingInstallSteps $folder $serviceName }
-    return Get-DarlingFreshFolderAdvice $folder
+    if ($backupNames.Count -gt 0) { return (Get-DarlingBackupFileAdvice $backupNames) + "`n`n" + $default }
+    return $default
 }
 
 # True when $candidate IS $parent or sits underneath it.
@@ -783,7 +826,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     if ($LASTEXITCODE -ne 0) { $open += "$root (could not make Administrators the owner of everything below it; run elevated: $($output | Select-Object -First 1))" }
     $serviceWritePaths = @()
     if ($serviceSid) {
-        foreach ($secret in @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object { Test-DarlingServiceWrittenFileName $_.Name })) {
+        foreach ($secret in @(Get-DarlingServiceWrittenRootFiles $root)) {
             $null = & icacls.exe $secret.FullName /setowner "*$($serviceSid.Value)" /L /Q 2>&1
         }
         foreach ($dir in $serviceWriteDirectories) {
@@ -830,7 +873,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         # darling.json and its backups: step 4b gives the service an explicit FullControl there (#1647) and the setowner
         # above makes it the owner, so the service is trusted on those files too. Without this the walk strips the
         # service's own grant from its config (the explicit-ACE branch below) and the service cannot start.
-        $isSecretFile = (-not $target.PSIsContainer) -and ([IO.Path]::GetDirectoryName($path).TrimEnd('\') -ieq $root.TrimEnd('\')) -and (Test-DarlingServiceWrittenFileName $target.Name)
+        $isSecretFile = (-not $target.PSIsContainer) -and ([IO.Path]::GetDirectoryName($path).TrimEnd('\') -ieq $root.TrimEnd('\')) -and (Test-DarlingServiceWrittenFileName $target.Name) -and ($target.LinkType -ne 'HardLink')
         if ($serviceSid -and ($path.TrimEnd('\') -ieq $root.TrimEnd('\') -or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }
         try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
         catch { $open += "$path (its permissions could not be read)"; continue }
@@ -1312,7 +1355,7 @@ function Test-DarlingManifestPathIsPreserved([string]$relativePath) {
     # the assertion that the manifest is what it claims to be, placed where being wrong costs a monitoring
     # host its configuration.
     if ($leaf.Equals('darling.json', [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    if ($leaf -like (Get-DarlingServiceWrittenNames).BackupGlob) { return $true }
+    if ($leaf.StartsWith((Get-DarlingServiceWrittenNames).BackupPrefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
 
     # DPAPI credential blobs. LocalMachine-scoped with an entropy constant that ships in an open-source
     # repo, so READ access is the secret - but they are also not recoverable from anywhere else, and a
@@ -1857,7 +1900,8 @@ $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $preLockTrusted = Get-DarlingPreLockTrustedSidsForRerun $serviceName $existingService
 $sourceTrusted = @(Get-DarlingPreLockTrustedSids)
 if (-not $AcceptWritableExtraction) {
-    $writable = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories @(Get-DarlingExtraServiceWriteDirectories $InstallRoot (Join-Path $InstallRoot $configName)))
+    $writableRecords = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted.Trusted -AsRecords -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories @(Get-DarlingExtraServiceWriteDirectories $InstallRoot (Join-Path $InstallRoot $configName)))
+    $writable = @($writableRecords | ForEach-Object { $_.Text })
     if ($writable.Count -gt 0) {
         $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
         $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }
@@ -1870,7 +1914,7 @@ A tree installed before #4038 was writable by the accounts above for its whole l
 only copies over what this build ships. It does not check the rest, so other files in the tree can differ
 from what an earlier build shipped.
 
-$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName) $writable)
+$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName) $writableRecords)
 
 If you accept the risk of upgrading this tree in place anyway, re-run with -AcceptWritableExtraction.
 

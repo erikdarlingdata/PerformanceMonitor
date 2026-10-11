@@ -4122,7 +4122,7 @@ public static class DarlingCliCommands
             new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
         };
 
-        foreach (var backup in SafeEnumerate(Path.GetDirectoryName(resolvedConfig), DarlingConfigBackup.Glob))
+        foreach (var backup in ConfigBackupFiles(Path.GetDirectoryName(resolvedConfig), Path.GetFileName(resolvedConfig)))
         {
             targets.Add(new(backup, AllowInteractive: false, IsDirectory: false, "a config backup"));
         }
@@ -4335,6 +4335,14 @@ public static class DarlingCliCommands
     /// <summary>Whether <paramref name="path"/> is strictly below <paramref name="directory"/>, a volume root included
     /// (<see cref="DarlingPathContainment.IsStrictlyBelow"/>, #4004 review, round 3).</summary>
     internal static bool IsBelow(string directory, string path) => DarlingPathContainment.IsStrictlyBelow(directory, path);
+
+    /// <summary>The backups of the config file named <paramref name="configFileName"/> in <paramref name="directory"/>
+    /// (#5649): the files that start with that file's own name plus <c>.bak-</c> (<c>prod.json.bak-x</c> for
+    /// <c>prod.json</c>), which is what the config verbs write and what the service's start-up hardening takes, not the
+    /// default config's backups. The directory listing's pattern only narrows the list; the ordinal name test decides.</summary>
+    internal static IEnumerable<string> ConfigBackupFiles(string? directory, string configFileName) =>
+        SafeEnumerate(directory, configFileName + DarlingConfigBackup.GlobSuffix)
+            .Where(file => DarlingConfigBackup.IsBackupName(configFileName, Path.GetFileName(file)));
 
     /// <summary>Directory enumeration that treats an unreadable or missing folder as empty — this verb runs
     /// precisely when permissions are broken, so a throw here would defeat its purpose.</summary>

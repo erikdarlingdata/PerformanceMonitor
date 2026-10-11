@@ -567,7 +567,7 @@ function Get-CimInstance {
         Assert.Contains("return @((Get-DarlingServiceWrittenNames).KeyDirectories)", helper, StringComparison.Ordinal);
         Assert.Contains("(Get-DarlingServiceWrittenNames).Directories", lockText, StringComparison.Ordinal);
         Assert.Contains("$names.Files", ExtractFunction(InstallScript, "Test-DarlingServiceWrittenFileName"), StringComparison.Ordinal);
-        Assert.Contains("$names.BackupGlob", ExtractFunction(InstallScript, "Test-DarlingServiceWrittenFileName"), StringComparison.Ordinal);
+        Assert.Contains("$names.BackupPrefix", ExtractFunction(InstallScript, "Test-DarlingServiceWrittenFileName"), StringComparison.Ordinal);
         Assert.Contains("'darling-keys'", ExtractFunction(InstallScript, "Get-DarlingServiceWrittenNames"), StringComparison.Ordinal);
         Assert.Equal(PerformanceMonitor.Darling.Service.DarlingLogHashKeyFile.BringYourOwnDirectoryName, "darling-keys");
         Assert.DoesNotContain("(Split-Path -LiteralPath $configPath -Parent)", helper, StringComparison.Ordinal);
@@ -596,7 +596,7 @@ function Get-CimInstance {
         foreach (var name in new[]
         {
             "Get-DarlingServiceSids", "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName",
-            "Test-DarlingServiceWrittenPath", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
+            "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
             "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice",
             "Get-DarlingRefusalAdvice", "Get-DarlingBackupFileFindingNames", "Get-DarlingBackupFileAdvice", "Test-DarlingSamePath", "Get-DarlingInstallRootFromService",
         })
@@ -724,9 +724,9 @@ function Get-CimInstance {
         Assert.DoesNotContain("Stop the", fresh, StringComparison.Ordinal);
 
         // Both scripts choose the steps by where the registered service runs from: no darling.json or pg-runtime test.
-        Assert.Contains("$advice = Get-DarlingRefusalAdvice $root $serviceName (Get-DarlingInstallRootFromService $serviceName) $writable", InstallScript, StringComparison.Ordinal);
+        Assert.Contains("$advice = Get-DarlingRefusalAdvice $root $serviceName (Get-DarlingInstallRootFromService $serviceName) $writableRecords", InstallScript, StringComparison.Ordinal);
         Assert.DoesNotContain("$existingInstall", InstallScript, StringComparison.Ordinal);
-        Assert.Contains("$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName) $writable)", upgrade, StringComparison.Ordinal);
+        Assert.Contains("$(Get-DarlingRefusalAdvice $InstallRoot $serviceName (Get-DarlingInstallRootFromService $serviceName) $writableRecords)", upgrade, StringComparison.Ordinal);
         Assert.DoesNotContain("Get-DarlingExistingInstallSteps $InstallRoot", upgrade, StringComparison.Ordinal);
         Assert.DoesNotContain("Get-DarlingExistingInstallSteps $root", InstallScript, StringComparison.Ordinal);
         Assert.DoesNotContain("a fresh install into a folder only an administrator can write to", upgrade, StringComparison.Ordinal);
@@ -1015,6 +1015,7 @@ function Get-CimInstance {
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
             $root = 'C:\Program Files\PerformanceMonitorDarling'
+            $fileItem = [pscustomobject]@{ PSIsContainer = $false; LinkType = $null; Attributes = [IO.FileAttributes]::Normal }
             foreach ($name in @('darling.json', 'DARLING.JSON', 'darling.json.bak-20260101-120000', 'darling.json.bak-20260101-120000-2',
                                 'darling.json.bak-x.dll', 'darling.json.bak-20260101', 'darling.json.bak-before-edit', 'DARLING.JSON.BAK-Upper', 'darling.json.bak-', 'darling.json.bak', 'darling.jsonbak-x', 'xdarling.json.bak-x', 'darling.json.', 'xdarling.json')) {
                 'name:' + $name + '=' + (Test-DarlingServiceWrittenFileName $name)
@@ -1024,8 +1025,15 @@ function Get-CimInstance {
                 @('pg-runtime.\a.dll', @()), @('pg-runtime-x\a.dll', @()), @('pg-runtimeX', @()), @('pg-runtime\..\a.dll', @()), @('other\pg-runtime\a.dll', @()),
                 @('darling.json', @()), @('darling.json.bak-20260101-120000', @()), @('darling.json.bak-x.dll', @()), @('darling.json.bak-before-edit', @()), @('xdarling.json.bak-x', @()), @('darling.json.bak', @()), @('other\darling.json', @()), @('darling.json\x', @()),
                 @('darling-keys\log-hash.key', @()), @('darling-keys\log-hash.key', @('darling-keys')), @('darling-keys-x\a', @('darling-keys')), @('PerformanceMonitor.Darling.Service.exe', @()))) {
-                'path:' + $case[0] + '|' + @($case[1]).Count + '=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root $case[0]) @($case[1]))
+                'path:' + $case[0] + '|' + @($case[1]).Count + '=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root $case[0]) @($case[1]) $fileItem)
             }
+            # #5649: the files-only answer comes from the item the caller listed, never from the disk.
+            'item:folder=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @() ([pscustomobject]@{ PSIsContainer = $true; LinkType = $null; Attributes = [IO.FileAttributes]::Directory }))
+            'item:hardLink=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @() ([pscustomobject]@{ PSIsContainer = $false; LinkType = 'HardLink'; Attributes = [IO.FileAttributes]::Normal }))
+            'item:reparse=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @() ([pscustomobject]@{ PSIsContainer = $false; LinkType = 'SymbolicLink'; Attributes = [IO.FileAttributes]::ReparsePoint }))
+            'item:none=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @())
+            'item:plainFile=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'darling.json.bak-x') @() $fileItem)
+            'item:directoryNeedsNoItem=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'pg-runtime\a.dll') @())
             'path:root=' + (Test-DarlingServiceWrittenPath $root $root @('darling-keys'))
             'path:outside=' + (Test-DarlingServiceWrittenPath $root 'C:\Program Files\PerformanceMonitorDarling-2\pg-runtime\a.dll' @())
             """);
@@ -1056,6 +1064,13 @@ function Get-CimInstance {
 
         Assert.Contains("path:root=False", answers);
         Assert.Contains("path:outside=False", answers);
+
+        Assert.Contains("item:plainFile=True", answers);
+        Assert.Contains("item:directoryNeedsNoItem=True", answers);
+        foreach (var no in new[] { "item:folder", "item:hardLink", "item:reparse", "item:none" })
+        {
+            Assert.Contains($"{no}=False", answers);
+        }
     }
 
     /// <summary>
@@ -1116,6 +1131,18 @@ function Get-CimInstance {
                 Own 'other\darling.json.bak-nested' @($script:serviceSid)
                 Show 'nested' $registered "NT SERVICE\$serviceName"
                 Reset-Extras
+
+                # #5649: a backup-named file with a second name (a hard link to a file outside the root) is never one the
+                # service writes: it is reported as a finding of its own, and the service's grant and ownership on it
+                # are named like a stranger's.
+                $outside = "$($script:root)-outside.txt"
+                Set-Content -LiteralPath $outside -Value 'x'
+                New-Item -ItemType HardLink -Path "$($script:root)\darling.json.bak-linked" -Value $outside | Out-Null
+                'setup.hardLinkMade=' + ((Get-Item -LiteralPath "$($script:root)\darling.json.bak-linked").LinkType -eq 'HardLink')
+                Own 'darling.json.bak-linked' @($script:serviceSid)
+                Show 'hardLink' $registered "NT SERVICE\$serviceName"
+                Reset-Extras
+                Remove-Item -LiteralPath $outside -Force
             }
             finally {
                 Remove-Item -LiteralPath $script:root -Recurse -Force -ErrorAction SilentlyContinue
@@ -1143,18 +1170,28 @@ function Get-CimInstance {
         Assert.Contains("folder.count=1", answers);
         Assert.Contains(answers, a => a.StartsWith("folder.text=", StringComparison.Ordinal)
             && a.Contains("<root>\\darling.json.bak-dir (owned by", StringComparison.Ordinal));
+
+        Assert.Contains("hardLink.count=3", answers);
+        Assert.Contains(answers, a => a.StartsWith("hardLink.text=", StringComparison.Ordinal)
+            && a.Contains("<root>\\darling.json.bak-linked (a hard link: this file has more than one name", StringComparison.Ordinal)
+            && a.Contains("on <root>\\darling.json.bak-linked", StringComparison.Ordinal)
+            && a.Contains("<root>\\darling.json.bak-linked (owned by", StringComparison.Ordinal));
     }
 
     /// <summary>
-    /// #5649: the refusal's advice. When EVERY entry is on a darling.json.bak-* file directly in the install folder,
-    /// it names the files and gives the one-file fix (move them to a folder only Administrators can read, then run the
-    /// command again), and says nothing about moving the install. Any other entry (another file, a folder, a link, a
-    /// path inside a folder, darling.json itself) keeps the old advice. Both scripts.
+    /// #5649: the refusal's advice. When EVERY finding is a grant or an owner on a darling.json.bak-* file directly in the
+    /// install folder, a note comes FIRST: it names the files, says a backup can hold the secrets that were in
+    /// darling.json and that the files can be moved to a folder only Administrators can read. The standard advice follows
+    /// it unchanged (the service owns the files it writes, so a backup that is a finding belongs to, or is writable by,
+    /// some other account, and the folder is replaced as usual). The decision is made from each finding's kind and path,
+    /// never its text: any other finding (another file, a folder, a link, a file with more than one name, a path inside
+    /// a folder, a path that could not be read or listed, darling.json itself, the folder) keeps the standard advice
+    /// alone, even beside a backup-named file whose name makes the text of other findings look like a backup's. Both scripts.
     /// </summary>
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
-    public void TheRefusalAdvice_NamesTheBackupFilesAndTheOneFileFix_OnlyWhenEveryEntryIsABackup(string scriptName)
+    public void TheRefusalAdvice_PutsTheBackupNoteAheadOfTheStandardAdvice_OnlyWhenEveryFindingIsABackup(string scriptName)
     {
         var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
         var probe = new StringBuilder();
@@ -1163,26 +1200,37 @@ function Get-CimInstance {
             $ErrorActionPreference = 'Stop'
             $root = Join-Path $env:TEMP ('pm5649-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             New-Item -ItemType Directory -Path "$root\other", "$root\darling.json.bak-dir" -Force | Out-Null
-            foreach ($n in @('darling.json.bak-before-edit', 'darling.json.bak-20260101-120000', 'notes.txt', 'darling.json', 'other\darling.json.bak-nested')) { Set-Content -LiteralPath "$root\$n" -Value '{}' }
+            foreach ($n in @('darling.json.bak-before-edit', 'darling.json.bak-20260101-120000', 'darling.json.bak-x', 'notes.txt', 'darling.json', 'other\darling.json.bak-nested')) { Set-Content -LiteralPath "$root\$n" -Value '{}' }
             $root = [System.IO.Path]::GetFullPath($root)
+            function F([string]$kind, [string]$path, [bool]$isFile = $true) { [pscustomobject]@{ Kind = $kind; Path = $path; Text = "$kind $path"; IsFile = $isFile } }
             function Show([string]$label, [array]$findings, [string]$registered) {
                 '@@' + $label
                 Get-DarlingRefusalAdvice $root 'PerformanceMonitor Darling' $registered $findings
             }
             try {
-                $all = @("BUILTIN\Users on $root\darling.json.bak-before-edit",
-                         "$root\darling.json.bak-before-edit (owned by CONTOSO\someone)",
-                         "BUILTIN\Users on $root\darling.json.bak-20260101-120000")
+                $all = @((F 'Grant' "$root\darling.json.bak-before-edit"), (F 'Owner' "$root\darling.json.bak-before-edit"), (F 'Grant' "$root\darling.json.bak-20260101-120000"))
                 Show 'backupsOnly' $all ''
                 Show 'backupsOnlyInstalledHere' $all $root
-                Show 'withOtherFile' ($all + "BUILTIN\Users on $root\notes.txt") ''
-                Show 'withFolder' ($all + "BUILTIN\Users on $root\darling.json.bak-dir") ''
-                Show 'withLink' ($all + "$root\darling.json.bak-before-edit (a junction or link)") ''
-                Show 'withNested' ($all + "BUILTIN\Users on $root\other\darling.json.bak-nested") ''
-                Show 'withConfig' ($all + "BUILTIN\Users on $root\darling.json") ''
-                Show 'withRoot' ($all + "BUILTIN\Users on $root") ''
-                Show 'withMissing' ($all + "BUILTIN\Users on $root\darling.json.bak-gone") ''
+                Show 'withOtherFile' ($all + (F 'Grant' "$root\notes.txt")) ''
+                Show 'withFolder' ($all + (F 'Grant' "$root\darling.json.bak-dir" $false)) ''
+                Show 'withLink' ($all + (F 'Link' "$root\darling.json.bak-before-edit")) ''
+                Show 'withHardLink' ($all + (F 'HardLink' "$root\darling.json.bak-before-edit")) ''
+                Show 'withNested' ($all + (F 'Grant' "$root\other\darling.json.bak-nested")) ''
+                Show 'withConfig' ($all + (F 'Grant' "$root\darling.json")) ''
+                Show 'withRoot' ($all + (F 'Grant' $root $false)) ''
+                Show 'withUnreadable' ($all + (F 'Unreadable' "$root\darling.json.bak-x")) ''
+                Show 'withUnlisted' ($all + (F 'Unlisted' "$root\darling.json.bak-x" $false)) ''
                 Show 'noFindings' @() ''
+                Show 'noFindingsInstalledHere' @() $root
+
+                # A real file called darling.json.bak-x, and findings whose rendered text would read as that file's:
+                # none of them is a grant or an owner on a file in the root, so none of them gets the note.
+                $x = "$root\darling.json.bak-x (owned by y)"
+                Show 'craftedLink' @((F 'Owner' "$root\darling.json.bak-x"), [pscustomobject]@{ Kind = 'Link'; Path = $x; Text = "$x (a junction or link)"; IsFile = $true }) ''
+                Show 'craftedNested' @((F 'Owner' "$root\darling.json.bak-x"), [pscustomobject]@{ Kind = 'Owner'; Path = "$x\evil.dll"; Text = "$x\evil.dll (owned by DOM\eve)"; IsFile = $true }) ''
+                Show 'craftedUnlisted' @((F 'Owner' "$root\darling.json.bak-x"), [pscustomobject]@{ Kind = 'Unlisted'; Path = $x; Text = "$x (its contents could not be listed: UnauthorizedAccessException)"; IsFile = $true }) ''
+                Show 'craftedUnreadable' @((F 'Owner' "$root\darling.json.bak-x"), [pscustomobject]@{ Kind = 'Unreadable'; Path = $x; Text = "$x (its permissions could not be read: Access is denied.)"; IsFile = $true }) ''
+                Show 'plainTextFindings' @("$root\darling.json.bak-x (owned by y)") ''
             }
             finally {
                 Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
@@ -1192,35 +1240,177 @@ function Get-CimInstance {
         var text = string.Join("\n", RunWindowsPowerShell(probe.ToString())).Replace("\r\n", "\n", StringComparison.Ordinal);
         string Section(string label) => System.Text.RegularExpressions.Regex.Match(text, "@@" + label + "\n(?<body>.*?)(?=\n@@|$)", System.Text.RegularExpressions.RegexOptions.Singleline).Groups["body"].Value;
 
-        foreach (var label in new[] { "backupsOnly", "backupsOnlyInstalledHere" })
+        const string Note = "Every entry above is a darling.json.bak-* backup file in this folder: darling.json.bak-before-edit, darling.json.bak-20260101-120000.";
+        foreach (var (label, standard) in new[] { ("backupsOnly", "noFindings"), ("backupsOnlyInstalledHere", "noFindingsInstalledHere") })
         {
             var advice = Section(label);
-            Assert.Contains("Every entry above is a darling.json.bak-* backup file in this folder: darling.json.bak-before-edit, darling.json.bak-20260101-120000.", advice, StringComparison.Ordinal);
-            Assert.Contains("You do not need to move the install. Move just those files out of this folder, into a folder only", advice, StringComparison.Ordinal);
-            Assert.Contains("Administrators can read, because a backup can hold the secrets that were in darling.json. Then run", advice, StringComparison.Ordinal);
-            Assert.Contains("this command again.", advice, StringComparison.Ordinal);
-            Assert.DoesNotContain("Do NOT try to repair", advice, StringComparison.Ordinal);
-            Assert.DoesNotContain("Stop the", advice, StringComparison.Ordinal);
-            Assert.DoesNotContain("Extract the zip", advice, StringComparison.Ordinal);
+            var standardAdvice = Section(standard).Trim();
+            Assert.False(string.IsNullOrWhiteSpace(standardAdvice));
+            Assert.StartsWith(Note, advice, StringComparison.Ordinal);
+            Assert.Contains("A backup can hold the secrets that were in darling.json.", advice, StringComparison.Ordinal);
+            Assert.Contains("These files can be moved out of this folder, into a", advice, StringComparison.Ordinal);
+            Assert.Contains("folder only Administrators can read.", advice, StringComparison.Ordinal);
+            Assert.Contains(standardAdvice, advice, StringComparison.Ordinal);
+            Assert.True(advice.IndexOf(Note, StringComparison.Ordinal) < advice.IndexOf(standardAdvice, StringComparison.Ordinal), "the note comes first");
+            Assert.DoesNotContain("You do not need to move the install", advice, StringComparison.Ordinal);
         }
 
-        foreach (var label in new[] { "withOtherFile", "withFolder", "withLink", "withNested", "withConfig", "withRoot", "withMissing", "noFindings" })
+        Assert.Contains("Do NOT try to repair this folder's permissions in place.", Section("backupsOnly"), StringComparison.Ordinal);
+        Assert.Contains("Stop the 'PerformanceMonitor Darling' service", Section("backupsOnlyInstalledHere"), StringComparison.Ordinal);
+
+        foreach (var label in new[] { "withOtherFile", "withFolder", "withLink", "withHardLink", "withNested", "withConfig", "withRoot", "withUnreadable", "withUnlisted",
+            "craftedLink", "craftedNested", "craftedUnlisted", "craftedUnreadable", "plainTextFindings", "noFindings" })
         {
             var advice = Section(label);
+            Assert.Equal(Section("noFindings").Trim(), advice.Trim());
             Assert.Contains("Do NOT try to repair this folder's permissions in place.", advice, StringComparison.Ordinal);
             Assert.DoesNotContain("backup file in this folder", advice, StringComparison.Ordinal);
-            Assert.DoesNotContain("You do not need to move the install", advice, StringComparison.Ordinal);
         }
     }
 
     /// <summary>
-    /// #5649: one definition of which files are a config backup, per language, and the two are the same text. In
-    /// PowerShell it is BackupGlob in the list both scripts share; the pre-lock walk, the install-time hardening and the
-    /// upgrade's manifest guard all read it. In C# it is DarlingConfigBackup, which TryHardenConfigBackups and the CLI's
-    /// permission check read. Nothing spells the glob a second time, and the stamped-name pattern is gone.
+    /// #5649: the walk's own records feed the advice. A tree whose only findings are a grant on a root-level backup file
+    /// gets the note; the same tree with one more finding of another kind next to it (an owner below a folder, a junction,
+    /// a folder named like a backup, a hard-linked backup) does not. The walk reports each finding's kind and whether the
+    /// item it listed is a file, so no text is parsed and no second look at the disk happens.
     /// </summary>
     [Fact]
-    public void TheBackupGlob_HasOneDefinitionPerLanguage_AndTheSameText()
+    public void TheWalksRecords_DecideTheBackupNote_AndNoTextIsParsed()
+    {
+        var probe = ServiceOwnedTreeProbe();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingBackupFileFindingNames"));
+        probe.AppendLine("""
+            $usersSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+            function ShowRecords([string]$label) {
+                $sets = Get-DarlingPreLockTrustedSidsForRerun $serviceName $registered
+                $records = @(Get-UntrustedWriteGrantees $script:root $sets.Trusted -AsRecords -Recurse -ServiceSids $sets.ServiceSids -ServiceDirectories $script:serviceDirs)
+                $label + '.kinds=' + (($records | ForEach-Object { $_.Kind + ':' + $_.IsFile }) -join ',')
+                $label + '.names=' + (@(Get-DarlingBackupFileFindingNames $script:root $records) -join ',')
+                $label + '.texts=' + ((@(Get-UntrustedWriteGrantees $script:root $sets.Trusted -Recurse -ServiceSids $sets.ServiceSids -ServiceDirectories $script:serviceDirs)) -join ' ; ' -replace [regex]::Escape($script:root), '<root>')
+            }
+            $script:logon = "NT SERVICE\$serviceName"
+            function Get-DarlingServiceLogonName([string]$name) { return $script:logon }
+            $outside = "$($script:root)-outside.txt"
+            try {
+                Set-Content -LiteralPath "$($script:root)\darling.json.bak-before-edit" -Value '{}'
+                New-Item -ItemType Directory -Path "$($script:root)\darling.json.bak-dir" -Force | Out-Null
+                'setup.backupMade=' + (Test-Path -LiteralPath "$($script:root)\darling.json.bak-before-edit")
+
+                $script:fileGrants['darling.json.bak-before-edit'] = @($usersSid)
+                ShowRecords 'backupGrant'
+
+                $script:serviceOwned = @('other\tool.dll')
+                ShowRecords 'plusNestedOwner'
+                $script:serviceOwned = @()
+
+                $script:serviceOwned = @('darling.json.bak-dir')
+                ShowRecords 'plusFolder'
+                $script:serviceOwned = @()
+
+                & cmd.exe /c mklink /J "$($script:root)\linked-dir" "$($script:root)\other" | Out-Null
+                'setup.junctionMade=' + (Test-Path -LiteralPath "$($script:root)\linked-dir")
+                ShowRecords 'plusJunction'
+                & cmd.exe /c rmdir "$($script:root)\linked-dir" | Out-Null
+
+                Set-Content -LiteralPath $outside -Value 'x'
+                New-Item -ItemType HardLink -Path "$($script:root)\darling.json.bak-linked" -Value $outside | Out-Null
+                'setup.hardLinkMade=' + ((Get-Item -LiteralPath "$($script:root)\darling.json.bak-linked").LinkType -eq 'HardLink')
+                ShowRecords 'plusHardLink'
+            }
+            finally {
+                if (Test-Path -LiteralPath "$($script:root)\linked-dir") { & cmd.exe /c rmdir "$($script:root)\linked-dir" | Out-Null }
+                Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $script:root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunServiceOwnedTreeProbe(probe);
+
+        Assert.Contains("backupGrant.names=darling.json.bak-before-edit", answers);
+        Assert.Contains("backupGrant.kinds=Grant:True", answers);
+        foreach (var label in new[] { "plusNestedOwner", "plusFolder", "plusJunction", "plusHardLink" })
+        {
+            Assert.Contains($"{label}.names=", answers);
+            Assert.DoesNotContain($"{label}.names=darling.json.bak-before-edit", answers);
+        }
+
+        Assert.Contains(answers, a => a.StartsWith("plusNestedOwner.kinds=", StringComparison.Ordinal) && a.Contains("Grant:True", StringComparison.Ordinal) && a.Contains("Owner:True", StringComparison.Ordinal));
+        Assert.Contains(answers, a => a.StartsWith("plusFolder.kinds=", StringComparison.Ordinal) && a.Contains("Owner:False", StringComparison.Ordinal));
+        Assert.Contains(answers, a => a.StartsWith("plusJunction.kinds=", StringComparison.Ordinal) && a.Contains("Link:False", StringComparison.Ordinal));
+        Assert.Contains(answers, a => a.StartsWith("plusHardLink.kinds=", StringComparison.Ordinal) && a.Contains("HardLink:True", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #5649: the root files the lock and the install pass act on. Only plain files with a name on the service-written
+    /// list; a hard-linked backup is left out (the service as owner, or a FullControl grant, would land on the other name
+    /// too), and so is a backup whose name differs only by case under Turkish culture rules ('I' and 'i' fold
+    /// differently there, so a culture-sensitive match would drop DARLING.JSON.BAK-B or keep a look-alike).
+    /// </summary>
+    [Fact]
+    public void TheServiceWrittenRootFiles_LeaveOutHardLinks_AndMatchTheBackupPrefixByOrdinalNameUnderAnyCulture()
+    {
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, InstallScript);
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm5649-rf-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path "$root\darling.json.bak-dir" -Force | Out-Null
+            foreach ($n in @('darling.json', 'darling.json.bak-a', 'DARLING.JSON.BAK-B', 'notes.txt', 'darling.jsonx', 'darling.json.bak')) { Set-Content -LiteralPath "$root\$n" -Value '{}' }
+            New-Item -ItemType HardLink -Path "$root\darling.json.bak-linked" -Value "$root\notes.txt" | Out-Null
+            $outside = "$root-outside.txt"
+            Set-Content -LiteralPath $outside -Value 'x'
+            New-Item -ItemType HardLink -Path "$root\darling.json.bak-outside" -Value $outside | Out-Null
+            function Names($files) { (@($files | ForEach-Object { $_.Name } | Sort-Object { $_.ToLowerInvariant() }) -join ',') }
+            try {
+                'setup.hardLinksMade=' + ((Get-Item -LiteralPath "$root\darling.json.bak-linked").LinkType -eq 'HardLink' -and (Get-Item -LiteralPath "$root\darling.json.bak-outside").LinkType -eq 'HardLink')
+                'all=' + (Names (Get-DarlingServiceWrittenRootFiles $root))
+                'backups=' + (Names (Get-DarlingServiceWrittenRootFiles $root -BackupsOnly))
+
+                [System.Threading.Thread]::CurrentThread.CurrentCulture = New-Object System.Globalization.CultureInfo 'tr-TR'
+                'setup.turkishCultureTook=' + (-not ('DARLING.JSON.BAK-B' -like 'darling.json.bak-*'))
+                'tr.all=' + (Names (Get-DarlingServiceWrittenRootFiles $root))
+                'tr.backups=' + (Names (Get-DarlingServiceWrittenRootFiles $root -BackupsOnly))
+                foreach ($name in @('DARLING.JSON.BAK-X', 'darling.json.bak-x', 'Darling.Json.Bak-X', 'DARLING.JSON')) {
+                    'tr.name:' + $name + '=' + (Test-DarlingServiceWrittenFileName $name)
+                }
+                $lookAlike = 'DARL' + [char]0x130 + 'NG.JSON.BAK-X'
+                'tr.lookAlike=' + (Test-DarlingServiceWrittenFileName $lookAlike)
+                [System.Threading.Thread]::CurrentThread.CurrentCulture = New-Object System.Globalization.CultureInfo 'en-US'
+                'en.lookAlike=' + (Test-DarlingServiceWrittenFileName $lookAlike)
+            }
+            finally {
+                Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+        AssertProbeSetupTook(answers);
+
+        Assert.Contains("all=darling.json,darling.json.bak-a,DARLING.JSON.BAK-B", answers);
+        Assert.Contains("backups=darling.json.bak-a,DARLING.JSON.BAK-B", answers);
+        Assert.Contains("tr.all=darling.json,darling.json.bak-a,DARLING.JSON.BAK-B", answers);
+        Assert.Contains("tr.backups=darling.json.bak-a,DARLING.JSON.BAK-B", answers);
+        foreach (var name in new[] { "DARLING.JSON.BAK-X", "darling.json.bak-x", "Darling.Json.Bak-X", "DARLING.JSON" })
+        {
+            Assert.Contains($"tr.name:{name}=True", answers);
+        }
+
+        Assert.Contains("tr.lookAlike=False", answers);
+        Assert.Contains("en.lookAlike=False", answers);
+    }
+
+    /// <summary>
+    /// #5649: one definition of which files are a config backup, per language, and the two are the same text. In
+    /// PowerShell it is BackupPrefix in the list both scripts share, tested with an ordinal, case-insensitive StartsWith
+    /// at every site (the pre-lock walk, the lock and the install-time hardening through Get-DarlingServiceWrittenRootFiles,
+    /// and the upgrade's manifest guard): -like and -Filter fold case by the current culture and, in Windows PowerShell
+    /// 5.1, match some look-alike characters, so they can disagree with the service. In C# it is DarlingConfigBackup,
+    /// which TryHardenConfigBackups and the CLI's permission check read, with the same ordinal test. Nothing spells the
+    /// name a second time, and the stamped-name pattern is gone.
+    /// </summary>
+    [Fact]
+    public void TheBackupPrefix_HasOneDefinitionPerLanguage_AndTheSameText()
     {
         var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
         var worker = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
@@ -1228,22 +1418,31 @@ function Get-CimInstance {
 
         foreach (var script in new[] { InstallScript, upgrade })
         {
-            var glob = System.Text.RegularExpressions.Regex.Matches(ExtractFunction(script, "Get-DarlingServiceWrittenNames"), @"BackupGlob\s*=\s*'(?<g>[^']+)'");
-            Assert.Single(glob);
-            Assert.Equal(PerformanceMonitor.Darling.Service.DarlingConfigBackup.Glob, glob[0].Groups["g"].Value);
-            Assert.Contains("$name -like $names.BackupGlob", ExtractFunction(script, "Test-DarlingServiceWrittenFileName"), StringComparison.Ordinal);
+            var prefix = System.Text.RegularExpressions.Regex.Matches(ExtractFunction(script, "Get-DarlingServiceWrittenNames"), @"BackupPrefix\s*=\s*'(?<g>[^']+)'");
+            Assert.Single(prefix);
+            Assert.Equal(PerformanceMonitor.Darling.Service.DarlingConfigBackup.Prefix, prefix[0].Groups["g"].Value);
+            Assert.Contains("$name.StartsWith($names.BackupPrefix, [StringComparison]::OrdinalIgnoreCase)", ExtractFunction(script, "Test-DarlingServiceWrittenFileName"), StringComparison.Ordinal);
+            Assert.DoesNotContain("BackupGlob", script, StringComparison.Ordinal);
             Assert.DoesNotContain("BackupPattern", script, StringComparison.Ordinal);
+            Assert.DoesNotContain("-Filter (Get-DarlingServiceWrittenNames)", script, StringComparison.Ordinal);
             Assert.DoesNotContain("-Filter 'darling.json.bak-", script, StringComparison.Ordinal);
             Assert.DoesNotContain("StartsWith('darling.json.bak-'", script, StringComparison.Ordinal);
+            Assert.DoesNotContain("-like 'darling.json.bak-", script, StringComparison.Ordinal);
+
+            /* The lock's service-owned loop reads the helper (which drops hard links), and its walk does not trust a hard link as a secret file. */
+            var lockText = ExtractFunction(script, "Lock-DarlingInstallTree");
+            Assert.Contains("foreach ($secret in @(Get-DarlingServiceWrittenRootFiles $root))", lockText, StringComparison.Ordinal);
+            Assert.Contains("(Test-DarlingServiceWrittenFileName $target.Name) -and ($target.LinkType -ne 'HardLink')", lockText, StringComparison.Ordinal);
         }
 
-        Assert.Contains("-Filter (Get-DarlingServiceWrittenNames).BackupGlob -File", InstallScript, StringComparison.Ordinal);
-        Assert.Contains("$leaf -like (Get-DarlingServiceWrittenNames).BackupGlob", upgrade, StringComparison.Ordinal);
+        Assert.Contains("Get-DarlingServiceWrittenRootFiles $root -BackupsOnly", InstallScript, StringComparison.Ordinal);
+        Assert.Contains("$leaf.StartsWith((Get-DarlingServiceWrittenNames).BackupPrefix, [StringComparison]::OrdinalIgnoreCase)", upgrade, StringComparison.Ordinal);
 
+        Assert.Equal("darling.json.bak-", PerformanceMonitor.Darling.Service.DarlingConfigBackup.Prefix);
         Assert.Equal("darling.json.bak-*", PerformanceMonitor.Darling.Service.DarlingConfigBackup.Glob);
-        Assert.Contains("Path.GetFileName(configPath) + DarlingConfigBackup.GlobSuffix", worker, StringComparison.Ordinal);
+        Assert.Contains("DarlingConfigBackup.ListBackups(directory, Path.GetFileName(configPath))", worker, StringComparison.Ordinal);
         Assert.DoesNotContain("\".bak-*\"", worker, StringComparison.Ordinal);
-        Assert.Contains("SafeEnumerate(Path.GetDirectoryName(resolvedConfig), DarlingConfigBackup.Glob)", cli, StringComparison.Ordinal);
+        Assert.Contains("ConfigBackupFiles(Path.GetDirectoryName(resolvedConfig), Path.GetFileName(resolvedConfig))", cli, StringComparison.Ordinal);
         Assert.DoesNotContain("\"darling.json.bak-*\"", cli, StringComparison.Ordinal);
     }
 
@@ -2279,7 +2478,7 @@ function Get-CimInstance {
         AssertRunsFirst(
             InstallScript,
             "install-darling.ps1",
-            "$writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories",
+            "$writableRecords = @(Get-UntrustedWriteGrantees $root $preLockTrusted.Trusted -AsRecords -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories",
             new[]
             {
                 ("Invoke-InstallTreeLock $lockAccount -StopOnOpen", "the step 1b2 install-tree lock"),
@@ -2294,7 +2493,7 @@ function Get-CimInstance {
         AssertRunsFirst(
             ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1")),
             "upgrade-darling.ps1",
-            "$writable = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted.Trusted -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories",
+            "$writableRecords = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted.Trusted -AsRecords -Recurse -ServiceSids $preLockTrusted.ServiceSids -ServiceDirectories",
             new[]
             {
                 ("$zipStagingFolder = New-DarlingProtectedStagingFolder", "creating the zip staging folder"),
@@ -2522,7 +2721,7 @@ function Get-CimInstance {
     /// (the lock and the pre-lock walk both read them).</summary>
     private static void AppendServiceWrittenList(StringBuilder probe, string script)
     {
-        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Test-DarlingServiceWrittenPath" })
+        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles" })
         {
             probe.AppendLine(ExtractFunction(script, name));
         }
