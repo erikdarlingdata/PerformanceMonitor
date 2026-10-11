@@ -342,21 +342,17 @@ public class DarlingRuntimePreflightTests
     /// install; the exit code alone keeps the ordinary failure path. The decision is executed as it ships.
     /// </summary>
     [Fact]
-    public void TestCetStartFailure_RecognisesTheExitCodeAndTheMessage_AsShipped()
+    public void TestCetStartFailure_DecidesOnTheOutputTextOnly_AsShipped()
     {
         var cases = new (string Args, bool Expected)[]
         {
             /* No output, or only a generic fatal-error line, is not CET: the CET text is what counts. */
             ("@()", false),
-            ("@()", false),
             ("@('Fatal error.', 'Some other runtime failure')", false),
             ("@('" + CetMessage.Replace("'", "''") + "')", true),
             ("@('Fatal error.', 'Your Windows doesn''t fully support CET. Please install all available Windows updates.')", true),
-            ("@('" + CetMessage.Replace("'", "''") + "')", true),
             /* Ordinary outcomes keep their old paths: pass, a failed server probe, a bad config. */
-            ("@()", false),
             ("@('PASS server1', 'FAIL server2: login failed')", false),
-            ("@()", false),
             ("@('You must install .NET to run this application')", false),
         };
 
