@@ -55,12 +55,33 @@ public sealed class PgDeadlockRemaskTests
 
     private const string LegacyVictimStatement = "UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111";
 
+    /* #5675: each secret holds a character no clock id can hold, or an eleven-digit run. See
+       EverySecretIsOneNoStoredClockCanContain. A four-digit PIN can match a clock reading, such as 17:47:21 with
+       its colons dropped. */
     private static readonly string[] s_secrets = ["4721", "9034", "4111111111111111", "5500005555555559", "Leak4012"];
 
     /* A store's log-hash key (#4004), fixed so the expected values are reproducible. */
     private static readonly PgLogHashKey s_key = new(Enumerable.Range(1, PgLogHashKey.KeyLength).Select(i => (byte)i).ToArray());
 
     /* ───────────────────────── pure ───────────────────────── */
+
+    /// <summary>
+    /// #5675: a planted secret must be one no stored clock can contain. The alert id is
+    /// <c>at-yyyyMMddTHHmmss.ffffff-pid</c>: every character in it is a digit, <c>a</c>, <c>t</c>, <c>T</c>,
+    /// <c>-</c> or <c>.</c>, and no run of its digits is longer than ten. A secret made only of those characters,
+    /// with no eleven-digit run, can match the id by chance. So each secret must hold a character outside that
+    /// set, or an eleven-digit run.
+    /// </summary>
+    [Fact]
+    public void EverySecretIsOneNoStoredClockCanContain()
+    {
+        foreach (var secret in s_secrets)
+        {
+            var clockAlphabet = secret.All(c => char.IsDigit(c) || "atT-.".Contains(c));
+            var longDigitRun = System.Text.RegularExpressions.Regex.IsMatch(secret, "[0-9]{11}");
+            Assert.True(!clockAlphabet || longDigitRun, $"Secret '{secret}' can match a clock id by chance.");
+        }
+    }
 
     /// <summary>
     /// The page, the lookup and the write all carry the parser's raw-hash test. The write's is what makes the
