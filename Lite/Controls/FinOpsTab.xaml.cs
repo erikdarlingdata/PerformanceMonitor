@@ -212,17 +212,23 @@ public partial class FinOpsTab : UserControl
             async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
             GetSelectedConnectionString() ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
             productName: "SQL Server Performance Monitor Lite")),
-        "the monitored server");
+        /* #5639: every Get Actual Plan click passes its own server (ActualPlanRunTarget); this name is only the
+           fallback for a click that did not. */
+        "");
 
     private string? GetSelectedConnectionString()
         => ServerSelector.SelectedItem is ServerConnection s && _credentialResolver != null
             ? _credentialResolver.GetConnectionString(s)
             : null;
 
-    private async System.Threading.Tasks.Task<string?> FetchFinOpsHighImpactPlanAsync(string queryHash)
+    /// <summary>
+    /// Reads the stored plan for a High Impact row. The server and its connection string are passed in, captured
+    /// when the click was made, so a server switch while this runs cannot change which server is read. An empty or
+    /// all-zero hash names no particular query, so no plan is looked up by it (#5639).
+    /// </summary>
+    private async System.Threading.Tasks.Task<string?> FetchFinOpsHighImpactPlanAsync(string queryHash, int serverId, string? connStr)
     {
-        if (string.IsNullOrEmpty(queryHash)) return null;
-        var serverId = GetSelectedServerId();
+        if (!QueryModificationDetector.IsUsableQueryHash(queryHash)) return null;
         string? plan = null;
         if (serverId != 0 && _dataService != null)
         {
@@ -231,7 +237,6 @@ public partial class FinOpsTab : UserControl
         }
         if (string.IsNullOrEmpty(plan))
         {
-            var connStr = GetSelectedConnectionString();
             if (!string.IsNullOrEmpty(connStr))
                 plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash));
         }
@@ -242,27 +247,44 @@ public partial class FinOpsTab : UserControl
     {
         if (GetFinOpsRow(sender) is HighImpactQueryRow row)
             await PlanActions.ViewPlanAsync(
-                () => FetchFinOpsHighImpactPlanAsync(row.QueryHash),
+                () => FetchFinOpsHighImpactPlanAsync(row.QueryHash, GetSelectedServerId(), GetSelectedConnectionString()),
                 $"Est Plan - {row.QueryHash}", row.FullQueryText);
     }
 
     private async void FinOpsGetActualPlan_Click(object sender, RoutedEventArgs e)
     {
-        switch (GetFinOpsRow(sender))
+        var row = GetFinOpsRow(sender);
+        if (row is not (HighImpactQueryRow or ExpensiveQueryRow)) return;
+
+        /* #5639: the server and its connection string are captured HERE, before any await. The stored-plan read
+           before the prompt can take a while, and the operator can switch servers meanwhile; the prompt, the plan
+           read and the run all use this click's server, and the run stops if the selection moved off it. */
+        if (ServerSelector.SelectedItem is not ServerConnection server) return;
+        var serverId = GetSelectedServerId();
+        var connStr = GetSelectedConnectionString();
+        if (string.IsNullOrEmpty(connStr)) return;
+        var target = new ActualPlanRunTarget(
+            server.ServerName,
+            () => ServerSelector.SelectedItem is ServerConnection && GetSelectedServerId() == serverId,
+            async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
+                connStr, db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
+                productName: "SQL Server Performance Monitor Lite")));
+
+        switch (row)
         {
             case HighImpactQueryRow hi:
-                /* #5639: the stored plan feeds the data-modification check; a failed lookup is the same as no plan. */
-                string? hiPlan = null;
-                try { hiPlan = await FetchFinOpsHighImpactPlanAsync(hi.QueryHash); }
-                catch { /* no plan: fail-safe prompt */ }
+                /* #5639: the stored plan feeds the data-modification check, read before the prompt (read-only); a
+                   failed lookup is the same as no plan. The row's database (the one picked when the hash appears in
+                   several) is the database the prompt names and the run uses. */
                 await PlanActions.GetActualPlanAsync(hi.FullQueryText, hi.DatabaseName, $"Actual Plan - {hi.QueryHash}",
-                    estimatedPlanXml: hiPlan);
+                    fetchPlanXml: () => FetchFinOpsHighImpactPlanAsync(hi.QueryHash, serverId, connStr),
+                    target: target);
                 break;
             case ExpensiveQueryRow ex:
                 /* #5639: these rows carry no query hash, so there is no plan to look up; the check treats the
                    query as modifying and the prompt says so. */
                 await PlanActions.GetActualPlanAsync(ex.FullQueryText, ex.DatabaseName, "Actual Plan - Expensive Query",
-                    estimatedPlanXml: null);
+                    fetchPlanXml: null, target: target);
                 break;
         }
     }

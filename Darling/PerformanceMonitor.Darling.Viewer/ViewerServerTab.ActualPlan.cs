@@ -41,16 +41,6 @@ public partial class ViewerServerTab
 
         /* Fetch the stored ESTIMATED plan for modification detection — the viewer reads its own store (the
            SERVICE re-resolves the query text by identifier when it executes). */
-        string? estimatedPlanXml = null;
-        try
-        {
-            estimatedPlanXml = await _dataService.GetQueryStatsPlanXmlAsync(_server.ServerId, stats.DatabaseName, stats.QueryHash);
-        }
-        catch
-        {
-            /* Detection degrades to the fail-safe uncertain path — no plan means "treat as modifying". */
-        }
-
         var argsJson = ViewerDataService.BuildActualPlanArgs(stats.QueryHash, stats.DatabaseName);
 
         /* The Plan Viewer overlay's Cancel button cancels this token (shared with Fetch Live Plan). */
@@ -59,7 +49,13 @@ public partial class ViewerServerTab
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, stats.DatabaseName,
-            stats.QueryText, estimatedPlanXml, argsJson,
+            stats.QueryText,
+            /* #5639: read before the prompt (a monitoring-store read); a failed read counts as no plan, and an
+               empty or all-zero hash names no particular query, so no plan is looked up by it. */
+            PerformanceMonitor.PlanAnalysis.QueryModificationDetector.IsUsableQueryHash(stats.QueryHash)
+                ? () => _dataService.GetQueryStatsPlanXmlAsync(_server.ServerId, stats.DatabaseName, stats.QueryHash)
+                : null,
+            argsJson,
             onStarted: () =>
             {
                 ShowPlanLoading(label);
@@ -109,16 +105,6 @@ public partial class ViewerServerTab
 
         /* Best-effort stored ESTIMATED plan for modification detection; null degrades to the fail-safe
            "treat as modifying" consent (Regression rows have no single PlanId, so they take that path). */
-        string? estimatedPlanXml = null;
-        try
-        {
-            estimatedPlanXml = await _dataService.GetQueryStorePlanTextAsync(_server.ServerId, databaseName, queryId, planId);
-        }
-        catch
-        {
-            /* detection degrades to the fail-safe uncertain path */
-        }
-
         var argsJson = ViewerDataService.BuildActualPlanArgsForQueryStore(queryId, databaseName);
 
         /* The Plan Viewer overlay's Cancel button cancels this token (shared with Fetch Live Plan). */
@@ -127,7 +113,9 @@ public partial class ViewerServerTab
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, databaseName,
-            queryText, estimatedPlanXml, argsJson,
+            queryText,
+            () => _dataService.GetQueryStorePlanTextAsync(_server.ServerId, databaseName, queryId, planId), /* #5639: read before the prompt; a failed read counts as no plan */
+            argsJson,
             onStarted: () =>
             {
                 ShowPlanLoading(label);

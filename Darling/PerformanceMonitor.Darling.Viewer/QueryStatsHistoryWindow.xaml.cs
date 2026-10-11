@@ -34,6 +34,7 @@ public partial class QueryStatsHistoryWindow : Window
 {
     private readonly ViewerDataService _dataService;
     private readonly int _serverId;
+    private readonly string _serverName;
     private readonly string _databaseName;
     private readonly string _queryHash;
     private readonly string _queryText;
@@ -47,12 +48,13 @@ public partial class QueryStatsHistoryWindow : Window
     private System.Threading.CancellationTokenSource? _actualPlanCts;
 
     public QueryStatsHistoryWindow(
-        ViewerDataService dataService, int serverId, string databaseName, string queryHash,
+        ViewerDataService dataService, int serverId, string serverName, string databaseName, string queryHash,
         string queryText, DateTime startUtc, DateTime endUtc)
     {
         InitializeComponent();
         _dataService = dataService;
         _serverId = serverId;
+        _serverName = serverName;
         _databaseName = databaseName;
         _queryHash = queryHash;
         _queryText = queryText;
@@ -271,10 +273,6 @@ public partial class QueryStatsHistoryWindow : Window
     {
         if (string.IsNullOrEmpty(_queryHash)) return;
 
-        string? estimatedPlanXml = null;
-        try { estimatedPlanXml = await _dataService.GetQueryStatsPlanXmlAsync(_serverId, _databaseName, _queryHash); }
-        catch { /* detection degrades to the fail-safe uncertain path */ }
-
         var argsJson = ViewerDataService.BuildActualPlanArgs(_queryHash, _databaseName);
         var label = $"Actual Plan - {_queryHash}";
 
@@ -282,7 +280,13 @@ public partial class QueryStatsHistoryWindow : Window
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
-            this, _dataService, _serverId, "the monitored server", _databaseName, _queryText, estimatedPlanXml, argsJson,
+            this, _dataService, _serverId, _serverName, _databaseName, _queryText,
+            /* #5639: the stored plan is read before the prompt (a monitoring-store read); an empty or all-zero hash
+               names no particular query, so no plan is looked up by it and the warning shows. */
+            PerformanceMonitor.PlanAnalysis.QueryModificationDetector.IsUsableQueryHash(_queryHash)
+                ? () => _dataService.GetQueryStatsPlanXmlAsync(_serverId, _databaseName, _queryHash)
+                : null,
+            argsJson,
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
             _actualPlanCts.Token);

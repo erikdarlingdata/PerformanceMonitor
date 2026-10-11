@@ -10,6 +10,7 @@ using System;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using System.Windows;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitor.Ui;
@@ -35,8 +36,11 @@ public static class ViewerActualPlanFlow
     /// already shown the user a message). <paramref name="onStarted"/> / <paramref name="onFinished"/> bracket
     /// the enqueue so each host shows its own progress indicator; consent runs BEFORE <paramref name="onStarted"/>.
     /// </summary>
-    /// <param name="estimatedPlanXml">The stored estimated plan for modification detection (the service re-resolves
-    /// the text by identifier when it executes); null/unparseable makes the detector fail-safe to "modifying".</param>
+    /// <param name="serverDisplayName">The server the prompt names (and the query runs on).</param>
+    /// <param name="fetchPlanXml">Reads the stored estimated plan for modification detection BEFORE the prompt (a
+    /// read of the monitoring store; nothing runs on the monitored server). The service re-resolves the text by
+    /// identifier when it executes. Null, a null result, a failed read or an unparseable plan all make the detector
+    /// fail safe to "modifying" (#5639).</param>
     public static async Task<string?> RequestActualPlanAsync(
         Window owner,
         ViewerDataService dataService,
@@ -44,7 +48,7 @@ public static class ViewerActualPlanFlow
         string serverDisplayName,
         string databaseName,
         string? queryText,
-        string? estimatedPlanXml,
+        Func<Task<string?>>? fetchPlanXml,
         string argsJson,
         Action? onStarted,
         Action? onFinished,
@@ -58,44 +62,79 @@ public static class ViewerActualPlanFlow
             return null;
         }
 
-        var modification = QueryModificationDetector.Detect(estimatedPlanXml, queryText);
-        if (!Confirm(owner, serverDisplayName, databaseName, modification))
+        /* #5639: one actual-plan request at a time. The plan read below can take a while, and a second click
+           meanwhile would queue a second read and a second prompt. */
+        if (s_requestInProgress)
         {
             return null;
         }
 
-        onStarted?.Invoke();
+        s_requestInProgress = true;
         try
         {
-            var result = await dataService.ExecuteActualPlanAsync(serverId, argsJson, cancellationToken);
-            if (result.Status == ActualPlanStatus.Captured)
+            string? estimatedPlanXml = null;
+            if (fetchPlanXml != null)
             {
-                return result.PlanXml;
+                try
+                {
+                    Mouse.OverrideCursor = Cursors.Wait;
+                    estimatedPlanXml = await fetchPlanXml();
+                }
+                catch (Exception)
+                {
+                    estimatedPlanXml = null; /* a failed read is the same as no plan: the warning shows */
+                }
+                finally
+                {
+                    Mouse.OverrideCursor = null;
+                }
             }
 
-            ShowOutcome(owner, result);
-            return null;
-        }
-        catch (OperationCanceledException)
-        {
-            return null;
-        }
-        catch (ViewerReadOnlyException)
-        {
-            ShowReadOnly(owner);
-            return null;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(owner, $"Failed to capture the actual plan:\n\n{ex.Message}", "Actual Plan Error",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-            return null;
+            var modification = QueryModificationDetector.Detect(estimatedPlanXml, queryText);
+            if (!Confirm(owner, serverDisplayName, databaseName, queryText, modification))
+            {
+                return null;
+            }
+
+            onStarted?.Invoke();
+            try
+            {
+                var result = await dataService.ExecuteActualPlanAsync(serverId, argsJson, cancellationToken);
+                if (result.Status == ActualPlanStatus.Captured)
+                {
+                    return result.PlanXml;
+                }
+
+                ShowOutcome(owner, result);
+                return null;
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            catch (ViewerReadOnlyException)
+            {
+                ShowReadOnly(owner);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(owner, $"Failed to capture the actual plan:\n\n{ex.Message}", "Actual Plan Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return null;
+            }
+            finally
+            {
+                onFinished?.Invoke();
+            }
         }
         finally
         {
-            onFinished?.Invoke();
+            s_requestInProgress = false;
         }
     }
+
+    private static bool s_requestInProgress;
 
     /// <summary>
     /// Opens a captured plan in a shared <see cref="PlanViewerControl"/> floated above <paramref name="owner"/>
@@ -142,7 +181,7 @@ public static class ViewerActualPlanFlow
     /// modification detector says it writes data — prepends a PROMINENT, distinct block naming the statement types
     /// and stating plainly that re-executing RE-APPLIES those changes. Returns true only on OK.
     /// </summary>
-    private static bool Confirm(Window owner, string serverDisplayName, string databaseName, QueryModificationInfo modification)
+    private static bool Confirm(Window owner, string serverDisplayName, string databaseName, string? queryText, QueryModificationInfo modification)
     {
         var prompt = new StringBuilder();
 
@@ -154,9 +193,10 @@ public static class ViewerActualPlanFlow
             prompt.AppendLine();
         }
 
-        var db = string.IsNullOrWhiteSpace(databaseName) ? "the default database" : $"[{databaseName}]";
-        prompt.AppendLine($"The service will EXECUTE this query against {serverDisplayName} in database {db} to capture its actual plan.");
+        prompt.AppendLine("The service will EXECUTE this query on " +
+            QueryModificationDetector.BuildConsentTarget(serverDisplayName, databaseName) + " to capture its actual plan.");
         prompt.AppendLine();
+        prompt.AppendLine(QueryModificationDetector.BuildConsentQueryText(queryText));
         prompt.AppendLine("It runs as the service's stored monitoring login, with SET STATISTICS XML ON. All data results are discarded — only the plan is returned.");
         prompt.AppendLine();
         prompt.AppendLine(QueryModificationDetector.CapturedQueryNotice);

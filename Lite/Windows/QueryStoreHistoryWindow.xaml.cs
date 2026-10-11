@@ -44,7 +44,7 @@ public partial class QueryStoreHistoryWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
-    public QueryStoreHistoryWindow(LocalDataService dataService, int serverId, string databaseName, long queryId, long planId, string queryText, int hoursBack, string? connectionString, Func<TimeZoneInfo> displayZone)
+    public QueryStoreHistoryWindow(LocalDataService dataService, int serverId, string serverName, string databaseName, long queryId, long planId, string queryText, int hoursBack, string? connectionString, Func<TimeZoneInfo> displayZone)
     {
         InitializeComponent();
         _dataService = dataService;
@@ -65,7 +65,7 @@ public partial class QueryStoreHistoryWindow : Window
             async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite")),
-            "the monitored server");
+            serverName);
 
         _filterManager = new DataGridFilterManager<QueryStoreHistoryRow>(HistoryDataGrid);
         DataGridFilterColumns.AddFilterButtons(HistoryDataGrid, Filter_Click);
@@ -321,13 +321,11 @@ public partial class QueryStoreHistoryWindow : Window
 
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
     {
-        /* #5639: the selected row's plan feeds the data-modification check; a failed lookup is the same as no
-           plan (the check then treats the query as modifying). */
-        string? estimatedPlanXml = null;
-        try { estimatedPlanXml = await FetchPlanAsync(SelectedPlanId); }
-        catch { /* no plan: fail-safe prompt */ }
+        /* #5639: the selected row's plan feeds the data-modification check, read before the prompt (read-only);
+           a failed lookup is the same as no plan, and the warning shows. */
+        var planId = SelectedPlanId;
         await _planActions.GetActualPlanAsync(_queryText, _databaseName, $"Actual Plan - QS {_queryId}",
-            estimatedPlanXml: estimatedPlanXml);
+            fetchPlanXml: () => FetchPlanAsync(planId));
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

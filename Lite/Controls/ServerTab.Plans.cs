@@ -454,7 +454,7 @@ public partial class ServerTab : UserControl
                 queryText = stats.QueryText;
                 databaseName = stats.DatabaseName;
                 label = $"Actual Plan - {stats.QueryHash}";
-                if (!string.IsNullOrEmpty(stats.QueryHash))
+                if (QueryModificationDetector.IsUsableQueryHash(stats.QueryHash))
                 {
                     try { planXml = await FetchPlanByHash(stats.QueryHash); }
                     catch { }
@@ -478,7 +478,7 @@ public partial class ServerTab : UserControl
                 queryText = comp.QueryText;
                 databaseName = comp.DatabaseName;
                 label = $"Actual Plan - {comp.QueryHash}";
-                if (!string.IsNullOrEmpty(comp.QueryHash))
+                if (QueryModificationDetector.IsUsableQueryHash(comp.QueryHash))
                 {
                     try { planXml = await FetchPlanByHash(comp.QueryHash); }
                     catch { }
@@ -507,8 +507,10 @@ public partial class ServerTab : UserControl
             prompt.AppendLine("──────────────────────────────────────────");
             prompt.AppendLine();
         }
-        prompt.AppendLine($"You are about to execute this query against {_server.ServerName} in database [{databaseName ?? "default"}].");
+        prompt.AppendLine("You are about to execute this query on " +
+            QueryModificationDetector.BuildConsentTarget(_server.ServerName, databaseName) + ".");
         prompt.AppendLine();
+        prompt.AppendLine(QueryModificationDetector.BuildConsentQueryText(queryText));
         prompt.AppendLine("Make sure you understand what the query does before proceeding.");
         prompt.AppendLine("The query will execute with SET STATISTICS XML ON to capture the actual plan.");
         prompt.AppendLine("All data results will be discarded.");

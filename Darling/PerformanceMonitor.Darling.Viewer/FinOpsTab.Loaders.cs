@@ -725,7 +725,10 @@ public partial class FinOpsTab
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
             Window.GetWindow(this)!, _dataService, _server.ServerId, _server.DisplayName, hi.DatabaseName,
-            hi.FullQueryText, hi.QueryPlanXml, argsJson,
+            hi.FullQueryText,
+            /* #5639: the row's stored plan; an empty or all-zero hash names no particular query, so it counts as no plan. */
+            PerformanceMonitor.PlanAnalysis.QueryModificationDetector.IsUsableQueryHash(hi.QueryHash) ? () => System.Threading.Tasks.Task.FromResult<string?>(hi.QueryPlanXml) : null,
+            argsJson,
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
             System.Threading.CancellationToken.None);

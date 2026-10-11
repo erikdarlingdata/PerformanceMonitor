@@ -46,6 +46,7 @@ public partial class WaitDrillDownWindow : Window
     public WaitDrillDownWindow(
         LocalDataService dataService,
         int serverId,
+        string serverName,
         string waitType,
         int hoursBack,
         TimeZoneInfo displayZone,
@@ -71,7 +72,7 @@ public partial class WaitDrillDownWindow : Window
             async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite")),
-            "the monitored server");
+            serverName);
 
         _filterManager = new DataGridFilterManager<QuerySnapshotRow>(ResultsDataGrid);
 
@@ -460,13 +461,12 @@ public partial class WaitDrillDownWindow : Window
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not QuerySnapshotRow row) return;
-        /* #4239: fetch before passing estimatedPlanXml on — it feeds ReproScriptBuilder's SET-options
-           extraction (ActualPlanExecutor, #233); a null plan silently loses that fidelity. #5639: it also
-           feeds the data-modification check PlanNavigationController.GetActualPlanAsync runs. */
-        var estimatedPlanXml = await FetchSnapshotPlanAsync(row);
+        /* #4239: the plan is read before the prompt, not passed as null — it feeds ReproScriptBuilder's SET-options
+           extraction (ActualPlanExecutor, #233). #5639: it also feeds the data-modification check; the controller
+           reads it (a stored-plan read, nothing runs) and counts a failed read as no plan, which shows the warning. */
         await _planActions.GetActualPlanAsync(row.QueryText, row.DatabaseName ?? "",
             $"Actual Plan - SPID {row.SessionId}",
-            estimatedPlanXml: estimatedPlanXml,
+            fetchPlanXml: () => FetchSnapshotPlanAsync(row),
             isolationLevel: row.TransactionIsolationLevel);
     }
 

@@ -60,6 +60,15 @@ public static partial class QueryModificationDetector
             if (types is { Count: > 0 })
             {
                 var modifies = types.Any(IsModifyingStatementType);
+                if (!modifies && TextRunsCodeThePlanDoesNotShow(queryText))
+                {
+                    /* #5639: an EXEC/EXECUTE statement runs code the plan's StatementType does not describe, and
+                       OPENQUERY / OPENROWSET / OPENDATASOURCE send text to another server. Either can write data
+                       while the plan reads SELECT, so these get the "could not be analyzed" warning instead of a
+                       clean pass. Only those cases: what a function or procedure does is not analyzed. */
+                    return new QueryModificationInfo(ModifiesData: true, types, IsUncertain: true);
+                }
+
                 return new QueryModificationInfo(modifies, types, IsUncertain: false);
             }
         }
@@ -68,6 +77,24 @@ public static partial class QueryModificationDetector
            text scan for DISPLAY, but treat the result as MODIFYING because we could not prove otherwise. */
         return new QueryModificationInfo(ModifiesData: true, ScanTextForStatementTypes(queryText), IsUncertain: true);
     }
+
+    /// <summary>
+    /// True when the query text has an EXEC / EXECUTE statement or uses OPENQUERY, OPENROWSET or OPENDATASOURCE.
+    /// A match inside a comment or string literal counts too: the safe direction for a re-execution gate.
+    /// </summary>
+    private static bool TextRunsCodeThePlanDoesNotShow(string? queryText)
+        => !string.IsNullOrWhiteSpace(queryText)
+           && (s_execStatement.IsMatch(queryText) || s_remoteRowset.IsMatch(queryText));
+
+    /* EXEC or EXECUTE as a word of its own: not part of a longer name (dm_exec_requests, execution_count), not a
+       bracketed or quoted identifier, not a column reached through a dot or a variable. */
+    private static readonly Regex s_execStatement = new(
+        @"(?<![\w@#$.\[\]""])EXEC(?:UTE)?(?![\w\]""])",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex s_remoteRowset = new(
+        @"\b(?:OPENQUERY|OPENROWSET|OPENDATASOURCE)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     /// <summary>
     /// True when a Showplan <c>StatementType</c> value denotes a data- or schema-modifying statement. Public so
@@ -166,6 +193,66 @@ public static partial class QueryModificationDetector
         return info.ModifiesData
             ? "Get Actual Plan (re-run) — DATA WILL BE MODIFIED"
             : "Get Actual Plan (re-run)";
+    }
+
+    /// <summary>The most query text a consent prompt shows.</summary>
+    public const int ConsentQueryTextLimit = 1000;
+
+    /// <summary>
+    /// The server and database a "run this captured query" confirmation names, worded the same in Lite, the
+    /// shared plan navigation and the Darling viewer: <c>server [X], database [Y]</c>. A blank database reads
+    /// as the connection's default database; a blank server reads as unknown, so the prompt never hides that.
+    /// </summary>
+    public static string BuildConsentTarget(string? serverName, string? databaseName)
+    {
+        var server = string.IsNullOrWhiteSpace(serverName) ? "[unknown]" : $"[{serverName.Trim()}]";
+        var database = string.IsNullOrWhiteSpace(databaseName) ? "the default database" : $"[{databaseName.Trim()}]";
+        return $"server {server}, database {database}";
+    }
+
+    /// <summary>
+    /// The query text a confirmation shows, so the operator reads what will run: the first
+    /// <see cref="ConsentQueryTextLimit"/> characters, then "(N more characters not shown)" when it is longer.
+    /// </summary>
+    public static string BuildConsentQueryText(string? queryText)
+    {
+        var text = queryText ?? string.Empty;
+        var shown = text.Length <= ConsentQueryTextLimit ? text : text[..ConsentQueryTextLimit];
+        if (shown.Length > 0 && shown.Length < text.Length && char.IsHighSurrogate(shown[^1]))
+        {
+            shown = shown[..^1];
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("Query text that will run:");
+        sb.AppendLine(shown);
+        if (shown.Length < text.Length)
+        {
+            sb.AppendLine($"({text.Length - shown.Length} more characters not shown)");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// True when a query hash can be used to look up the stored plan that decides the data-modification check.
+    /// An empty or all-zero hash (with or without a 0x prefix) stands for no particular query, so a plan found by
+    /// it would say nothing about this text: the caller treats that as "no plan" and the warning shows.
+    /// </summary>
+    public static bool IsUsableQueryHash(string? queryHash)
+    {
+        if (string.IsNullOrWhiteSpace(queryHash))
+        {
+            return false;
+        }
+
+        var hash = queryHash.Trim();
+        if (hash.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            hash = hash[2..];
+        }
+
+        return hash.Length > 0 && hash.Any(c => c != '0');
     }
 
     /// <summary>

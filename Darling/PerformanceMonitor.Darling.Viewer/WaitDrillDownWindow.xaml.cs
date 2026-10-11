@@ -36,6 +36,7 @@ public partial class WaitDrillDownWindow : Window
 {
     private readonly ViewerDataService _dataService;
     private readonly int _serverId;
+    private readonly string _serverName;
     private readonly string _waitType;
     private readonly DateTime _fromUtc;
     private readonly DateTime _toUtc;
@@ -46,11 +47,12 @@ public partial class WaitDrillDownWindow : Window
     private System.Threading.CancellationTokenSource? _actualPlanCts;
 
     public WaitDrillDownWindow(
-        ViewerDataService dataService, int serverId, string waitType, DateTime fromUtc, DateTime toUtc)
+        ViewerDataService dataService, int serverId, string serverName, string waitType, DateTime fromUtc, DateTime toUtc)
     {
         InitializeComponent();
         _dataService = dataService;
         _serverId = serverId;
+        _serverName = serverName;
         _waitType = waitType;
         _fromUtc = fromUtc;
         _toUtc = toUtc;
@@ -465,7 +467,8 @@ public partial class WaitDrillDownWindow : Window
         _actualPlanCts = new System.Threading.CancellationTokenSource();
 
         var planXml = await ViewerActualPlanFlow.RequestActualPlanAsync(
-            this, _dataService, _serverId, "the monitored server", row.DatabaseName, row.QueryText, estimatedPlanXml, argsJson,
+            this, _dataService, _serverId, _serverName, row.DatabaseName, row.QueryText,
+            () => System.Threading.Tasks.Task.FromResult(estimatedPlanXml), argsJson,
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
             _actualPlanCts.Token);

@@ -45,7 +45,7 @@ public partial class QueryStatsHistoryWindow : Window
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
 
-    public QueryStatsHistoryWindow(LocalDataService dataService, int serverId, string databaseName, string queryHash, int hoursBack, string? queryText, string? connectionString, Func<TimeZoneInfo> displayZone, Func<ServerClock> serverClock)
+    public QueryStatsHistoryWindow(LocalDataService dataService, int serverId, string serverName, string databaseName, string queryHash, int hoursBack, string? queryText, string? connectionString, Func<TimeZoneInfo> displayZone, Func<ServerClock> serverClock)
     {
         InitializeComponent();
         _dataService = dataService;
@@ -66,7 +66,7 @@ public partial class QueryStatsHistoryWindow : Window
             async (db, qt, est, iso, ct) => await LivePlanDisplay.FilterAsync(await ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite")),
-            "the monitored server");
+            serverName);
 
         _filterManager = new DataGridFilterManager<QueryStatsHistoryRow>(HistoryDataGrid);
         DataGridFilterColumns.AddFilterButtons(HistoryDataGrid, Filter_Click);
@@ -314,15 +314,10 @@ public partial class QueryStatsHistoryWindow : Window
         => await _planActions.ViewPlanAsync(FetchPlanAsync, $"Est Plan - {_queryHash}", _queryText);
 
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
-    {
-        /* #5639: the stored plan feeds the data-modification check; a failed lookup is the same as no plan
-           (the check then treats the query as modifying). */
-        string? estimatedPlanXml = null;
-        try { estimatedPlanXml = await FetchPlanAsync(); }
-        catch { /* no plan: fail-safe prompt */ }
-        await _planActions.GetActualPlanAsync(_queryText, _databaseName, $"Actual Plan - {_queryHash}",
-            estimatedPlanXml: estimatedPlanXml);
-    }
+        /* #5639: the stored plan feeds the data-modification check, read before the prompt (read-only). An empty or
+           all-zero hash names no particular query, so no plan is looked up by it: the check shows the warning. */
+        => await _planActions.GetActualPlanAsync(_queryText, _databaseName, $"Actual Plan - {_queryHash}",
+            fetchPlanXml: QueryModificationDetector.IsUsableQueryHash(_queryHash) ? FetchPlanAsync : null);
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }
