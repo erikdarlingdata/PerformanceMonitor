@@ -117,12 +117,18 @@ public partial class MainWindow : Window
         /* #5642: when this app's connection to the server began collecting, and the recent CPU samples the shared
            gate judges one by one. The sweep observes the reading too, so a sweep that runs before the connection
            tick's first pass still stamps a value (an online server already stamped keeps its value). A server whose
-           status is unknown has none, and the engine then treats every sample as eligible. */
-        DateTime? watchingSinceUtc = null;
+           status is unknown (or offline) falls back to the app's start, never to null: the engine reads a null as
+           "unknown" and collapses to the single newest sample, and nothing before the app started was watched
+           anyway. */
+        DateTime watchingSinceUtc;
         if (badgeServer != null && connStatus?.IsOnline != null)
         {
             _watchingSince.Observe(badgeServer.Id, connStatus.IsOnline == true, DateTime.UtcNow);
-            watchingSinceUtc = _watchingSince.Get(badgeServer.Id);
+            watchingSinceUtc = _watchingSince.GetOrAppStart(badgeServer.Id);
+        }
+        else
+        {
+            watchingSinceUtc = badgeServer != null ? _watchingSince.GetOrAppStart(badgeServer.Id) : _watchingSince.AppStartUtc;
         }
 
         var recentCpuSamples = await ReadRecentCpuSamplesAsync(summary.ServerId);

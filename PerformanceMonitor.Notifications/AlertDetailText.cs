@@ -82,7 +82,9 @@ public static class AlertDetailText
     }
 
     /// <summary>
-    /// The one-line sample age (#5642): <c>Newest CPU sample: 15:43:29 UTC, 5m 20s old</c>. Built from the
+    /// The one-line sample age (#5642): <c>Newest Query Store sample: 15:43:29 UTC, 5m 20s old</c>, or for a
+    /// source that ends in " reading" (High CPU: the breaching reading the card's percentage came from, which a
+    /// later clear sample can outrun) <c>CPU reading: 15:43:29 UTC, 5m 20s old</c>. Built from the
     /// age the engine computed ONCE when the alert fired and persisted with it, never from the clock at render
     /// time, so a history row opened a day later still says how old the sample was when the alert went out.
     /// Null when there is no sample to describe.
@@ -96,7 +98,7 @@ public static class AlertDetailText
 
         return string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"Newest {sample.Source} sample: {sample.InstantUtc:HH:mm:ss} UTC, {FormatAge(sample.Age)} old");
+            $"{LineLead(sample.Source)}: {sample.InstantUtc:HH:mm:ss} UTC, {FormatAge(sample.Age)} old");
     }
 
     /// <summary>
@@ -164,8 +166,13 @@ public static class AlertDetailText
     /// </summary>
     public static string StripSampleAge(string text) => s_ageLine.Replace(text, string.Empty).Trim();
 
+    /// <summary>The words before the time: "Newest {source} sample", or the source itself when it names a
+    /// reading ("CPU reading"). alerts.js keeps the same rule.</summary>
+    private static string LineLead(string source) =>
+        source.EndsWith(" reading", StringComparison.Ordinal) ? source : $"Newest {source} sample";
+
     private static readonly System.Text.RegularExpressions.Regex s_ageLine = new(
-        @"(?m)^[ \t]*Newest [^\r\n:]+ sample: \d\d:\d\d:\d\d UTC, [^\r\n]+ old[ \t]*(\r?\n|$)",
+        @"(?m)^[ \t]*(?:Newest [^\r\n:]+ sample|[^\r\n:]+ reading): \d\d:\d\d:\d\d UTC, [^\r\n]+ old[ \t]*(\r?\n|$)",
         System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.Compiled,
         TimeSpan.FromSeconds(1));
 

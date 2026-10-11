@@ -109,8 +109,8 @@ public sealed record AlertServerSnapshot(
     /// (#5642). A service restart and a reconnect after a drop each set a new value; a server evaluated from
     /// its last known target after its runtime dropped keeps the last value. The engine feeds individually only
     /// the samples at or after this instant; older (backfilled) samples collapse to the newest one, so a spike
-    /// that ended while nobody was watching never alerts. Null = unknown, and the engine treats every sample as
-    /// eligible.</summary>
+    /// that ended while nobody was watching never alerts. Null = unknown, and the engine collapses the list to
+    /// the single newest sample (the path a missing list takes), never treating every sample as eligible.</summary>
     public DateTime? WatchingSinceUtc { get; init; }
 
     /// <summary>True when another registration carries the same display name (ordinal), blank-on-host, host-equal

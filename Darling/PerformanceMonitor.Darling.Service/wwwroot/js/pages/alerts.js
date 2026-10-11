@@ -263,7 +263,8 @@ function alertAdvice(a) {
   return adviceCache.get(key);
 }
 
-/* #5642: "Newest CPU sample: 15:43:29 UTC, 5m 20s old" - the same wording AlertDetailText.SampleAgeLine writes into
+/* #5642: "Newest Query Store sample: 15:43:29 UTC, 5m 20s old", or "CPU reading: 15:43:29 UTC, 5m 20s old" for a source that
+ * ends in " reading" (the breaching reading a High CPU card's percentage came from) - the same wording AlertDetailText.SampleAgeLine writes into
  * detail_text, built from the persisted newest_sample field. Null when the row has none. age_seconds is TRUNCATED to the
  * millisecond on the wire (AlertNewestSampleWire), never rounded, so the Math.floor below is exactly the C# (int) truncation
  * AlertDetailText.FormatAge does: 59.6 s is "59s old" here and in the email, not "1m 0s old". */
@@ -278,7 +279,8 @@ function sampleAgeLine(sample) {
   else if (total < 3600) age = Math.floor(total / 60) + "m " + (total % 60) + "s";
   else if (total < 86400) age = Math.floor(total / 3600) + "h " + Math.floor((total % 3600) / 60) + "m";
   else age = Math.floor(total / 86400) + "d " + Math.floor((total % 86400) / 3600) + "h";
-  return "Newest " + sample.source + " sample: " + two(at.getUTCHours()) + ":" + two(at.getUTCMinutes()) + ":" + two(at.getUTCSeconds()) + " UTC, " + age + " old";
+  const lead = sample.source.endsWith(" reading") ? sample.source : "Newest " + sample.source + " sample";
+  return lead + ": " + two(at.getUTCHours()) + ":" + two(at.getUTCMinutes()) + ":" + two(at.getUTCSeconds()) + " UTC, " + age + " old";
 }
 
 /* The expansion body: unchanged shape from the pre-#4194 eager version (see detailCell above), just built lazily. */

@@ -213,6 +213,45 @@ public sealed class AlertEngineCpuBatchTests
     }
 
     [Fact]
+    public async Task AnUnknownWatchingSince_CollapsesToTheSingleNewestSample_NeverEverySampleEligible()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        /* No watching-since (the host could not tell). Three breaching readings from before the host started
+           looking, then a quiet newest one: judged one by one they would open an incident. Unknown must mean
+           "collapse to the newest sample" (today's path), so only the quiet one is counted and nothing is sent. */
+        await engine.EvaluateServerAsync(Batch(
+            null, Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(Noon.AddMinutes(-1))));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+        Assert.Equal(0, h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)].State.ConsecutiveBreaches);
+    }
+
+    [Fact]
+    public async Task AnUnknownWatchingSince_CountsOnlyTheNewestOfThreeHotSamples_OneBreach()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        await engine.EvaluateServerAsync(Batch(null, Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2))));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        var record = h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)];
+        Assert.Equal(1, record.State.ConsecutiveBreaches);
+        Assert.Equal(t.AddMinutes(2), record.LastObservedSampleUtc);
+
+        /* The sweeps after it advance the streak one new sample at a time, as before the batch gate existed. */
+        h.Now = Noon.AddMinutes(1);
+        await engine.EvaluateServerAsync(Batch(null, Hot(t.AddMinutes(2)), Hot(t.AddMinutes(3))));
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(2, h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)].State.ConsecutiveBreaches);
+    }
+
+    [Fact]
     public async Task AReconnect_ANewWatchingSince_SendsNothingForTheBacklog_AndCountsLiveSamplesAfterIt()
     {
         var h = NewHarness();
@@ -284,6 +323,62 @@ public sealed class AlertEngineCpuBatchTests
         Assert.Single(h.Deliverer.Outcomes);
     }
 
+    /// <summary>One batch of Hot x3, Cool x2, Hot x3: the gate opens, closes and opens again (CpuBreachSamples
+    /// 3, CpuClearSamples 2), eight samples a minute apart inside the 15-minute lookback.</summary>
+    private static AlertCpuSample[] FireResolveFire(DateTime first) => new[]
+    {
+        Hot(first), Hot(first.AddMinutes(1)), Hot(first.AddMinutes(2)),
+        Cool(first.AddMinutes(3)), Cool(first.AddMinutes(4)),
+        Hot(first.AddMinutes(5)), Hot(first.AddMinutes(6)), Hot(first.AddMinutes(7))
+    };
+
+    [Fact]
+    public async Task AFireResolveFireBatch_SendsOneFire_AndNoResolve()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), FireResolveFire(Noon.AddMinutes(-10))));
+
+        /* The cooldown would swallow the second fire, leaving "CPU Resolved" as the last word while the gate is
+           firing. The resolve that a fire immediately follows is cancelled with it, so the operator's one
+           message is the fire. */
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task AResolveFireBatchFromAFiringStart_SendsNothing_TheIncidentNeverClosed()
+    {
+        var h = NewHarness();
+        var t = Noon.AddMinutes(-10);
+
+        /* The incident was already open (the persisted firing bit), and the batch clears then breaches again. */
+        h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)] = new AlertPersistenceRecord(
+            new PersistenceState(AlertEngine.CpuBreachSamples, 0, true), t.AddMinutes(-1));
+        var engine = h.Build();
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-30),
+            Cool(t), Cool(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Hot(t.AddMinutes(3)), Hot(t.AddMinutes(4))));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task AFireThenResolveBatch_StillSendsBoth_ARealSpikeWhileWeWereWatching()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(t.AddMinutes(3)), Cool(t.AddMinutes(4))));
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.Resolutions);
+    }
+
     [Fact]
     public async Task TheFiredCpuAlert_CarriesTheSampleAge_SetAtFireTime_AndTheLinePrintsOnce()
     {
@@ -296,16 +391,64 @@ public sealed class AlertEngineCpuBatchTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         var sample = fired.Context!.NewestSample!;
-        Assert.Equal("CPU", sample.Source);
         Assert.Equal(newest, sample.InstantUtc);
         Assert.Equal(TimeSpan.FromMinutes(8), sample.Age);
+        Assert.Equal("CPU reading", sample.Source);
 
         /* CPU's context holds no Details, so the hand-built text carries the line, built by SampleAgeLine. */
         var line = AlertDetailText.SampleAgeLine(sample)!;
-        Assert.Equal("Newest CPU sample: 11:52:00 UTC, 8m 0s old", line);
+        Assert.Equal("CPU reading: 11:52:00 UTC, 8m 0s old", line);
         Assert.Equal(1, CountOf(fired.DetailText!, line));
         Assert.Equal(1, CountOf(AlertDetailText.WithSampleAge(fired.DetailText, fired.Context)!, line));
         Assert.Null(AlertDetailText.SampleAgeLineFor(fired.Context, fired.DetailText));
+    }
+
+    [Fact]
+    public async Task ABatchThatEndsOnAClearSample_StampsTheBreachingReadingsInstant_ThePercentageAndTheAgeAreOneReading()
+    {
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        /* Three breaching readings (the last at 95%) and then one clear one, the newest sample in the list. The
+           alert fires with the third reading's percentage, so the age must be that reading's, not the clear
+           sample's: "CPU at 95%" and "11:52:00, 8m old" describe the same measurement. */
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(t.AddMinutes(3))));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("95% (Total CPU)", fired.CurrentValue);
+        var sample = fired.Context!.NewestSample!;
+        Assert.Equal(t.AddMinutes(2), sample.InstantUtc);
+        Assert.Equal(TimeSpan.FromMinutes(8), sample.Age);
+
+        /* The newest sample is NOT what the alert fired on, so the line must not call it "Newest". */
+        Assert.Equal("CPU reading", sample.Source);
+        Assert.Equal("CPU reading: 11:52:00 UTC, 8m 0s old", AlertDetailText.SampleAgeLine(sample));
+        Assert.DoesNotContain("Newest", fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheReadingWording_RoundTripsThroughTheLineHelpers_AndTheNewestWordingIsUnchanged()
+    {
+        var instant = new DateTime(2026, 10, 11, 15, 43, 29, DateTimeKind.Utc);
+        var reading = new AlertNewestSample("CPU reading", instant, TimeSpan.FromSeconds(320));
+        var newest = new AlertNewestSample("Query Store", instant, TimeSpan.FromSeconds(320));
+
+        Assert.Equal("CPU reading: 15:43:29 UTC, 5m 20s old", AlertDetailText.SampleAgeLine(reading));
+        Assert.Equal("Newest Query Store sample: 15:43:29 UTC, 5m 20s old", AlertDetailText.SampleAgeLine(newest));
+
+        /* Both wordings are recognised as an age line already in the prose: appended once, stripped, not doubled. */
+        foreach (var sample in new[] { reading, newest })
+        {
+            var context = new AlertContext { NewestSample = sample };
+            var line = AlertDetailText.SampleAgeLine(sample)!;
+            var once = AlertDetailText.WithSampleAge("  Total CPU: 97%", context)!;
+            Assert.Equal(1, CountOf(once, line));
+            Assert.Equal(once, AlertDetailText.WithSampleAge(once, context));
+            Assert.Null(AlertDetailText.SampleAgeLineFor(context, once));
+            Assert.Equal("Total CPU: 97%", AlertDetailText.StripSampleAge(once));
+        }
     }
 
     [Fact]

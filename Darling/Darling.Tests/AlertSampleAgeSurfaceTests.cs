@@ -207,13 +207,19 @@ public sealed class AlertSampleAgeSurfaceTests
         var seconds = new[] { 0d, 0.4, 59d, 59.6, 59.9999999, 60d, 119.7, 3599d, 3599.6, 3599.9999999, 3600d, 3661.9, 86399.6, 86400d, 90000.5, 200000.123 };
         var wires = new List<AlertNewestSampleWire>();
         var expected = new List<string>();
-        foreach (var s in seconds)
+        // Both wordings: "Newest CPU sample: ..." and the High CPU alert's "CPU reading: ..." (the breaching reading).
+        foreach (var source in new[] { "CPU", "CPU reading" })
         {
-            var sample = new AlertNewestSample("CPU", new DateTime(2026, 10, 11, 15, 43, 29, DateTimeKind.Utc), TimeSpan.FromTicks((long)(s * TimeSpan.TicksPerSecond)));
-            var json = ContextJsonWith(sample);
-            wires.Add(AlertNewestSampleWire.FromContextJson(json)!);
-            expected.Add(AlertDetailText.SampleAgeLine(AlertContextSerializer.TryReadNewestSample(json))!);
+            foreach (var s in seconds)
+            {
+                var sample = new AlertNewestSample(source, new DateTime(2026, 10, 11, 15, 43, 29, DateTimeKind.Utc), TimeSpan.FromTicks((long)(s * TimeSpan.TicksPerSecond)));
+                var json = ContextJsonWith(sample);
+                wires.Add(AlertNewestSampleWire.FromContextJson(json)!);
+                expected.Add(AlertDetailText.SampleAgeLine(AlertContextSerializer.TryReadNewestSample(json))!);
+            }
         }
+        Assert.StartsWith("Newest CPU sample: ", expected[0], StringComparison.Ordinal);
+        Assert.StartsWith("CPU reading: ", expected[seconds.Length], StringComparison.Ordinal);
 
         // Spot checks that name the failing boundary, not just a diff.
         Assert.EndsWith("59s old", expected[3], StringComparison.Ordinal);
@@ -236,7 +242,7 @@ public sealed class AlertSampleAgeSurfaceTests
         catch (System.ComponentModel.Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
-            return;
+            throw;
         }
 
         using (proc)
@@ -344,6 +350,14 @@ public sealed class AlertSampleAgeSurfaceTests
 
         Assert.Contains("Binding=\"{Binding NewestSampleDisplay}\"",
             ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/AlertsHistoryTab.xaml"), StringComparison.Ordinal);
+
+        /* The column carries a filter button like its siblings: the grid's filter manager finds the column's value by the
+           button's Tag, read as a property name of the row type, so the Tag must name a public string property. */
+        Assert.Matches(@"Tag=""NewestSampleDisplay""\s+Click=""FilterButton_Click""[\s\S]{0,200}Text=""Newest Sample""",
+            ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/AlertsHistoryTab.xaml"));
+        var filterProperty = typeof(PerformanceMonitor.Darling.Viewer.ViewerAlertRow).GetProperty("NewestSampleDisplay");
+        Assert.NotNull(filterProperty);
+        Assert.Equal(typeof(string), filterProperty!.PropertyType);
     }
 
     [Fact]

@@ -217,6 +217,12 @@ public sealed class LiteSampleAgeHistoryTests : IClassFixture<SharedDuckDbFixtur
     {
         var tab = File.ReadAllText(LiteSampleAgeDeliveryTests.RepoFile("Lite/Controls/AlertsHistoryTab.xaml"));
         Assert.Contains("Binding=\"{Binding NewestSampleDisplay}\"", tab);
+        /* The column carries a filter button like its siblings: the grid's filter manager finds the column's value by the
+           button's Tag, read as a property name of the row type, so the Tag must name a public string property. */
+        Assert.Matches(@"Tag=""NewestSampleDisplay""\s+Click=""FilterButton_Click""[\s\S]{0,200}Text=""Newest Sample""", tab);
+        var filterProperty = typeof(AlertHistoryRow).GetProperty("NewestSampleDisplay");
+        Assert.NotNull(filterProperty);
+        Assert.Equal(typeof(string), filterProperty!.PropertyType);
 
         var window = File.ReadAllText(LiteSampleAgeDeliveryTests.RepoFile("Lite/Windows/AlertDetailWindow.xaml.cs"));
         /* The flat-text fallback already ends in the line the engine stamped, so the window must hand it that text as the
@@ -377,12 +383,45 @@ public sealed class WatchingSinceTrackerTests
     }
 
     [Fact]
+    public void GetOrAppStart_IsTheConnectionsValueWhenThereIsOne_ElseTheAppStart_NeverNull()
+    {
+        var tracker = new WatchingSinceTracker(T0);
+        Assert.Equal(T0, tracker.AppStartUtc);
+
+        // Never observed, and offline: the app start.
+        Assert.Equal(T0, tracker.GetOrAppStart("never-seen"));
+        tracker.Observe("a", false, T0.AddMinutes(1));
+        Assert.Equal(T0, tracker.GetOrAppStart("a"));
+
+        // Online: the connection's own value, which a repeated reading does not move.
+        tracker.Observe("a", true, T0.AddMinutes(2));
+        tracker.Observe("a", true, T0.AddMinutes(3));
+        Assert.Equal(T0.AddMinutes(2), tracker.GetOrAppStart("a"));
+
+        // Dropped again: back to the app start, not null.
+        tracker.Observe("a", false, T0.AddMinutes(4));
+        Assert.Equal(T0, tracker.GetOrAppStart("a"));
+        tracker.Forget("a");
+        Assert.Equal(T0, tracker.GetOrAppStart("a"));
+    }
+
+    [Fact]
     public void TheSnapshotIsBuiltFromTheTrackersValue()
     {
         var source = File.ReadAllText(LiteSampleAgeDeliveryTests.RepoFile("Lite/MainWindow.AlertEngine.cs"));
-        Assert.Contains("_watchingSince.Get(", source);
+        Assert.Contains("_watchingSince.GetOrAppStart(", source);
         Assert.Contains("WatchingSinceUtc = watchingSinceUtc", source);
         Assert.Contains("RecentCpuSamples = recentCpuSamples", source);
+    }
+
+    [Fact]
+    public void TheSnapshotNeverCarriesANullWatchingSince_ItFallsBackToTheAppStart()
+    {
+        // The shared engine collapses an unknown watching-since to the single newest sample, so a null would cost
+        // Lite the batch gate for that sweep. Lite always has an answer: the connection's value, else the app start.
+        var source = File.ReadAllText(LiteSampleAgeDeliveryTests.RepoFile("Lite/MainWindow.AlertEngine.cs"));
+        Assert.DoesNotContain("DateTime? watchingSinceUtc = null", source);
+        Assert.Contains("_watchingSince.GetOrAppStart(", source);
     }
 }
 

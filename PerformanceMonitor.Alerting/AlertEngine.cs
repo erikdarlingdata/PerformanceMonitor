@@ -765,7 +765,7 @@ public sealed class AlertEngine
            target's local stamp before V134 (#3744); the gate compares it for EQUALITY, so which clock stamped
            it is not a gate input — see ObservePersistenceAsync for why order was the wrong test. */
         var observations = SelectCpuObservations(snapshot, key, now);
-        var events = new List<(bool IsFire, double Value)>();
+        var events = new List<(bool IsFire, double Value, DateTime? ReadingUtc)>();
         foreach (var obs in observations)
         {
             var sampleValue = CpuValueFor(obs);
@@ -791,26 +791,33 @@ public sealed class AlertEngine
                    the newest breaching reading. The cooldown inside FireCpuAsync still decides delivery. */
                 if (events.Count > 0 && events[^1].IsFire)
                 {
-                    events[^1] = (true, sampleValue.Value);
+                    events[^1] = (true, sampleValue.Value, obs.UtcInstant);
                 }
                 else
                 {
-                    events.Add((true, sampleValue.Value));
+                    events.Add((true, sampleValue.Value, obs.UtcInstant));
                 }
             }
             else if (outcome == PersistenceOutcome.Resolve)                          /* :101 */
             {
-                events.Add((false, sampleValue.Value));
+                events.Add((false, sampleValue.Value, obs.UtcInstant));
             }
         }
 
-        var newestCpuSampleUtc = snapshot.CpuSampleUtcOnly
-            ?? (snapshot.RecentCpuSamples is { Count: > 0 } recentForAge ? recentForAge.Max(s => s.SampleTimeUtc) : (DateTime?)null);
-        foreach (var (isFire, eventValue) in events)
+        /* A resolve that a fire immediately follows IN THIS BATCH is cancelled with that fire (#5642). Each edge
+           used to land on its own 30 s sweep with its own clock, so the cooldown had run out between them and the
+           sequence arrived in order. Replayed together against one `now`, [fire, resolve, fire] delivered the
+           first fire, then "CPU Resolved", then had the cooldown swallow the second fire: the last word was an
+           all-clear while the gate was firing. So [fire, resolve, fire] sends one fire; [resolve, fire] from a
+           firing start sends nothing (the incident never closed); [fire, resolve] still sends both (a real spike
+           while we were watching). Consecutive fires that remain collapse to the later one. */
+        events = CancelResolveBeforeFire(events);
+
+        foreach (var (isFire, eventValue, readingUtc) in events)
         {
             if (isFire)
             {
-                await FireCpuAsync(key, serverName, serverId, now, alertCooldown, suppressed, eventValue, cpuMetricLabel, newestCpuSampleUtc, ct);
+                await FireCpuAsync(key, serverName, serverId, now, alertCooldown, suppressed, eventValue, cpuMetricLabel, readingUtc, ct);
             }
             else if (!suppressed)
             {
@@ -827,6 +834,33 @@ public sealed class AlertEngine
         }
     }
 
+    /// <summary>
+    /// The CPU edges one sweep sends, after a resolve that a fire immediately follows is dropped together with
+    /// that fire (#5642): <c>[fire, resolve, fire]</c> becomes <c>[fire]</c>, <c>[resolve, fire]</c> becomes
+    /// nothing, <c>[fire, resolve]</c> is unchanged. Two fires left adjacent collapse to the later one.
+    /// </summary>
+    internal static List<(bool IsFire, double Value, DateTime? ReadingUtc)> CancelResolveBeforeFire(List<(bool IsFire, double Value, DateTime? ReadingUtc)> events)
+    {
+        var kept = new List<(bool IsFire, double Value, DateTime? ReadingUtc)>(events.Count);
+        foreach (var edge in events)
+        {
+            if (edge.IsFire && kept.Count > 0 && !kept[^1].IsFire)
+            {
+                kept.RemoveAt(kept.Count - 1);
+            }
+            else if (edge.IsFire && kept.Count > 0)
+            {
+                kept[^1] = edge;
+            }
+            else
+            {
+                kept.Add(edge);
+            }
+        }
+
+        return kept;
+    }
+
     private double? CpuValueFor(CpuObservation obs) =>
         _settings.CpuAlertMode == CpuAlertMode.TotalServer ? (obs.Total ?? obs.Sql) : obs.Sql;
 
@@ -837,7 +871,13 @@ public sealed class AlertEngine
     /// <summary>The most samples one sweep feeds the CPU gate (#5642): the PostgreSQL check's bound.</summary>
     internal const int CpuSampleBatchLimit = 32;
 
-    private readonly record struct CpuObservation(double? Sql, double? Total, DateTime? Instant);
+    /// <summary>The age carrier's label on a High CPU alert (#5642): the reading the gate fired on. The
+    /// percentage on the card is the last BREACHING reading of the batch, which is not always the newest sample
+    /// (a clear sample can follow it in the same batch), so the line says "CPU reading", not "Newest CPU sample":
+    /// the value and the instant describe one measurement.</summary>
+    internal const string CpuReadingSource = "CPU reading";
+
+    private readonly record struct CpuObservation(double? Sql, double? Total, DateTime? Instant, DateTime? UtcInstant);
 
     /// <summary>
     /// Fills <see cref="AlertContext.NewestSample"/> at FIRE time (#5642): the source's label, the newest
@@ -883,21 +923,33 @@ public sealed class AlertEngine
     /// line fire as soon as the third lands, however the collector batched them. Bounded to
     /// <see cref="CpuSampleLookback"/> and <see cref="CpuSampleBatchLimit"/>; a sample later than now is ignored.
     /// NO REPLAY: older, backfilled samples are never judged one by one (a spike that ended before a restart
-    /// or reconnect must not alert, an episode already announced must not be announced again); they collapse
+    /// or reconnect must not alert, an episode already announced must not be announced again), and a snapshot
+    /// with no <see cref="AlertServerSnapshot.WatchingSinceUtc"/> has no sample that is individually eligible; they collapse
     /// to the single latest sample, which is today's path with today's equality reasoning (see
     /// <see cref="ObservePersistenceAsync"/>). A persisted watermark LATER than the newest sample (a frame or
     /// clock skew, or a pre-V134 local stamp east of UTC) takes that path too, which re-anchors it once.
     /// </summary>
     private IReadOnlyList<CpuObservation> SelectCpuObservations(AlertServerSnapshot snapshot, string key, DateTime now)
     {
-        var single = new[] { new CpuObservation(snapshot.SqlCpuPercent, snapshot.TotalCpuPercent, snapshot.CpuSampleTimeUtc) };
+        var singleUtc = snapshot.CpuSampleUtcOnly
+            ?? (snapshot.RecentCpuSamples is { Count: > 0 } recentForAge ? recentForAge.Max(s => s.SampleTimeUtc) : (DateTime?)null);
+        var single = new[] { new CpuObservation(snapshot.SqlCpuPercent, snapshot.TotalCpuPercent, snapshot.CpuSampleTimeUtc, singleUtc) };
         if (snapshot.RecentCpuSamples is not { Count: > 0 } recent)
         {
             return single;
         }
 
+        /* An UNKNOWN watching-since collapses to the single newest sample (#5642), the same path a missing list
+           takes: unknown is never "every sample eligible". A host that cannot say when it began watching cannot
+           tell the samples collected while it watched from the backfilled history of a spike that ended before
+           it started, and judging those one by one would open an incident nobody saw happen. */
+        if (snapshot.WatchingSinceUtc is not { } watchingSince)
+        {
+            return single;
+        }
+
         var floor = now - CpuSampleLookback;
-        if (snapshot.WatchingSinceUtc is { } watchingSince && watchingSince > floor)
+        if (watchingSince > floor)
         {
             floor = watchingSince;
         }
@@ -920,14 +972,14 @@ public sealed class AlertEngine
         var live = inBounds
             .Where(s => s.SampleTimeUtc >= floor && (!watermark.HasValue || s.SampleTimeUtc > watermark.Value))
             .TakeLast(CpuSampleBatchLimit)
-            .Select(s => new CpuObservation(s.SqlCpuPercent, s.TotalCpuPercent, s.SampleTimeUtc))
+            .Select(s => new CpuObservation(s.SqlCpuPercent, s.TotalCpuPercent, s.SampleTimeUtc, s.SampleTimeUtc))
             .ToList();
         return live.Count == 0 ? single : live;
     }
 
     private async Task FireCpuAsync(
         string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed,
-        double alertCpuValue, string cpuMetricLabel, DateTime? newestSampleUtc, CancellationToken ct)
+        double alertCpuValue, string cpuMetricLabel, DateTime? readingUtc, CancellationToken ct)
     {
         if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
         {
@@ -1008,7 +1060,7 @@ public sealed class AlertEngine
                BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
                Lite's deliverer persists only the context, Darling's folds the outcome in. */
             var cpuGrade = GradeCpuFire(alertCpuValue);
-            var cpuContext = StampNewestSample(new AlertContext { SeverityOverride = cpuGrade }, "CPU", newestSampleUtc, now);
+            var cpuContext = StampNewestSample(new AlertContext { SeverityOverride = cpuGrade }, CpuReadingSource, readingUtc, now);
             /* #5642: the context holds no Details, so the typed field alone would not reach a text channel; the
                hand-built text carries the age line (AlertDetailText.SampleAgeLine, appended once), and the
                channel renderers print the typed field only when the prose does not already carry it. */
