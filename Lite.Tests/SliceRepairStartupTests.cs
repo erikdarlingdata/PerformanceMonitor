@@ -156,11 +156,30 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
         var reserve = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
         _duckDb.AvailableFreeBytesProvider = _ => reserve + fileBytes + (fileBytes / 2) + (300 * MiB);
 
+        var schemaBefore = await ParquetSchemaAsync(file);
+
         var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
         await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
 
         Assert.True(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
         Assert.False(File.Exists(file + ".repair-tmp"));
+
+        /* This file is an old-era one (no runtime_stats_interval_id, no replica_role): the rewrite must hand back
+           exactly the columns and parquet types it was given. */
+        Assert.DoesNotContain("runtime_stats_interval_id", schemaBefore, StringComparison.Ordinal);
+        Assert.Equal(schemaBefore, await ParquetSchemaAsync(file));
+    }
+
+    private async Task<string> ParquetSchemaAsync(string file)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT string_agg(name || ':' || type, ', ') FROM parquet_schema('" +
+            file.Replace("\\", "/", StringComparison.Ordinal).Replace("'", "''", StringComparison.Ordinal) +
+            "') WHERE name <> 'duckdb_schema'";
+        return Convert.ToString(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken), System.Globalization.CultureInfo.InvariantCulture) ?? "";
     }
 
     /// <summary>

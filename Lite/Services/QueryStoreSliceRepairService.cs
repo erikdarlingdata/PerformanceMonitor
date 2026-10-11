@@ -709,9 +709,11 @@ HAVING COUNT(*) > 1";
         var rewroteArchive = false;
         foreach (var file in survey.Archive.Where(a => a.Groups > 0))
         {
-            /* A handed-in survey can be older than the file set: archiving or compaction may have replaced or
-               removed a file since it ran. A file that is gone has nothing left to repair, and treating it as a
-               failure would withhold the completion marker for good. */
+            /* A handed-in survey can be older than the file set: archiving or compaction may have removed a file
+               since it ran. A file that is gone has nothing left to repair, and treating it as a failure would
+               withhold the completion marker for good. A file REPLACED since the survey is not caught here: it is
+               rewritten from its current bytes, and the row and execution checks against the survey's figures
+               refuse to promote it if they no longer agree. */
             if (!File.Exists(file.Path))
             {
                 _logger?.LogInformation("#1912 archive file {File} no longer exists; nothing to repair", file.Path);
