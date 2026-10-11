@@ -1484,6 +1484,23 @@ function Test-DarlingSamePath([string]$left, [string]$right) {
     return $l.Equals($r, [StringComparison]::OrdinalIgnoreCase)
 }
 
+# Rewrites an extended-length path to its ordinary spelling, leaving anything else alone:
+# \\?\UNC\server\share -> \\server\share, and \\?\C:\dir -> C:\dir. The same function is in install-darling.ps1 (#2348).
+# 'UNC' is tested first because it is the longer prefix, and is matched without regard to case.
+function Convert-ExtendedLengthPath([string]$path) {
+    if ([string]::IsNullOrEmpty($path)) { return $path }
+    if ($path.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) { return '\\' + $path.Substring(8) }
+    if ($path.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $path.Substring(4) }
+    return $path
+}
+
+# The ordinary spelling of a folder typed as \\?\C:\dir or \\.\C:\dir (#5673), so the checks that ask whether the
+# running script's folder or the source folder is the install folder see the same folder. Anything else is unchanged.
+function Get-DarlingOrdinaryPath([string]$path) {
+    if ([string]::IsNullOrEmpty($path)) { return $path }
+    return Convert-ExtendedLengthPath ($path -replace '^\\\\\.\\(?=[A-Za-z]:)', '')
+}
+
 # Where the service is ACTUALLY installed, read from the registered ImagePath rather than guessed from
 # where this script happens to be sitting. Returns $null when the service is not installed.
 #
@@ -2240,7 +2257,7 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     }
 }
 
-try { $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') }
+try { $InstallRoot = [IO.Path]::GetFullPath((Get-DarlingOrdinaryPath $InstallRoot)).TrimEnd('\') }
 catch { Fail "'$InstallRoot' is not a path this script can resolve." }
 
 if (-not (Test-Path -LiteralPath $InstallRoot -PathType Container)) {
@@ -2393,7 +2410,7 @@ if ([string]::IsNullOrWhiteSpace($Source)) {
     Fail "No -Source given and this script is not running from a file, so there is nothing to install from."
 }
 
-try { $Source = [IO.Path]::GetFullPath($Source).TrimEnd('\') }
+try { $Source = [IO.Path]::GetFullPath((Get-DarlingOrdinaryPath $Source)).TrimEnd('\') }
 catch { Fail "'$Source' is not a path this script can resolve." }
 
 if (-not (Test-Path -LiteralPath $Source)) {

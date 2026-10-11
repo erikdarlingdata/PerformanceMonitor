@@ -4192,6 +4192,132 @@ function Get-CimInstance {
         Assert.Contains("quick=True", answers);
     }
 
+    /// <summary>
+    /// #5673: the upgrade puts -InstallRoot and -Source in their ordinary spelling (the extended-length
+    /// <c>\\?\C:\dir</c> and device <c>\\.\C:\dir</c> forms lose their prefix) on the lines that resolve them, so the
+    /// running-from-the-install-folder refusal and the source-is-the-install-folder refusal see the same folder
+    /// however the operator typed it. This runs the two resolving lines as shipped and then asks
+    /// <c>Test-DarlingSamePath</c> the way those refusals do.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheUpgrade_ReadsAnExtendedLengthOrDeviceSpellingOfTheInstallRootAndSourceAsTheSameFolder(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var probe = new StringBuilder();
+        foreach (var name in new[] { "Get-DarlingCanonicalPath", "Test-DarlingSamePath", "Convert-ExtendedLengthPath", "Get-DarlingOrdinaryPath" })
+        {
+            probe.AppendLine(ExtractFunction(script, name));
+        }
+        var installLine = ExtractLine(script, "try { $InstallRoot = [IO.Path]::GetFullPath(").Trim();
+        var sourceLine = ExtractLine(script, "try { $Source = [IO.Path]::GetFullPath(").Trim();
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            function Fail([string]$message) { throw $message }
+            $dir = Join-Path $env:TEMP ('pm5673-ext-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory($dir)
+            $dir = (Get-Item -LiteralPath $dir -Force).FullName
+            try {
+                $spellings = [ordered]@{
+                    plain    = $dir
+                    extended = '\\?\' + $dir
+                    device   = '\\.\' + $dir
+                    slash    = '\\?\' + $dir + '\'
+                    lower    = '\\?\' + $dir.ToLowerInvariant()
+                }
+                foreach ($tag in $spellings.Keys) {
+                    $InstallRoot = $spellings[$tag]
+                    @@INSTALL@@
+                    catch { 'resolveFailed' }
+                    'installRoot[' + $tag + ']=' + (Test-DarlingSamePath $dir $InstallRoot)
+                    $Source = $spellings[$tag]
+                    @@SOURCE@@
+                    catch { 'resolveFailed' }
+                    'source[' + $tag + ']=' + (Test-DarlingSamePath $dir $Source)
+                }
+                # A different folder still reads as different.
+                $InstallRoot = '\\?\' + $dir + '-other'
+                @@INSTALL@@
+                catch { 'resolveFailed' }
+                'other=' + (Test-DarlingSamePath $dir $InstallRoot)
+            }
+            finally {
+                Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """.Replace("@@INSTALL@@", installLine, StringComparison.Ordinal).Replace("@@SOURCE@@", sourceLine, StringComparison.Ordinal));
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.DoesNotContain("resolveFailed", answers);
+        foreach (var tag in new[] { "plain", "extended", "device", "slash", "lower" })
+        {
+            Assert.Contains($"installRoot[{tag}]=True", answers);
+            Assert.Contains($"source[{tag}]=True", answers);
+        }
+        Assert.Contains("other=False", answers);
+    }
+
+    /// <summary>
+    /// #5673: when <c>Get-DarlingCanonicalPath</c> cannot work out either path (the drive is not mounted, so no part of
+    /// the path can be looked up), both helpers fall back to the <c>GetFullPath</c> spelling on both sides and answer as
+    /// they did before the canonical form existed: the same text in another case, or with a trailing backslash, is the
+    /// same folder; a child is under its parent; a sibling and a different folder are not.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheSameFolderTestAndTheAtOrUnderTest_KeepTheirAnswerWhenNeitherPathCanBeWorkedOut(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-DarlingSamePath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $mounted = [IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() }
+            $letter = [char[]]'QRSTUVWXYZ' | Where-Object { $mounted -notcontains [string]$_ } | Select-Object -First 1
+            'nullBothSides=' + ($null -eq (Get-DarlingCanonicalPath "${letter}:\ABCDEF~1\x"))
+            'same=' + (Test-DarlingSamePath "${letter}:\ABCDEF~1\x" ("${letter}:\abcdef~1\x".ToLowerInvariant() + '\'))
+            'sameOther=' + (Test-DarlingSamePath "${letter}:\ABCDEF~1\x" "${letter}:\ABCDEF~1\y")
+            'under=' + (Test-PathIsAtOrUnder "${letter}:\ABCDEF~1\x\y" "${letter}:\ABCDEF~1\x")
+            'underSelf=' + (Test-PathIsAtOrUnder "${letter}:\ABCDEF~1\x" "${letter}:\ABCDEF~1\x\")
+            'underSibling=' + (Test-PathIsAtOrUnder "${letter}:\ABCDEF~1\xy" "${letter}:\ABCDEF~1\x")
+            'underParent=' + (Test-PathIsAtOrUnder "${letter}:\ABCDEF~1" "${letter}:\ABCDEF~1\x")
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("nullBothSides=True", answers);
+        Assert.Contains("same=True", answers);
+        Assert.Contains("sameOther=False", answers);
+        Assert.Contains("under=True", answers);
+        Assert.Contains("underSelf=True", answers);
+        Assert.Contains("underSibling=False", answers);
+        Assert.Contains("underParent=False", answers);
+    }
+
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>
     private static void AppendPathHelpers(StringBuilder probe, string script)
     {
