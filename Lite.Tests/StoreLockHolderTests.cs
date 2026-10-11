@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -59,8 +60,13 @@ public sealed class StoreLockHolderTests
                 var ex = Assert.ThrowsAny<TimeoutException>(
                     () => initializer.AcquireWriteLock(TimeSpan.FromMilliseconds(20)));
 
-                Assert.Contains(nameof(WriteTimeout_NamesTheWriteHolder_AndNotArchival), ex.Message, StringComparison.Ordinal);
-                Assert.Contains("write lock", ex.Message, StringComparison.Ordinal);
+                /* The registered holder itself, not the message's preamble: "write lock" appears in BuildMessage's own
+                   text with no holder at all, so asserting it would pass if the registry broke. A holder with this
+                   test's name, taken as a write lock, can only come from the registry. */
+                var typed = Assert.IsType<StoreLockTimeoutException>(ex);
+                var holder = Assert.Single(typed.Holders, h => h.Name.Contains(nameof(WriteTimeout_NamesTheWriteHolder_AndNotArchival), StringComparison.Ordinal));
+                Assert.True(holder.Write, "the holder took the write lock");
+                Assert.Contains(nameof(WriteTimeout_NamesTheWriteHolder_AndNotArchival) + " (write lock, held", ex.Message, StringComparison.Ordinal);
                 Assert.DoesNotContain("archival or maintenance", ex.Message, StringComparison.OrdinalIgnoreCase);
             }
             finally
@@ -185,6 +191,44 @@ public sealed class StoreLockHolderTests
         finally
         {
             Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A leaked releaser leaves its entry in the registry forever. Left alone it would sort first (longest held) in every
+    /// later timeout and blame a hold that ended long ago. Past <see cref="StoreLockHolders.StaleAfter"/> an entry is
+    /// marked and listed after every fresher holder. The entries are registered with their start times set, so nothing
+    /// waits; other tests' real holds may be in the registry, so only this test's own entries are looked at.
+    /// </summary>
+    [Fact]
+    public void AHoldFarPastAnyRealOne_IsMarkedStale_AndNeverBlamedAheadOfARealHolder()
+    {
+        var now = Stopwatch.GetTimestamp();
+        var elevenMinutes = (long)(TimeSpan.FromMinutes(11).TotalSeconds * Stopwatch.Frequency);
+        var oldId = StoreLockHolders.Register("StaleProbeLeaked", "StaleProbeFile.cs", write: false, startedTimestamp: now - elevenMinutes);
+        var freshId = StoreLockHolders.Register("StaleProbeReal", "StaleProbeFile.cs", write: false, startedTimestamp: now - (elevenMinutes / 100));
+        try
+        {
+            var mine = StoreLockHolders.Snapshot(now)
+                .Where(h => h.Name.StartsWith("StaleProbeFile.", StringComparison.Ordinal))
+                .ToList();
+
+            Assert.Equal(2, mine.Count);
+
+            /* The real holder comes first although it has held for far less. */
+            Assert.Equal("StaleProbeFile.StaleProbeReal", mine[0].Name);
+            Assert.Equal("StaleProbeFile.StaleProbeLeaked (stale?)", mine[1].Name);
+            Assert.True(mine[1].Held > StoreLockHolders.StaleAfter);
+
+            /* And the text a timeout would carry names the real one first and carries the mark. */
+            var text = StoreLockTimeoutException.FormatHolders(mine);
+            Assert.True(text.IndexOf("StaleProbeReal", StringComparison.Ordinal) < text.IndexOf("StaleProbeLeaked", StringComparison.Ordinal));
+            Assert.Contains("(stale?)", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            StoreLockHolders.Unregister(oldId);
+            StoreLockHolders.Unregister(freshId);
         }
     }
 

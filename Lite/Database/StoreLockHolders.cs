@@ -40,24 +40,45 @@ internal static class StoreLockHolders
         return method is null ? type : type + "." + method;
     }
 
+    /// <summary>
+    /// A hold older than this is almost certainly a leaked <c>LockReleaser</c> (a release that never ran), not a real
+    /// hold: the longest real ones, an archive export or a compaction, run for minutes. The registry cannot tell the two
+    /// apart, so it does not delete the entry; it marks it and lists it after every fresher holder, so a phantom cannot
+    /// take the first place in a timeout's blame while a real holder exists.
+    /// </summary>
+    internal static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(10);
+
+    /// <summary>The mark added to a stale holder's name.</summary>
+    internal const string StaleMark = " (stale?)";
+
     internal static long Register(string? member, string? file, bool write)
+        => Register(member, file, write, Stopwatch.GetTimestamp());
+
+    /// <summary>The start time is a parameter so a test can register an entry that is already old.</summary>
+    internal static long Register(string? member, string? file, bool write, long startedTimestamp)
     {
         var id = Interlocked.Increment(ref s_nextId);
-        s_holds[id] = new Entry(Name(member, file), write, Stopwatch.GetTimestamp());
+        s_holds[id] = new Entry(Name(member, file), write, startedTimestamp);
         return id;
     }
 
     internal static void Unregister(long id) => s_holds.TryRemove(id, out _);
 
-    /// <summary>The current holders, longest-held first.</summary>
-    internal static IReadOnlyList<StoreLockHolder> Snapshot()
-    {
-        var now = Stopwatch.GetTimestamp();
-        return s_holds.Values
-            .Select(e => new StoreLockHolder(e.Name, e.Write, Stopwatch.GetElapsedTime(e.StartedTimestamp, now)))
-            .OrderByDescending(h => h.Held)
+    /// <summary>
+    /// The current holders, longest-held first, except that a hold past <see cref="StaleAfter"/> is marked
+    /// <see cref="StaleMark"/> and listed after the others.
+    /// </summary>
+    internal static IReadOnlyList<StoreLockHolder> Snapshot() => Snapshot(Stopwatch.GetTimestamp());
+
+    /// <summary>The snapshot as of <paramref name="now"/> (a <see cref="Stopwatch"/> timestamp), so a test can age the registry.</summary>
+    internal static IReadOnlyList<StoreLockHolder> Snapshot(long now)
+        => s_holds.Values
+            .Select(e => (Held: Stopwatch.GetElapsedTime(e.StartedTimestamp, now), Entry: e))
+            .Select(x => (x.Held, Stale: x.Held > StaleAfter, x.Entry))
+            .OrderBy(x => x.Stale)
+            .ThenByDescending(x => x.Held)
+            .Select(x => new StoreLockHolder(x.Stale ? x.Entry.Name + StaleMark : x.Entry.Name, x.Entry.Write, x.Held))
             .ToList();
-    }
 }
 
 /// <summary>
