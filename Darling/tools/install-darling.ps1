@@ -197,7 +197,10 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
     if ($Recurse) {
         # -ErrorVariable, so a folder the walk cannot list is a finding of its own (#4043 round-2 review).
         # Skipped silently, nothing under it reached the checks above and the tree read as clean.
-        $rootFull = try { [IO.Path]::GetFullPath($path).TrimEnd('\') } catch { $path.TrimEnd('\') }
+        # Compared in one canonical long spelling (Get-DarlingCanonicalPath), so an install folder handed in as a short path
+        # (C:\PROGRA~1\...), with a trailing backslash or in other case is the same folder as the one the listing returns. A
+        # path that cannot be worked out is taken to be in the root, so the file is checked rather than passed over (#5649).
+        $rootFull = Get-DarlingCanonicalPath $path
         foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable listFailures)) {
             if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                 $result += New-DarlingWriteFinding 'Link' $child.FullName "$($child.FullName) (a junction or link)"
@@ -208,7 +211,8 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
             # the lock and the install pass (#5649). Reported like a link, for the root files the service writes.
             # The names are counted through Get-DarlingFileNameCount, never from LinkType, and a count that cannot be read is a
             # hard link here too.
-            if (-not $child.PSIsContainer -and (Test-DarlingServiceWrittenFileName $child.Name) -and ([IO.Path]::GetDirectoryName($child.FullName).TrimEnd('\') -ieq $rootFull)) {
+            $childFull = if (-not $child.PSIsContainer -and (Test-DarlingServiceWrittenFileName $child.Name)) { Get-DarlingCanonicalPath $child.FullName } else { $null }
+            if (-not $child.PSIsContainer -and (Test-DarlingServiceWrittenFileName $child.Name) -and ($null -eq $rootFull -or $null -eq $childFull -or [IO.Path]::GetDirectoryName($childFull).TrimEnd('\') -ieq $rootFull.TrimEnd('\'))) {
                 $nameCount = Get-DarlingFileNameCount $child.FullName
                 if ($nameCount -gt 1) {
                     $result += New-DarlingWriteFinding 'HardLink' $child.FullName "$($child.FullName) (a hard link: this file has more than one name, and its permissions are the same under every one)" $true
@@ -372,6 +376,86 @@ public static class DarlingNativeFileNames
     catch { return -1 }
 }
 
+# One long, absolute spelling of a path, to compare paths by (#5649): GetFullPath's answer (separators, '.' and '..'
+# resolved) with every 8.3 short name in it (C:\PROGRA~1, C:\Users\RUNNER~1) spelled out and the trailing backslash dropped
+# (a drive root keeps it). GetFullPath alone is not enough: it spells short names out differently from one runtime to the
+# next (Windows PowerShell 5.1 leaves them when part of the path is missing or has a '..' step, PowerShell 7 spells out only
+# the part that exists), so a root typed one way and a path listed or joined the other compared unequal, which is how a root
+# under a GitHub Windows runner's temp folder (C:\Users\RUNNER~1\...) lost its hard links and its trusted folders. The part
+# of the path that exists is spelled out by GetLongPathName and a name below it that does not exist stays as typed. Returns
+# $null when no part of the path can be worked out, and every caller treats that as not trusted. Kept byte-identical in
+# install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingCanonicalPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+    try {
+        $full = [IO.Path]::GetFullPath($path)
+        $trimmed = $full.TrimEnd('\')
+        if ($trimmed.Length -le 2) { return $full }
+        if ($trimmed.IndexOf('~') -lt 0) { return $trimmed }
+        if (-not ('DarlingNativePaths' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DarlingNativePaths
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathNameW(string shortPath, StringBuilder longPath, uint bufferLength);
+
+    // The long spelling of a path that exists, or null.
+    public static string LongName(string path)
+    {
+        StringBuilder buffer = new StringBuilder(path.Length + 260);
+        uint length = GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
+        if (length > buffer.Capacity)
+        {
+            buffer = new StringBuilder((int)length + 1);
+            length = GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
+        }
+        if (length == 0 || length > buffer.Capacity) { return null; }
+        return buffer.ToString();
+    }
+}
+'@
+        }
+        $below = @()
+        $existing = $trimmed
+        while ($true) {
+            $long = [DarlingNativePaths]::LongName($existing)
+            if ($null -ne $long) { break }
+            $parent = [IO.Path]::GetDirectoryName($existing)
+            if ([string]::IsNullOrEmpty($parent)) { return $null }
+            $below = @([IO.Path]::GetFileName($existing)) + $below
+            $existing = $parent
+        }
+        return (@($long.TrimEnd('\')) + $below) -join '\'
+    }
+    catch { return $null }
+}
+
+# The names on the way from $root down to $candidate, as an array, or $null when $candidate is not below $root, is not an
+# absolute path, has a name on the way that Windows folds into another (a '.' or '..' step, an empty name, a trailing dot or
+# space) or either path cannot be worked out. Both paths go through Get-DarlingCanonicalPath, so a root typed as a short path
+# (C:\PROGRA~1\x), with a trailing backslash or in another case gives the same answer as its long spelling. The fold check
+# runs on the candidate as it was handed in, because that is the spelling Windows would resolve (GetFullPath folds the
+# names away). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingSegmentsBelowRoot([string]$root, [string]$candidate) {
+    if ([string]::IsNullOrWhiteSpace($candidate) -or $candidate -notmatch '^([A-Za-z]:[\\/]|\\\\)') { return $null }
+    $given = @($candidate.TrimEnd('\', '/') -split '[\\/]')
+    $first = if ($candidate.StartsWith('\\')) { 3 } else { 1 }
+    for ($i = $first; $i -lt $given.Count; $i++) {
+        $name = $given[$i]
+        if ($name -eq '' -or $name -eq '.' -or $name -eq '..' -or $name.EndsWith('.') -or $name.EndsWith(' ')) { return $null }
+    }
+    $rootText = Get-DarlingCanonicalPath $root
+    $candidateText = Get-DarlingCanonicalPath $candidate
+    if ($null -eq $rootText -or $null -eq $candidateText) { return $null }
+    $prefix = $rootText.TrimEnd('\') + '\'
+    if (-not $candidateText.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or $candidateText.Length -eq $prefix.Length) { return $null }
+    return , @($candidateText.Substring($prefix.Length) -split '\\')
+}
+
 # The files directly in $root that the service writes (the names on the list above): the ones the lock makes the
 # service the owner of, and with -BackupsOnly the darling.json.bak-* ones the install pass hardens. A file with more
 # than one name (a hard link) and a file that is a link are left out, so neither gets the service as its owner or a
@@ -394,13 +478,8 @@ function Get-DarlingServiceWrittenRootFiles([string]$root, [switch]$BackupsOnly)
 # listed file is trusted by name only when it is a plain file (not a folder, a link or a file with more than one
 # name), and with no item a root file is not trusted, so the answer never rests on a second look at the disk.
 function Test-DarlingServiceWrittenPath([string]$root, [string]$candidate, [string[]]$extraDirectories = @(), $item = $null) {
-    try { $rootText = [IO.Path]::GetFullPath($root).TrimEnd('\') }
-    catch { return $false }
-    if (-not $candidate.StartsWith($rootText + '\', [StringComparison]::OrdinalIgnoreCase)) { return $false }
-    $segments = @($candidate.Substring($rootText.Length + 1).TrimEnd('\') -split '\\')
-    foreach ($segment in $segments) {
-        if ($segment -eq '' -or $segment -eq '.' -or $segment -eq '..' -or $segment.EndsWith('.') -or $segment.EndsWith(' ')) { return $false }
-    }
+    $segments = Get-DarlingSegmentsBelowRoot $root $candidate
+    if ($null -eq $segments) { return $false }
     $names = Get-DarlingServiceWrittenNames
     foreach ($directory in (@($names.Directories) + @($extraDirectories | Where-Object { $_ }))) {
         if ($segments[0] -ieq $directory) { return $true }
@@ -611,16 +690,14 @@ Then run install-darling.ps1 from there.
 # the refusal keeps its standard advice alone. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingBackupFileFindingNames([string]$root, [array]$findings) {
     if (@($findings).Count -eq 0) { return @() }
-    try { $rootText = [IO.Path]::GetFullPath($root).TrimEnd('\') }
-    catch { return @() }
     $names = @()
     foreach ($finding in @($findings)) {
         if ($finding.Kind -ne 'Grant' -and $finding.Kind -ne 'Owner') { return @() }
         if (-not $finding.IsFile) { return @() }
-        $path = "$($finding.Path)"
-        if (-not $path.StartsWith($rootText + '\', [StringComparison]::OrdinalIgnoreCase)) { return @() }
-        $leaf = $path.Substring($rootText.Length + 1)
-        if ($leaf.Contains('\') -or -not (Test-DarlingServiceWrittenFileName $leaf) -or [string]::Equals($leaf, 'darling.json', [StringComparison]::OrdinalIgnoreCase)) { return @() }
+        $segments = Get-DarlingSegmentsBelowRoot $root "$($finding.Path)"
+        if ($null -eq $segments -or $segments.Count -ne 1) { return @() }
+        $leaf = $segments[0]
+        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or [string]::Equals($leaf, 'darling.json', [StringComparison]::OrdinalIgnoreCase)) { return @() }
         if ($names -notcontains $leaf) { $names += $leaf }
     }
     return @($names)
@@ -979,8 +1056,9 @@ function Get-DarlingExtraServiceWriteDirectories([string]$root, [string]$configP
     # A NAME under the install root, not a path: Lock-DarlingInstallTree Join-Paths it onto the root, and Join-Path does not
     # treat a rooted child as rooted ('C:\a' + 'C:\a\b' = 'C:\a\C:\a\b'). A darling.json outside the root puts the key
     # folder outside the tree the lock covers, so it needs no grant from here.
-    $configDir = [System.IO.Path]::GetDirectoryName($configPath).TrimEnd('\')   # Split-Path -LiteralPath -Parent is ambiguous on PowerShell 5.1
-    if ($configDir -ine $root.TrimEnd('\')) { return @() }
+    $configDir = Get-DarlingCanonicalPath ([System.IO.Path]::GetDirectoryName($configPath))   # Split-Path -LiteralPath -Parent is ambiguous on PowerShell 5.1
+    $rootCanonical = Get-DarlingCanonicalPath $root
+    if ($null -eq $configDir -or $null -eq $rootCanonical -or $configDir.TrimEnd('\') -ine $rootCanonical.TrimEnd('\')) { return @() }
     return @((Get-DarlingServiceWrittenNames).KeyDirectories)
 }
 
@@ -990,6 +1068,12 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     # it. So this function judges icacls by its exit code and output, and reports an unreadable object rather
     # than throwing out of the whole lock. The preference is local to this function.
     $ErrorActionPreference = 'Continue'
+    # Every path below is compared with the listing's own spelling, which is the long one, so the root is put in that
+    # spelling first: handed in as a short path (C:\PROGRA~1\...), the root file the service owns would not be recognised as
+    # one directly in it and the service's own grant on it would be stripped (#5649). One that cannot be worked out is not locked.
+    $rootCanonical = Get-DarlingCanonicalPath $root
+    if ($null -eq $rootCanonical) { return @("$root (the full path of the install folder could not be worked out, so it was not locked)") }
+    $root = $rootCanonical
     if ((Get-Item -LiteralPath $root -Force -ErrorAction Stop).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
         return @("$root (the install folder itself is a junction or link: run from the folder it points to)")
     }
@@ -1065,7 +1149,9 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
             }
             $grantOutput = & icacls.exe $dirPath /grant "*$($serviceSid.Value):(OI)(CI)M" 2>&1
             if ($LASTEXITCODE -ne 0) { $open += "$dirPath (icacls /grant Modify for the service failed: $($grantOutput -join ' '))"; continue }
-            $serviceWritePaths += (Get-Item -LiteralPath $dirPath -Force).FullName.TrimEnd('\')
+            $serviceWritePath = Get-DarlingCanonicalPath (Get-Item -LiteralPath $dirPath -Force).FullName
+            if ($null -eq $serviceWritePath) { $open += "$dirPath (its full path could not be worked out, so the service's grant on it cannot be trusted)"; continue }
+            $serviceWritePaths += $serviceWritePath.TrimEnd('\')
         }
     }
     # A write grant to the service SID is only trusted under one of $serviceWritePaths (path-prefix match,
@@ -1088,7 +1174,8 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     if (-not (Get-Acl -LiteralPath $root).AreAccessRulesProtected) { $open += "$root (still inherits from its parent)" }
     $targets = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue)
     foreach ($target in $targets) {
-        $path = $target.FullName
+        $path = Get-DarlingCanonicalPath $target.FullName
+        if ($null -eq $path) { $open += "$($target.FullName) (its full path could not be worked out)"; continue }
         if ($path.TrimEnd('\') -ine $root.TrimEnd('\') -and ($target.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             $open += "$path (a junction or link)"
             continue

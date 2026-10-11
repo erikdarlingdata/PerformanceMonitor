@@ -596,7 +596,7 @@ function Get-CimInstance {
         foreach (var name in new[]
         {
             "Get-DarlingServiceSids", "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName",
-            "Get-DarlingFileNameCount", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
+            "Get-DarlingFileNameCount", "Get-DarlingCanonicalPath", "Get-DarlingSegmentsBelowRoot", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
             "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice",
             "Get-DarlingRefusalAdvice", "Get-DarlingBackupFileFindingNames", "Get-DarlingBackupFileAdvice", "Test-DarlingSamePath", "Get-DarlingInstallRootFromService",
         })
@@ -1473,6 +1473,7 @@ function Get-CimInstance {
         var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, script);
         AppendServiceWrittenList(probe, script);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
@@ -1503,7 +1504,7 @@ function Get-CimInstance {
                 'heldTrustedPath=' + (Test-DarlingServiceWrittenPath $root "$root\darling.json.bak-held" @() $heldItem)
                 $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
                 $records = @(Get-UntrustedWriteGrantees $root @($me) -Recurse -AsRecords)
-                foreach ($r in $records) { if ($r.Kind -eq 'HardLink') { 'walkHardLink=' + $r.Path.Substring($root.Length + 1) } }
+                foreach ($r in $records) { if ($r.Kind -eq 'HardLink') { 'walkHardLink=' + [IO.Path]::GetFileName($r.Path) } }
             }
             finally {
                 if ($held) { $held.Dispose() }
@@ -1675,6 +1676,8 @@ function Get-CimInstance {
         {
             probe.AppendLine(ExtractFunction(script ?? InstallScript, name));
         }
+
+        AppendPathHelpers(probe, script ?? InstallScript);
     }
 
     /// <summary>
@@ -1736,6 +1739,7 @@ function Get-CimInstance {
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingServiceSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSidsForRerun"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, InstallScript);
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
@@ -2023,6 +2027,7 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, InstallScript);
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
@@ -2115,6 +2120,7 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, InstallScript);
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
@@ -2230,6 +2236,7 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, InstallScript);
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
@@ -2322,6 +2329,7 @@ function Get-CimInstance {
             }
             """);
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, InstallScript);
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine("""
             $trusted = Get-DarlingPreLockTrustedSids
@@ -2368,6 +2376,7 @@ function Get-CimInstance {
             }
             """);
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, InstallScript);
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine("""
             $usersAces = @((Get-Acl).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $script:usersSid })
@@ -2396,6 +2405,7 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, InstallScript);
         AppendServiceWrittenList(probe, InstallScript);
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
@@ -2635,6 +2645,7 @@ function Get-CimInstance {
         var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, script);
         AppendServiceWrittenList(probe, script);
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
@@ -2947,11 +2958,164 @@ function Get-CimInstance {
         Assert.Contains("jsonInteractive=Read, Synchronize", answers);
     }
 
+    /// <summary>
+    /// #5649, from the failed run of a GitHub Windows runner, where $env:TEMP is the 8.3 short form (C:\Users\RUNNER~1\...) and
+    /// everything listed under it comes back in the long form: a root typed one way and a path joined or listed the other
+    /// compared unequal, so the walk reported no hard link and the path test trusted none of the service's folders. The
+    /// scripts now put every root and every path in one long spelling (Get-DarlingCanonicalPath) before comparing. This test
+    /// gives the walk, the path test, the root-file list, the backup-name test and the key-folder test the same install
+    /// folder spelled as its short path, the short path with a trailing backslash, the long path in upper case, in lower
+    /// case and with a trailing backslash, and requires the same answers for each, on any machine that has 8.3 names. The
+    /// trust answers are exact: only the service's own folders and its two kinds of root file, nothing else.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheWalkAndThePathTests_AnswerTheSameForARootInShortFormWithATrailingBackslashOrInOtherCase(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
+        AppendPathHelpers(probe, script);
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingBackupFileFindingNames"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingExtraServiceWriteDirectories"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $parent = Join-Path $env:TEMP ('pm5649-short-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $outside = "$parent-outside.txt"
+            # CreateDirectory, not New-Item: Windows PowerShell 5.1's New-Item refuses a new folder chain whose parent is typed as a short path.
+            foreach ($made in @("$parent\install-root-with-a-long-name\pg-runtime", "$parent\install-root-with-a-long-name\other")) { [void][IO.Directory]::CreateDirectory($made) }
+            # The long spelling is what the listing returns for an existing folder; the short one comes from the file system.
+            $long = (Get-Item -LiteralPath "$parent\install-root-with-a-long-name" -Force).FullName
+            $short = ((cmd /c "for %I in (""$long"") do @echo %~sI") | Select-Object -First 1).Trim()
+            try {
+                if ($short.IndexOf('~') -lt 0 -or $short -ieq $long) { 'noShortNames=True'; return }
+                'shortForm=' + $short
+                'longForm=' + $long
+                Set-Content -LiteralPath "$long\darling.json" -Value '{ "postgres": { "managed": false } }'
+                Set-Content -LiteralPath "$long\darling.json.bak-plain" -Value 'x'
+                Set-Content -LiteralPath "$long\notes.txt" -Value 'x'
+                Set-Content -LiteralPath "$long\pg-runtime\a.dll" -Value 'x'
+                Set-Content -LiteralPath "$long\other\darling.json" -Value 'x'
+                Set-Content -LiteralPath $outside -Value 'x'
+                New-Item -ItemType HardLink -Path "$long\darling.json.bak-linked" -Value $outside | Out-Null
+                $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                $plainItem = [pscustomobject]@{ PSIsContainer = $false; LinkType = $null; Attributes = [IO.FileAttributes]::Normal }
+                $forms = [ordered]@{ short = $short; shortSlash = $short + '\'; upper = $long.ToUpperInvariant(); lower = $long.ToLowerInvariant(); longSlash = $long + '\' }
+                foreach ($tag in $forms.Keys) {
+                    $form = $forms[$tag]
+                    $records = @(Get-UntrustedWriteGrantees $form @($me) -Recurse -AsRecords)
+                    'walk[' + $tag + ']=' + (@($records | Where-Object { $_.Kind -eq 'HardLink' } | ForEach-Object { [IO.Path]::GetFileName($_.Path) } | Sort-Object) -join ',')
+                    'rootFiles[' + $tag + ']=' + (@(Get-DarlingServiceWrittenRootFiles $form | ForEach-Object { $_.Name } | Sort-Object) -join ',')
+                    foreach ($name in @('pg-runtime', 'pg-runtime\a.dll', 'darling.json', 'darling.json.bak-plain', 'darling.json.bak-linked', 'notes.txt', 'other', 'other\darling.json', 'pg-runtime.\a.dll', 'pg-runtime\..\notes.txt')) {
+                        $onDisk = Join-Path $long $name
+                        $item = if (Test-Path -LiteralPath $onDisk -PathType Leaf) { Get-Item -LiteralPath $onDisk -Force } else { $plainItem }
+                        # The candidate is joined onto the root as the caller was handed it, and again onto the long spelling.
+                        'trust[' + $tag + ']' + $name + '=' + (Test-DarlingServiceWrittenPath $form (Join-Path $form $name) @() $item)
+                        'trustLongCandidate[' + $tag + ']' + $name + '=' + (Test-DarlingServiceWrittenPath $form (Join-Path $long $name) @() $item)
+                        'trustShortCandidate[' + $tag + ']' + $name + '=' + (Test-DarlingServiceWrittenPath $form (Join-Path $short $name) @() $item)
+                    }
+                    foreach ($spelling in @(@('long', $long), @('short', $short))) {
+                        $finding = [pscustomobject]@{ Kind = 'Grant'; IsFile = $true; Path = (Join-Path $spelling[1] 'darling.json.bak-plain') }
+                        $other = [pscustomobject]@{ Kind = 'Grant'; IsFile = $true; Path = (Join-Path $spelling[1] 'notes.txt') }
+                        'backupNames[' + $tag + '/' + $spelling[0] + ']=' + (@(Get-DarlingBackupFileFindingNames $form @($finding)) -join ',') + '|' + (@(Get-DarlingBackupFileFindingNames $form @($finding, $other)) -join ',')
+                    }
+                    'keyFolders[' + $tag + ']=' + (@(Get-DarlingExtraServiceWriteDirectories $form (Join-Path $form 'darling.json')) -join ',')
+                }
+                'canonicalShort=' + (Get-DarlingCanonicalPath $short)
+                'canonicalMissingTail=' + (Get-DarlingCanonicalPath "$short\not-there\deeper")
+                'canonicalNothing=[' + (Get-DarlingCanonicalPath '') + ']'
+            }
+            finally {
+                Remove-Item -LiteralPath $parent -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        if (answers.Contains("noShortNames=True"))
+        {
+            Assert.Skip("8.3 short names are not created on the volume the temp folder is on, so there is no short spelling to test.");
+            return;
+        }
+
+        var longForm = answers.Single(a => a.StartsWith("longForm=", StringComparison.Ordinal))["longForm=".Length..];
+        var shortForm = answers.Single(a => a.StartsWith("shortForm=", StringComparison.Ordinal))["shortForm=".Length..];
+        Assert.Contains("~", shortForm, StringComparison.Ordinal);
+        Assert.NotEqual(longForm, shortForm, StringComparer.OrdinalIgnoreCase);
+
+        var trusted = new[] { "pg-runtime", "pg-runtime\\a.dll", "darling.json", "darling.json.bak-plain" };
+        var untrusted = new[] { "darling.json.bak-linked", "notes.txt", "other", "other\\darling.json", "pg-runtime.\\a.dll", "pg-runtime\\..\\notes.txt" };
+        foreach (var tag in new[] { "short", "shortSlash", "upper", "lower", "longSlash" })
+        {
+            Assert.Contains($"walk[{tag}]=darling.json.bak-linked", answers);
+            Assert.Contains($"rootFiles[{tag}]=darling.json,darling.json.bak-plain", answers);
+            /* A finding on a backup alone is named, whichever spelling its path and the root come in; one beside a file that is not a backup is not. */
+            Assert.Contains($"backupNames[{tag}/long]=darling.json.bak-plain|", answers);
+            Assert.Contains($"backupNames[{tag}/short]=darling.json.bak-plain|", answers);
+            Assert.Contains($"keyFolders[{tag}]=darling-keys", answers);
+            foreach (var kind in new[] { "trust", "trustLongCandidate", "trustShortCandidate" })
+            {
+                foreach (var name in trusted) { Assert.Contains($"{kind}[{tag}]{name}=True", answers); }
+                foreach (var name in untrusted) { Assert.Contains($"{kind}[{tag}]{name}=False", answers); }
+            }
+        }
+
+        Assert.Contains($"canonicalShort={longForm}", answers, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains($"canonicalMissingTail={longForm}\\not-there\\deeper", answers, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("canonicalNothing=[]", answers);
+    }
+
+    /// <summary>
+    /// #5649: the lock and the walk compare the install folder and every path under it in one spelling (the canonical long
+    /// one) and never through a bare GetFullPath, which spells short names out differently from one runtime to the next. A
+    /// path that cannot be worked out is reported or left untrusted, never passed. The behaviour is run by the test above;
+    /// this one pins that the lock, which needs an elevated account to run, goes through the same helper.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheLockAndTheWalk_PutTheRootAndEveryPathInTheCanonicalLongSpellingBeforeComparing(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var lockText = ExtractFunction(script, "Lock-DarlingInstallTree");
+        Assert.Contains("$rootCanonical = Get-DarlingCanonicalPath $root", lockText, StringComparison.Ordinal);
+        Assert.Contains("$root = $rootCanonical", lockText, StringComparison.Ordinal);
+        Assert.Contains("$path = Get-DarlingCanonicalPath $target.FullName", lockText, StringComparison.Ordinal);
+        Assert.Contains("Get-DarlingCanonicalPath (Get-Item -LiteralPath $dirPath -Force).FullName", lockText, StringComparison.Ordinal);
+        Assert.Contains("$rootFull = Get-DarlingCanonicalPath $path", ExtractFunction(script, "Get-UntrustedWriteGrantees"), StringComparison.Ordinal);
+        foreach (var name in new[] { "Get-UntrustedWriteGrantees", "Lock-DarlingInstallTree", "Test-DarlingServiceWrittenPath", "Get-DarlingBackupFileFindingNames", "Get-DarlingExtraServiceWriteDirectories" })
+        {
+            Assert.DoesNotContain("GetFullPath", ExtractFunction(script, name), StringComparison.Ordinal);
+        }
+        Assert.Contains("Get-DarlingSegmentsBelowRoot $root $candidate", ExtractFunction(script, "Test-DarlingServiceWrittenPath"), StringComparison.Ordinal);
+    }
+
+    /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>
+    private static void AppendPathHelpers(StringBuilder probe, string script)
+    {
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingSegmentsBelowRoot"));
+    }
+
     /// <summary>Adds the shared service-written list and its path test to a probe, the way the scripts define them
     /// (the lock and the pre-lock walk both read them).</summary>
     private static void AppendServiceWrittenList(StringBuilder probe, string script)
     {
-        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles" })
+        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Get-DarlingCanonicalPath", "Get-DarlingSegmentsBelowRoot" })
         {
             probe.AppendLine(ExtractFunction(script, name));
         }
