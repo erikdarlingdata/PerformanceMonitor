@@ -448,6 +448,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 "alert_time", "server_id", "server_name", "metric_name", "current_value", "threshold_value", "alert_sent",
                 "notification_type", "send_error", "muted", "dismissed", "severity", "severity_source", "route", "routing",
                 "routing_reason", "detail_text",
+                /* #5642: the newest sample the alert judged and its age at fire time, read from the persisted context. */
+                "newest_sample",
             },
             alert.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(Stamp(now), alert.GetProperty("alert_time").GetString());
