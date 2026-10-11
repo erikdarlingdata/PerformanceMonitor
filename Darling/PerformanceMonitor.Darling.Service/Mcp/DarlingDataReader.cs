@@ -3659,16 +3659,22 @@ internal static class DarlingDataReader
         -- idx_collection_log_watermark that stops after three rows.
         LEFT JOIN LATERAL
         (
-            SELECT COALESCE(MIN(CASE WHEN r.ok = 0 THEN r.run_rank END) - 1, COUNT(*)) AS trailing_success_runs
+            SELECT CASE WHEN r.flags[1] = 1 AND r.flags[2] = 1 AND r.flags[3] = 1 THEN 3
+                        WHEN r.flags[1] = 1 AND r.flags[2] = 1 THEN 2
+                        WHEN r.flags[1] = 1 THEN 1
+                        ELSE 0 END AS trailing_success_runs
             FROM
             (
-                SELECT CASE WHEN x.status = 'SUCCESS'
-                             AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-                            THEN 1 ELSE 0 END AS ok,
-                       ROW_NUMBER() OVER (ORDER BY x.collection_time DESC, x.log_id DESC) AS run_rank
+                -- An ordered aggregate over the three rows, not a window function: the keyed lookups
+                -- above rank nothing over the window.
+                SELECT array_agg(x.ok ORDER BY x.collection_time DESC, x.log_id DESC) AS flags
                 FROM
                 (
-                    SELECT v.status, v.error_message, v.rows_collected, v.collection_time, v.log_id
+                    SELECT CASE WHEN v.status = 'SUCCESS'
+                                 AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                                THEN 1 ELSE 0 END AS ok,
+                           v.collection_time,
+                           v.log_id
                     FROM v_collection_log v
                     WHERE v.server_id = $1
                     AND   v.collector_name = h.collector_name

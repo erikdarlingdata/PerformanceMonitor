@@ -455,7 +455,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
 
     private static void AssertSameRows(string label, Result oracle, Result current)
     {
-        Assert.Equal(oracle.Columns, current.Columns);
+        /* #5646: the current statements carry ONE more column than the pre-change oracles, appended last
+           (trailing_success_runs, the recovery rule's input). Every column the oracle has is compared. */
+        Assert.Equal(oracle.Columns.Count + 1, current.Columns.Count);
+        Assert.Equal("trailing_success_runs", current.Columns[^1].Name);
+        Assert.Equal(oracle.Columns, current.Columns.Take(oracle.Columns.Count).ToList());
         Assert.Equal(oracle.Rows.Count, current.Rows.Count);
         Assert.True(oracle.Rows.Count >= 10, label + ": the seed should give the oracle many collectors");
         for (var r = 0; r < oracle.Rows.Count; r++)
