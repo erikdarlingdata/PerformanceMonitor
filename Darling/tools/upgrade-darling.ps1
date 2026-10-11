@@ -434,6 +434,115 @@ public static class DarlingNativeFileNames
     catch { return -1 }
 }
 
+# Sets the owner of one file or folder to the SID given, only when it has exactly one name, on the SAME handle the name count
+# is read from (#5677): the handle is opened for attributes and WRITE_OWNER with every sharing mode allowed and the object
+# itself rather than anything it points to (FILE_FLAG_OPEN_REPARSE_POINT, the way Get-DarlingFileNameCount opens), the link
+# count is read from it, and only a count of exactly 1 is followed by SetSecurityInfo on that handle for the owner alone. A
+# file with more than one name (a hard link) shares one owner under every name, so one whose count is not 1 is never touched.
+# SetOwner returns 0 when the owner was set; 1 when the count is not 1 (detail is the count); 2 when it could not be opened and
+# 3 when the count could not be read (detail is the Win32 error); 4 when the owner could not be set (detail is the error).
+# attributes is the object's attribute bits as read from the handle, so a caller can tell a folder from a link without
+# opening it again. SetPrivileges turns SeTakeOwnershipPrivilege and SeRestorePrivilege on or off for this process's token (the
+# two icacls /setowner turns on for itself) and returns false if either could not be changed. Kept byte-identical in
+# install-darling.ps1 and upgrade-darling.ps1.
+function Initialize-DarlingNativeOwner {
+    if ('DarlingNativeOwner' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class DarlingNativeOwner
+{
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct TokenPrivilege { public uint Count; public long Luid; public uint Attributes; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTimeValue { public uint Low; public uint High; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public FileTimeValue CreationTime;
+        public FileTimeValue LastAccessTime;
+        public FileTimeValue LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint SetSecurityInfo(SafeFileHandle handle, int objectType, uint securityInfo, byte[] owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LookupPrivilegeValueW(string systemName, string name, out long luid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state, uint length, IntPtr previous, IntPtr returned);
+
+    // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY; SE_PRIVILEGE_ENABLED is 2. A privilege the token does not hold is reported as an error.
+    public static bool SetPrivileges(bool on)
+    {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) { return false; }
+        try
+        {
+            bool all = true;
+            foreach (string name in new string[] { "SeTakeOwnershipPrivilege", "SeRestorePrivilege" })
+            {
+                TokenPrivilege state = new TokenPrivilege();
+                state.Count = 1;
+                state.Attributes = on ? 2u : 0u;
+                if (!LookupPrivilegeValueW(null, name, out state.Luid)) { all = false; continue; }
+                if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero) || Marshal.GetLastWin32Error() != 0) { all = false; }
+            }
+            return all;
+        }
+        finally { CloseHandle(token); }
+    }
+
+    // FILE_READ_ATTRIBUTES | WRITE_OWNER; share read, write and delete; OPEN_EXISTING;
+    // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. SE_FILE_OBJECT is 1, OWNER_SECURITY_INFORMATION is 1.
+    public static int SetOwner(string path, byte[] ownerSid, out int detail, out uint attributes)
+    {
+        detail = 0;
+        attributes = 0;
+        using (SafeFileHandle handle = CreateFileW(path, 0x80 | 0x00080000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) { detail = Marshal.GetLastWin32Error(); return 3; }
+            attributes = information.FileAttributes;
+            detail = (int)information.NumberOfLinks;
+            if (information.NumberOfLinks != 1) { return 1; }
+            uint error = SetSecurityInfo(handle, 1, 1, ownerSid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (error != 0) { detail = (int)error; return 4; }
+            return 0;
+        }
+    }
+}
+'@
+}
+
 # One long, absolute spelling of a path, to compare paths by (#5649): GetFullPath's answer (separators, '.' and '..'
 # resolved) with every 8.3 short name in it (C:\PROGRA~1, C:\Users\RUNNER~1) spelled out and the trailing backslash dropped
 # (a drive root keeps it). GetFullPath alone is not enough: it spells short names out differently from one runtime to the
@@ -980,8 +1089,43 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         $output = & icacls.exe $root @step 2>&1
         if ($LASTEXITCODE -ne 0) { return @("$root (icacls $($step -join ' ') failed: $($output -join ' '))") }
     }
-    $output = & icacls.exe $root /setowner "*$($adminsSid.Value)" /T /C /L /Q 2>&1
-    if ($LASTEXITCODE -ne 0) { $open += "$root (could not make Administrators the owner of everything below it; run elevated: $($output | Select-Object -First 1))" }
+    # The owner step (#5677). The tree is walked here and the owner of each object is set one at a time, in this process, on the
+    # handle its name count is read from (see Initialize-DarlingNativeOwner): a file whose count is not exactly 1, or cannot be
+    # read, keeps its owner, because a file with more than one name (a hard link) has one owner that every name shares, some of
+    # them outside this folder. Such a file, and one whose owner cannot be set, is listed as open here and put in $skipped so the
+    # walk below leaves it out (it is listed once). The walk does not follow a junction or link: the link itself is the object,
+    # and nothing below it is listed. The two privileges are turned on for the step and off again after it; without them (not
+    # elevated) the step is not run and the root is reported.
+    $skipped = @{}
+    $ownerBytes = New-Object byte[] $adminsSid.BinaryLength
+    $adminsSid.GetBinaryForm($ownerBytes, 0)
+    $ownerReady = $false
+    try {
+        Initialize-DarlingNativeOwner
+        $ownerReady = [DarlingNativeOwner]::SetPrivileges($true)
+        if (-not $ownerReady) { $open += "$root (could not make Administrators the owner of everything below it; run elevated)" }
+        else {
+            $pending = New-Object System.Collections.Stack
+            $pending.Push($root)
+            while ($pending.Count -gt 0) {
+                $ownPath = [string]$pending.Pop()
+                $detail = 0
+                $attributes = [uint32]0
+                $result = [DarlingNativeOwner]::SetOwner($ownPath, $ownerBytes, [ref]$detail, [ref]$attributes)
+                if ($result -ne 0) {
+                    $skipped[$ownPath] = $true
+                    if ($result -eq 4) { $open += "$ownPath (its owner could not be set, error $detail)" }
+                    else { $open += "$ownPath (a hard link: this file has more than one name, or its names could not be counted, and its permissions are the same under every one; its owner and permissions were not changed)" }
+                }
+                if (($attributes -band 0x10) -ne 0 -and ($attributes -band 0x400) -eq 0) {
+                    try { foreach ($kid in @(Get-ChildItem -LiteralPath $ownPath -Force -ErrorAction Stop)) { $pending.Push($kid.FullName) } }
+                    catch { $open += "$ownPath (its contents could not be listed, so nothing below it was given an owner: $($_.Exception.Message))" }
+                }
+            }
+        }
+    }
+    catch { $open += "$root (could not make Administrators the owner of everything below it: $($_.Exception.Message))" }
+    finally { try { $null = [DarlingNativeOwner]::SetPrivileges($false) } catch { } }
     $serviceWritePaths = @()
     if ($serviceSid) {
         foreach ($secret in @(Get-DarlingServiceWrittenRootFiles $root)) {
@@ -1020,6 +1164,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     if (-not (Get-Acl -LiteralPath $root).AreAccessRulesProtected) { $open += "$root (still inherits from its parent)" }
     $targets = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue)
     foreach ($target in $targets) {
+        if ($skipped.ContainsKey($target.FullName)) { continue }
         $path = Get-DarlingCanonicalPath $target.FullName
         if ($null -eq $path) { $open += "$($target.FullName) (its full path could not be worked out)"; continue }
         if ($path.TrimEnd('\') -ine $root.TrimEnd('\') -and ($target.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
@@ -2415,7 +2560,7 @@ function Invoke-UpgradeTreeLock([string]$when) {
         Good "Install folder locked ${when}: only SYSTEM and Administrators can change what runs from $InstallRoot; $logonAccount can write only its runtime folders."
         return
     }
-    Warn ("Ordinary users can still change {0} path(s) in the install folder, and the service runs from there as {1}, so anyone who can replace a binary can run code as that account. First: {2}. Fix from an elevated prompt with: icacls `"{3}`" /inheritance:d, then icacls `"{3}`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4, then icacls `"{3}`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant:r `"{1}:(OI)(CI)RX`", then icacls `"{3}`" /setowner *S-1-5-32-544 /T /C /L. A path listed as owned by an account, or below the folder, needs its own fix: icacls `"<path>`" /setowner *S-1-5-32-544 /L, then icacls `"<path>`" /reset /T /C. Remove any junction or link it names." -f $open.Count, $logonAccount, (($open | Select-Object -First 5) -join ', '), $InstallRoot)
+    Warn ("Ordinary users can still change {0} path(s) in the install folder, and the service runs from there as {1}, so anyone who can replace a binary can run code as that account. First: {2}. Fix from an elevated prompt with: icacls `"{3}`" /inheritance:d, then icacls `"{3}`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4, then icacls `"{3}`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant:r `"{1}:(OI)(CI)RX`", then run this script again from an elevated prompt (it makes Administrators the owner of each path itself, and lists a file with more than one name). A path listed as owned by an account, or below the folder, needs its own fix: icacls `"<path>`" /setowner *S-1-5-32-544 /L, then icacls `"<path>`" /reset /T /C. Remove any junction or link it names." -f $open.Count, $logonAccount, (($open | Select-Object -First 5) -join ', '), $InstallRoot)
 }
 
 Invoke-UpgradeTreeLock 'before the backup and the copy'

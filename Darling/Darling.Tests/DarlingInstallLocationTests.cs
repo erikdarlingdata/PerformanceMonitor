@@ -596,7 +596,7 @@ function Get-CimInstance {
         foreach (var name in new[]
         {
             "Get-DarlingServiceSids", "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName",
-            "Get-DarlingFileNameCount", "Get-DarlingCanonicalPath", "Get-DarlingSegmentsBelowRoot", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
+            "Get-DarlingFileNameCount", "Initialize-DarlingNativeOwner", "Get-DarlingCanonicalPath", "Get-DarlingSegmentsBelowRoot", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Test-PathIsAtOrUnder", "Get-DarlingConfiguredPathsUnder",
             "Get-DarlingNewFolderPhrase", "Get-DarlingExistingInstallSteps", "Get-DarlingFreshFolderAdvice",
             "Get-DarlingRefusalAdvice", "Get-DarlingBackupFileFindingNames", "Get-DarlingBackupFileAdvice", "Test-DarlingSamePath", "Get-DarlingInstallRootFromService",
         })
@@ -1874,6 +1874,203 @@ function Get-CimInstance {
         }
 
         Assert.Contains("plain.usersExplicit=False", answers);
+    }
+
+    /// <summary>
+    /// #5677: the lock's owner step sets the owner one object at a time, in process, on the handle the name count is read from,
+    /// and never with one <c>icacls /setowner ... /T</c> over the tree (which would change the owner of every name of a file
+    /// that has more than one). Pins the shape in both scripts: the lock calls <c>SetOwner</c>, has no <c>/T</c> owner call,
+    /// turns the two privileges on and off around the step, skips what the owner step listed, and the native class opens the
+    /// object itself (not what a link points to), reads the count from that handle and sets the owner on it.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void TheInstallTreeLockOwnerStep_SetsTheOwnerPerObjectOnTheCountedHandle_AndHasNoSubtreeCall(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var lockText = ExtractFunction(script, "Lock-DarlingInstallTree");
+        Assert.DoesNotContain("/setowner \"*$($adminsSid.Value)\"", lockText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$adminsSid.Value)\" /T", lockText, StringComparison.Ordinal);
+        Assert.Contains("[DarlingNativeOwner]::SetOwner($ownPath, $ownerBytes, [ref]$detail, [ref]$attributes)", lockText, StringComparison.Ordinal);
+        Assert.Contains("[DarlingNativeOwner]::SetPrivileges($true)", lockText, StringComparison.Ordinal);
+        Assert.Contains("[DarlingNativeOwner]::SetPrivileges($false)", lockText, StringComparison.Ordinal);
+        Assert.Contains("if ($skipped.ContainsKey($target.FullName)) { continue }", lockText, StringComparison.Ordinal);
+        /* A link is acted on itself and never walked into. */
+        Assert.Contains("($attributes -band 0x400) -eq 0", lockText, StringComparison.Ordinal);
+
+        var native = ExtractFunction(script, "Initialize-DarlingNativeOwner");
+        Assert.Contains("CreateFileW(path, 0x80 | 0x00080000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero)", native, StringComparison.Ordinal);
+        Assert.Contains("if (information.NumberOfLinks != 1) { return 1; }", native, StringComparison.Ordinal);
+        Assert.Contains("SetSecurityInfo(handle, 1, 1, ownerSid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero)", native, StringComparison.Ordinal);
+        Assert.DoesNotContain("/setowner /T", script.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.DoesNotContain("/setowner *S-1-5-32-544 /T", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5677: the owner step on its own, run on a small tree with the current account's SID as the owner to set (so it works
+    /// without elevation). A plain file and a folder take the new owner and report 0; a file with a second name outside the tree
+    /// reports 1 with a count of 2, keeps its owner under both names; a junction reports its attributes and is not followed
+    /// (the folder it points to keeps its owner). Run under Windows PowerShell 5.1 and PowerShell 7, with both scripts.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheNativeOwnerStep_SetsAPlainFileAndAFolder_AndLeavesAHardLinkedFileAlone(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Initialize-DarlingNativeOwner"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $stamp = [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $root = Join-Path $env:TEMP ('pm5677-native-' + $stamp)
+            $outsideDir = Join-Path $env:TEMP ('pm5677-native-outside-' + $stamp)
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $mine = New-Object byte[] $me.BinaryLength
+            $me.GetBinaryForm($mine, 0)
+            function Get-OwnerValue([string]$p) { return (Get-Acl -LiteralPath $p).GetOwner($sidType).Value }
+            try {
+                New-Item -ItemType Directory -Path "$root\sub", "$root\target", $outsideDir -Force | Out-Null
+                Set-Content -LiteralPath "$root\plain.txt" -Value 'x'
+                Set-Content -LiteralPath "$outsideDir\linked.txt" -Value 'x'
+                New-Item -ItemType HardLink -Path "$root\sub\linked.txt" -Value "$outsideDir\linked.txt" | Out-Null
+                & cmd.exe /c mklink /J "$root\junction" "$root\target" | Out-Null
+                'setup.linkMade=' + ((Get-Item -LiteralPath "$root\sub\linked.txt").LinkType -eq 'HardLink')
+                'setup.junctionMade=' + ((((Get-Item -LiteralPath "$root\junction" -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0))
+                $linkedBefore = Get-OwnerValue "$outsideDir\linked.txt"
+                $targetBefore = Get-OwnerValue "$root\target"
+                Initialize-DarlingNativeOwner
+                foreach ($name in @('plain.txt', 'sub', 'sub\linked.txt', 'junction')) {
+                    $detail = 0
+                    $attributes = [uint32]0
+                    $result = [DarlingNativeOwner]::SetOwner("$root\$name", $mine, [ref]$detail, [ref]$attributes)
+                    'result.' + $name + '=' + $result + ',' + $detail + ',' + (($attributes -band 0x400) -ne 0)
+                }
+                'owner.plain=' + ((Get-OwnerValue "$root\plain.txt") -eq $me.Value)
+                'owner.folder=' + ((Get-OwnerValue "$root\sub") -eq $me.Value)
+                'owner.linkedInside=' + ((Get-OwnerValue "$root\sub\linked.txt") -eq $linkedBefore)
+                'owner.linkedOutside=' + ((Get-OwnerValue "$outsideDir\linked.txt") -eq $linkedBefore)
+                'owner.junctionTarget=' + ((Get-OwnerValue "$root\target") -eq $targetBefore)
+            }
+            finally {
+                foreach ($dir in @($root, $outsideDir)) {
+                    if (Test-Path -LiteralPath $dir) {
+                        if (Test-Path -LiteralPath "$dir\junction") { & cmd.exe /c rmdir "$dir\junction" | Out-Null }
+                        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        AssertProbeSetupTook(answers);
+        Assert.Contains("result.plain.txt=0,1,False", answers);
+        Assert.Contains("result.sub=0,1,False", answers);
+        Assert.Contains("result.sub\\linked.txt=1,2,False", answers);
+        Assert.Contains("result.junction=0,1,True", answers);
+        Assert.Contains("owner.plain=True", answers);
+        Assert.Contains("owner.folder=True", answers);
+        Assert.Contains("owner.linkedInside=True", answers);
+        Assert.Contains("owner.linkedOutside=True", answers);
+        Assert.Contains("owner.junctionTarget=True", answers);
+    }
+
+    /// <summary>
+    /// #5677: the lock's owner step leaves a file with more than one name alone. The tree holds a plain file, a folder, a file
+    /// inside it and a file whose second name is outside the tree, all owned by the current account first. After the lock (the
+    /// service account is one that needs no account lookup) the linked file keeps that owner under BOTH names and is listed as
+    /// open exactly once, while the plain file, the folder and the root are owned by Administrators. Setting an owner of
+    /// Administrators needs an elevated token (CI's runner is one); a filtered token reports the root as needing an elevated
+    /// session and changes no owner. Run under Windows PowerShell 5.1 and PowerShell 7, with both scripts.
+    /// </summary>
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    [InlineData("install-darling.ps1", "pwsh")]
+    [InlineData("upgrade-darling.ps1", "pwsh")]
+    public void TheInstallTreeLock_GivesAdministratorsTheOwnerOfPlainFilesAndFolders_AndLeavesAHardLinkedFilesOwner(string scriptName, string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        AppendServiceWrittenList(probe, script);
+        probe.AppendLine(ExtractFunction(script, "Lock-DarlingInstallTree"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $stamp = [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $root = Join-Path $env:TEMP ('pm5677-owner-' + $stamp)
+            $outsideDir = Join-Path $env:TEMP ('pm5677-owner-outside-' + $stamp)
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $admins = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+            function Get-OwnerValue([string]$p) { return (Get-Acl -LiteralPath $p).GetOwner($sidType).Value }
+            try {
+                New-Item -ItemType Directory -Path "$root\sub", $outsideDir -Force | Out-Null
+                Set-Content -LiteralPath "$root\plain.dll" -Value 'x'
+                Set-Content -LiteralPath "$root\sub\inner.dll" -Value 'x'
+                Set-Content -LiteralPath "$outsideDir\linked.dll" -Value 'x'
+                New-Item -ItemType HardLink -Path "$root\sub\linked.dll" -Value "$outsideDir\linked.dll" | Out-Null
+                foreach ($p in @("$root\sub", "$root\plain.dll", "$root\sub\inner.dll", "$root\sub\linked.dll")) { $null = & icacls.exe $p /setowner "*$($me.Value)" /L /Q 2>&1 }
+                'setup.ownersSet=' + ((@("$root\sub", "$root\plain.dll", "$root\sub\inner.dll", "$root\sub\linked.dll", "$outsideDir\linked.dll") | Where-Object { (Get-OwnerValue $_) -ne $me.Value }).Count -eq 0)
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } }
+                'linkedListed=' + @($open | Where-Object { $_ -like '*linked.dll*' }).Count
+                'owner.linkedInside=' + ((Get-OwnerValue "$root\sub\linked.dll") -eq $me.Value)
+                'owner.linkedOutside=' + ((Get-OwnerValue "$outsideDir\linked.dll") -eq $me.Value)
+                foreach ($leaf in @('', '\sub', '\plain.dll', '\sub\inner.dll')) { 'adminOwner[' + $leaf + ']=' + ((Get-OwnerValue ($root + $leaf)) -eq $admins.Value) }
+            }
+            finally {
+                foreach ($dir in @($root, $outsideDir)) {
+                    if (Test-Path -LiteralPath $dir) {
+                        & icacls.exe $dir /reset /T /C /Q 2>&1 | Out-Null
+                        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        AssertProbeSetupTook(answers);
+        Assert.Contains("owner.linkedInside=True", answers);
+        Assert.Contains("owner.linkedOutside=True", answers);
+        if (answers.Contains("elevated=True"))
+        {
+            Assert.Contains("linkedListed=1", answers);
+            Assert.Contains(answers, a => a.StartsWith("open:\\sub\\linked.dll (a hard link: this file has more than one name", StringComparison.Ordinal));
+            foreach (var leaf in new[] { "", "\\sub", "\\plain.dll", "\\sub\\inner.dll" })
+            {
+                Assert.Contains($"adminOwner[{leaf}]=True", answers);
+            }
+        }
+        else
+        {
+            Assert.Contains(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("run elevated", StringComparison.Ordinal));
+        }
     }
 
     /// <summary>
@@ -3373,7 +3570,7 @@ function Get-CimInstance {
     /// (the lock and the pre-lock walk both read them).</summary>
     private static void AppendServiceWrittenList(StringBuilder probe, string script)
     {
-        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Get-DarlingCanonicalPath", "Get-DarlingSegmentsBelowRoot" })
+        foreach (var name in new[] { "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount", "Initialize-DarlingNativeOwner", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Get-DarlingCanonicalPath", "Get-DarlingSegmentsBelowRoot" })
         {
             probe.AppendLine(ExtractFunction(script, name));
         }
