@@ -138,9 +138,12 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
     public Task ADayMarkedByALateRow_DropsOutOfTheBuiltDays_AndIsReadLive() => RunLateRowAsync(utcNow: null);
 
     /// <summary>
-    /// The same assertions at a fixed clock, so the late-row test means the same all day. Before 04:00 UTC the window's start
-    /// (four hours back) is on the previous calendar day, so the window's first day is fifteen days before today; from 04:00
-    /// UTC it is fourteen. The cases straddle that edge (the last minute before 04:00, and 04:00 itself) and a mid-day one.
+    /// The same assertions at a fixed time of day, so the late-row test means the same all day. Before 04:00 UTC the window's
+    /// start (four hours back) is on the previous calendar day, so the window's first day is fifteen days before today; from
+    /// 04:00 UTC it is fourteen. The cases straddle that edge (the last minute before 04:00, and 04:00 itself) and a mid-day
+    /// one. The date is today's (read once), not a pinned calendar day: the late-row trigger windows on the database's own
+    /// <c>now()</c> (it marks a row only 1 to 17 days old), so a pinned date ages out of that reach and the trigger skips the
+    /// row (#5661). The hour and minute are what the case pins.
     /// </summary>
     [Theory]
     [InlineData(0, 30)]
@@ -148,7 +151,7 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
     [InlineData(4, 0)]
     [InlineData(12, 0)]
     public Task ADayMarkedByALateRow_DropsOutOfTheBuiltDays_AndIsReadLive_AtAFixedClock(int hour, int minute) =>
-        RunLateRowAsync(new DateTime(2026, 10, 7, hour, minute, 0, DateTimeKind.Utc));
+        RunLateRowAsync(DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Utc).AddHours(hour).AddMinutes(minute));
 
     private static async Task RunLateRowAsync(DateTime? utcNow)
     {
