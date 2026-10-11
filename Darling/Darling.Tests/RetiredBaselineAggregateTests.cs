@@ -539,13 +539,20 @@ public sealed class EmptySupersededBaselineLiveTests
         Assert.True(await RelationExistsAsync(connection, successor, ct), "the successor must stay, empty or not");
     }
 
+    /* #5667: the probe's lock_timeout and the release of the held lock are two timers this test owns, and the test needs the probe
+       to time out BEFORE the release (else the probe succeeds and the drop runs) and the release to come BEFORE a wrongly
+       attempted drop would itself time out (else a regression is hidden). At 1 s and 1.5 s that was 0.5 s each side, which a
+       slow runner closes; 4 s and 6 s leave 2 s each side, and no assertion changed. */
+    private static readonly TimeSpan ProbeLockTimeout = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan ReleaseAfter = TimeSpan.FromSeconds(6);
+
     /// <summary>#4292 Low 1: when the has-rows probe itself fails, the legacy must survive, not read as empty.
     /// <see cref="TimescaleSupport.JudgeSupersededBaselineRelationAsync"/> has no catch of its own, so the
     /// exception reaches <see cref="TimescaleSupport.DropRetiredBaselineAggregatesAsync"/>'s
     /// per-relation catch, which logs and skips the drop. Forced with a lock timeout (a plain <c>REVOKE SELECT</c>
     /// does not work here — <see cref="ScratchPostgres"/> connects as a superuser, which bypasses grants):
     /// a second connection holds <c>ACCESS EXCLUSIVE</c> on the legacy relation in an open transaction, and the
-    /// judged connection carries a 1-second <c>lock_timeout</c>, so its <c>EXISTS</c> read against the legacy
+    /// judged connection carries a <see cref="ProbeLockTimeout"/> <c>lock_timeout</c>, so its <c>EXISTS</c> read against the legacy
     /// view times out server-side.</summary>
     [Fact]
     public async Task LegacyProbeFails_LegacySurvives_AgainstDevPostgres()
@@ -591,14 +598,14 @@ public sealed class EmptySupersededBaselineLiveTests
             await lockCommand.ExecuteNonQueryAsync(ct);
         }
 
-        await using (var setLockTimeout = new NpgsqlCommand("SET lock_timeout = '1s'", connection))
+        await using (var setLockTimeout = new NpgsqlCommand($"SET lock_timeout = '{ProbeLockTimeout.TotalSeconds:0}s'", connection))
         {
             await setLockTimeout.ExecuteNonQueryAsync(ct);
         }
 
-        /* The lock blocks the has-rows probe, which times out at 1s and (correctly, today) propagates all the
+        /* The lock blocks the has-rows probe, which times out at ProbeLockTimeout and (correctly, today) propagates all the
            way out of DropRetiredBaselineAggregatesAsync's per-relation try, so the drop statement it guards is
-           never attempted and this returns almost immediately -- dropped stays 0. Released 1.5s in regardless,
+           never attempted and this returns once the probe has timed out -- dropped stays 0. Released ReleaseAfter in regardless,
            on its own timer: a REGRESSION this test must still be able to catch -- a catch inside
            JudgeSupersededBaselineRelationAsync that swallows the probe error and answers "empty" -- reaches
            that same drop statement, which would otherwise sit behind the SAME lock and time out too, hiding the
@@ -607,7 +614,7 @@ public sealed class EmptySupersededBaselineLiveTests
         var dropTask = TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct);
         var releaseTask = Task.Run(async () =>
         {
-            await Task.Delay(TimeSpan.FromSeconds(1.5), ct);
+            await Task.Delay(ReleaseAfter, ct);
             await lockTransaction.RollbackAsync(ct);
         }, ct);
 

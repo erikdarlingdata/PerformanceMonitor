@@ -10859,7 +10859,7 @@ WHERE ca.view_schema = 'collect'
     /// <summary>
     /// Runs DDL that takes an AccessExclusiveLock (the compression-settings ALTER on a hypertable or a continuous
     /// aggregate) without letting it queue indefinitely. The statements run in ONE explicit transaction behind
-    /// <c>SET LOCAL lock_timeout</c> (<see cref="HourlyDdlLockTimeout"/>), because <c>SET LOCAL</c> outside a
+    /// <c>SET LOCAL lock_timeout</c> (<see cref="HourlyDdlLockTimeout"/>, or the internal <c>lockTimeoutOverride</c> a test passes), because <c>SET LOCAL</c> outside a
     /// transaction is a no-op and a waiting AccessExclusiveLock request holds up every collector write to the
     /// table behind it. A busy lock (<c>55P03</c>) costs one Information line and the next hourly pass tries again;
     /// the same <paramref name="what"/> busy <see cref="BoundedDdlBusyStreaks.EscalateAfter"/> passes in a row also
@@ -12633,14 +12633,14 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
     /// <summary>
     /// The compress half of a chunk's re-group (#5574): the chunk was decompressed in a transaction that has committed,
     /// so it is uncompressed now and a busy lock is worth <paramref name="attempts"/> tries, <paramref name="retryDelay"/>
-    /// apart, each behind the 3 s lock timeout. Returns <see cref="PerfmonRegroupChunkResult.Regrouped"/> when the chunk is compressed again,
+    /// apart, each behind the lock timeout (<see cref="HourlyDdlLockTimeout"/> unless the caller passes <paramref name="lockTimeoutOverride"/>). Returns <see cref="PerfmonRegroupChunkResult.Regrouped"/> when the chunk is compressed again,
     /// <see cref="PerfmonRegroupChunkResult.Gone"/> when the chunk is really gone (retention dropped it between the halves),
     /// and <see cref="PerfmonRegroupChunkResult.LeftUncompressed"/> otherwise. When every try failed the
     /// chunk stays uncompressed, with one Warning, and the compression policy compresses it with the hypertable's grouping
     /// at its next run. <c>if_not_compressed</c> makes a policy run that got there first a success, not an error.
     /// A cancellation (the service stopping) leaves the chunk the same way, says so at Information, and propagates.
     ///
-    /// <para><b>Only a busy lock is retried</b> (55P03, behind the 3 s lock timeout): any other error, a statement that ran
+    /// <para><b>Only a busy lock is retried</b> (55P03, behind that lock timeout): any other error, a statement that ran
     /// into its cap included, ends the tries at once, because a second try of a compression that just failed (or ran
     /// 30 minutes) is another whole compression. The busy tries are not fed to <see cref="BusyStreaks"/>: three tries inside
     /// ten seconds are not "three passes", and the Warning below is the one line an all-busy half logs.</para>

@@ -493,8 +493,9 @@ public sealed class PerfmonRegroupLiveTests
 
     /// <summary>
     /// A decompress that runs into its statement cap is not retried while the process lives (#5574, M2): the newest chunk's lock is
-    /// held, so its decompress waits and the 2 s cap (a test value for the 30 minutes) ends it before the 3 s lock timeout. The
-    /// other four chunks are re-grouped, the capped one is untouched with ONE Warning, and a second run of the same drain does not
+    /// held, so its decompress waits and the 2 s cap (a test value for the 30 minutes) ends it. The lock timeout is 120 s here
+    /// (LockTimeoutFarAboveTheCap), so the cap is the only timeout that can end the wait. The other four
+    /// chunks are re-grouped, the capped one is untouched with ONE Warning, and a second run of the same drain does not
     /// try it again even though it is still a candidate.
     /// </summary>
     [Fact]
@@ -543,8 +544,9 @@ public sealed class PerfmonRegroupLiveTests
     /// A decompress the SERVER cancels before the 30-minute cap (a short <c>statement_timeout</c> on the role, a cancel from
     /// another session) is still not tried again until the restart, so a short server timeout does not cost a rewrite every hour,
     /// but the log tells the truth about it (#5574, check round 2): "cancelled by the server" with the real elapsed time, not
-    /// "could not be decompressed within 1800 s". The session's <c>statement_timeout</c> is 2 s here, under the 3 s lock wait the
-    /// held chunk gives, so the server cancels first and the cap (the default 1800 s) is nowhere near.
+    /// "could not be decompressed within 1800 s". The session's <c>statement_timeout</c> is 2 s here and the lock timeout is 120 s
+    /// (LockTimeoutFarAboveTheCap), so the server's cancel is the only timeout that can end the wait and the cap (the default 1800 s)
+    /// is nowhere near.
     /// </summary>
     [Fact]
     public async Task ADecompressTheServerCancelsBeforeTheCap_IsNotTriedAgain_AndTheLogSaysTheServerDidIt()
@@ -833,11 +835,6 @@ public sealed class PerfmonRegroupLiveTests
     }
 
     /* ---------------- fixture ---------------- */
-
-    /// <summary>#5667: the lock timeout of a test that holds a chunk on purpose to make a statement cap or a server
-    /// <c>statement_timeout</c> fire. The product's own is 3 s; with that, a cap of 1 or 2 s wins by 1 or 2 s on a quiet machine and
-    /// loses on a slow one. 120 s is far above every cap in this class, so the cap is the ONLY timeout that can end the wait.</summary>
-    private const string LockTimeoutFarAboveTheCap = "120s";
 
     private static PerfmonRegroupDrain NewDrain(
         string connectionString, CapturingTestLogger logger, TimeSpan minPause, List<TimeSpan> pauses,
