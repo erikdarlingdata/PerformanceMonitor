@@ -264,7 +264,9 @@ function alertAdvice(a) {
 }
 
 /* #5642: "Newest CPU sample: 15:43:29 UTC, 5m 20s old" - the same wording AlertDetailText.SampleAgeLine writes into
- * detail_text, built from the persisted newest_sample field. Null when the row has none. */
+ * detail_text, built from the persisted newest_sample field. Null when the row has none. age_seconds is TRUNCATED to the
+ * millisecond on the wire (AlertNewestSampleWire), never rounded, so the Math.floor below is exactly the C# (int) truncation
+ * AlertDetailText.FormatAge does: 59.6 s is "59s old" here and in the email, not "1m 0s old". */
 function sampleAgeLine(sample) {
   if (sample == null || typeof sample.source !== "string" || sample.source.trim().length === 0) return null;
   const at = new Date(sample.instant_utc);

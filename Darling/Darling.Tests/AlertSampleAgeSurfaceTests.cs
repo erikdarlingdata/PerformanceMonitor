@@ -199,6 +199,57 @@ public sealed class AlertSampleAgeSurfaceTests
         Assert.Contains("detail-sample-age", branch, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task TheWebPageAgeLine_MatchesTheNotificationLine_AtEveryUnitBoundary()
+    {
+        // alerts.js builds the line from the published age_seconds; AlertDetailText.SampleAgeLine builds the notification's.
+        // They must agree to the character at the unit boundaries, where a rounded field said "1m 0s" for "59s" (#5642 review).
+        var seconds = new[] { 0d, 0.4, 59d, 59.6, 59.9999999, 60d, 119.7, 3599d, 3599.6, 3599.9999999, 3600d, 3661.9, 86399.6, 86400d, 90000.5, 200000.123 };
+        var wires = new List<AlertNewestSampleWire>();
+        var expected = new List<string>();
+        foreach (var s in seconds)
+        {
+            var sample = new AlertNewestSample("CPU", new DateTime(2026, 10, 11, 15, 43, 29, DateTimeKind.Utc), TimeSpan.FromTicks((long)(s * TimeSpan.TicksPerSecond)));
+            var json = ContextJsonWith(sample);
+            wires.Add(AlertNewestSampleWire.FromContextJson(json)!);
+            expected.Add(AlertDetailText.SampleAgeLine(AlertContextSerializer.TryReadNewestSample(json))!);
+        }
+
+        // Spot checks that name the failing boundary, not just a diff.
+        Assert.EndsWith("59s old", expected[3], StringComparison.Ordinal);
+        Assert.EndsWith("59m 59s old", expected[8], StringComparison.Ordinal);
+
+        var js = ReadRepoFile(AlertsJsPath);
+        var start = js.IndexOf("function sampleAgeLine(sample) {", StringComparison.Ordinal);
+        var end = js.IndexOf("\n}", start, StringComparison.Ordinal) + 2;
+        Assert.True(start >= 0 && end > start);
+        var script = js[start..end] + "\nconsole.log(JSON.stringify(" + JsonSerializer.Serialize(wires) + ".map(sampleAgeLine)));";
+
+        var psi = new System.Diagnostics.ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        psi.ArgumentList.Add("-e");
+        psi.ArgumentList.Add(script);
+        System.Diagnostics.Process proc;
+        try
+        {
+            proc = System.Diagnostics.Process.Start(psi)!;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
+            return;
+        }
+
+        using (proc)
+        {
+            var error = proc.StandardError.ReadToEndAsync();
+            var output = proc.StandardOutput.ReadToEnd().Trim();
+            Assert.True(proc.WaitForExit(20000), "node did not finish in 20 s");
+            Assert.True(proc.ExitCode == 0, "node failed: " + await error);
+            var lines = JsonSerializer.Deserialize<string[]>(output)!;
+            Assert.Equal(expected.ToArray(), lines);
+        }
+    }
+
     /* ---------------- MCP get_alert_history ---------------- */
 
     [Fact]
@@ -271,6 +322,11 @@ public sealed class AlertSampleAgeSurfaceTests
         {
             AlertTime = new DateTime(2026, 7, 1, 15, 49, 0, DateTimeKind.Unspecified),
             MetricName = "High CPU",
+            CurrentValue = 97,
+            ThresholdValue = 90,
+            AlertSent = true,
+            NotificationType = "email",
+            Muted = false,
             ContextJson = ContextJsonWith(Sample()),
         };
         Assert.Equal(Line, withSample.NewestSampleDisplay);
@@ -278,6 +334,11 @@ public sealed class AlertSampleAgeSurfaceTests
         {
             AlertTime = new DateTime(2026, 7, 1, 15, 49, 0, DateTimeKind.Unspecified),
             MetricName = "Failed Jobs",
+            CurrentValue = 1,
+            ThresholdValue = 0,
+            AlertSent = true,
+            NotificationType = "email",
+            Muted = false,
             ContextJson = ContextJsonWith(null),
         }.NewestSampleDisplay);
 
