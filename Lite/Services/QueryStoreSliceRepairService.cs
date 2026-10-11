@@ -851,18 +851,17 @@ HAVING COUNT(*) > 1";
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
 
-            var columns = await ColumnsOfParquetAsync(connection, file.Path, cancellationToken);
+            var columnTypes = await ColumnTypesOfParquetAsync(connection, file.Path, cancellationToken);
+            var columns = columnTypes.Select(c => c.Name).ToList();
             var key = KeyColumnsFor(columns);
-            var projection = BuildProjection(columns, key);
+            var rewrite = BuildRewriteSelect(columnTypes, key, EscapePath(file.Path));
 
             await ArchiveService.WithRaisedCopyMemoryLimit(connection, () => WithRewriteSpillCap(connection, spillCapBytes, async () =>
             {
                 using var command = connection.CreateCommand();
                 command.CommandText = $@"
 COPY (
-    SELECT {projection}
-    FROM read_parquet('{EscapePath(file.Path)}')
-    GROUP BY {string.Join(", ", key)}
+{rewrite}
 ) TO '{EscapePath(temp)}' ({ParquetCompaction.ArchiveCopyOptions})";
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }));
@@ -1006,6 +1005,60 @@ COPY (
         using var command = connection.CreateCommand();
         command.CommandText = $"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}' ORDER BY ordinal_position";
         return await ReadStringsAsync(command, cancellationToken);
+    }
+
+    /// <summary>
+    /// The SELECT that rewrites one archive file with its split slices collapsed (#5653).
+    ///
+    /// <para><b>Shape.</b> A narrow aggregate (the key, the first row's position in the file and the recombined
+    /// measurements, with no text column in it) is joined back to the file on that position, so the output is the
+    /// file's own rows in the file's own order. The old shape was one wide <c>GROUP BY</c> over every column.
+    /// That carried every attribute through the hash aggregate (a reporter's 199 MiB file spilled 2.7 GiB), and its
+    /// output came back in hash order, which lost the time order the archiver wrote and the compression that rides
+    /// on it (a file that lost 40 rows grew from 17.4 to 23.4 MB).</para>
+    ///
+    /// <para><b>Types.</b> The recombined values are cast back to the column's own type. <c>SUM</c> of a BIGINT is
+    /// a HUGEINT, which parquet stores as DOUBLE, so <c>execution_count</c> used to come back as DOUBLE. A group of
+    /// one row is not recombined at all: its row passes through byte for byte (the old shape also turned a lone
+    /// row's average into NULL when its execution count was 0).</para>
+    /// </summary>
+    internal static string BuildRewriteSelect(
+        IReadOnlyList<(string Name, string Type)> columns, IReadOnlyList<string> key, string escapedPath)
+    {
+        var names = columns.Select(c => c.Name).ToList();
+        var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
+        var narrow = BuildMeasurementProjection(names, key, "MIN(file_row_number)", "__survivor");
+        var select = string.Join(
+            ", ",
+            columns.Select(c => keySet.Contains(c.Name) || !IsMeasurement(c.Name)
+                ? $"t.{c.Name}"
+                : $"CASE WHEN s.__slices > 1 THEN CAST(s.{c.Name} AS {c.Type}) ELSE t.{c.Name} END AS {c.Name}"));
+
+        return $@"    SELECT {select}
+    FROM read_parquet('{escapedPath}', file_row_number = true) AS t
+    JOIN (
+        SELECT {narrow}, COUNT(*) AS __slices
+        FROM read_parquet('{escapedPath}', file_row_number = true)
+        GROUP BY {string.Join(", ", key)}
+    ) AS s ON t.file_row_number = s.__survivor";
+    }
+
+    /// <summary>
+    /// A parquet file's columns with their DuckDB types.
+    /// </summary>
+    private static async Task<IReadOnlyList<(string Name, string Type)>> ColumnTypesOfParquetAsync(
+        DuckDBConnection connection, string file, CancellationToken cancellationToken)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"DESCRIBE SELECT * FROM read_parquet('{EscapePath(file)}')";
+        var values = new List<(string, string)>();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            values.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        return values;
     }
 
     /// <summary>
