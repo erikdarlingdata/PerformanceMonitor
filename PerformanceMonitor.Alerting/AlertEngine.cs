@@ -1008,11 +1008,16 @@ public sealed class AlertEngine
                BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
                Lite's deliverer persists only the context, Darling's folds the outcome in. */
             var cpuGrade = GradeCpuFire(alertCpuValue);
+            var cpuContext = StampNewestSample(new AlertContext { SeverityOverride = cpuGrade }, "CPU", newestSampleUtc, now);
+            /* #5642: the context holds no Details, so the typed field alone would not reach a text channel; the
+               hand-built text carries the age line (AlertDetailText.SampleAgeLine, appended once), and the
+               channel renderers print the typed field only when the prose does not already carry it. */
+            cpuDetailText = AlertDetailText.WithSampleAge(cpuDetailText, cpuContext) ?? cpuDetailText;
             var delivery = await FireAsync(new AlertOutcome(
                 key, serverName, "High CPU",
                 $"{alertCpuValue:F0}% ({cpuMetricLabel})",
                 $"{_settings.CpuThresholdPercent}%",
-                Context: StampNewestSample(new AlertContext { SeverityOverride = cpuGrade }, "CPU", newestSampleUtc, now), DetailText: cpuDetailText,
+                Context: cpuContext, DetailText: cpuDetailText,
                 NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
                 Muted: isMuted, Severity: cpuGrade,
                 ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
