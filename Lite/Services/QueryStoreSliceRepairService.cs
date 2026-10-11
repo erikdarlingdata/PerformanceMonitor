@@ -774,8 +774,9 @@ HAVING COUNT(*) > 1";
     ///
     /// <para>The cap is not a prediction. An earlier version asked for 16 times the file, from one 199 MiB file that
     /// spilled 2.7 GiB under the old query, which carried the text and plan columns through the aggregate. The
-    /// current query aggregates only the key and the measurements, and its spill is a small fraction of that (see
-    /// the measurement on the PR), so sizing the ask from the file would skip files the disk can hold. If the
+    /// current query aggregates only the key and the measurements. Measured on a generated 159 MiB file with the real
+    /// <c>query_store_stats</c> columns, it completed with the temp folder capped at 2 MiB (under 0.013 times the
+    /// file, against 13.6 times before), so sizing the ask from the file would skip files the disk can hold. If the
     /// rewrite does run out of its cap, DuckDB fails the statement, the temp file goes, and the original stays.</para>
     /// </summary>
     internal static long RewriteSpillCapBytes(long? freeBytes, long fileBytes, long reserveBytes) =>
