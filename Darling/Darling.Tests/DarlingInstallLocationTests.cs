@@ -4439,6 +4439,76 @@ function Get-CimInstance {
         Assert.Contains("neither=0", answers);
     }
 
+    /// <summary>
+    /// #5673: the installer's user-profile check also runs on the install folder's final path, so a junction that leads into
+    /// a profile folder reads as under the profile, a folder that is only named like one does not, and a folder that does not
+    /// exist yet is resolved through the part of its path that does. The check is cut out of the script, after the typed-path
+    /// check, and run with a profile root of its own.
+    /// </summary>
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh")]
+    public void TheInstaller_ReadsAJunctionIntoAProfileFolderAsUnderTheProfile(string shell)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
+        var start = script.IndexOf("$resolvedRoot = Get-DarlingResolvedFolder $classifyRoot", StringComparison.Ordinal);
+        Assert.True(start >= 0, "install-darling.ps1 no longer resolves the install folder before the profile check (#5673)");
+        var end = script.IndexOf("\n}", start, StringComparison.Ordinal) + 2;
+        var profileCheck = script.Substring(start, end - start);
+
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Convert-ExtendedLengthPath"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingCanonicalPath"));
+        probe.AppendLine(ExtractFunction(script, "Test-PathIsAtOrUnder"));
+        probe.AppendLine(ExtractFunction(script, "Get-DarlingResolvedFolder"));
+        probe.AppendLine("function Get-ProfilesDirectory { $script:profiles }");
+        probe.AppendLine("function Test-Under([string]$typed) { $classifyRoot = $typed; $underProfile = $false; " + "\n" + profileCheck + "\n" + " $underProfile }");
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $base = Join-Path $env:TEMP ('pm5673-prof-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory("$base\profiles\me\data")
+            [void][IO.Directory]::CreateDirectory("$base\elsewhere\data")
+            try {
+                $script:profiles = "$base\profiles"
+                $env:USERPROFILE = "$base\profiles\me"
+                [void](New-Item -ItemType Junction -Path "$base\link" -Target "$base\profiles\me\data")
+                [void](New-Item -ItemType Junction -Path "$base\plain" -Target "$base\elsewhere\data")
+                'resolved=' + (Get-DarlingResolvedFolder "$base\link").EndsWith('\profiles\me\data')
+                'resolvedMissing=' + (Get-DarlingResolvedFolder "$base\link\not\there").EndsWith('\profiles\me\data\not\there')
+                'junction=' + (Test-Under "$base\link")
+                'junctionNew=' + (Test-Under "$base\link\Darling")
+                'typedProfile=' + (Test-Under "$base\profiles\me\x")
+                'plainJunction=' + (Test-Under "$base\plain")
+                'plainNew=' + (Test-Under "$base\plain\Darling")
+                'elsewhere=' + (Test-Under "$base\elsewhere\x")
+            }
+            finally {
+                foreach ($name in 'link', 'plain') { if (Test-Path -LiteralPath "$base\$name") { [IO.Directory]::Delete("$base\$name") } }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        List<string>? answers;
+        if (shell == "pwsh")
+        {
+            answers = RunPowerShell7(probe.ToString());
+            if (answers is null) { Assert.Skip("PowerShell 7 (pwsh) is not installed on this machine."); return; }
+        }
+        else
+        {
+            answers = RunWindowsPowerShell(probe.ToString());
+        }
+
+        Assert.Contains("resolved=True", answers);
+        Assert.Contains("resolvedMissing=True", answers);
+        Assert.Contains("junction=True", answers);
+        Assert.Contains("junctionNew=True", answers);
+        Assert.Contains("typedProfile=True", answers);
+        Assert.Contains("plainJunction=False", answers);
+        Assert.Contains("plainNew=False", answers);
+        Assert.Contains("elsewhere=False", answers);
+    }
+
     /// <summary>The two path helpers the walk, the lock and the path test call (#5649), the way the scripts define them.</summary>
     private static void AppendPathHelpers(StringBuilder probe, string script)
     {

@@ -1003,6 +1003,68 @@ function Get-DarlingInstallRootFromService([string]$name) {
     catch { return $null }
 }
 
+# The folder with every junction and link on the way to it followed (#5673): the final path of the deepest part of $path
+# that exists, with the names below it that do not exist yet put back after it. A junction or link that leads into a
+# profile folder is under that profile whatever it is called, so the profile test is run on this spelling as well as the
+# typed one. Returns $null when no part of the path can be opened. Only in install-darling.ps1.
+function Get-DarlingResolvedFolder([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+    try {
+        if (-not ('DarlingFinalPath' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DarlingFinalPath
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint length, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    // The final path (drive-letter form, links followed) of an existing folder, or null.
+    public static string Of(string folder)
+    {
+        IntPtr handle = CreateFileW(folder, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) { return null; }
+        try
+        {
+            StringBuilder buffer = new StringBuilder(1024);
+            uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+            if (length >= buffer.Capacity)
+            {
+                buffer = new StringBuilder((int)length + 1);
+                length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+            }
+            if (length == 0 || length >= buffer.Capacity) { return null; }
+            return buffer.ToString();
+        }
+        finally { CloseHandle(handle); }
+    }
+}
+'@
+        }
+        $existing = [IO.Path]::GetFullPath($path)
+        if ($existing.Length -gt 3) { $existing = $existing.TrimEnd('\') }
+        $below = @()
+        while ($true) {
+            $real = [DarlingFinalPath]::Of($existing)
+            if ($null -ne $real) { break }
+            $parent = [IO.Path]::GetDirectoryName($existing)
+            if ([string]::IsNullOrEmpty($parent)) { return $null }
+            $below = @([IO.Path]::GetFileName($existing)) + $below
+            $existing = $parent
+        }
+        return (@((Convert-ExtendedLengthPath $real).TrimEnd('\')) + $below) -join '\'
+    }
+    catch { return $null }
+}
+
 # True when $candidate IS $parent or sits underneath it.
 #
 # The separator is appended before the prefix test on purpose: a bare StartsWith reads C:\UsersData as
@@ -1684,6 +1746,13 @@ $networkKind = Get-NetworkPathKind $classifyRoot
 # $env:USERPROFILE as well as the machine's profile root: a profile redirected outside ProfilesDirectory
 # is still a profile, and it is the profile whose owner is most likely to be running this script.
 $underProfile = (Test-PathIsAtOrUnder $classifyRoot (Get-ProfilesDirectory)) -or (Test-PathIsAtOrUnder $classifyRoot $env:USERPROFILE)
+
+# A junction or link into a profile folder is under that profile whatever it is called (#5673): the same test, on the
+# folder's final path.
+$resolvedRoot = Get-DarlingResolvedFolder $classifyRoot
+if (-not $underProfile -and $resolvedRoot) {
+    $underProfile = (Test-PathIsAtOrUnder $resolvedRoot (Get-ProfilesDirectory)) -or (Test-PathIsAtOrUnder $resolvedRoot $env:USERPROFILE)
+}
 
 if ($underProfile -or $networkKind) {
     if ($underProfile) {
