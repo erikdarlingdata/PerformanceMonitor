@@ -1024,15 +1024,17 @@ COPY (
 
         progress?.Report($"Archive {name}: {file.RowsRemoved:N0} row(s) removed ({FormatBytes(beforeBytes)} -> {FormatBytes(afterBytes)}).");
 
-        /* The size can GROW despite the repair removing rows, and an operator watching their archive get
-           bigger after a row-removing repair deserves the reason rather than a support ticket: parquet size is
-           dominated by per-column compression of row groups, and the rewrite re-lays those out. Measured on a
-           real archive file, 22,760 rows removed and the file still went 28.0 MB to 31.6 MB. */
+        /* The rewrite keeps the file's row order and its column types (#5653), so a repaired file is not expected to
+           be bigger than the original. Before that, it could be: the old rewrite returned rows in hash order and
+           stored execution_count as DOUBLE, and a file that lost 40 rows grew from 17.4 to 23.4 MB. If it grows
+           anyway, say so plainly instead of explaining it away: the contents were just verified (rows and execution
+           total), so the operator needs to know the data is fine and the size is unexpected. */
         if (afterBytes > beforeBytes)
         {
             progress?.Report(
-                $"  ({name} grew despite losing rows — parquet size follows row-group layout and per-column " +
-                "compression, not row count. The data is correct and smaller; its encoding is simply less lucky.)");
+                $"  ({name} is larger after the repair despite losing rows, which is not expected: the rewrite keeps the " +
+                "file's row order and column types. Its rows and execution total were checked against the original before " +
+                "it replaced it, so the data is intact.)");
         }
 
         _logger?.LogInformation(
