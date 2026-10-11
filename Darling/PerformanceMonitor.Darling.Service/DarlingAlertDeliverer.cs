@@ -198,6 +198,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             context.SeverityOverride ??= outcome.Severity;
         }
 
+        /* #5642: the sample-age line rides the history row's detail_text and every channel's prose exactly
+           once, whichever way the engine built the text; the context JSON below carries the typed field. */
+        detailText = AlertDetailText.WithSampleAge(detailText, context);
+
         /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below.
            outcome.DisplayName (a custom rule's human name, or null for built-ins) renders in the
            subject/body/webhook titles in place of the "Custom:<id>" metric name; the metric name stays the

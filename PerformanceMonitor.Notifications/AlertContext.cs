@@ -371,7 +371,17 @@ public record AlertContextDto(
     /* #4223 self-monitor notebook: trailing and nullable like WaitType, so a row written before this
        member existed rehydrates to null ("this row carries no collector name") rather than a fabricated
        value. */
-    string? CollectorName = null);
+    string? CollectorName = null,
+    /* #5642 sample age: trailing and nullable like CollectorName, so a row written before this member
+       existed rehydrates to null ("this row carries no sample age") rather than a fabricated age. */
+    AlertNewestSampleDto? NewestSample = null);
+
+/// <summary>
+/// JSON mirror of <see cref="AlertNewestSample"/> (#5642): the age rides as whole-and-fractional seconds,
+/// computed ONCE when the alert fired, so the history row, the web pages, the MCP read and the Viewer all say
+/// what the notification said and never re-measure against a later clock.
+/// </summary>
+public record AlertNewestSampleDto(string Source, DateTime InstantUtc, double AgeSeconds);
 
 /// <summary>
 /// The persisted routing DECISION for an analysis finding (#3712): trailing and nullable on
@@ -699,7 +709,11 @@ public static class AlertContextSerializer
             /* #4223: the wait type this firing is about, as structured data. Already the persisted shape. */
             context.WaitType,
             /* #4223: the collector this firing is about, as structured data. Already the persisted shape. */
-            context.CollectorName);
+            context.CollectorName,
+            /* #5642: the newest sample's source, instant and fire-time age. */
+            context.NewestSample is { } sample
+                ? new AlertNewestSampleDto(sample.Source, DateTime.SpecifyKind(sample.InstantUtc, DateTimeKind.Utc), sample.Age.TotalSeconds)
+                : null);
         return JsonSerializer.Serialize(dto);
     }
 
@@ -948,6 +962,13 @@ public static class AlertContextSerializer
             /* #4223: the collector this firing is about, null on every non-Collector-Cost-Regression alert
                and every row written before this member existed. */
             context.CollectorName = dto.CollectorName;
+
+            /* #5642: the fire-time sample age, null on every alert without a UTC sample instant and every row
+               written before this member existed. */
+            context.NewestSample = dto.NewestSample is { } newest && !string.IsNullOrWhiteSpace(newest.Source)
+                ? new AlertNewestSample(newest.Source, DateTime.SpecifyKind(newest.InstantUtc, DateTimeKind.Utc),
+                    TimeSpan.FromSeconds(Math.Max(0, newest.AgeSeconds)))
+                : null;
 
             foreach (var d in dto.Details)
             {
