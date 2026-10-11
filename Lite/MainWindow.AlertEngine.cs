@@ -114,6 +114,19 @@ public partial class MainWindow : Window
            and counted its sibling databases' blocking and deadlocks. */
         var liveEdition = connStatus?.SqlEngineEdition ?? PerformanceMonitor.Collectors.CollectorEngineCapability.UnknownEngineEdition;
 
+        /* #5642: when this app's connection to the server began collecting, and the recent CPU samples the shared
+           gate judges one by one. The sweep observes the reading too, so a sweep that runs before the connection
+           tick's first pass still stamps a value (an online server already stamped keeps its value). A server whose
+           status is unknown has none, and the engine then treats every sample as eligible. */
+        DateTime? watchingSinceUtc = null;
+        if (badgeServer != null && connStatus?.IsOnline != null)
+        {
+            _watchingSince.Observe(badgeServer.Id, connStatus.IsOnline == true, DateTime.UtcNow);
+            watchingSinceUtc = _watchingSince.Get(badgeServer.Id);
+        }
+
+        var recentCpuSamples = await ReadRecentCpuSamplesAsync(summary.ServerId);
+
         var snapshot = new AlertServerSnapshot(
             key,
             summary.DisplayName,
@@ -132,7 +145,14 @@ public partial class MainWindow : Window
             CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime,
             SeparatelyMonitoredDatabases: badgeServer is null
                 ? null
-                : _engineEditions.SeparatelyMonitoredDatabases(badgeServer, liveEdition, _serverManager.GetAllServers()));
+                : _engineEditions.SeparatelyMonitoredDatabases(badgeServer, liveEdition, _serverManager.GetAllServers()))
+        {
+            /* #5642: the TRUE UTC instant of the newest CPU sample (null on a pre-v63 row, which has only the local
+               stamp), the recent samples oldest first, and when the connection began collecting. */
+            CpuSampleUtcOnly = summary.CpuSampleTimeUtc,
+            RecentCpuSamples = recentCpuSamples,
+            WatchingSinceUtc = watchingSinceUtc
+        };
 
         /* #4752: the app-lifetime token (_backgroundCts, cancelled once in MainWindow_Closing), so closing the app
            ends an alert post still in flight instead of leaving it to run out its timeout against an endpoint that
@@ -179,6 +199,28 @@ public partial class MainWindow : Window
             if ((curBadgeLowDisk && !prevBadgeLowDisk) || (curBadgeFailedJob && !prevBadgeFailedJob))
                 _alertStateService.ClearAcknowledgementForNewCondition(badgeServer.Id);
             RefreshServerBadgeExtras(badgeServer.Id);
+        }
+    }
+
+    /// <summary>
+    /// The server's recent CPU samples for the shared gate (#5642), oldest first, off the dispatcher (DuckDB.NET is
+    /// synchronous). A failed read returns null, which the engine reads as "no list": it judges the single latest
+    /// sample as it did before, so a read failure can only make the alert fire later, never stop the sweep.
+    /// </summary>
+    private async Task<IReadOnlyList<AlertCpuSample>?> ReadRecentCpuSamplesAsync(int serverId)
+    {
+        var dataService = _dataService;
+        if (dataService == null) return null;
+
+        try
+        {
+            var now = DateTime.UtcNow;
+            return await Task.Run(() => dataService.GetRecentCpuSamplesAsync(serverId, now));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("Alerts", $"Recent CPU samples read failed for server {serverId}: {ex.Message}");
+            return null;
         }
     }
 

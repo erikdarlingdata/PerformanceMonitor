@@ -28,7 +28,8 @@ public partial class LocalDataService
 SELECT
     volume_mount_point,
     MAX(volume_total_mb) AS volume_total_mb,
-    MIN(volume_free_mb) AS volume_free_mb
+    MIN(volume_free_mb) AS volume_free_mb,
+    MAX(collection_time) AS newest_sample
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -51,7 +52,10 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
             {
                 MountPoint = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 TotalMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                FreeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                FreeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                /* #5642: the snapshot this row came from, for the alert's newest-sample age line. collection_time is
+                   a naive-UTC store stamp, so it is the instant as it stands. */
+                NewestSampleUtc = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)
             });
         }
 

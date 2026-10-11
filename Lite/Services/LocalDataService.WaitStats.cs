@@ -906,6 +906,7 @@ LIMIT 2000";
                         r.program_name,
                         r.login_name,
                         r.total_elapsed_time_ms,
+                        r.collection_time,
                         {exclusionSql.ProgramPrefixPredicate} AS excluded_by_program_prefix,
                         {exclusionSql.LoginPredicate} AS excluded_by_login,
                         {exclusionSql.DatabasePredicate} AS excluded_by_database
@@ -936,7 +937,8 @@ LIMIT 2000";
                     r.login_name,
                     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_program_prefix_count,
                     CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS INTEGER) AS excluded_by_login_count,
-                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS INTEGER) AS excluded_by_database_count
+                    CAST((SELECT COUNT(DISTINCT x.session_id) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS INTEGER) AS excluded_by_database_count,
+                    r.collection_time AS newest_sample
                 FROM candidates AS r
                 WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)
                 ORDER BY r.total_elapsed_time_ms DESC
@@ -980,7 +982,10 @@ LIMIT 2000";
                    BuildLongRunningQueryContext renders the ("Program", ...) detail item the
                    Dashboard's alert already had. */
                 ProgramName = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11)
+                LoginName = reader.IsDBNull(11) ? "" : reader.GetString(11),
+                /* #5642: the snapshot the row came from (the read keeps only the newest collection), for the alert's
+                   newest-sample age line. collection_time is a naive-UTC store stamp. */
+                NewestSampleUtc = reader.IsDBNull(15) ? null : DateTime.SpecifyKind(reader.GetDateTime(15), DateTimeKind.Utc)
             });
             /* The same three scalars on every row — read once is enough, and a read with no rows has nothing to
                fire and therefore nothing to render the counts beside (LongRunningQueryReadResult says why). */
