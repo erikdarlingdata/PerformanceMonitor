@@ -802,6 +802,8 @@ internal static class DarlingTriageEndpoint
                        ServerError arm answers with (this page still answers 200 overall; only the card's text
                        degrades). */
                     var sentence = McpHelpers.ErrorMessageOf(raw);
+                    /* #5678: a card the browser left is not a failure; the page is gone, so nothing is logged or answered. */
+                    requestContext.RequestAborted.ThrowIfCancellationRequested();
                     DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, sentence);
                     result["error"] = DarlingWebFailureLog.IsStatementTimeoutSentence(sentence)
                         ? DarlingWebFailureLog.TimeoutMessage

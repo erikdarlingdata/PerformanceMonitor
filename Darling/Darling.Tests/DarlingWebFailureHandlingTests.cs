@@ -20,6 +20,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -182,7 +183,8 @@ public sealed class DarlingWebFailureHandlingTests
     /// middleware registered textually before it — the same nesting these test-only routes rely on. No live
     /// Postgres needed: every route here throws before ever opening the (unopened) pool.
     /// </summary>
-    private static async Task<(TestServer Server, CapturingTestLogger Logger)> BuildServer(CollectorRuntimeState? collectorState = null)
+    private static async Task<(TestServer Server, CapturingTestLogger Logger)> BuildServer(
+        CollectorRuntimeState? collectorState = null, NpgsqlDataSource? store = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -192,7 +194,7 @@ public sealed class DarlingWebFailureHandlingTests
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
 
-        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        var postgres = store ?? NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
 
         DarlingWebHostService.ConfigureResponseCompression(builder.Services);
@@ -437,6 +439,128 @@ public sealed class DarlingWebFailureHandlingTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
         Assert.Equal("(no log lines captured)", logger.Joined);
+    }
+
+    /* ═══════════════════════════ a tool-caught failure for a browser that left (#5678) ═══════════════════════════ */
+
+    /* The race behind #5678 made deterministic, as WebDataStartNoteEventReadsTests does: the connect budget (1 s) is spent by the time
+       Npgsql would look at the request token, so a read under an already-cancelled token meets a connect TIMEOUT -- an
+       NpgsqlException, not an OperationCanceledException. The tool's catch (`when ex is not OperationCanceledException`) takes it
+       and returns an "Error during ..." sentence normally. A logger that is slow on every call spends the budget: Npgsql logs while
+       it opens a connection, after the budget has started. */
+    private sealed class SlowLogger : ILogger, ILoggerFactory
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Thread.Sleep(1200);
+
+        public ILogger CreateLogger(string categoryName) => this;
+
+        public void AddProvider(ILoggerProvider provider)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private static NpgsqlDataSource UnreachableStore()
+    {
+        var builder = new NpgsqlDataSourceBuilder("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
+        builder.UseLoggerFactory(new SlowLogger());
+        return builder.Build();
+    }
+
+    /* get_fleet_overview reads the store without resolving a server first, so its own catch is the one that answers. */
+    private const string ToolCaughtRead = "/api/read/get_fleet_overview";
+
+    /// <summary>
+    /// #5678: a read whose tool caught its own failure and returned an <c>Error during ...</c> sentence, for a browser that
+    /// has already left, writes no failure line and no body: the request ends as #4276 ends a cancelled one. Before the fix the
+    /// sentence went on to ToHttpResult, which logged it and wrote a 500/503 for a caller who was gone.
+    /// </summary>
+    [Fact]
+    public async Task AToolCaughtFailure_ForABrowserThatLeft_WritesNoFailureLine()
+    {
+        var (server, logger) = await BuildServer(store: UnreachableStore());
+        using var _ = server;
+        using var gone = new CancellationTokenSource();
+        await gone.CancelAsync();
+
+        try
+        {
+            var ctx = await Send(server, ToolCaughtRead, gone.Token);
+            Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        }
+        catch (OperationCanceledException)
+        {
+            /* The harness may surface the aborted request as its own cancellation; the log is what is under test. */
+        }
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal("(no log lines captured)", logger.Joined);
+    }
+
+    /// <summary>Control for <see cref="AToolCaughtFailure_ForABrowserThatLeft_WritesNoFailureLine"/>: the same read with a live
+    /// token still answers the server-error status and writes its one line.</summary>
+    [Fact]
+    public async Task AToolCaughtFailure_ForALiveBrowser_StillAnswersServerError_AndWritesOneLine()
+    {
+        var (server, logger) = await BuildServer(store: UnreachableStore());
+        using var _ = server;
+
+        var ctx = await Send(server, ToolCaughtRead);
+
+        Assert.True(
+            ctx.Response.StatusCode is StatusCodes.Status500InternalServerError or StatusCodes.Status503ServiceUnavailable,
+            $"expected the server-error status, got {ctx.Response.StatusCode}");
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning) + logger.CountAtLevel(LogLevel.Error));
+    }
+
+    /// <summary>The helper's own rule, with no pipeline: a cancelled token ends a server-error sentence with a cancellation
+    /// carrying that token; a live token, or a result that is not a server error, is left alone.</summary>
+    [Fact]
+    public void ThrowIfCallerGone_OnlyEndsAServerErrorSentence_ForACancelledToken()
+    {
+        var sentence = PerformanceMonitor.Common.McpHelpers.FormatError("get_server_summary", new InvalidOperationException("boom"));
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError, DarlingWebEndpoints.ClassifyToolResponse(sentence));
+        var cancelled = new CancellationToken(canceled: true);
+
+        var thrown = Assert.Throws<OperationCanceledException>(() => DarlingWebEndpoints.ThrowIfCallerGone(sentence, cancelled));
+        Assert.Equal(cancelled, thrown.CancellationToken);
+
+        DarlingWebEndpoints.ThrowIfCallerGone(sentence, CancellationToken.None);
+        DarlingWebEndpoints.ThrowIfCallerGone("{\"rows\":[]}", cancelled);
+    }
+
+    /// <summary>#5678: every web handler that hands a tool's string, or a store fault, to a failure log with the request token in
+    /// reach ends a gone caller's request first. Source pin over the sites, so a new copy of the old shape is noticed.</summary>
+    [Fact]
+    public void EveryWebSiteThatLogsAToolCaughtFailure_EndsAGoneCallersRequestFirst()
+    {
+        var service = "Darling/PerformanceMonitor.Darling.Service/";
+        var endpoints = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(service + "DarlingWebEndpoints.cs"));
+        var loopAt = endpoints.IndexOf("foreach (var (name, handler) in BuildReadDispatch", StringComparison.Ordinal);
+        var loopEnd = endpoints.IndexOf("return ToHttpResult(result,", loopAt, StringComparison.Ordinal);
+        Assert.Contains("ThrowIfCallerGone(result, context.RequestAborted)", endpoints[loopAt..loopEnd], StringComparison.Ordinal);
+
+        var tagAt = endpoints.IndexOf("internal static IResult ServerTagToolResult(", StringComparison.Ordinal);
+        Assert.Contains("ThrowIfCallerGone(result, requestAborted)", endpoints[tagAt..(tagAt + 600)], StringComparison.Ordinal);
+
+        var composeAt = endpoints.IndexOf("return ComposeRunFailureResult(outcome,", StringComparison.Ordinal);
+        Assert.Contains("context.RequestAborted.ThrowIfCancellationRequested()", endpoints[(composeAt - 300)..composeAt], StringComparison.Ordinal);
+
+        var databases = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(service + "DarlingServerDatabasesEndpoint.cs"));
+        Assert.Contains("DarlingWebEndpoints.ThrowIfCallerGone(error, context.RequestAborted)", databases, StringComparison.Ordinal);
+
+        var triage = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(service + "DarlingTriageEndpoint.cs"));
+        var sentenceAt = triage.IndexOf("var sentence = McpHelpers.ErrorMessageOf(raw);", StringComparison.Ordinal);
+        Assert.Contains("requestContext.RequestAborted.ThrowIfCancellationRequested()", triage[sentenceAt..(sentenceAt + 300)], StringComparison.Ordinal);
     }
 
     /* ═══════════════════════════ the wired pipeline: BadHttpRequestException (#4281 review, finding 3) ═══════════════════════════ */

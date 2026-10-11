@@ -418,6 +418,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
                 catch (Exception ex)
                 {
+                    /* #5678: the browser left and the store's connect timed out before it could raise a cancellation
+                       (Npgsql can do that for an already-cancelled token): still the #4276 not-a-failure case. */
+                    context.RequestAborted.ThrowIfCancellationRequested();
+
                     /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
                        McpHelpers.FormatError's envelope and return normally, so this is only a backstop).
                        Reported and answered directly from the real Exception here — ServerErrorResult's
@@ -446,6 +450,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
                     resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
 
+                /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
+                ThrowIfCallerGone(result, context.RequestAborted);
                 return ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds);
             });
         }
@@ -672,6 +678,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             if (outcome.Payload is not null)
             {
                 return JsonNodeResult(outcome.Payload);
+            }
+
+            /* #5678: a failed run for a browser that has left (a store fault, or the generic catch's sentence) is not logged. */
+            if (outcome.Fault is not null || outcome.IsServerError)
+            {
+                context.RequestAborted.ThrowIfCancellationRequested();
             }
 
             return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds);
@@ -2003,7 +2015,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.CreateServerTagCore(store, name, parentId, colour, context.RequestAborted);
             LogServerTagWrite(logger, context, "create", null, result, 0);
-            return ServerTagToolResult(result, "/api/server-tags", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
+            return ServerTagToolResult(result, "/api/server-tags", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created, requestAborted: context.RequestAborted);
         });
 
         app.MapPatch("/api/server-tags/{id:int}", async (HttpContext context, int id) =>
@@ -2026,7 +2038,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.UpdateServerTagCore(store, id, changes, context.RequestAborted);
             LogServerTagWrite(logger, context, "update", id, result, 0);
-            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds);
+            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds, requestAborted: context.RequestAborted);
         });
 
         app.MapDelete("/api/server-tags/{id:int}", async (HttpContext context, int id) =>
@@ -2045,7 +2057,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.DeleteServerTagCore(store, id, confirm, context.RequestAborted);
             LogServerTagWrite(logger, context, "delete", id, result, 0);
-            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds);
+            return ServerTagToolResult(result, "/api/server-tags/{id}", logger, stopwatch.ElapsedMilliseconds, requestAborted: context.RequestAborted);
         });
 
         app.MapPost("/api/server-tags/{id:int}/servers", async (HttpContext context, int id) =>
@@ -2064,7 +2076,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.AssignServerTagCore(store, id, serverIds, context.RequestAborted);
             LogServerTagWrite(logger, context, "assign", id, result, serverIds.Count);
-            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds);
+            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds, requestAborted: context.RequestAborted);
         });
 
         app.MapDelete("/api/server-tags/{id:int}/servers", async (HttpContext context, int id) =>
@@ -2083,7 +2095,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.UnassignServerTagCore(store, id, serverIds, context.RequestAborted);
             LogServerTagWrite(logger, context, "unassign", id, result, serverIds.Count);
-            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds);
+            return ServerTagToolResult(result, "/api/server-tags/{id}/servers", logger, stopwatch.ElapsedMilliseconds, requestAborted: context.RequestAborted);
         });
     }
 
@@ -2277,8 +2289,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The envelope pass-through the server-tag routes share: <see cref="MuteRuleToolResult"/>'s error
     /// handling (the caught-exception sentence never reaches the wire) with <see cref="ServerTagEnvelopeStatus"/>'s
     /// status.</summary>
-    internal static IResult ServerTagToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
+    internal static IResult ServerTagToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK,
+        CancellationToken requestAborted = default)
     {
+        /* #5678: the cores run on the request token, so a tool-caught failure may be the caller leaving, not a fault. */
+        ThrowIfCallerGone(result, requestAborted);
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
         {
@@ -6041,6 +6056,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs),
             _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
         };
+    }
+
+    /// <summary>
+    /// #5678: ends the request the way #4276 does when the browser has left and a tool's own caught failure is about to be
+    /// logged for it. A tool that catches its own exception hands back an <c>Error during ...</c> sentence and returns
+    /// normally, so the <c>OperationCanceledException</c> catch never sees it; when the cause was the caller going away (a
+    /// cancelled token can surface as a connect timeout rather than a cancellation), logging it as a read failure blames the
+    /// service for a request nobody is waiting on. Throwing <c>OperationCanceledException(requestAborted)</c> hands it to the
+    /// top-of-pipeline backstop (<see cref="DarlingWebFailureObserver"/>), which writes no line and no body for it. Only a
+    /// result that classifies as <see cref="ToolResponseKind.ServerError"/> is touched: a payload or a client-correctable
+    /// refusal is answered as before. Call it AFTER any latency sample, which is already right for a gone caller
+    /// (<see cref="ReadOutcomeClassifier.ClassifySentence"/> says Cancelled).
+    /// </summary>
+    internal static void ThrowIfCallerGone(string result, CancellationToken requestAborted)
+    {
+        if (requestAborted.IsCancellationRequested && ClassifyToolResponse(result) == ToolResponseKind.ServerError)
+        {
+            throw new OperationCanceledException(requestAborted);
+        }
     }
 
     /// <summary>The ServerError arm's body, factored out so both <see cref="ToHttpResult"/> and the
