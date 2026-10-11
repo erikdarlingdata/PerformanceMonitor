@@ -115,9 +115,10 @@ switch ($Mode) {
     'Start' {
         $self = $MyInvocation.MyCommand.Path
         $log = Join-Path $env:RUNNER_TEMP 'guard-watch.log'
-        # The streams go to files: a detached child that inherits the step's pipes would hold the step open.
+        # The streams go to files: a detached child that inherits the step's pipes would hold the step open. The arguments are one
+        # string with quotes around the two values that can hold a space (Start-Process does not quote an array's elements).
         $process = Start-Process -FilePath 'pwsh' -PassThru `
-            -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $self, '-Mode', 'Watch', '-GuardJobName', $GuardJobName, '-PollSeconds', $PollSeconds) `
+            -ArgumentList "-NoProfile -NonInteractive -File `"$self`" -Mode Watch -GuardJobName `"$GuardJobName`" -PollSeconds $PollSeconds" `
             -RedirectStandardOutput $log -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'guard-watch.err')
         Set-Content -Path $pidFile -Value $process.Id
         Write-Host "::notice title=Guard watcher started::Watching the '$GuardJobName' job of this run every $PollSeconds seconds (watcher pid $($process.Id)). If it fails, this job stops and fails too."
