@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -187,7 +188,9 @@ public partial class DuckDbInitializer : IDisposable
     /// If the current thread already owns a read lock (e.g., leaked by an unhandled exception),
     /// returns a no-op disposable to allow the operation to proceed.
     /// </summary>
-    public IDisposable AcquireReadLock() => AcquireReadLock(CancellationToken.None);
+    public IDisposable AcquireReadLock(
+        [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
+        => AcquireReadLock(CancellationToken.None, holderMember, holderFile);
 
     /// <summary>
     /// The same read lock, abandonable (#2443). <see cref="AcquireWriteLock"/> has taken a timeout
@@ -204,7 +207,9 @@ public partial class DuckDbInitializer : IDisposable
     /// <see cref="CancellationToken.None"/> takes the original uninterruptible path, so the fourteen
     /// callers outside the analysis pass are unchanged rather than quietly re-timed.</para>
     /// </summary>
-    public IDisposable AcquireReadLock(CancellationToken cancellationToken)
+    public IDisposable AcquireReadLock(
+        CancellationToken cancellationToken,
+        [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
         try
         {
@@ -229,7 +234,7 @@ public partial class DuckDbInitializer : IDisposable
                proceeds normally. */
             return NoOpDisposable.Instance;
         }
-        return new LockReleaser(s_dbLock, write: false);
+        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false));
     }
 
     /// <summary>
@@ -255,7 +260,8 @@ public partial class DuckDbInitializer : IDisposable
     /// because this caller genuinely has a number to pick: it is bounded by what a UI thread may spend,
     /// not by a caller's remaining budget.</para>
     /// </summary>
-    public IDisposable? TryAcquireReadLock(TimeSpan timeout)
+    public IDisposable? TryAcquireReadLock(
+        TimeSpan timeout, [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
         try
         {
@@ -271,7 +277,7 @@ public partial class DuckDbInitializer : IDisposable
             return NoOpDisposable.Instance;
         }
 
-        return new LockReleaser(s_dbLock, write: false);
+        return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false));
     }
 
     /// <summary>
@@ -288,19 +294,27 @@ public partial class DuckDbInitializer : IDisposable
     /// When a timeout is specified, throws <see cref="TimeoutException"/> if the lock
     /// cannot be acquired within the given duration (e.g., archival is in progress).
     /// </summary>
-    public IDisposable AcquireWriteLock(TimeSpan? timeout = null)
+    public IDisposable AcquireWriteLock(
+        TimeSpan? timeout = null, [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
         if (timeout.HasValue)
         {
+            var waitStarted = Stopwatch.GetTimestamp();
             if (!s_dbLock.TryEnterWriteLock(timeout.Value))
-                throw new TimeoutException(
-                    "Could not acquire database write lock — another operation (archival or maintenance) may be in progress. Please try again in a few moments.");
+            {
+                /* #5650: say who holds the lock and for how long, from the registry every acquisition writes
+                   to. The old text named "archival or maintenance" whatever the holder was. */
+                throw new StoreLockTimeoutException(
+                    Stopwatch.GetElapsedTime(waitStarted),
+                    StoreLockHolders.Snapshot(),
+                    StoreLockHolders.Name(holderMember, holderFile));
+            }
         }
         else
         {
             s_dbLock.EnterWriteLock();
         }
-        return new LockReleaser(s_dbLock, write: true);
+        return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true));
     }
 
     private sealed class NoOpDisposable : IDisposable
@@ -342,18 +356,21 @@ public partial class DuckDbInitializer : IDisposable
     {
         private readonly ReaderWriterLockSlim _lock;
         private readonly bool _write;
+        private readonly long _holdId;
         private bool _disposed;
 
-        public LockReleaser(ReaderWriterLockSlim rwLock, bool write)
+        public LockReleaser(ReaderWriterLockSlim rwLock, bool write, long holdId)
         {
             _lock = rwLock;
             _write = write;
+            _holdId = holdId;
         }
 
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+            StoreLockHolders.Unregister(_holdId);
             if (_write) _lock.ExitWriteLock();
             else _lock.ExitReadLock();
         }
