@@ -71,7 +71,7 @@ public partial class ManageServersWindow : Window
                table or row reads as unknown (older than 3.11) inside the reader. */
             try
             {
-                ServiceVersionBlock.Text = ServiceVersionText.ServiceLines(await _dataService.GetServiceVersionsAsync());
+                ServiceVersionBlock.Text = ServiceVersionText.ServiceLines(await _dataService.GetServiceVersionsAsync(), ViewerTimeHelper.CurrentDisplayMode);
             }
             catch (Exception ex)
             {

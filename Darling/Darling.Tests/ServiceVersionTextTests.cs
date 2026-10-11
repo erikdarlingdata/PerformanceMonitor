@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -20,13 +21,15 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ServiceVersionTextTests
 {
-    private static ServiceVersionRow Row(string host, string version) =>
-        new(host, version, new DateTime(2026, 10, 1, 8, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 1, 8, 0, 1, DateTimeKind.Utc));
+    private static ServiceVersionRow Row(string host, string version) => Row(host, version, new DateTime(2026, 10, 1, 8, 0, 0, DateTimeKind.Utc));
+
+    private static ServiceVersionRow Row(string host, string version, DateTime startedUtc) =>
+        new(host, version, startedUtc, startedUtc.AddSeconds(1));
 
     [Fact]
     public void OneHost_ShowsTheServiceVersionAndTheHostOnOneLine()
     {
-        Assert.Equal("Service version: 3.10.0 (SQLHOST1)", ServiceVersionText.ServiceLines(new[] { Row("SQLHOST1", "3.10.0") }));
+        Assert.Equal("Service version: 3.10.0 (SQLHOST1, started 2026-10-01 08:00 UTC)", ServiceVersionText.ServiceLines(new[] { Row("SQLHOST1", "3.10.0") }));
     }
 
     [Fact]
@@ -34,7 +37,34 @@ public sealed class ServiceVersionTextTests
     {
         var text = ServiceVersionText.ServiceLines(new[] { Row("hostB", "3.11.0"), Row("HostA", "3.10.0") });
 
-        Assert.Equal("Service versions:" + Environment.NewLine + "HostA: 3.10.0" + Environment.NewLine + "hostB: 3.11.0", text);
+        Assert.Equal("Service versions:" + Environment.NewLine + "HostA: 3.10.0, started 2026-10-01 08:00 UTC" + Environment.NewLine + "hostB: 3.11.0, started 2026-10-01 08:00 UTC", text);
+    }
+
+    [Fact]
+    public void TwoHosts_OneRetiredLongAgo_EachLineShowsItsOwnStartTime()
+    {
+        var text = ServiceVersionText.ServiceLines(new[]
+        {
+            Row("NEWHOST", "3.11.0", new DateTime(2026, 10, 9, 14, 5, 59, DateTimeKind.Utc)),
+            Row("OLDHOST", "3.9.2", new DateTime(2025, 3, 2, 0, 30, 0, DateTimeKind.Utc)),
+        });
+
+        Assert.Equal("Service versions:" + Environment.NewLine + "NEWHOST: 3.11.0, started 2026-10-09 14:05 UTC" + Environment.NewLine
+            + "OLDHOST: 3.9.2, started 2025-03-02 00:30 UTC", text);
+    }
+
+    [Fact]
+    public void StartTime_FollowsTheDisplayMode_AndServerTimeReadsUtc()
+    {
+        var started = new DateTime(2026, 7, 1, 8, 0, 0, DateTimeKind.Utc);
+        var rows = new[] { Row("H", "3.11.0", started) };
+        var local = TimeZoneInfo.ConvertTimeFromUtc(started, TimeZoneInfo.Local);
+        var zone = TimeZoneInfo.Local.IsDaylightSavingTime(started) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName;
+
+        Assert.Equal($"Service version: 3.11.0 (H, started {local:yyyy-MM-dd HH:mm} {zone})",
+            ServiceVersionText.ServiceLines(rows, TimeDisplayMode.LocalTime));
+        Assert.Equal("Service version: 3.11.0 (H, started 2026-07-01 08:00 UTC)", ServiceVersionText.ServiceLines(rows, TimeDisplayMode.ServerTime));
+        Assert.Equal("Service version: 3.11.0 (H, started 2026-07-01 08:00 UTC)", ServiceVersionText.ServiceLines(rows, TimeDisplayMode.UTC));
     }
 
     [Fact]
@@ -62,7 +92,7 @@ public sealed class ServiceVersionTextTests
         Assert.DoesNotContain("InstalledVersion", code, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"ServiceVersionBlock\"", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"ViewerVersionBlock\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("ServiceVersionText.ServiceLines(await _dataService.GetServiceVersionsAsync())", code, StringComparison.Ordinal);
+        Assert.Contains("ServiceVersionText.ServiceLines(await _dataService.GetServiceVersionsAsync(), ViewerTimeHelper.CurrentDisplayMode)", code, StringComparison.Ordinal);
         Assert.Contains("ServiceVersionText.ViewerLine(appVersion)", code, StringComparison.Ordinal);
     }
 
