@@ -14,6 +14,11 @@ using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
 
+/// <summary>The newest sample behind an alert (#5642): <paramref name="Source"/> is a short label ("CPU",
+/// "Wait stats"), <paramref name="InstantUtc"/> the newest sample's UTC instant, and <paramref name="Age"/>
+/// the gap to the fire time, computed once when the alert fires.</summary>
+public sealed record AlertNewestSample(string Source, DateTime InstantUtc, TimeSpan Age);
+
 /// <summary>
 /// Optional detail context attached to alert emails.
 /// Populated from blocking/deadlock detail queries at alert time.
@@ -111,6 +116,12 @@ public class AlertContext
     /// exactly the shape consumers can reason about — see the helper for why.
     /// </summary>
     public string? AgReplicaIdentity { get; set; }
+
+    /// <summary>The newest source sample behind this alert (#5642): its source label, its UTC instant, and its
+    /// age computed ONCE at fire time. Null when the alert has no UTC instant to age (a pre-V134 local stamp, a
+    /// live read, or a check not yet wired). Persisted with the alert's context, so the age never drifts at
+    /// render time. The renderers print it as one line per body.</summary>
+    public AlertNewestSample? NewestSample { get; set; }
 
     /// <summary>
     /// A copy of this context that shares its member objects (#5320): the alert statement filter replaces the
