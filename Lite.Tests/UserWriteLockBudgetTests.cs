@@ -22,15 +22,15 @@ namespace Lite.Tests;
 /// lock than a background writer that skips and retries on its own.
 ///
 /// <para>Both budgets are injected per instance, so nothing here sleeps through the shipped 5 s and 30 s. The
-/// background budget is 150 ms and the user budget is 10 s; a holder keeps the lock for 700 ms, which is longer than
-/// the first and far shorter than the second (10 s here). <c>s_dbLock</c> is process-wide and thread-affine, so the holder is a
+/// background budget is 150 ms and the user budget is 3 s; a holder keeps the lock for 700 ms, which is longer than
+/// the first and far shorter than the second (3 s here). <c>s_dbLock</c> is process-wide and thread-affine, so the holder is a
 /// dedicated thread that enters and leaves it on that one thread.</para>
 /// </summary>
 [Collection("timing")]
 public sealed class UserWriteLockBudgetTests : IClassFixture<SharedDuckDbFixture>
 {
     private static readonly TimeSpan BackgroundBudget = TimeSpan.FromMilliseconds(150);
-    private static readonly TimeSpan UserBudget = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan UserBudget = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HoldFor = TimeSpan.FromMilliseconds(700);
 
     private readonly SharedDuckDbFixture _fixture;
@@ -110,7 +110,7 @@ public sealed class UserWriteLockBudgetTests : IClassFixture<SharedDuckDbFixture
         })
         { IsBackground = true, Name = "UserWriteLockBudgetTests holder" };
         thread.Start();
-        Assert.True(acquired.Wait(TimeSpan.FromSeconds(10)), "the holder never got the write lock");
+        Assert.True(acquired.Wait(TimeSpan.FromSeconds(3)), "the holder never got the write lock");
         return new LockHolder(thread, release);
     }
 
@@ -119,7 +119,7 @@ public sealed class UserWriteLockBudgetTests : IClassFixture<SharedDuckDbFixture
         public void Dispose()
         {
             release.Set();
-            thread.Join(TimeSpan.FromSeconds(10));
+            thread.Join(TimeSpan.FromSeconds(3));
         }
     }
 }

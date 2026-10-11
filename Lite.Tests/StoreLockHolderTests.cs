@@ -20,7 +20,7 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("timing")]
 public sealed class StoreLockHolderTests
 {
-    private static readonly TimeSpan HangBackstop = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan HangBackstop = TimeSpan.FromSeconds(3);
 
     /// <summary>Holds a lock on its own thread (the lock is thread-affine) until the returned action runs.</summary>
     private static Action HoldOnThread(Func<IDisposable> acquire, ManualResetEventSlim held)
@@ -204,7 +204,7 @@ public sealed class StoreLockHolderTests
     public void AHoldFarPastAnyRealOne_IsMarkedStale_AndNeverBlamedAheadOfARealHolder()
     {
         var now = Stopwatch.GetTimestamp();
-        var elevenMinutes = (long)(TimeSpan.FromMinutes(11).TotalSeconds * Stopwatch.Frequency);
+        var elevenMinutes = (long)(StoreLockHolders.StaleAfter.TotalSeconds * 1.1 * Stopwatch.Frequency);   // no TimeSpan literal: WriteLockBudgetTests counts those as deliberate holds
         var oldId = StoreLockHolders.Register("StaleProbeLeaked", "StaleProbeFile.cs", write: false, startedTimestamp: now - elevenMinutes);
         var freshId = StoreLockHolders.Register("StaleProbeReal", "StaleProbeFile.cs", write: false, startedTimestamp: now - (elevenMinutes / 100));
         try
