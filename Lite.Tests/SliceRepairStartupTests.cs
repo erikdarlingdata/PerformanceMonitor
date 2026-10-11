@@ -30,11 +30,13 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
 
     private readonly DuckDbInitializer _duckDb;
     private readonly string _archivePath;
+    private readonly Func<string, long?> _originalFreeBytesProvider;
 
     public SliceRepairStartupTests(SharedDuckDbFixture fixture)
     {
         fixture.ResetData();
         _duckDb = fixture.DuckDb;
+        _originalFreeBytesProvider = _duckDb.AvailableFreeBytesProvider;
         _archivePath = Path.Combine(Path.GetTempPath(), $"pm-5653-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_archivePath);
 
@@ -50,6 +52,7 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
 
     public void Dispose()
     {
+        _duckDb.AvailableFreeBytesProvider = _originalFreeBytesProvider;
         try
         {
             if (Directory.Exists(_archivePath))
@@ -112,6 +115,90 @@ public sealed class SliceRepairStartupTests : IClassFixture<SharedDuckDbFixture>
 
         Assert.True(result.FullyRepaired);
         Assert.Equal(1, service.SurveysRun);
+    }
+
+    /// <summary>
+    /// #5653: with too little free disk for the rewrite, the file is left alone and the run says why, instead of
+    /// starting a COPY that dies part way through with the disk full.
+    /// </summary>
+    [Fact]
+    public async Task Rewrite_WithTooLittleFreeDisk_SkipsTheFile_AndSaysWhy()
+    {
+        var file = Path.Combine(_archivePath, "202605_query_store_stats.parquet");
+        await WriteSplitArchiveAsync(file);
+        var before = File.ReadAllBytes(file);
+        _duckDb.AvailableFreeBytesProvider = _ => 1024 * 1024;
+
+        var log = new List<(LogLevel Level, string Message)>();
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath, new CapturingLogger(log));
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(before, File.ReadAllBytes(file));
+        Assert.False(File.Exists(file + ".repair-tmp"));
+        Assert.False(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
+        Assert.Contains(log, l => l.Level == LogLevel.Warning && l.Message.Contains("free disk space", StringComparison.Ordinal));
+    }
+
+    /// <summary>An unreadable volume (null) counts as enough, as it does for compaction: the repair goes ahead.</summary>
+    [Fact]
+    public async Task Rewrite_WhenFreeSpaceCannotBeRead_StillRuns()
+    {
+        await WriteSplitArchiveAsync(Path.Combine(_archivePath, "202605_query_store_stats.parquet"));
+        _duckDb.AvailableFreeBytesProvider = _ => null;
+
+        var service = new QueryStoreSliceRepairService(_duckDb, _archivePath);
+        await service.RepairOnStartupAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(await service.AlreadyRepairedAsync(TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>The spill cap scales with the file and stays between its floor and ceiling.</summary>
+    [Fact]
+    public void SpillCap_ScalesWithTheFile_WithinItsFloorAndCeiling()
+    {
+        const long MiB = 1024 * 1024;
+        Assert.Equal(512 * MiB, QueryStoreSliceRepairService.RewriteSpillCapBytes(1 * MiB));
+        Assert.Equal(16 * 100 * MiB, QueryStoreSliceRepairService.RewriteSpillCapBytes(100 * MiB));
+        Assert.Equal(4096 * MiB, QueryStoreSliceRepairService.RewriteSpillCapBytes(10_000 * MiB));
+
+        /* The reporter's 199 MiB file spilled 2.7 GiB; its cap must cover that. */
+        Assert.True(QueryStoreSliceRepairService.RewriteSpillCapBytes(199 * MiB) > 2764 * MiB);
+
+        /* Need = rewritten copy (1.5x) + cap + reserve. */
+        Assert.Equal(
+            (150 * MiB) + (1600 * MiB) + (64 * MiB),
+            QueryStoreSliceRepairService.RewriteDiskNeedBytes(100 * MiB, 64 * MiB));
+    }
+
+    /// <summary>The cap is in force while the action runs and the setting is put back after, even when the action throws.</summary>
+    [Fact]
+    public async Task SpillCap_AppliesDuringTheAction_AndIsRestoredAfter()
+    {
+        using var connection = new DuckDBConnection("DataSource=:memory:");
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        var original = await SettingAsync(connection);
+        string? during = null;
+
+        await QueryStoreSliceRepairService.WithRewriteSpillCap(connection, 700L * 1024 * 1024, async () =>
+        {
+            during = await SettingAsync(connection);
+        });
+
+        Assert.NotEqual(original, during);
+        Assert.Contains("MiB", during, StringComparison.Ordinal);
+        Assert.Equal(original, await SettingAsync(connection));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            QueryStoreSliceRepairService.WithRewriteSpillCap(
+                connection, 700L * 1024 * 1024, () => throw new InvalidOperationException("boom")));
+        Assert.Equal(original, await SettingAsync(connection));
+    }
+
+    private static async Task<string> SettingAsync(DuckDBConnection connection)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT CAST(current_setting('max_temp_directory_size') AS VARCHAR)";
+        return Convert.ToString(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken), System.Globalization.CultureInfo.InvariantCulture) ?? "";
     }
 
     private async Task WriteSplitArchiveAsync(string file)
