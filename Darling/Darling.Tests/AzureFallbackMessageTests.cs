@@ -20,7 +20,8 @@ namespace Darling.Tests;
 /// #5498: when master cannot be read and the registration names no database, the thrown text puts the firewall first.
 /// Error 40615 means the Azure firewall did not allow the client's IP address (a server-level block causes it as
 /// readily as a database-only rule), so the text names that and the firewall rule as the fix. Setting a database is
-/// only the fix for the master-only case. The 3.10 Azure release test hit this with a server-level rule removed and
+/// the fix for the master-only case, and (#5647 follow-up) it is also offered on the 40615 text for a client that a
+/// database-level rule on a user database allows, since Azure checks that rule only for that database. The 3.10 Azure release test hit this with a server-level rule removed and
 /// was told to set a database. The fallback behavior itself (throw when there is nothing to fall back to, use the
 /// named database otherwise) is unchanged and pinned here beside the wording.
 /// </summary>
@@ -47,7 +48,7 @@ public sealed class AzureFallbackMessageTests
     [InlineData("master")]
     [InlineData("")]
     [InlineData(null)]
-    public void Error40615_NamesTheFirewallAndTheClientIp_WithNoSetDatabaseAdvice(string? targetDb)
+    public void Error40615_NamesTheFirewallAndTheClientIp_ThenOffersSettingTheDatabase(string? targetDb)
     {
         var ex = Assert.Throws<InvalidOperationException>(
             () => Runner().FallbackDatabaseList(
@@ -59,13 +60,14 @@ public sealed class AzureFallbackMessageTests
         Assert.Contains("The Azure firewall did not allow this client's IP address (192.0.2.1)", message, StringComparison.Ordinal);
         Assert.Contains("dd a firewall rule", message, StringComparison.Ordinal);
         Assert.Contains("either a server-level rule or a database-level rule in master", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("set a database", message, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(
+            "If a database-level rule in a user database already allows this IP, set the database for 'AzureTest1007' to that database instead.",
+            message, StringComparison.Ordinal);
         Assert.DoesNotContain("can open a user database", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("AzureTest1007", message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Error40615_WithoutAnIpInTheServerText_StillHasNoSetDatabaseAdvice()
+    public void Error40615_WithoutAnIpInTheServerText_StillOffersSettingTheDatabase()
     {
         var ex = Assert.Throws<InvalidOperationException>(
             () => Runner().FallbackDatabaseList(
@@ -73,7 +75,9 @@ public sealed class AzureFallbackMessageTests
                 errorNumber: 40615, serverMessage: "Ein anderer Text ohne Adresse."));
 
         Assert.Contains("did not allow this client's IP address. Add a firewall rule", ex.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("set a database", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(
+            "If a database-level rule in a user database already allows this IP, set the database for 'AzureTest1007' to that database instead.",
+            ex.Message, StringComparison.Ordinal);
     }
 
     [Theory]
