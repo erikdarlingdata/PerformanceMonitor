@@ -10831,7 +10831,11 @@ WHERE ca.view_schema = 'collect'
     /// </summary>
     internal const string HourlyDdlLockTimeout = "3s";
 
-    /// <summary>Consecutive busy results per object across hourly passes; process lifetime. Tests reset it.</summary>
+    /// <summary>
+    /// Consecutive busy results per object across hourly passes; process lifetime. Tests reset it, and a reset clears EVERY
+    /// key, so a test that counts passes hands <see cref="TryRunBoundedDdlAsync(NpgsqlConnection, IReadOnlyList{string}, ILogger, string, CancellationToken, BoundedDdlBusyStreaks)"/>
+    /// its own registry instead of sharing this one (#5672).
+    /// </summary>
     internal static readonly BoundedDdlBusyStreaks BusyStreaks = new();
 
     /// <summary>What <see cref="TryRunBoundedDdlAsync"/> did.</summary>
@@ -10869,7 +10873,8 @@ WHERE ca.view_schema = 'collect'
     /// isolation; cancellation still propagates.
     /// </summary>
     internal static Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
-        NpgsqlConnection connection, IReadOnlyList<string> statements, ILogger? logger, string what, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IReadOnlyList<string> statements, ILogger? logger, string what, CancellationToken cancellationToken,
+        BoundedDdlBusyStreaks? streaks = null)
         => TryRunBoundedDdlAsync(
             connection,
             async transaction =>
@@ -10880,21 +10885,28 @@ WHERE ca.view_schema = 'collect'
                     await command.ExecuteNonQueryAsync(cancellationToken);
                 }
             },
-            logger, what, cancellationToken);
+            logger, what, cancellationToken, streaks: streaks);
 
     /// <summary>
-    /// <see cref="TryRunBoundedDdlAsync(NpgsqlConnection, IReadOnlyList{string}, ILogger, string, CancellationToken)"/>
+    /// <see cref="TryRunBoundedDdlAsync(NpgsqlConnection, IReadOnlyList{string}, ILogger, string, CancellationToken, BoundedDdlBusyStreaks)"/>
     /// for a body that needs a statement's result (#5574: the chunk re-group counts its rows between the decompress and
     /// the compress). <paramref name="body"/> runs in the same transaction, behind the same <c>SET LOCAL
     /// lock_timeout</c>, and the same outcomes and log lines apply. The list overload is this one with a loop for a body.
     /// </summary>
     internal static async Task<BoundedDdlOutcome> TryRunBoundedDdlAsync(
         NpgsqlConnection connection, Func<NpgsqlTransaction, Task> body, ILogger? logger, string what, CancellationToken cancellationToken,
-        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false, string? lockTimeoutOverride = null)
+        bool recordBusyStreak = true, bool distinguishTimeoutAndMissing = false, string? lockTimeoutOverride = null,
+        BoundedDdlBusyStreaks? streaks = null)
     {
         /* #5667: the test seam. Production passes null and gets HourlyDdlLockTimeout; a test whose statement cap has to be the
            only timeout that can fire on a held chunk passes a lock timeout far above the cap. */
         var lockTimeout = lockTimeoutOverride ?? HourlyDdlLockTimeout;
+
+        /* #5672: the same kind of seam for the busy streak. Production passes null and shares BusyStreaks; a test that counts
+           passes passes its own registry, because other classes' BusyStreaks.Reset() clears every key, not just theirs, and a
+           reset between two of the test's passes restarts its count (no Warning) or drops its streak before the Applied pass
+           (no "busy passes" line). */
+        var busyStreaks = streaks ?? BusyStreaks;
         try
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -10906,7 +10918,7 @@ WHERE ca.view_schema = 'collect'
             await body(transaction);
 
             await transaction.CommitAsync(cancellationToken);
-            if (BusyStreaks.Clear(what, out var busyPasses))
+            if (busyStreaks.Clear(what, out var busyPasses))
             {
                 logger?.LogInformation(
                     "TimescaleDB: {What} changed after {Passes} busy passes in a row; the table is no longer held",
@@ -10924,7 +10936,7 @@ WHERE ca.view_schema = 'collect'
 
             /* #5574: the compress half's in-call retries (three tries inside ten seconds) are not "passes", and counting
                them would add a "busy for 3 passes in a row" Warning to the one the half logs itself. */
-            if (recordBusyStreak && BusyStreaks.RecordBusy(what, now, out var passes, out var firstBusyUtc))
+            if (recordBusyStreak && busyStreaks.RecordBusy(what, now, out var passes, out var firstBusyUtc))
             {
                 logger?.LogWarning(
                     "TimescaleDB: {What} has been busy for {Passes} passes in a row, since {Since:u} UTC ({Elapsed} ago); its settings stay as they are until another session releases the table",
@@ -10938,13 +10950,13 @@ WHERE ca.view_schema = 'collect'
         {
             /* #5574: probably a chunk dropped (retention) between the candidates read and the statement; the caller re-reads the
                chunk catalog to tell (ResolveMissingRelationAsync), because a chunk that still exists is a failure. */
-            BusyStreaks.Clear(what, out _);
+            busyStreaks.Clear(what, out _);
             logger?.LogDebug("TimescaleDB: {What} stopped: the server reported that a relation does not exist ({Message})", what, ex.Message);
             return BoundedDdlOutcome.RelationMissing;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            BusyStreaks.Clear(what, out _);
+            busyStreaks.Clear(what, out _);
             logger?.LogWarning(
                 "TimescaleDB: {What} could not be changed, so the change was rolled back and the table keeps its current settings: {Message}",
                 what, ex.Message);
