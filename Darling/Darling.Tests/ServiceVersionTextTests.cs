@@ -54,8 +54,8 @@ public sealed class ServiceVersionTextTests
     [Fact]
     public void TheGrid_HasNoInstalledVersionColumn_AndTheWindowShowsBothVersionsOnce()
     {
-        var xaml = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Viewer", "ManageServersWindow.xaml");
-        var code = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Viewer", "ManageServersWindow.xaml.cs");
+        var xaml = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ManageServersWindow.xaml");
+        var code = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ManageServersWindow.xaml.cs");
 
         Assert.DoesNotContain("Installed Version", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("InstalledVersion", xaml, StringComparison.Ordinal);
@@ -71,7 +71,7 @@ public sealed class ServiceVersionTextTests
     {
         Assert.Contains("FROM config.service_version", ServiceVersionTable.SelectSql, StringComparison.Ordinal);
 
-        var viewer = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ServerStatus.cs");
+        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ServerStatus.cs");
         Assert.DoesNotContain("ServiceVersionTable.UpsertAsync", viewer, StringComparison.Ordinal);
     }
 }

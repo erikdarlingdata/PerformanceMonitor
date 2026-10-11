@@ -267,7 +267,7 @@ public sealed class ServiceVersionLiveTests
     [Fact]
     public void TheWorker_RecordsTheVersion_BeforeTheConfigViewIsBuilt()
     {
-        var worker = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         var record = worker.IndexOf("DarlingServiceVersionRecorder.RecordAsync(postgres, _logger, ProcessStartUtc(), stoppingToken)", StringComparison.Ordinal);
         var provider = worker.IndexOf("var configProvider = new StoreConfigProvider(postgres, _logger);", StringComparison.Ordinal);
 
