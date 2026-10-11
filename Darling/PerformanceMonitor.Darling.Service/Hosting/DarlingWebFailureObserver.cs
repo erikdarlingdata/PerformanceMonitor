@@ -45,13 +45,12 @@ internal sealed class DarlingWebFailureObserver
     }
 
     /// <summary>
-    /// #5678: true when the request's caller has gone and <paramref name="exception"/> is therefore not the service's failure to
-    /// report: the request token has fired, and the exception is not Kestrel's own rejection of a malformed request
-    /// (<see cref="BadHttpRequestException"/>, which has its own arm and answers its status). Takes the exception and the token
-    /// so the rule is testable without a pipeline.
+    /// #5678: true when the request's caller has gone and the exception in flight is therefore not the service's failure to report:
+    /// the request token has fired. The token decides, not the exception's type, so every type the old filter swallowed (an
+    /// OperationCanceledException, an IOException, and so a BadHttpRequestException, which derives from IOException and was
+    /// swallowed here before its own arm) is still swallowed, and so is the NpgsqlException a connect timeout throws.
     /// </summary>
-    internal static bool IsCallerGone(Exception exception, CancellationToken requestAborted) =>
-        requestAborted.IsCancellationRequested && exception is not BadHttpRequestException;
+    internal static bool IsCallerGone(CancellationToken requestAborted) => requestAborted.IsCancellationRequested;
 
     public async Task InvokeAsync(HttpContext context)
     {
@@ -61,7 +60,7 @@ internal sealed class DarlingWebFailureObserver
         {
             await _next(context);
         }
-        catch (Exception ex) when (IsCallerGone(ex, context.RequestAborted))
+        catch (Exception) when (IsCallerGone(context.RequestAborted))
         {
             /* #5678: the caller's cancelled token decides, not the exception's type. A caller who left while the store was being
                reached can surface as an OperationCanceledException, as an IOException (a TCP reset, or "The client reset the

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text.Json;
@@ -534,77 +535,32 @@ public sealed class DarlingWebFailureHandlingTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Debug));
     }
 
-    /// <summary>The backstop's rule on its own, with no pipeline: a fired token makes any exception the caller leaving, except
-    /// Kestrel's rejection of a malformed request, which keeps its own arm; a live token never does.</summary>
+    /// <summary>The backstop's rule on its own, with no pipeline: a fired token makes the caller gone whatever the exception is; a live
+    /// token never does.</summary>
     [Fact]
-    public void IsCallerGone_IsTheTokenNotTheType_ExceptForABadHttpRequest()
+    public void IsCallerGone_IsTheToken_NotTheExceptionsType()
     {
-        var gone = new CancellationToken(canceled: true);
-        var timeout = new NpgsqlException("Exception while connecting", new TimeoutException());
-
-        Assert.True(DarlingWebFailureObserver.IsCallerGone(timeout, gone));
-        Assert.True(DarlingWebFailureObserver.IsCallerGone(new OperationCanceledException(gone), gone));
-        Assert.True(DarlingWebFailureObserver.IsCallerGone(new IOException("reset"), gone));
-        Assert.False(DarlingWebFailureObserver.IsCallerGone(new BadHttpRequestException("too large", 413), gone));
-        Assert.False(DarlingWebFailureObserver.IsCallerGone(timeout, CancellationToken.None));
-        Assert.False(DarlingWebFailureObserver.IsCallerGone(new OperationCanceledException(), CancellationToken.None));
+        Assert.True(DarlingWebFailureObserver.IsCallerGone(new CancellationToken(canceled: true)));
+        Assert.False(DarlingWebFailureObserver.IsCallerGone(CancellationToken.None));
     }
 
-    /// <summary>#5678: a failure reported for a caller who has left writes one Debug line and no Warning or Error, on both
-    /// overloads, and still counts as reported so the observer writes nothing after it.</summary>
+    /// <summary>The old swallow arm ran first and caught a BadHttpRequestException (an IOException) under a fired token, so this
+    /// round keeps that: the caller is gone, so the request ends with no line and the status it had, and the arm below it answers
+    /// only for a caller who is still there (BadHttpRequestException_AnswersItsOwnStatus_WritesNoBody_LogsAtDebugNeverError pins that side).</summary>
     [Fact]
-    public void Report_UnderACancelledToken_WritesOneDebugLine_AndNoWarningOrError()
+    public async Task TheBackstop_StaysQuiet_ForAMalformedRequestUnderACancelledToken()
     {
-        var gone = new CancellationToken(canceled: true);
-        var logger = new CapturingTestLogger();
-        var tracking = DarlingWebFailureLog.BeginRequestTracking();
-        var ex = new NpgsqlException("Exception while connecting", new TimeoutException());
+        using var built = await BuildServer();
+        var (server, logger) = built;
+        using var _ = server;
+        using var gone = new CancellationTokenSource();
+        await gone.CancelAsync();
 
-        DarlingWebFailureLog.Report(logger, "/api/ag", 1010, ex, gone);
-        DarlingWebFailureLog.Report(logger, "/api/fleet", 2020, "Error during get_fleet_overview: boom", gone);
+        var ctx = await Send(server, "/api/__test/bad-request", gone.Token);
 
-        Assert.Equal(2, logger.CountAtLevel(LogLevel.Debug));
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
-        Assert.Contains("/api/ag", logger.Joined, StringComparison.Ordinal);
-        Assert.Contains("1010", logger.Joined, StringComparison.Ordinal);
-        Assert.Contains(nameof(NpgsqlException), logger.Joined, StringComparison.Ordinal);
-        Assert.Contains("Error during get_fleet_overview: boom", logger.Joined, StringComparison.Ordinal);
-        Assert.True(tracking.Reported);
-    }
-
-    /// <summary>The helper's own rule, with no pipeline: a cancelled token ends a server-error sentence with a cancellation
-    /// carrying that token; a live token, or a result that is not a server error, is left alone.</summary>
-    [Fact]
-    public void ThrowIfCallerGone_OnlyEndsAServerErrorSentence_ForACancelledToken()
-    {
-        var sentence = PerformanceMonitor.Common.McpHelpers.FormatError("get_server_summary", new InvalidOperationException("boom"));
-        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ServerError, DarlingWebEndpoints.ClassifyToolResponse(sentence));
-        var cancelled = new CancellationToken(canceled: true);
-
-        var thrown = Assert.Throws<OperationCanceledException>(() => DarlingWebEndpoints.ThrowIfCallerGone(sentence, cancelled));
-        Assert.Equal(cancelled, thrown.CancellationToken);
-
-        DarlingWebEndpoints.ThrowIfCallerGone(sentence, CancellationToken.None);
-        DarlingWebEndpoints.ThrowIfCallerGone("{\"rows\":[]}", cancelled);
-    }
-
-    /// <summary>Source pin for one wiring spot: the <c>/api/read/*</c> loop ends a gone caller's tool-caught sentence before it
-    /// reaches <c>ToHttpResult</c>. Reads only; the writes (server tags, mute rules) have no such guard on purpose, because
-    /// <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string,System.Threading.CancellationToken)"/> leaves their one
-    /// Debug line.</summary>
-    [Fact]
-    public void TheReadDispatchLoop_EndsAGoneCallersToolCaughtSentence_BeforeToHttpResult()
-    {
-        var endpoints = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs"));
-        var loopAt = endpoints.IndexOf("foreach (var (name, handler) in BuildReadDispatch", StringComparison.Ordinal);
-        var loopEnd = endpoints.IndexOf("return ToHttpResult(result,", loopAt, StringComparison.Ordinal);
-        Assert.Contains("ThrowIfCallerGone(result, context.RequestAborted)", endpoints[loopAt..loopEnd], StringComparison.Ordinal);
-
-        var tagAt = endpoints.IndexOf("internal static IResult ServerTagToolResult(", StringComparison.Ordinal);
-        var tagEnd = endpoints.IndexOf("internal static IResult MuteRuleToolResult(", tagAt, StringComparison.Ordinal);
-        Assert.DoesNotContain("ThrowIfCallerGone", endpoints[tagAt..tagEnd], StringComparison.Ordinal);
     }
 
     /// <summary>Source pin for one wiring spot: the compose route ends a gone caller's request for any failed run that is not a
@@ -621,16 +577,54 @@ public sealed class DarlingWebFailureHandlingTests
         Assert.Contains("context.RequestAborted.ThrowIfCancellationRequested()", window, StringComparison.Ordinal);
     }
 
-    /// <summary>The triage section runner's doc says it never throws, so it must not throw for a gone caller; the observer and
-    /// <c>Report</c> carry that rule instead.</summary>
-    [Fact]
-    public void TheTriageSectionRunner_DoesNotThrowForAGoneCaller()
+    /// <summary>The triage section runner's doc says it never throws, so a section whose tool throws OUTSIDE its own try (the read
+    /// tools resolve the server before their try) under a fired request token must end quietly: no throw, no Warning, no Error
+    /// (#5678 round 2). The two shapes are a plain cancellation and a store connect timeout the driver threw instead of a
+    /// cancellation.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheTriageSectionRunner_ReturnsQuietly_WhenASectionsToolThrowsForAGoneCaller(bool connectTimeout)
     {
-        var triage = CSharpSourceWalker.StripCommentsAndStrings(
-            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingTriageEndpoint.cs"));
-        var runAt = triage.IndexOf("private static async Task<JsonObject> RunSectionAsync(", StringComparison.Ordinal);
-        var runEnd = triage.IndexOf("internal static string BuildSectionQuery(", runAt, StringComparison.Ordinal);
-        Assert.DoesNotContain("ThrowIfCancellationRequested", triage[runAt..runEnd], StringComparison.Ordinal);
+        using var store = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        var logger = new CapturingTestLogger();
+        using var goneSource = new CancellationTokenSource();
+        await goneSource.CancelAsync();
+        var context = new DefaultHttpContext { RequestAborted = goneSource.Token };
+        var dispatch = new Dictionary<string, DarlingWebEndpoints.ReadToolHandler>
+        {
+            ["get_wait_stats"] = (_, _, _) => throw (connectTimeout
+                ? new NpgsqlException("Exception while connecting", new TimeoutException())
+                : new OperationCanceledException(goneSource.Token)),
+        };
+        var section = new DarlingTriageEndpoint.TriageSection("Waits", "get_wait_stats", new Dictionary<string, string>());
+
+        var result = await DarlingTriageEndpoint.RunSectionAsync(section, dispatch, context, store, null!, "srv", null, logger);
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.False(result.ContainsKey("error"));
+        Assert.False(result.ContainsKey("data"));
+    }
+
+    /// <summary>Control for <see cref="TheTriageSectionRunner_ReturnsQuietly_WhenASectionsToolThrowsForAGoneCaller"/>: the same
+    /// throw under a LIVE token still degrades the one card (a fixed sentence) and logs its one failure line.</summary>
+    [Fact]
+    public async Task TheTriageSectionRunner_StillLogsAndDegradesTheCard_ForTheSameThrowUnderALiveToken()
+    {
+        using var store = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        var logger = new CapturingTestLogger();
+        var context = new DefaultHttpContext();
+        var dispatch = new Dictionary<string, DarlingWebEndpoints.ReadToolHandler>
+        {
+            ["get_wait_stats"] = (_, _, _) => throw new NpgsqlException("Exception while connecting", new TimeoutException()),
+        };
+        var section = new DarlingTriageEndpoint.TriageSection("Waits", "get_wait_stats", new Dictionary<string, string>());
+
+        var result = await DarlingTriageEndpoint.RunSectionAsync(section, dispatch, context, store, null!, "srv", null, logger);
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning) + logger.CountAtLevel(LogLevel.Error));
+        Assert.True(result.ContainsKey("error"));
     }
 
     /* ═══════════════════════════ the wired pipeline: BadHttpRequestException (#4281 review, finding 3) ═══════════════════════════ */

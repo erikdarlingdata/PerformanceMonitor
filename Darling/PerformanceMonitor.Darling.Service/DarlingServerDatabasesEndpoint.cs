@@ -72,8 +72,6 @@ internal static class DarlingServerDatabasesEndpoint
                 postgres, DarlingWebEndpoints.First(context, "server"), context.RequestAborted);
             if (error is not null)
             {
-                /* #5678: a registry fault for a browser that has left is not logged (see ThrowIfCallerGone). */
-                DarlingWebEndpoints.ThrowIfCallerGone(error, context.RequestAborted);
                 return DarlingWebEndpoints.ToHttpResult(error, Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
 
@@ -88,7 +86,8 @@ internal static class DarlingServerDatabasesEndpoint
             }
             catch (Exception ex)
             {
-                /* #5678: a connect timeout raised for an already-cancelled token is the browser leaving, not a fault. */
+                /* #5678: a connect timeout raised for an already-cancelled token is the browser leaving, not a fault. (The registry
+                   lookup above needs no such line: under a fired token its fault becomes a cancellation inside the resolver.) */
                 context.RequestAborted.ThrowIfCancellationRequested();
 
                 /* The real exception reaches the service log once; the body is the fixed message, never ex.Message. */

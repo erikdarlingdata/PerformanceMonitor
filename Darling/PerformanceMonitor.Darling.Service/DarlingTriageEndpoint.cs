@@ -760,8 +760,9 @@ internal static class DarlingTriageEndpoint
     /// that caught an exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11) or a
     /// binding-layer throw instead gets a fixed sentence (#4283: never <c>ex.Message</c>), and the real text
     /// goes to the service log once through <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string,System.Threading.CancellationToken)"/>.
-    /// Never throws: a broken section is one card on the page, not a dead page.</summary>
-    private static async Task<JsonObject> RunSectionAsync(
+    /// Never throws for a broken section (one card on the page, not a dead page) and never for a caller who has gone (the section
+    /// ends quietly, #5678).</summary>
+    internal static async Task<JsonObject> RunSectionAsync(
         TriageSection section,
         IReadOnlyDictionary<string, DarlingWebEndpoints.ReadToolHandler> dispatch,
         HttpContext requestContext,
@@ -816,6 +817,15 @@ internal static class DarlingTriageEndpoint
                     result["error"] = McpHelpers.ErrorMessageOf(raw);
                     break;
             }
+        }
+        catch (Exception ex) when (requestContext.RequestAborted.IsCancellationRequested)
+        {
+            /* #5678 round 2: the caller has gone, so whatever the section's tool threw (the read tools resolve the server OUTSIDE
+               their own try, so a cancellation, or a connect timeout the driver threw instead of one, leaves the tool) is not a
+               broken card: nobody is reading this page. This section ends quietly -- no error text, no Warning or Error line
+               (Report with the fired token writes one Debug line). This is what keeps "Never throws" true for a gone caller. */
+            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, requestContext.RequestAborted);
+            return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
