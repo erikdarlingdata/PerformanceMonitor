@@ -492,8 +492,8 @@ ORDER BY l.database_name";
     public async Task SetDatabaseStateExpectedAsync(int serverId, string databaseName, string expectedState)
     {
         /* #2208: an upsert, so the WRITE lock. Unlike the deviation read's maintenance prologue this one does
-           NOT swallow a timeout: it is a user action, and TimeoutException's message ("try again in a few
-           moments") is written to be shown. Silently dropping an operator's declared expected state would be
+           NOT swallow a timeout: it is a user action, and StoreLockTimeoutException says how long it
+           waited and who held the lock (#5650), so the caller can show it. Silently dropping an operator's declared expected state would be
            the worst outcome available here. */
         using var connection = await OpenWriteConnectionAsync();
         using var command = connection.CreateCommand();

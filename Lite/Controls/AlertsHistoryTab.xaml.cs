@@ -437,10 +437,11 @@ public partial class AlertsHistoryTab : UserControl
             foreach (var dismissedServerId in liveAlerts.Select(a => a.ServerId).Distinct())
                 AlertsDismissed?.Invoke(dismissedServerId);
         }
-        catch (TimeoutException)
+        catch (TimeoutException ex)
         {
+            AppLogger.Warn("AlertsHistory", StoreBusyReport.LogLine("Dismiss selected", ex));
             MessageBox.Show(
-                "The database is currently busy (archival or maintenance in progress).\n\nPlease try again in a few moments.",
+                StoreBusyReport.DialogText(ex),
                 "Dismiss Unavailable",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
@@ -503,10 +504,11 @@ public partial class AlertsHistoryTab : UserControl
             /* Clear the matching server tab badge(s) so the indicator matches the cleared list (issue #1092). */
             AlertsDismissed?.Invoke(serverId);
         }
-        catch (TimeoutException)
+        catch (TimeoutException ex)
         {
+            AppLogger.Warn("AlertsHistory", StoreBusyReport.LogLine("Dismiss all", ex));
             MessageBox.Show(
-                "The database is currently busy (archival or maintenance in progress).\n\nPlease try again in a few moments.",
+                StoreBusyReport.DialogText(ex),
                 "Dismiss Unavailable",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);

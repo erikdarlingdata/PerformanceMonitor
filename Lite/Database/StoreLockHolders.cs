@@ -102,7 +102,7 @@ public sealed class StoreLockTimeoutException : TimeoutException
     private static string BuildMessage(TimeSpan waited, IReadOnlyList<StoreLockHolder> holders, string requester)
     {
         var text = string.Create(CultureInfo.InvariantCulture,
-            $"The local database write lock was not free for {requester} within {waited.TotalSeconds:0.#} s.");
+            $"Could not acquire the local database write lock for {requester} within {waited.TotalSeconds:0.#} s.");
         var who = FormatHolders(holders);
         return who.Length == 0 ? text : text + " " + who;
     }

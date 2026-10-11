@@ -229,7 +229,7 @@ AND    dismissed = FALSE";
         thread.Join(2000);
 
         Assert.NotNull(caughtException);
-        Assert.IsType<TimeoutException>(caughtException);
+        Assert.IsAssignableFrom<TimeoutException>(caughtException);
         Assert.Contains("could not acquire", caughtException.Message, StringComparison.OrdinalIgnoreCase);
     }
 
