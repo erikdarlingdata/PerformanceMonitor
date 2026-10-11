@@ -172,6 +172,7 @@ SELECT
            the alert memory for all of them. Skipping maintenance is the only failure mode here that loses
            nothing. */
         var maintenanceSkipped = false;
+        var skipHolder = "holder unknown";
         var judged = false;
         List<DatabaseStateInfo>? deviations = null;
         try
@@ -180,11 +181,15 @@ SELECT
             deviations = await SweepDatabaseStatesAsync(maintenance, serverId);
             judged = true;
         }
-        catch (TimeoutException)
+        catch (TimeoutException ex)
         {
-            /* Archival or compaction holds the write lock. Skip this cycle's maintenance and read anyway —
+            /* Something holds the write lock (#5650: named when the lock registry knows who). Skip this cycle's maintenance and read anyway —
                see the block comment at the top of the method for why skipping is the only lossless option. */
             maintenanceSkipped = true;
+            if (ex is StoreLockTimeoutException typed && typed.Holders.Count > 0)
+            {
+                skipHolder = StoreLockTimeoutException.FormatHolders(typed.Holders);
+            }
         }
 
         /* #2266: report the skip, on the TRANSITION. Warn rather than Error, because a single skipped cycle is
@@ -199,7 +204,7 @@ SELECT
                 _lastMaintenanceSkipped[serverId] = true;
                 AppLogger.Warn(nameof(GetDatabaseStateDeviationsAsync),
                     $"server {serverId}: skipped this cycle's database-state maintenance — could not acquire the " +
-                    "store write lock within 5s (archival or compaction holds it). Baselines are not being " +
+                    $"store write lock within 5s ({skipHolder}). Baselines are not being " +
                     "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
                     "occasionally — if it repeats, the write lock is contended.");
             }
