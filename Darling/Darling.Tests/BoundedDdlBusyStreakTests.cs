@@ -125,26 +125,47 @@ public sealed class BoundedDdlBusyStreakLiveTests
         using var holder = new NpgsqlConnection(scratch.ConnectionString);
         await holder.OpenAsync(ct);
         var holding = true;
+        using var sampler = new BackendSampler(scratch.ConnectionString);
         try
         {
             await Exec(holder, "BEGIN", ct);
             await Exec(holder, "SELECT 1 FROM collect.wait_stats LIMIT 1", ct);
 
+            /* #5672: every assert below names what it saw (each pass's outcome, every captured log line, and the other
+               backends and TimescaleDB jobs on this database while the pass ran), so one failure says which assert it was. */
+            var outcomes = new System.Collections.Generic.List<TimescaleSupport.BoundedDdlOutcome>();
             for (var i = 0; i < BoundedDdlBusyStreaks.EscalateAfter; i++)
             {
+                sampler.Start();
                 var outcome = await TimescaleSupport.TryRunBoundedDdlAsync(connection, statements, log, What, ct);
-                Assert.Equal(TimescaleSupport.BoundedDdlOutcome.LockBusy, outcome);
+                await sampler.StopAsync();
+                outcomes.Add(outcome);
+                Assert.True(
+                    outcome == TimescaleSupport.BoundedDdlOutcome.LockBusy,
+                    $"busy pass {i + 1} of {BoundedDdlBusyStreaks.EscalateAfter}: expected LockBusy, got {outcome}. outcomes so far: [{string.Join(", ", outcomes)}]. log: {log.Joined}. backends: {sampler.Snapshot}");
             }
 
-            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
-            Assert.Contains(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains(What, StringComparison.Ordinal));
+            Assert.True(
+                log.CountAtLevel(LogLevel.Warning) == 1,
+                $"after {outcomes.Count} busy passes expected exactly 1 Warning, got {log.CountAtLevel(LogLevel.Warning)}. outcomes: [{string.Join(", ", outcomes)}]. log: {log.Joined}");
+            Assert.True(
+                log.Lines.Any(l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains(What, StringComparison.Ordinal)),
+                $"expected a Warning line naming the object. log: {log.Joined}");
 
             await Exec(holder, "ROLLBACK", ct);
             holding = false;
+            sampler.Start();
             var applied = await TimescaleSupport.TryRunBoundedDdlAsync(connection, statements, log, What, ct);
-            Assert.Equal(TimescaleSupport.BoundedDdlOutcome.Applied, applied);
-            Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
-            Assert.Contains(log.Lines, l => l.StartsWith("Information:", StringComparison.Ordinal) && l.Contains("busy passes", StringComparison.Ordinal));
+            await sampler.StopAsync();
+            Assert.True(
+                applied == TimescaleSupport.BoundedDdlOutcome.Applied,
+                $"after the lock was released expected Applied, got {applied}. outcomes: [{string.Join(", ", outcomes)}]. log: {log.Joined}. backends: {sampler.Snapshot}");
+            Assert.True(
+                log.CountAtLevel(LogLevel.Warning) == 1,
+                $"after Applied expected still exactly 1 Warning, got {log.CountAtLevel(LogLevel.Warning)}. log: {log.Joined}");
+            Assert.True(
+                log.Lines.Any(l => l.StartsWith("Information:", StringComparison.Ordinal) && l.Contains("busy passes", StringComparison.Ordinal)),
+                $"expected an Information line saying 'busy passes'. log: {log.Joined}");
         }
         finally
         {
@@ -153,6 +174,78 @@ public sealed class BoundedDdlBusyStreakLiveTests
                 await Exec(holder, "ROLLBACK", System.Threading.CancellationToken.None);
             }
         }
+    }
+
+    /// <summary>
+    /// Polls the scratch database for its other backends and TimescaleDB jobs while a pass runs and keeps the last snapshot
+    /// (#5672): a LockBusy or a Failed is otherwise silent about WHO held the table.
+    /// </summary>
+    private sealed class BackendSampler : IDisposable
+    {
+        private const string BackendsSql = @"
+SELECT coalesce(string_agg(format('pid=%s %s state=%s wait=%s/%s xact_age_s=%s q=%s', pid, backend_type, state, wait_event_type, wait_event,
+         coalesce(extract(epoch FROM now() - xact_start)::int::text, '-'), left(regexp_replace(coalesce(query, ''), '\s+', ' ', 'g'), 80)), '; '), '')
+FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()";
+
+        private const string JobsSql = @"
+SELECT coalesce(string_agg(format('job %s %s last=%s next=%s', j.job_id, j.proc_name, s.last_run_status, s.next_start), '; '), '')
+FROM timescaledb_information.jobs j LEFT JOIN timescaledb_information.job_stats s USING (job_id)";
+
+        private readonly string _connectionString;
+        private System.Threading.CancellationTokenSource? _stop;
+        private Task? _loop;
+        private volatile string _last = "(none sampled)";
+
+        public BackendSampler(string connectionString) => _connectionString = connectionString;
+
+        public string Snapshot => _last;
+
+        public void Start()
+        {
+            _stop = new System.Threading.CancellationTokenSource();
+            var token = _stop.Token;
+            _loop = Task.Run(async () =>
+            {
+                try
+                {
+                    await using var c = new NpgsqlConnection(_connectionString);
+                    await c.OpenAsync(token);
+                    while (!token.IsCancellationRequested)
+                    {
+                        string? backends;
+                        string? jobs;
+                        using (var cmd = new NpgsqlCommand(BackendsSql, c) { CommandTimeout = 5 })
+                        {
+                            backends = (string?)await cmd.ExecuteScalarAsync(token);
+                        }
+
+                        using (var cmd = new NpgsqlCommand(JobsSql, c) { CommandTimeout = 5 })
+                        {
+                            jobs = (string?)await cmd.ExecuteScalarAsync(token);
+                        }
+
+                        _last = $"[{backends}] jobs [{jobs}]";
+                        await Task.Delay(250, token);
+                    }
+                }
+                catch (Exception ex) when (ex is OperationCanceledException || ex is NpgsqlException)
+                {
+                    /* Diagnostics only: a sampler that cannot read must never fail the test it watches. */
+                }
+            });
+        }
+
+        public async Task StopAsync()
+        {
+            _stop?.Cancel();
+            if (_loop is not null)
+            {
+                await _loop;
+            }
+        }
+
+        public void Dispose() => _stop?.Dispose();
     }
 
     private static async Task Exec(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
