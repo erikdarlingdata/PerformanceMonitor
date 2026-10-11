@@ -67,8 +67,10 @@ public partial class ManageServersWindow : Window
             var rows = await _dataService.GetMonitoredServersAsync();
 
             /* #5655: the SERVICE's version, from the store, shown once above the grid (the grid used to repeat the VIEWER's own version
-               on every row). Defensive like the reads below: a failed read shows "unavailable" and the list still loads. A missing
-               table or row reads as unknown (older than 3.11) inside the reader. */
+               on every row). Defensive like the reads below: if THIS read fails, the line shows "unavailable" and the list still loads.
+               A missing table or row reads as unknown (older than 3.11) inside the reader. It sits after GetMonitoredServersAsync in
+               the outer try, so when that read throws this line is never assigned: it stays as it was (blank on the first load) and the
+               error box above is the message, not "unavailable". */
             try
             {
                 ServiceVersionBlock.Text = ServiceVersionText.ServiceLines(await _dataService.GetServiceVersionsAsync(), ViewerTimeHelper.CurrentDisplayMode);

@@ -3058,8 +3058,11 @@ LIMIT 1";
            reload baseline, so the seed's own version bumps do not trigger a spurious first-sweep reload. */
         /* #5655: say in the store which version this service host runs and when the process started, so the viewers can show the
            SERVICE's version (they used to show their own). Its own table, never config_service (that row's self-bump trigger would
-           reload every service). A failed write logs a warning and the start goes on. */
-        await DarlingServiceVersionRecorder.RecordAsync(postgres, _logger, ProcessStartUtc(), stoppingToken);
+           reload every service). A failed write logs a warning and the start goes on; the sweep below tries it again until it lands. */
+        var serviceVersionStart = ProcessStartUtc();
+        var serviceVersionWriter = new DarlingServiceVersionWriter((retry, ct) =>
+            DarlingServiceVersionRecorder.RecordAsync(postgres, _logger, serviceVersionStart, ct, retry));
+        await serviceVersionWriter.TryAsync(stoppingToken);
 
         var configProvider = new StoreConfigProvider(postgres, _logger);
         await configProvider.SeedIfEmptyAsync(config, stoppingToken);
@@ -3485,6 +3488,13 @@ LIMIT 1";
             if (_passwordKeyRuntime is not null)
             {
                 await _passwordKeyRuntime.SweepCheckAsync(stoppingToken);
+            }
+
+            /* #5655: a service version write that failed at the start is tried again here on every pass until it succeeds, the way
+               the pin step above is, so the viewers do not say "unknown (older than 3.11)" about this service until the next restart. */
+            if (serviceVersionWriter.Pending)
+            {
+                await serviceVersionWriter.TryAsync(stoppingToken);
             }
 
             /* Control-plane reload beacon: poll config_version at a SAFE point (top of the sweep, never

@@ -50,17 +50,19 @@ public sealed class ServiceVersionLiveTests
             await ExecAsync(owner,
                 "INSERT INTO config.service_version (service_host, product_version, process_started_at, updated_at) VALUES "
                 + "('ZED', '3.11.0-nightly.7', '2026-10-01 12:00:00.123456+00', '2026-10-01 12:00:01.654321+00'), "
-                + "('alpha', '3.10.0', '2026-09-30 01:02:03.000001+00', '2026-09-30 01:02:04+00')", ct);
+                + "('ALPHA', '3.10.0', '2026-09-30 01:02:03.000001+00', '2026-09-30 01:02:04+00')", ct);
 
             var rows = await ServiceVersionTable.ReadAsync(dataSource, 15, ct);
 
-            Assert.Equal(new[] { "alpha", "ZED" }.Order(StringComparer.Ordinal).ToArray(), rows.Select(r => r.ServiceHost).Order(StringComparer.Ordinal).ToArray());
+            /* The rows were inserted ZED first. Both names are upper case so the expected order holds under any collation the scratch
+               database was made with; a read that lost its ORDER BY would return them in insertion order and fail here. */
+            Assert.Equal(new[] { "ALPHA", "ZED" }, rows.Select(r => r.ServiceHost).ToArray());
             var zed = rows.Single(r => r.ServiceHost == "ZED");
             Assert.Equal("3.11.0-nightly.7", zed.ProductVersion);
             Assert.Equal(new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc).AddTicks(1234560), zed.ProcessStartedUtc);
             Assert.Equal(DateTimeKind.Utc, zed.ProcessStartedUtc.Kind);
             Assert.Equal(new DateTime(2026, 10, 1, 12, 0, 1, DateTimeKind.Utc).AddTicks(6543210), zed.UpdatedUtc);
-            Assert.Equal("3.10.0", rows.Single(r => r.ServiceHost == "alpha").ProductVersion);
+            Assert.Equal("3.10.0", rows.Single(r => r.ServiceHost == "ALPHA").ProductVersion);
             Assert.Equal(2, rows.Count);
 
             bodySucceeded = true;
@@ -268,12 +270,26 @@ public sealed class ServiceVersionLiveTests
     public void TheWorker_RecordsTheVersion_BeforeTheConfigViewIsBuilt()
     {
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-        var record = worker.IndexOf("DarlingServiceVersionRecorder.RecordAsync(postgres, _logger, ProcessStartUtc(), stoppingToken)", StringComparison.Ordinal);
+        var record = worker.IndexOf("await serviceVersionWriter.TryAsync(stoppingToken);", StringComparison.Ordinal);
         var provider = worker.IndexOf("var configProvider = new StoreConfigProvider(postgres, _logger);", StringComparison.Ordinal);
 
         Assert.True(record > 0, "the worker records the service version at startup");
         Assert.True(provider > record, "the version row is written before the config provider's first read");
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(worker, "DarlingServiceVersionRecorder\\.RecordAsync"));
+    }
+
+    [Fact]
+    public void TheWorker_TriesAFailedVersionWriteAgain_OnEverySweep_UntilItLands()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var retry = worker.IndexOf("if (serviceVersionWriter.Pending)", StringComparison.Ordinal);
+        var pinStep = worker.IndexOf("await _passwordKeyRuntime.SweepCheckAsync(stoppingToken);", StringComparison.Ordinal);
+        var firstTry = worker.IndexOf("await serviceVersionWriter.TryAsync(stoppingToken);", StringComparison.Ordinal);
+
+        Assert.True(pinStep > firstTry && firstTry > 0, "the per-sweep pin step sweep comes after the start's version write");
+        Assert.True(retry > pinStep, "the retry sits right after the pin step's per-sweep retry, inside the sweep loop");
+        Assert.True(retry - pinStep < 1500, "the retry is the next step after the pin step, not somewhere later in the file");
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(worker, "serviceVersionWriter\\.Pending"));
     }
 
     private static async Task<NpgsqlConnection> OpenMigratedAsync(ScratchPostgres scratch, CancellationToken ct)
