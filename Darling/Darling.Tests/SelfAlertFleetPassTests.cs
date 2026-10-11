@@ -547,7 +547,7 @@ public sealed class SelfAlertFleetPassTests
         Assert.True(pause > 0 && pauseContinue > pause, "the pause gate was not found");
         Assert.True(launch > pauseContinue, "the self-alert pass must sit after the operator pause's continue");
         Assert.True(launch < guard && launch < launchLoop, "the self-alert pass must not depend on the guard or the launch loop");
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(source, @"TryStartSelfAlertPass\(sweepTargets"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(source, @"TryStartSelfAlertPass\(\s*sweepTargets"));
 
         var bodyStart = source.IndexOf("private async Task ProcessServerSweepAsync(", StringComparison.Ordinal);
         var nextMember = System.Text.RegularExpressions.Regex.Match(

@@ -137,9 +137,7 @@ public static class AlertDetailText
             return line;
         }
 
-        return s_ageLine.IsMatch(detailText) ? detailText : detailText.TrimEnd() + "
-
-" + line;
+        return s_ageLine.IsMatch(detailText) ? detailText : detailText.TrimEnd() + "\n\n" + line;
     }
 
     /// <summary>

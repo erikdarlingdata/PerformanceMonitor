@@ -7292,7 +7292,9 @@ LIMIT 1";
 
             /* #5642: the recent samples (15 minutes, at most 32, oldest first) the engine feeds through the persistence
                gate one by one. Inside this same counted block on purpose: it is one more read of the same pass step, so a
-               failure of either costs this tick its CPU alert and nothing else, and counts once under the latest-CPU name. */
+               failure of either costs this tick its CPU alert and nothing else, and counts once under the latest-CPU name.
+               The clock restarts so a fault here records this read's elapsed, not the first read's too. */
+            cpuReadClock.Restart();
             recentCpuSamples = await ReadRecentCpuSamplesAsync(runtime.ServerId, DateTime.UtcNow, cancellationToken);
         }
         catch (OperationCanceledException)
