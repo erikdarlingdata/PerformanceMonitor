@@ -49,9 +49,13 @@ public partial class ManageServersWindow : Window
 
     private async Task RefreshGridAsync()
     {
+        var appVersion = GetAppVersion();
+        ViewerVersionBlock.Text = ServiceVersionText.ViewerLine(appVersion);
+
         if (_dataService is null)
         {
             ServersGrid.ItemsSource = null;
+            ServiceVersionBlock.Text = string.Empty;
             return;
         }
 
@@ -61,7 +65,19 @@ public partial class ManageServersWindow : Window
             var previouslySelected = (ServersGrid.SelectedItem as ManagedServerListItem)?.Row.ServerId;
 
             var rows = await _dataService.GetMonitoredServersAsync();
-            var appVersion = GetAppVersion();
+
+            /* #5655: the SERVICE's version, from the store, shown once above the grid (the grid used to repeat the VIEWER's own version
+               on every row). Defensive like the reads below: a failed read shows "unavailable" and the list still loads. A missing
+               table or row reads as unknown (older than 3.11) inside the reader. */
+            try
+            {
+                ServiceVersionBlock.Text = ServiceVersionText.ServiceLines(await _dataService.GetServiceVersionsAsync());
+            }
+            catch (Exception ex)
+            {
+                ViewerLogger.Warn("ManageServersWindow", $"service version read failed: {ex.Message}");
+                ServiceVersionBlock.Text = "Service version: " + ServiceVersionText.Unavailable;
+            }
 
             /* One collection-freshness read for the whole list — the same MAX(collection_time) per server the
                sidebar dots + Overview cards derive freshness from — so the grid shows when the Darling SERVICE
@@ -116,7 +132,6 @@ public partial class ManageServersWindow : Window
                 /* The flag is filed under the server's id (#4768); the host is what earlier versions filed it under. */
                 items.Add(new ManagedServerListItem(row, _serverStore.IsFavorite(row.ServerId, row.Host))
                 {
-                    InstalledVersion = appVersion,
                     LastCollectedUtc = lastCollected,
                     Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, row.ServerId, TimeZoneInfo.Local, nowUtc),
                     HistoryAgedOut = lastCollected is null
@@ -335,9 +350,6 @@ public sealed class ManagedServerListItem
     public MonitoredServerRow Row { get; }
 
     public bool IsFavorite { get; }
-
-    /// <summary>Set once before binding; one viewer shows the same version for every row.</summary>
-    public string? InstalledVersion { get; set; }
 
     public string DisplayNameWithIntent => Row.ReadOnlyIntent ? $"{Row.Name} (Read-Only)" : Row.Name;
 

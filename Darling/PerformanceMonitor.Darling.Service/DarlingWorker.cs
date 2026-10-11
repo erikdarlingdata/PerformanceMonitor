@@ -3056,6 +3056,11 @@ LIMIT 1";
            The initial server set comes from config_monitored_servers WHERE is_enabled = TRUE (post-seed
            equivalent to darling.json, but store-authoritative); the config_version read here is the
            reload baseline, so the seed's own version bumps do not trigger a spurious first-sweep reload. */
+        /* #5655: say in the store which version this service host runs and when the process started, so the viewers can show the
+           SERVICE's version (they used to show their own). Its own table, never config_service (that row's self-bump trigger would
+           reload every service). A failed write logs a warning and the start goes on. */
+        await DarlingServiceVersionRecorder.RecordAsync(postgres, _logger, ProcessStartUtc(), stoppingToken);
+
         var configProvider = new StoreConfigProvider(postgres, _logger);
         await configProvider.SeedIfEmptyAsync(config, stoppingToken);
         /* #5366: the service's password key, after migrations, role provisioning and the seed, and before the first config view (#5455:
