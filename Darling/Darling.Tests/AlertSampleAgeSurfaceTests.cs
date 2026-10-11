@@ -236,7 +236,7 @@ public sealed class AlertSampleAgeSurfaceTests
         catch (System.ComponentModel.Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
-            return;
+            throw;
         }
 
         using (proc)
@@ -344,6 +344,14 @@ public sealed class AlertSampleAgeSurfaceTests
 
         Assert.Contains("Binding=\"{Binding NewestSampleDisplay}\"",
             ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/AlertsHistoryTab.xaml"), StringComparison.Ordinal);
+
+        /* The column carries a filter button like its siblings: the grid's filter manager finds the column's value by the
+           button's Tag, read as a property name of the row type, so the Tag must name a public string property. */
+        Assert.Matches(@"Tag=""NewestSampleDisplay""\s+Click=""FilterButton_Click""[\s\S]{0,200}Text=""Newest Sample""",
+            ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/AlertsHistoryTab.xaml"));
+        var filterProperty = typeof(PerformanceMonitor.Darling.Viewer.ViewerAlertRow).GetProperty("NewestSampleDisplay");
+        Assert.NotNull(filterProperty);
+        Assert.Equal(typeof(string), filterProperty!.PropertyType);
     }
 
     [Fact]
