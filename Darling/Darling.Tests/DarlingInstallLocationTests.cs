@@ -1757,6 +1757,7 @@ function Get-CimInstance {
                 $null = & icacls.exe "$root\darling.json.bak-linked" /inheritance:d /grant "*$($users.Value):(M)" 2>&1
                 Confirm-ProbeAcl 'linkedAces' "$root\darling.json.bak-linked" $null @($users)
                 'setup.otherNameSharesTheAcl=' + (@((Get-Acl -LiteralPath $outside).GetAccessRules($true, $false, $sidType) | Where-Object { $_.IdentityReference -eq $users }).Count -gt 0)
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
                 $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
                 foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } }
@@ -1782,10 +1783,17 @@ function Get-CimInstance {
         var answers = RunWindowsPowerShell(probe.ToString());
         AssertProbeSetupTook(answers);
 
-        Assert.Contains(answers, a => a.StartsWith(@"open:\darling.json.bak-linked (a hard link: this file has more than one name", StringComparison.Ordinal));
-        Assert.Contains("darling.json.bak-linked.usersExplicit=True", answers);
-        Assert.Contains("darling.json.bak-linked.protected=True", answers);
-        Assert.Contains(answers, a => a.EndsWith(".txt.usersExplicit=True", StringComparison.Ordinal));
+        /* The text depends on which step reports the file. An elevated session runs the owner step first: it counts the names on
+           the handle, lists the file in its own words and leaves it out of the permission walk. Without elevation the owner step
+           does not run and the permission walk lists it (the root-file arm, in the walk's words). Either way it is listed once. */
+        var linkedText = answers.Contains("elevated=True")
+            ? @"open:\darling.json.bak-linked (has 2 names (a hard link): its permissions are the same under every one"
+            : @"open:\darling.json.bak-linked (a hard link: this file has more than one name";
+        AssertAnswer(answers, a => a.StartsWith(linkedText, StringComparison.Ordinal), "that starts with '" + linkedText + "'");
+        AssertAnswerCount(answers, a => a.StartsWith(@"open:\darling.json.bak-linked", StringComparison.Ordinal), 1, "that list darling.json.bak-linked");
+        AssertAnswer(answers, "darling.json.bak-linked.usersExplicit=True");
+        AssertAnswer(answers, "darling.json.bak-linked.protected=True");
+        AssertAnswer(answers, a => a.EndsWith(".txt.usersExplicit=True", StringComparison.Ordinal), "that ends with '.txt.usersExplicit=True' (the other name keeps the grant)");
     }
 
     /// <summary>
@@ -1833,6 +1841,7 @@ function Get-CimInstance {
                 }
                 $null = & icacls.exe "$root\plain.dll" /inheritance:d /grant "*$($users.Value):(M)" 2>&1
                 'setup.plain.ace=' + (@((Get-Acl -LiteralPath "$root\plain.dll").GetAccessRules($true, $false, $sidType) | Where-Object { $_.IdentityReference -eq $users }).Count -gt 0)
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
                 $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
                 foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } }
@@ -1866,14 +1875,20 @@ function Get-CimInstance {
         }
 
         AssertProbeSetupTook(answers);
+        /* An elevated session runs the owner step first, which lists a file with more than one name in its own words and keeps it
+           out of the permission walk; without elevation the permission walk lists it. Either way it is listed once. */
+        var linkedText = answers.Contains("elevated=True")
+            ? " (has 2 names (a hard link): its permissions are the same under every one"
+            : " (a hard link: this file has more than one name";
         foreach (var leaf in new[] { "vendor.dll", "inner.dll", "darling.json.bak-deep", "darling.json.bak-hand" })
         {
-            Assert.Contains(answers, a => a.StartsWith("open:\\", StringComparison.Ordinal) && a.Contains(leaf + " (a hard link: this file has more than one name", StringComparison.Ordinal));
-            Assert.Contains($"{leaf}.True.usersExplicit=True", answers);
-            Assert.Contains($"{leaf}.False.usersExplicit=True", answers);
+            AssertAnswer(answers, a => a.StartsWith("open:\\", StringComparison.Ordinal) && a.Contains("\\" + leaf + linkedText, StringComparison.Ordinal), "that starts with 'open:\\' and holds '\\" + leaf + linkedText + "'");
+            AssertAnswerCount(answers, a => a.StartsWith("open:\\", StringComparison.Ordinal) && a.Contains("\\" + leaf + " (", StringComparison.Ordinal), 1, "that list " + leaf);
+            AssertAnswer(answers, $"{leaf}.True.usersExplicit=True");
+            AssertAnswer(answers, $"{leaf}.False.usersExplicit=True");
         }
 
-        Assert.Contains("plain.usersExplicit=False", answers);
+        AssertAnswer(answers, "plain.usersExplicit=False");
     }
 
     /// <summary>
@@ -2032,6 +2047,9 @@ function Get-CimInstance {
             function Get-OwnerValue([string]$p) { return (Get-Acl -LiteralPath $p).GetOwner($sidType).Value }
             try {
                 New-Item -ItemType Directory -Path "$root\sub", $outsideDir -Force | Out-Null
+                # The lock works in the long spelling of the root and lists every path in it, while $env:TEMP is the 8.3 short form on a
+                # CI runner (C:\Users\RUNNER~1\...), which would make the open: filter below drop every line the lock returned.
+                $root = Get-DarlingCanonicalPath $root
                 Set-Content -LiteralPath "$root\plain.dll" -Value 'x'
                 Set-Content -LiteralPath "$root\sub\inner.dll" -Value 'x'
                 Set-Content -LiteralPath "$outsideDir\linked.dll" -Value 'x'
@@ -2041,7 +2059,7 @@ function Get-CimInstance {
                 'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
                 $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
-                foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } }
+                foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } else { 'openElsewhere:' + $line } }
                 'linkedListed=' + @($open | Where-Object { $_ -like '*linked.dll*' }).Count
                 'owner.linkedInside=' + ((Get-OwnerValue "$root\sub\linked.dll") -eq $me.Value)
                 'owner.linkedOutside=' + ((Get-OwnerValue "$outsideDir\linked.dll") -eq $me.Value)
@@ -2069,20 +2087,20 @@ function Get-CimInstance {
         }
 
         AssertProbeSetupTook(answers);
-        Assert.Contains("owner.linkedInside=True", answers);
-        Assert.Contains("owner.linkedOutside=True", answers);
+        AssertAnswer(answers, "owner.linkedInside=True");
+        AssertAnswer(answers, "owner.linkedOutside=True");
         if (answers.Contains("elevated=True"))
         {
-            Assert.Contains("linkedListed=1", answers);
-            Assert.Contains(answers, a => a.StartsWith("open:\\sub\\linked.dll (has 2 names (a hard link)", StringComparison.Ordinal));
+            AssertAnswer(answers, "linkedListed=1");
+            AssertAnswer(answers, a => a.StartsWith("open:\\sub\\linked.dll (has 2 names (a hard link)", StringComparison.Ordinal), "that starts with 'open:\\sub\\linked.dll (has 2 names (a hard link)'");
             foreach (var leaf in new[] { "", "\\sub", "\\plain.dll", "\\sub\\inner.dll" })
             {
-                Assert.Contains($"adminOwner[{leaf}]=True", answers);
+                AssertAnswer(answers, $"adminOwner[{leaf}]=True");
             }
         }
         else
         {
-            Assert.Contains(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv)", StringComparison.Ordinal));
+            AssertAnswer(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv)", StringComparison.Ordinal), "that starts with 'open:' and names SeTakeOwnershipPrivilege and SeBackupPrivilege");
         }
     }
 
@@ -2311,18 +2329,25 @@ function Get-CimInstance {
             $admins = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
             try {
                 New-Item -ItemType Directory -Path $root, $outsideDir -Force | Out-Null
+                # The lock works in the long spelling of the root and lists every path in it, while $env:TEMP is the 8.3 short form on a
+                # CI runner (C:\Users\RUNNER~1\...), which would make the open: filter below drop every line the lock returned.
+                $root = Get-DarlingCanonicalPath $root
                 Set-Content -LiteralPath "$outsideDir\file" -Value 'x'
                 Set-Content -LiteralPath "$root\dn" -Value 'x'
                 [IO.File]::WriteAllText("\\?\$root\dn.", 'x')
                 & cmd.exe /c mklink /J "$root\a" $outsideDir | Out-Null
-                foreach ($p in @("$outsideDir\file", "$root\dn")) { $null = & icacls.exe $p /setowner "*$($me.Value)" /L /Q 2>&1 }
+                # Every file this probe checks is given the current account as its owner first. A file made by an elevated administrator
+                # is owned by Administrators from the start, so without this the check that the lock left dn. alone would pass or fail on
+                # who created it. dn. is reached with a \\?\ path, which Windows does not fold into dn (icacls and Get-Acl both honour it).
+                foreach ($p in @("$outsideDir\file", "$root\dn", "\\?\$root\dn.")) { $null = & icacls.exe $p /setowner "*$($me.Value)" /L /Q 2>&1 }
                 'setup.bothNamesListed=' + ((((@(Get-ChildItem -LiteralPath $root -Force | ForEach-Object Name) | Sort-Object) -join '|')) -eq 'a|dn|dn.')
-                'setup.ownersSet=' + ((Get-OwnerValue "$outsideDir\file") -eq $me.Value)
+                'setup.ownersSet=' + (((Get-OwnerValue "$outsideDir\file") -eq $me.Value) -and ((Get-OwnerValue "$root\dn") -eq $me.Value) -and ((Get-OwnerValue "\\?\$root\dn.") -eq $me.Value))
                 $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
-                foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } }
+                foreach ($line in $open) { if ($line.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { 'open:' + $line.Substring($root.Length) } else { 'openElsewhere:' + $line } }
                 'owner.outsideFile=' + ((Get-OwnerValue "$outsideDir\file") -eq $me.Value)
                 'adminOwner[dn]=' + ((Get-OwnerValue "$root\dn") -eq $admins.Value)
                 'adminOwner[dn.]=' + ((Get-OwnerValue "\\?\$root\dn.") -eq $admins.Value)
+                'ownerNow[dn]=' + (Get-OwnerValue "$root\dn") + ' ownerNow[dn.]=' + (Get-OwnerValue "\\?\$root\dn.") + ' me=' + $me.Value + ' admins=' + $admins.Value
             }
             finally { foreach ($dir in @($root, $outsideDir)) { Remove-ProbeDirectory $dir } }
             """);
@@ -2330,18 +2355,18 @@ function Get-CimInstance {
         var answers = RunProbeInShell(shell, probe.ToString());
 
         AssertProbeSetupTook(answers);
-        Assert.Contains("owner.outsideFile=True", answers);
-        Assert.Contains("adminOwner[dn.]=False", answers);
-        Assert.Contains(answers, a => a.StartsWith("open:\\a (a junction or link)", StringComparison.Ordinal));
+        AssertAnswer(answers, "owner.outsideFile=True");
+        AssertAnswer(answers, "adminOwner[dn.]=False");
+        AssertAnswer(answers, a => a.StartsWith("open:\\a (a junction or link)", StringComparison.Ordinal), "that starts with 'open:\\a (a junction or link)'");
         if (answers.Contains("elevated=True"))
         {
-            Assert.Contains("adminOwner[dn]=True", answers);
-            Assert.Contains(answers, a => a.StartsWith("open:\\dn. (its name ends in a dot or a space", StringComparison.Ordinal));
+            AssertAnswer(answers, "adminOwner[dn]=True");
+            AssertAnswer(answers, a => a.StartsWith("open:\\dn. (its name ends in a dot or a space", StringComparison.Ordinal), "that starts with 'open:\\dn. (its name ends in a dot or a space'");
         }
         else
         {
-            Assert.Contains("adminOwner[dn]=False", answers);
-            Assert.Contains(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv); a policy may have removed them from Administrators", StringComparison.Ordinal));
+            AssertAnswer(answers, "adminOwner[dn]=False");
+            AssertAnswer(answers, a => a.StartsWith("open:", StringComparison.Ordinal) && a.Contains("SeTakeOwnershipPrivilege and SeBackupPrivilege (see whoami /priv); a policy may have removed them from Administrators", StringComparison.Ordinal), "that starts with 'open:' and names SeTakeOwnershipPrivilege and SeBackupPrivilege");
         }
     }
 
@@ -2569,7 +2594,29 @@ function Get-CimInstance {
         var setup = answers.Where(l => l.StartsWith("setup.", StringComparison.Ordinal)).ToList();
         Assert.True(setup.Count > 0, "the probe printed no setup.* marker, so nothing shows its owner or ACE setup took:\n" + string.Join("\n", answers));
         var failed = setup.Where(l => !l.EndsWith("=True", StringComparison.Ordinal)).ToList();
-        Assert.True(failed.Count == 0, "the probe's own setup did not take (a test-environment problem, not a product result): " + string.Join(", ", failed));
+        Assert.True(failed.Count == 0, "the probe's own setup did not take (a test-environment problem, not a product result): " + string.Join(", ", failed) + "\nevery answer:\n" + string.Join("\n", answers));
+    }
+
+    /// <summary>
+    /// A probe answer is required, and a failure prints every answer the probe gave (xunit's own message shows the first five and
+    /// cuts the rest), so a failed CI run shows the whole list.
+    /// </summary>
+    private static void AssertAnswer(IReadOnlyCollection<string> answers, string exact)
+    {
+        Assert.True(answers.Contains(exact), $"expected the answer '{exact}'; every answer:\n" + string.Join("\n", answers));
+    }
+
+    /// <summary>The same for an answer found by a predicate; <paramref name="expected"/> says what it looks for.</summary>
+    private static void AssertAnswer(IReadOnlyCollection<string> answers, Func<string, bool> match, string expected)
+    {
+        Assert.True(answers.Any(match), $"expected an answer {expected}; every answer:\n" + string.Join("\n", answers));
+    }
+
+    /// <summary>The count of answers a predicate matches must be exactly <paramref name="count"/>; a failure prints every answer.</summary>
+    private static void AssertAnswerCount(IReadOnlyCollection<string> answers, Func<string, bool> match, int count, string what)
+    {
+        var found = answers.Count(match);
+        Assert.True(found == count, $"expected {count} answer(s) {what}, found {found}; every answer:\n" + string.Join("\n", answers));
     }
 
     /// <summary>
