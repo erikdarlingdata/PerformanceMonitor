@@ -2194,7 +2194,7 @@ function Protect-DarlingStagingFolder([string]$path) {
 
 # A fresh, empty, protected folder under the machine temp directory for H1's zip staging copy. Elevation is
 # assumed (this script requires it), so setting Administrators as owner needs no extra privilege - the same
-# fact Lock-DarlingInstallTree's own /setowner already relies on.
+# fact Lock-DarlingInstallTree's own owner step already relies on.
 function New-DarlingProtectedStagingFolder {
     $path = Join-Path $env:TEMP ('darling-upgrade-staging-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $path -Force | Out-Null
