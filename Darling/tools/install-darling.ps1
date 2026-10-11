@@ -1878,8 +1878,8 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 # Without this check the failure below reads "the config is invalid or a server is unreachable", which points
 # at the wrong file. Only the message counts: 0x80131506 is .NET's general fatal-error code
 # (COR_E_EXECUTIONENGINE), not a CET-only code, so an exit code of 0x80131506 with no such text keeps the
-# ordinary failure path below. $ExitCode is kept in the signature for the call site and for a future signal.
-function Test-CetStartFailure([int64]$ExitCode, [string[]]$Output) {
+# ordinary failure path below.
+function Test-CetStartFailure([string[]]$Output) {
     foreach ($line in @($Output)) {
         if ("$line" -match "doesn't fully support CET") { return $true }
     }
@@ -1896,7 +1896,7 @@ if (-not $SkipPreflight) {
     $preflightOutput = @(& $serviceExe --test-connection 2>&1 | ForEach-Object { Write-Host "$_"; "$_" })
     $preflightExit = $LASTEXITCODE
     $ErrorActionPreference = $savedErrorAction
-    if (Test-CetStartFailure $preflightExit $preflightOutput) {
+    if (Test-CetStartFailure $preflightOutput) {
         Write-Host ''
         Write-Host 'ERROR: Windows on this machine is missing updates that .NET 10 needs, so the service cannot start.' -ForegroundColor Red
         Write-Host 'The service exe printed the CET start error (Your Windows doesn''t fully support CET).' -ForegroundColor Red

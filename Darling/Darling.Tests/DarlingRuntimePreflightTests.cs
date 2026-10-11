@@ -346,18 +346,18 @@ public class DarlingRuntimePreflightTests
     {
         var cases = new (string Args, bool Expected)[]
         {
-            /* The exit code alone is not CET: any fatal runtime error returns it. */
-            ("-2146233082 @()", false),
-            ("2148734214 @()", false),
-            ("-2146233082 @('Fatal error.', 'Some other runtime failure')", false),
-            ("0 @('" + CetMessage.Replace("'", "''") + "')", true),
-            ("1 @('Fatal error.', 'Your Windows doesn''t fully support CET. Please install all available Windows updates.')", true),
-            ("-2146233082 @('" + CetMessage.Replace("'", "''") + "')", true),
+            /* No output, or only a generic fatal-error line, is not CET: the CET text is what counts. */
+            ("@()", false),
+            ("@()", false),
+            ("@('Fatal error.', 'Some other runtime failure')", false),
+            ("@('" + CetMessage.Replace("'", "''") + "')", true),
+            ("@('Fatal error.', 'Your Windows doesn''t fully support CET. Please install all available Windows updates.')", true),
+            ("@('" + CetMessage.Replace("'", "''") + "')", true),
             /* Ordinary outcomes keep their old paths: pass, a failed server probe, a bad config. */
-            ("0 @()", false),
-            ("1 @('PASS server1', 'FAIL server2: login failed')", false),
-            ("3 @()", false),
-            ("-1073741515 @('You must install .NET to run this application')", false),
+            ("@()", false),
+            ("@('PASS server1', 'FAIL server2: login failed')", false),
+            ("@()", false),
+            ("@('You must install .NET to run this application')", false),
         };
 
         var probe = new StringBuilder();
@@ -393,10 +393,10 @@ public class DarlingRuntimePreflightTests
         var script = InstallScript.ReplaceLineEndings("\n");
 
         var run = script.IndexOf("& $serviceExe --test-connection", StringComparison.Ordinal);
-        var check = script.IndexOf("if (Test-CetStartFailure $preflightExit $preflightOutput) {", StringComparison.Ordinal);
+        var check = script.IndexOf("if (Test-CetStartFailure $preflightOutput) {", StringComparison.Ordinal);
         var prompt = script.IndexOf("Install anyway?", StringComparison.Ordinal);
         Assert.True(run >= 0 && check > run && prompt > check,
-            "the CET check must read the pre-flight exe's exit code and output, and run before the 'Install anyway?' prompt (#5651)");
+            "the CET check must read the pre-flight exe's output, and run before the 'Install anyway?' prompt (#5651)");
 
         var block = ExtractBracedBlockAt(script, script.IndexOf('{', check), out _);
         Assert.Contains("Windows on this machine is missing updates", block, StringComparison.Ordinal);
@@ -440,7 +440,7 @@ public class DarlingRuntimePreflightTests
             probe.AppendLine(block);
             probe.AppendLine("\"exit=$preflightExit\"");
             probe.AppendLine("\"lines=$($preflightOutput.Count)\"");
-            probe.AppendLine("\"cet=$(Test-CetStartFailure $preflightExit $preflightOutput)\"");
+            probe.AppendLine("\"cet=$(Test-CetStartFailure $preflightOutput)\"");
             probe.AppendLine("\"eap=$ErrorActionPreference\"");
 
             var lines = RunWindowsPowerShell(probe.ToString());
