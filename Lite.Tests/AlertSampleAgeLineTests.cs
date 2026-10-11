@@ -200,13 +200,12 @@ public class AlertSampleAgeLineTests
     }
 
     [Fact]
-    public void TheWireField_CarriesSourceInstantAgeAndLine_AndIsNullWithoutACarrier()
+    public void TheWireField_CarriesSourceInstantAndAge_AndIsNullWithoutACarrier()
     {
         var wire = AlertNewestSampleWire.FromContextJson(AlertContextSerializer.Serialize(WithDetails()))!;
         Assert.Equal("CPU", wire.Source);
         Assert.Equal("2026-10-11T15:43:29.0000000Z", wire.InstantUtc);
         Assert.Equal(320d, wire.AgeSeconds);
-        Assert.Equal(Line, wire.Line);
 
         Assert.Null(AlertNewestSampleWire.FromContextJson(AlertContextSerializer.Serialize(WithDetails(withSample: false))));
         Assert.Null(AlertNewestSampleWire.FromContextJson(null));

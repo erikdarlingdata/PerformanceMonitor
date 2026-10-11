@@ -146,7 +146,6 @@ public sealed class AlertSampleAgeSurfaceTests
         Assert.Equal("CPU", (string?)sample["source"]);
         Assert.Equal("2026-10-11T15:43:29.0000000Z", (string?)sample["instant_utc"]);
         Assert.Equal(320d, (double?)sample["age_seconds"]);
-        Assert.Equal(Line, (string?)sample["line"]);
     }
 
     [Fact]
@@ -157,7 +156,6 @@ public sealed class AlertSampleAgeSurfaceTests
         var notebook = AlertNotebookEndpoint.AlertRowNode(Row(json), incident: null);
 
         Assert.Equal(notebook["newest_sample"]!.ToJsonString(), triage["newest_sample"]!.ToJsonString());
-        Assert.Equal(Line, (string?)triage["newest_sample"]!["line"]);
     }
 
     [Fact]
@@ -195,7 +193,7 @@ public sealed class AlertSampleAgeSurfaceTests
         var next = js.IndexOf("} else if (fields) {", items, StringComparison.Ordinal);
         Assert.True(items >= 0 && next > items);
         var branch = js[items..next];
-        Assert.Contains("a.newest_sample", branch, StringComparison.Ordinal);
+        Assert.Contains("sampleAgeLine(a.newest_sample)", branch, StringComparison.Ordinal);
         Assert.Equal(1, Count(js, "class: \"detail-sample-age\""));
         Assert.Contains("detail-sample-age", branch, StringComparison.Ordinal);
     }
@@ -219,11 +217,31 @@ public sealed class AlertSampleAgeSurfaceTests
         var sample = doc.RootElement.GetProperty("newest_sample");
         Assert.Equal("CPU", sample.GetProperty("source").GetString());
         Assert.Equal(320d, sample.GetProperty("age_seconds").GetDouble());
-        Assert.Equal(Line, sample.GetProperty("line").GetString());
+        Assert.Equal("2026-10-11T15:43:29.0000000Z", sample.GetProperty("instant_utc").GetString());
+        Assert.False(sample.TryGetProperty("line", out _), "the twin tools publish source, instant_utc and age_seconds only");
         Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(JsonSerializer.Serialize(new
         {
             newest_sample = AlertNewestSampleWire.FromContextJson(ContextJsonWith(null))
         })).RootElement.GetProperty("newest_sample").ValueKind);
+    }
+
+    [Fact]
+    public void TheTwinMcpTools_PublishTheSameNewestSampleShape()
+    {
+        // Lite's get_alert_history builds source, instant_utc (round-trip text) and age_seconds (whole seconds)
+        // inline; Darling's goes through AlertNewestSampleWire. The names, the "o" format and the rounding must
+        // stay the same so the twin tools return identical fields.
+        var lite = ReadRepoFile("Lite/Mcp/McpAlertTools.cs");
+        Assert.Contains("source = sample.Source,", lite, StringComparison.Ordinal);
+        Assert.Contains("instant_utc = DateTime.SpecifyKind(sample.InstantUtc, DateTimeKind.Utc).ToString(\"o\"),", lite, StringComparison.Ordinal);
+        Assert.Contains("age_seconds = Math.Round(sample.Age.TotalSeconds, 0),", lite, StringComparison.Ordinal);
+
+        var wire = ReadRepoFile("PerformanceMonitor.Notifications/AlertNewestSampleWire.cs");
+        Assert.Contains("JsonPropertyName(\"source\")", wire, StringComparison.Ordinal);
+        Assert.Contains("JsonPropertyName(\"instant_utc\")", wire, StringComparison.Ordinal);
+        Assert.Contains("JsonPropertyName(\"age_seconds\")", wire, StringComparison.Ordinal);
+        Assert.Contains("ToString(\"o\", CultureInfo.InvariantCulture)", wire, StringComparison.Ordinal);
+        Assert.Contains("Math.Round(sample.Age.TotalSeconds, 0)", wire, StringComparison.Ordinal);
     }
 
     /* ---------------- the Viewer's alert detail ---------------- */

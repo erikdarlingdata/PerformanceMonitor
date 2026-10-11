@@ -263,6 +263,22 @@ function alertAdvice(a) {
   return adviceCache.get(key);
 }
 
+/* #5642: "Newest CPU sample: 15:43:29 UTC, 5m 20s old" - the same wording AlertDetailText.SampleAgeLine writes into
+ * detail_text, built from the persisted newest_sample field. Null when the row has none. */
+function sampleAgeLine(sample) {
+  if (sample == null || typeof sample.source !== "string" || sample.source.trim().length === 0) return null;
+  const at = new Date(sample.instant_utc);
+  if (Number.isNaN(at.getTime())) return null;
+  const two = (n) => String(n).padStart(2, "0");
+  const total = Math.max(0, Math.floor(Number(sample.age_seconds) || 0));
+  let age;
+  if (total < 60) age = total + "s";
+  else if (total < 3600) age = Math.floor(total / 60) + "m " + (total % 60) + "s";
+  else if (total < 86400) age = Math.floor(total / 3600) + "h " + Math.floor((total % 3600) / 60) + "m";
+  else age = Math.floor(total / 86400) + "d " + Math.floor((total % 86400) / 3600) + "h";
+  return "Newest " + sample.source + " sample: " + two(at.getUTCHours()) + ":" + two(at.getUTCMinutes()) + ":" + two(at.getUTCSeconds()) + " UTC, " + age + " old";
+}
+
 /* The expansion body: unchanged shape from the pre-#4194 eager version (see detailCell above), just built lazily. */
 function detailBody(a, details) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
@@ -276,10 +292,11 @@ function detailBody(a, details) {
   if (items) {
     for (const item of items) body.push(...detailItem(item));
     /* #5642: the structured items replace detail_text, which is where the fire-time sample-age line lives, so the
-     * line is shown here from the row's newest_sample field - once, and only when the persisted carrier set it.
-     * The detail_text branches below already carry the line in the text and must not add it a second time. */
-    const ageLine = a.newest_sample != null && typeof a.newest_sample.line === "string" ? a.newest_sample.line : "";
-    if (ageLine.length > 0) body.push(el("div", { class: "detail-sample-age", text: ageLine }));
+     * line is shown here from the row's newest_sample field (source, instant_utc, age_seconds: the carrier the
+     * engine persisted when the alert fired, never re-measured against this page's clock) - once, and only when the
+     * carrier is set. The detail_text branches below already carry the line in the text and must not add it again. */
+    const ageLine = sampleAgeLine(a.newest_sample);
+    if (ageLine !== null) body.push(el("div", { class: "detail-sample-age", text: ageLine }));
   } else if (fields) {
     body.push(el("div", { class: "detail-fields" }, fields.map(fieldRow)));
   } else if (hasDetail) {
