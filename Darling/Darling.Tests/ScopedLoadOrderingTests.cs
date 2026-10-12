@@ -282,7 +282,7 @@ public sealed class ScopedLoadOrderingTests
 
             foreach (var check in checks)
             {
-                var tail = body[(check.Index + check.Length)..];
+                var tail = body[check.ConsequenceStart..];
 
                 Assert.Matches(new Regex(@"^\s*(\{\s*return\s*;\s*\}|return\s*;)"), tail);
             }
@@ -310,7 +310,7 @@ public sealed class ScopedLoadOrderingTests
         {
             var body = LoadBody(site);
             var firstAwait = FirstAwait(site, body);
-            var checks = Checks(site, body).Select(m => m.Index).ToList();
+            var checks = Checks(site, body).Select(c => c.Pos).ToList();
 
             Assert.True(
                 checks.Count >= 1,
@@ -371,7 +371,7 @@ public sealed class ScopedLoadOrderingTests
                 }
 
                 painting++;
-                var checks = Checks(site, catchBlock).Select(m => m.Index).ToList();
+                var checks = Checks(site, catchBlock).Select(c => c.Pos).ToList();
 
                 var unguarded = Unguarded(catchBlock, checks, paints);
 
@@ -417,6 +417,74 @@ public sealed class ScopedLoadOrderingTests
                 + $"nameof({site.Method}); a key that differs between the claim and the check asks about a "
                 + "surface nothing claimed");
         }
+    }
+
+    // ── The bind-when-current shape (#5703) ───────────────────────────────────────────
+
+    private static readonly Site s_synthetic = new(s_viewer, "Synthetic.cs", "Task", "LoadJobsAsync");
+
+    private const string BindStatement =
+        "if (!await JobHistoryLoadSteps.BindWhenCurrentAsync(readTask, () => _loads.Superseded(nameof(LoadJobsAsync), gen), BindRows)) { return; }";
+
+    private static List<int> UnguardedPaintsOf(string body)
+    {
+        var checks = Checks(s_synthetic, body).Select(c => c.Pos).ToList();
+        var afterAwait = Paints(s_synthetic, body).Where(p => p > FirstAwait(s_synthetic, body));
+        return Unguarded(body, checks, afterAwait);
+    }
+
+    /// <summary>
+    /// <c>if (!await JobHistoryLoadSteps.BindWhenCurrentAsync(read, () =&gt; _loads.Superseded(nameof(Loader), gen), ...)) return;</c>
+    /// is a supersession check: the paints below it, with no await between, are protected.
+    /// </summary>
+    [Fact]
+    public void TheBindWhenCurrentStatement_IsACheck_ForThePaintsBelowIt()
+    {
+        var body = $"var gen = _loads.Claim(nameof(LoadJobsAsync)); var readTask = Read(); {BindStatement} Grid.ItemsSource = rows;";
+
+        Assert.Single(Checks(s_synthetic, body));
+        Assert.Empty(UnguardedPaintsOf(body));
+        /* The keyed count the claim/check pin takes: the one Superseded call inside the statement is the check, counted once. */
+        Assert.Equal(
+            Regex.Matches(body, @"_loads\s*\.\s*(?:Claim|Superseded)\s*\(").Count,
+            Matches(body, Claim(s_synthetic)).Count() + Checks(s_synthetic, body).Count);
+    }
+
+    /// <summary>
+    /// The scanner still fails what the shape does not protect: a paint with no check at all, a paint that sits above the statement,
+    /// and a paint below an await that follows it.
+    /// </summary>
+    [Theory]
+    [InlineData("var readTask = Read(); await readTask; Grid.ItemsSource = rows;")]
+    [InlineData("var readTask = Read(); await readTask; Grid.ItemsSource = rows; BINDSTATEMENT")]
+    [InlineData("var readTask = Read(); BINDSTATEMENT await Other(); Grid.ItemsSource = rows;")]
+    public void ThePaintsTheBindStatementDoesNotProtect_StillFail(string template)
+    {
+        var body = template.Replace("BINDSTATEMENT", BindStatement, StringComparison.Ordinal);
+
+        Assert.NotEmpty(UnguardedPaintsOf(body));
+    }
+
+    /// <summary>
+    /// Only that exact statement counts: another loader's key, a lambda that does not ask the ledger, a consequence that does not
+    /// return, a statement without the <c>!await</c>, and a binding callback with a block body (which could paint on its own) are
+    /// not checks, so the paint below them is still unguarded.
+    /// </summary>
+    [Theory]
+    [InlineData("nameof(LoadJobsAsync), gen), BindRows)) { return; }", "nameof(LoadOtherAsync), gen), BindRows)) { return; }")]
+    [InlineData("() => _loads.Superseded(nameof(LoadJobsAsync), gen), BindRows)) { return; }", "() => false, BindRows)) { return; }")]
+    [InlineData("BindRows)) { return; }", "BindRows)) { x = 1; }")]
+    [InlineData("if (!await", "if (await")]
+    [InlineData("BindRows)) { return; }", "r => { Grid.ItemsSource = r; })) { return; }")]
+    public void ALookAlikeThatIsNotTheExactStatement_IsNotACheck(string find, string replacement)
+    {
+        var statement = BindStatement.Replace(find, replacement, StringComparison.Ordinal);
+        Assert.NotEqual(BindStatement, statement);
+
+        var body = $"var gen = _loads.Claim(nameof(LoadJobsAsync)); var readTask = Read(); {statement} Grid.Text = \"x\";";
+
+        Assert.Empty(Checks(s_synthetic, body));
+        Assert.NotEmpty(UnguardedPaintsOf(body));
     }
 
     /// <summary>
@@ -534,13 +602,33 @@ public sealed class ScopedLoadOrderingTests
     private static Regex Claim(Site site) =>
         new(@"_loads\s*\.\s*Claim\s*\(\s*nameof\s*\(\s*" + Regex.Escape(site.Method) + @"\s*\)\s*\)");
 
-    private static List<Match> Checks(Site site, string body) =>
-        Regex.Matches(
+    /// <summary>One supersession check: <paramref name="Pos"/> is where the paints below it become protected (the start of a plain
+    /// <c>if</c>, the end of the whole statement for the bind shape, whose <c>await</c> sits inside it);
+    /// <paramref name="ConsequenceStart"/> is where the text that must leave without painting begins.</summary>
+    private sealed record Check(int Pos, int ConsequenceStart);
+
+    private static List<Check> Checks(Site site, string body)
+    {
+        var key = Regex.Escape(site.Method);
+        var plain = Regex.Matches(
                 body,
-                @"if\s*\(\s*_loads\s*\.\s*Superseded\s*\(\s*nameof\s*\(\s*" + Regex.Escape(site.Method)
-                + @"\s*\)\s*,\s*gen\s*\)\s*\)")
-            .OrderBy(m => m.Index)
-            .ToList();
+                @"if\s*\(\s*_loads\s*\.\s*Superseded\s*\(\s*nameof\s*\(\s*" + key + @"\s*\)\s*,\s*gen\s*\)\s*\)")
+            .Select(m => new Check(m.Index, m.Index + m.Length));
+
+        /* #5703: the one other shape that is a check. JobHistoryLoadSteps.BindWhenCurrentAsync waits for the read, asks the ledger
+           (the lambda handed to it, keyed nameof(<this loader>) and this load's gen) and binds in the same synchronous run, and the
+           `if (!await ...)` leaves for a superseded load. The statement is a check whose paints begin after it: nothing awaits between
+           the ledger call and the bind, and nothing below the statement runs for a superseded load. The pattern is exact on purpose:
+           the key, `gen`, the leading `!await` and a consequence that returns are all required, and a binding callback with a block
+           body (which could paint on its own) is not matched. */
+        var bind = Regex.Matches(
+                body,
+                @"if\s*\(\s*!\s*await\s+JobHistoryLoadSteps\s*\.\s*BindWhenCurrentAsync\s*\(\s*\w+\s*,\s*\(\s*\)\s*=>\s*_loads\s*\.\s*Superseded\s*\(\s*nameof\s*\(\s*"
+                + key + @"\s*\)\s*,\s*gen\s*\)\s*,[^;{}]*?\)\s*\)\s*(?<ret>\{\s*return\s*;\s*\}|return\s*;)")
+            .Select(m => new Check(m.Index + m.Length, m.Groups["ret"].Index));
+
+        return plain.Concat(bind).OrderBy(c => c.Pos).ToList();
+    }
 
     private static IEnumerable<int> Matches(string body, Regex pattern) =>
         pattern.Matches(body).Select(m => m.Index).OrderBy(i => i);

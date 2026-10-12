@@ -441,6 +441,22 @@ AND   (
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
 
+    /// <summary>
+    /// Whether this collector runs on a monitored server that is known only by what the store (or Lite's connection status) holds
+    /// about it (#5703): the Job History tab offers exactly these servers in its Server drop-down. A disabled server is not collected;
+    /// a PostgreSQL target fails the engine half of the dispatch gate; an Azure SQL Database fails <see cref="AppliesTo"/>. Amazon RDS
+    /// and Azure SQL Managed Instance run SQL Agent and stay. An unknown engine edition or kind claims nothing, so a server that has not
+    /// connected yet is offered. Both hosts' answers come from the catalog's own gate through
+    /// <see cref="CollectorEngineCapability"/>, so this cannot drift from what the collector does.
+    /// </summary>
+    /// <param name="isEnabled">Whether the server is enabled for collection.</param>
+    /// <param name="engineKind">The store's <c>servers.engine_kind</c> (null in Lite, which monitors SQL Server only).</param>
+    /// <param name="engineEdition">The server's <c>SERVERPROPERTY('EngineEdition')</c>, or <see cref="CollectorEngineCapability.UnknownEngineEdition"/>.</param>
+    public static bool CollectsOn(bool isEnabled, string? engineKind, int engineEdition) =>
+        isEnabled
+        && CollectorEngineCapability.IsCollectedOnEngineKind(Instance, engineKind)
+        && CollectorEngineCapability.IsCollectedOnEngineEdition(Instance, engineEdition);
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         /* Incremental filter selection (the numeric high-water mark, with the Lite archival-emptied fallback):

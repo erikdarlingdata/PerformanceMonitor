@@ -25,8 +25,9 @@ public static class JobHistoryCap
 
     /// <summary>
     /// The count text beside the grid (#4966): "N run(s)", with the cap label in brackets whenever the READ reached the cap,
-    /// and empty when the grid shows nothing. <paramref name="shownCount"/> is what the grid shows now, after the Status,
-    /// Category and column filters; <paramref name="readCount"/> is what the read returned before any of them. The cap
+    /// and empty when the grid shows nothing. <paramref name="shownCount"/> is what the grid shows now, after the column
+    /// filters; <paramref name="readCount"/> is what the read returned, after the Status and Category filters (the Job History read applies
+    /// them ahead of its row cap, #5703) and before the column filters. The cap
     /// belongs to the read, so a column filter that narrows the grid must not take the label away while the read is still
     /// cut at the cap: every writer of the count text, the load and the column-filter handler alike, builds it here.
     /// </summary>
