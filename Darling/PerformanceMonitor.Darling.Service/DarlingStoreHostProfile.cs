@@ -901,6 +901,29 @@ WHERE NOT is_compressed";
         return DarlingManagedPostgres.IsWalSizeWithinDriftOf(freeDiskBytes, current) ? current : derivedValueMb;
     }
 
+    /// <summary>#5716: <c>shared_buffers</c> is written once, by the v5 block, from the RAW RAM reading
+    /// (<see cref="DarlingManagedPostgres.QuantizeRam"/>: "v3/v5/v7 keep deriving from the raw reading"), and the
+    /// v8 block never re-states it. <see cref="BuildDerivedTargets"/> derives from the QUANTIZED reading, so on a
+    /// host whose OS reports a little under the nominal size (about 4092 MB on a 4 GB host) the stored 1023 MB
+    /// read stale against 1024 MB, forever, with no hardware change. When the stored value equals the derivation
+    /// from the raw reading, the derived figure reported is the stored one (so it reads Matches and the text
+    /// never says "1023 in force, 1024 derived, Matches"). A real resize still reads stale: a 2 GB host moved to
+    /// 4 GB keeps v5's 512 MB, which equals neither derivation. Same shape as
+    /// <see cref="ApplyWalDriftTolerance"/>; both derivations go through
+    /// <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>, never a second copy of the formula.</summary>
+    internal static long ApplySharedBuffersRawReadingTolerance(
+        string settingName, long derivedValueMb, long? currentValueMb, long ramBytesForDerivation)
+    {
+        if (!string.Equals(settingName, "shared_buffers", StringComparison.Ordinal) || currentValueMb is not { } current)
+        {
+            return derivedValueMb;
+        }
+
+        return DarlingManagedPostgres.DeriveMemorySettings(ramBytesForDerivation).SharedBuffersMb == current
+            ? current
+            : derivedValueMb;
+    }
+
     /// <summary>The eight settings ruling 4 names, each with its unit and the <c>Derive*</c>/constant that
     /// supplies "the value derived for this host" — never a second copy of a formula (ruling 1).</summary>
     private static (string Name, long DerivedValueMb, string Unit)[] BuildDerivedTargets(
@@ -1017,6 +1040,7 @@ WHERE NOT is_compressed";
 
             var attribution = AttributeManagedSetting(dataDirectory, name);
             derivedValue = ApplyWalDriftTolerance(name, rawDerivedValue, currentValue, freeDiskBytesForDerivation);
+            derivedValue = ApplySharedBuffersRawReadingTolerance(name, derivedValue, currentValue, ramBytesForDerivation);
             derivedDisplay = FormatSettingValue(derivedValue, unit);
             var (sourceDescription, verdict) = ClassifyVerdict(attribution, currentValue ?? long.MinValue, derivedValue);
             (sourceDescription, verdict) = ApplyHandEditOverride(sourceDescription, verdict, isHandEdited);
@@ -1481,6 +1505,7 @@ ORDER BY setting_name";
 
             var attribution = AttributeManagedSetting(dataDirectory, name);
             derivedValueMb = ApplyWalDriftTolerance(name, rawDerivedValueMb, currentValue, freeDiskBytesForDerivation);
+            derivedValueMb = ApplySharedBuffersRawReadingTolerance(name, derivedValueMb, currentValue, ramBytesForDerivation);
             derivedDisplay = FormatSettingValue(derivedValueMb, unit);
             var (sourceDescription, verdict) = ClassifyVerdict(attribution, currentValue ?? long.MinValue, derivedValueMb);
             string? detail = null;

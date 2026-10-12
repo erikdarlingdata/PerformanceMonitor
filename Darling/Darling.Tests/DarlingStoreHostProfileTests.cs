@@ -345,6 +345,80 @@ public sealed class DarlingStoreHostProfileTests
         Assert.Equal(1024, DarlingStoreHostProfile.ApplyWalDriftTolerance("max_wal_size", 1024, 4096, 16 * Gb));
     }
 
+    /// <summary>The verdict a live check reaches for shared_buffers: the target BuildDerivedTargets gives
+    /// (derived from the QUANTIZED reading), through the #5716 tolerance, into ClassifyVerdict.</summary>
+    private static (HostSettingVerdict Verdict, long Derived) SharedBuffersVerdict(long rawRamBytes, long inForceMb)
+    {
+        var quantizedTarget = DarlingManagedPostgres.DeriveMemorySettings(
+            DarlingManagedPostgres.QuantizeRam(rawRamBytes)).SharedBuffersMb;
+        var derived = DarlingStoreHostProfile.ApplySharedBuffersRawReadingTolerance(
+            "shared_buffers", quantizedTarget, inForceMb, rawRamBytes);
+        var attribution = new PerformanceMonitor.Darling.Service.ConfSettingAttribution(
+            PerformanceMonitor.Darling.Service.ConfSettingOrigin.ManagedBlock, "postgresql.conf", 90, $"{inForceMb}MB");
+        return (DarlingStoreHostProfile.ClassifyVerdict(attribution, inForceMb, derived).Verdict, derived);
+    }
+
+    /// <summary>#5716: a 4 GB host whose OS reports 4092 MB. v5 wrote the RAW derivation (1023 MB); the
+    /// quantized target is 1024 MB. Precondition asserts the plant really splits the two derivations.</summary>
+    [Fact]
+    public void SharedBuffersVerdict_RawReadingGave1023_QuantizedGives1024_1023InForceMatches()
+    {
+        const long raw = 4092L * 1024 * 1024;
+        Assert.Equal(1023, DarlingManagedPostgres.DeriveMemorySettings(raw).SharedBuffersMb);
+        Assert.Equal(1024, DarlingManagedPostgres.DeriveMemorySettings(DarlingManagedPostgres.QuantizeRam(raw)).SharedBuffersMb);
+
+        var (verdict, derived) = SharedBuffersVerdict(raw, 1023);
+
+        Assert.Equal(HostSettingVerdict.Matches, verdict);
+        Assert.Equal(1023, derived); /* the reported derived figure is the one the verdict matched */
+    }
+
+    [Fact]
+    public void SharedBuffersVerdict_SameHost_1024InForceMatches()
+    {
+        var (verdict, derived) = SharedBuffersVerdict(4092L * 1024 * 1024, 1024);
+
+        Assert.Equal(HostSettingVerdict.Matches, verdict);
+        Assert.Equal(1024, derived);
+    }
+
+    /// <summary>#5716: a 2 GB host moved to 4 GB keeps v5's 512 MB, which equals neither derivation.</summary>
+    [Fact]
+    public void SharedBuffersVerdict_FourGbHostWith512FromATwoGbHost_IsStale()
+    {
+        var (verdict, derived) = SharedBuffersVerdict(4092L * 1024 * 1024, 512);
+
+        Assert.Equal(HostSettingVerdict.StaleAfterHardwareChange, verdict);
+        Assert.Equal(1024, derived);
+    }
+
+    /// <summary>#5716: the tolerance is shared_buffers-only and needs a readable current value, so every other
+    /// setting's target is untouched.</summary>
+    [Fact]
+    public void SharedBuffersTolerance_LeavesEveryOtherSettingAndAnUnreadableValueAlone()
+    {
+        const long raw = 4092L * 1024 * 1024;
+        Assert.Equal(1024, DarlingStoreHostProfile.ApplySharedBuffersRawReadingTolerance("shared_buffers", 1024, null, raw));
+        Assert.Equal(3072, DarlingStoreHostProfile.ApplySharedBuffersRawReadingTolerance("effective_cache_size", 3072, 1023, raw));
+        Assert.Equal(1024, DarlingStoreHostProfile.ApplySharedBuffersRawReadingTolerance("work_mem", 1024, 1023, raw));
+    }
+
+    /// <summary>#5716: both verdict producers (--check-settings / get_store_host, and the startup profile that
+    /// feeds the self-alert) must route their derived target through the tolerance before ClassifyVerdict.</summary>
+    [Theory]
+    [InlineData("GatherSettingProfilesAsync")]
+    [InlineData("ComputeAndStoreManagedConfVerdictsAsync")]
+    public void SharedBuffersTolerance_IsAppliedBeforeClassifyVerdictByBothVerdictProducers(string member)
+    {
+        var body = CSharpSourceWalker.StripCommentsAndStrings(
+            StartupCommandTimeoutTests.SerialLoopMemberBody("DarlingStoreHostProfile.cs", member));
+
+        var tolerance = body.IndexOf("ApplySharedBuffersRawReadingTolerance(", StringComparison.Ordinal);
+        var classify = body.IndexOf("ClassifyVerdict(", StringComparison.Ordinal);
+        Assert.True(tolerance >= 0, member + " must call ApplySharedBuffersRawReadingTolerance");
+        Assert.True(tolerance < classify, member + " must apply the tolerance before ClassifyVerdict");
+    }
+
     [Fact]
     public void ClassifyVerdict_OperatorOverrideIsAlwaysOperatorOverride()
     {
