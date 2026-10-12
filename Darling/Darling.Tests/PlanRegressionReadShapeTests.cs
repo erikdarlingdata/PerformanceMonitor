@@ -53,9 +53,10 @@ public sealed class PlanRegressionReadShapeTests
         /* Appended at ordinal 8, which is where the collector reads it: the eight columns before it are read by
            ordinal and must not move. #3953 appended the best plan's last run after it, at ordinal 9, for the same
            reason, and both PLAN_REGRESSION reads share the text (the interval-table twin's suffix). #5630 appended the
-           two plan_ids to compare and the statement text after them, at ordinals 10 to 12, for the same reason. */
+           two plan_ids to compare and the statement text after them, at ordinals 10 to 12, and #5631 the two plans' rows
+           per call after those, at ordinals 13 and 14 (the newer plan's, then the cheaper plan's), for the same reason. */
         var shape = new Regex(
-            @"c\.regression_factor,\s+c\.database_name,\s+c\.best_last_exec,\s+c\.latest_plan_id,\s+c\.best_plan_id,\s+x\.query_sql_text\s+FROM candidates",
+            @"c\.regression_factor,\s+c\.database_name,\s+c\.best_last_exec,\s+c\.latest_plan_id,\s+c\.best_plan_id,\s+x\.query_sql_text,\s+c\.latest_rows,\s+c\.best_rows\s+FROM candidates",
             RegexOptions.Singleline);
         Assert.Matches(shape, sql);
         Assert.Matches(shape, StripComments(PgFactCollector.PlanRegressionTableSql));

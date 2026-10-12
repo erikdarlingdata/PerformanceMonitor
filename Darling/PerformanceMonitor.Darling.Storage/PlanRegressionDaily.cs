@@ -80,7 +80,7 @@ WITH built AS
     INSERT INTO collect.plan_regression_daily
     (
         server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash,
-        execs, cpu_us_sum, dur_us_sum, last_exec, is_forced_plan, force_failure_count
+        execs, cpu_us_sum, dur_us_sum, last_exec, is_forced_plan, force_failure_count, rowcount_sum
     )
     SELECT
         $1::integer, $2::date, l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash,
@@ -89,7 +89,9 @@ WITH built AS
         SUM(l.avg_duration_us::numeric * l.execution_count),
         MAX(l.last_execution_time),
         bool_or(l.is_forced_plan),
-        MAX(l.force_failure_count)
+        MAX(l.force_failure_count),
+        -- #5631: NULL when any interval of the day has no avg_rowcount, so a missing count never reads as a small one.
+        CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN SUM(l.avg_rowcount::numeric * l.execution_count) END
     FROM collect.query_store_interval_latest AS l
     WHERE l.server_id = $1::integer
     AND   l.first_execution_time >= $4::timestamp

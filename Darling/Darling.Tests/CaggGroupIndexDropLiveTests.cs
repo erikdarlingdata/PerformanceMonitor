@@ -318,6 +318,13 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 175)
+        {
+            /* V175 (#5631) - the rows-per-call column of the daily plan regression totals is the probe's sentinel. */
+            await using var dropRowcount = new NpgsqlCommand("ALTER TABLE IF EXISTS collect.plan_regression_daily DROP COLUMN IF EXISTS rowcount_sum", connection);
+            await dropRowcount.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < ServiceVersionTable.RungVersion)
         {
             /* V174 (#5655) - the service host version table is the probe's sentinel. */

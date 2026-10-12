@@ -336,7 +336,7 @@ WITH deduped AS
     -- DISTINCT ON needs the same global sort and measured WORSE (49.8s). Raising work_mem is not the
     -- answer either -- 512MB took it from 25.6s to 59.3s. Do not revert to any of those.
     --
-    -- ASSUMPTION, written down because PostgreSQL does not contract it: the seven aggregates below each
+    -- ASSUMPTION, written down because PostgreSQL does not contract it: the eight aggregates below each
     -- sort their own group, so taking [1] from each is only coherent if they all resolve a TIE -- two rows
     -- equal on BOTH collection_time and execution_count -- to the same physical row. PostgreSQL shares one
     -- sort across aggregates carrying an identical ORDER BY, so in practice they do; that is implementation
@@ -360,6 +360,8 @@ WITH deduped AS
         (array_agg(execution_count ORDER BY collection_time DESC, execution_count DESC))[1] AS execution_count,
         (array_agg(avg_cpu_time_us ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_cpu_time_us,
         (array_agg(avg_duration_us ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_duration_us,
+        -- #5631: rows per call, for the output check; the same pick as the aggregates around it.
+        (array_agg(avg_rowcount ORDER BY collection_time DESC, execution_count DESC))[1] AS avg_rowcount,
         (array_agg(last_execution_time ORDER BY collection_time DESC, execution_count DESC))[1] AS last_execution_time,
         (array_agg(is_forced_plan ORDER BY collection_time DESC, execution_count DESC))[1] AS is_forced_plan,
         (array_agg(force_failure_count ORDER BY collection_time DESC, execution_count DESC))[1] AS force_failure_count
@@ -395,6 +397,11 @@ plan_agg AS
         SUM(execution_count) AS execs,
         SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
         SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        -- #5631: rows returned per call, execution-weighted over the same intervals as cpu_per_exec. NULL when any
+        -- interval has no avg_rowcount, so a missing count can never read as a small one.
+        CASE WHEN COUNT(*) = COUNT(avg_rowcount)
+             THEN SUM(avg_rowcount::numeric * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+        END AS rows_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
@@ -435,6 +442,11 @@ WITH plan_agg AS
         SUM(execution_count) AS execs,
         SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
         SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        -- #5631: rows returned per call, execution-weighted over the same intervals as cpu_per_exec. NULL when any
+        -- interval has no avg_rowcount, so a missing count can never read as a small one.
+        CASE WHEN COUNT(*) = COUNT(avg_rowcount)
+             THEN SUM(avg_rowcount::numeric * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
+        END AS rows_per_exec,
         MAX(last_execution_time) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
@@ -486,6 +498,11 @@ WITH plan_agg AS
         SUM(execs) AS execs,
         SUM(cpu_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS cpu_per_exec,
         SUM(dur_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        -- #5631: rows per call. A day with no rowcount_sum (an interval had none, or the day awaits its rebuild after the
+        -- column was added) makes the whole plan's figure NULL, the same rule the other two reads apply.
+        CASE WHEN COUNT(*) = COUNT(rowcount_sum)
+             THEN SUM(rowcount_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0)
+        END AS rows_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count
@@ -493,7 +510,7 @@ WITH plan_agg AS
     (
         SELECT
             d.database_name, d.query_id, d.plan_id, d.replica_role, d.query_plan_hash,
-            d.execs, d.cpu_us_sum, d.dur_us_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
+            d.execs, d.cpu_us_sum, d.dur_us_sum, d.rowcount_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
         FROM plan_regression_daily AS d
         WHERE d.server_id = $1::integer
         AND   d.day = ANY($3::date[])
@@ -505,6 +522,7 @@ WITH plan_agg AS
             SUM(l.execution_count),
             SUM(l.avg_cpu_time_us::numeric * l.execution_count),
             SUM(l.avg_duration_us::numeric * l.execution_count),
+            CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN SUM(l.avg_rowcount::numeric * l.execution_count) END,
             MAX(l.last_execution_time),
             bool_or(l.is_forced_plan),
             MAX(l.force_failure_count)
@@ -562,6 +580,10 @@ WITH plan_agg AS
         SUM(execs) AS execs,
         SUM(cpu_per_exec * execs) / NULLIF(SUM(execs), 0) AS cpu_per_exec,
         SUM(dur_per_exec * execs) / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        -- #5631: NULL when any plan_id of the hash group has no rows figure.
+        CASE WHEN COUNT(*) = COUNT(rows_per_exec)
+             THEN SUM(rows_per_exec * execs) / NULLIF(SUM(execs), 0)
+        END AS rows_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
         MAX(force_failure_count) AS force_failure_count,
@@ -600,6 +622,9 @@ compared AS
         l.force_failure_count AS force_failure_count,
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
+        -- #5631: rows per call of the two plans, for the output check.
+        l.rows_per_exec AS latest_rows,
+        b.rows_per_exec AS best_rows,
         -- #2138: CPU is the PRIMARY signal — duration alone is confounded by blocking, IO waits, and
         -- machine contention that no plan choice caused, so it must not fire a plan-regression verdict
         -- by itself. A CPU regression scores at its own ratio; a duration-dominant one fires only when
@@ -664,7 +689,10 @@ SELECT
     -- on (server, database, query_id), so it cannot fan a row out).
     c.latest_plan_id,
     c.best_plan_id,
-    x.query_sql_text
+    x.query_sql_text,
+    -- #5631: appended for the same reason. Rows per call of the newer and the cheaper plan; NULL when unknown.
+    c.latest_rows,
+    c.best_rows
 FROM candidates AS c
 LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
@@ -793,7 +821,9 @@ ORDER BY c.regression_factor DESC";
                         BestLastExec: reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9)),
                         LatestPlanId: reader.IsDBNull(10) ? null : ToInt64(reader.GetValue(10)),
                         BestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
-                        StatementText: reader.IsDBNull(12) ? null : reader.GetString(12)));
+                        StatementText: reader.IsDBNull(12) ? null : reader.GetString(12),
+                        LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                        BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
                 }
             }
 
@@ -814,7 +844,7 @@ ORDER BY c.regression_factor DESC";
             var kept = new List<PlanRegressionCandidate>();
             var excludedKeys = new HashSet<PlanRegressionOffender>();
             var judgedKeys = new HashSet<PlanRegressionOffender>();
-            var judgements = new Dictionary<int, bool>();
+            var judgements = new Dictionary<int, PlanInputJudgement>();
             var planReads = new PlanReadFailures();
             for (var i = 0; i < candidates.Count; i++)
             {
@@ -837,14 +867,14 @@ ORDER BY c.regression_factor DESC";
                             break;
                         }
 
-                        judgements[j] = verdict.Unverified;
+                        judgements[j] = verdict;
                     }
                 }
 
                 if (excludedKeys.Contains(queryKey))
                     continue;
 
-                kept.Add(candidate with { Unverified = judgements[i] });
+                kept.Add(candidate with { Unverified = judgements[i].Unverified, InputBasis = judgements[i].Basis });
             }
 
             var offenderCount = kept.Count;
@@ -856,6 +886,7 @@ ORDER BY c.regression_factor DESC";
             var worstDimension = 1;
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
+            var worstInputBasis = 0;
             DateTime? worstBestLastExec = null;
             var offenders = new List<PlanRegressionOffender>();
 
@@ -872,6 +903,7 @@ ORDER BY c.regression_factor DESC";
                     worstLatestCpu = row.LatestCpu;
                     worstBestCpu = row.BestCpu;
                     worstBestLastExec = row.BestLastExec;
+                    worstInputBasis = row.InputBasis;
                     // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
                     // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
                     // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
@@ -929,11 +961,15 @@ ORDER BY c.regression_factor DESC";
                     ["force_failure_count"] = worstForceFailures,
                     /* #3953: 1 when this pass read the latest-snapshot interval table, 0 for the raw slice. */
                     ["plan_regression_source"] = readsTable ? 1 : 0,
-                    /* #5630: queries left out because their two plans were compiled for different inputs (or the
-                       statement recompiles on every call), and kept queries that could not be checked (a plan or the
+                    /* #5630: queries left out as a change of input (the statement recompiles on every call, the newer
+                       plan's cost followed a 10x bigger output, or the two plans were compiled for different values over
+                       unchanged statistics, #5631), and kept queries that could not be checked (a plan or the
                        statement text is missing, or was withheld by the statement filter). */
                     ["cross_input_excluded_count"] = excludedKeys.Count,
                     ["inputs_unverified_count"] = unverified,
+                    /* #5631: how the worst kept offender's two plans were compared: 1 compiled for the same parameter
+                       values, 2 compiled for different values after a statistics update, 0 not checked. */
+                    ["worst_input_basis"] = worstInputBasis,
                 }
             };
 
@@ -979,7 +1015,10 @@ ORDER BY c.regression_factor DESC";
         long? LatestPlanId,
         long? BestPlanId,
         string? StatementText,
-        bool Unverified = false);
+        double? LatestRows,
+        double? BestRows,
+        bool Unverified = false,
+        int InputBasis = 0);
 
     /// <summary>The plan reads of one PLAN_REGRESSION pass that failed: how many, and the first exception (#5630).</summary>
     private sealed class PlanReadFailures
@@ -996,7 +1035,12 @@ ORDER BY c.regression_factor DESC";
     }
 
     /// <summary>What the input check decided about one candidate: leave it out, or keep it (checked or not).</summary>
-    private readonly record struct PlanInputJudgement(bool Exclude, bool Unverified);
+    private readonly record struct PlanInputJudgement(PlanInputOutcome Outcome, bool Unverified)
+    {
+        public bool Exclude => PlanInputComparison.IsDrop(Outcome);
+
+        public int Basis => PlanInputComparison.InputBasis(Outcome);
+    }
 
     /// <summary>
     /// The stored plan XML for two plan_ids of one database (#5630): the plan map reaches the plan dimension, which holds
@@ -1013,22 +1057,28 @@ AND   m.database_name = $2
 AND   m.plan_id = ANY($3)";
 
     /// <summary>
-    /// Decides whether one PLAN_REGRESSION candidate compares plans compiled for different inputs (#5630). A statement with
-    /// OPTION (RECOMPILE) is out: each call compiles for its own parameters, so its plans differ by input. Otherwise the two
-    /// plans' compiled parameter values are compared, and different values are out. Anything that cannot be checked (a plan
-    /// or the statement text is missing, unreadable or withheld, or the read failed) keeps the candidate, as before, and
-    /// counts as unverified. Only the verdict leaves <see cref="PlanInputComparison"/>: no value is logged or stored.
+    /// Decides whether one PLAN_REGRESSION candidate is a real plan regression or only a change of input (#5630, #5631).
+    /// The shared rule (<see cref="PlanInputComparison"/>) judges in order: a statement with OPTION (RECOMPILE) is out; a
+    /// newer plan that returns 10x the rows per call or more, with the regression gone per row, is out (its cost followed its
+    /// output); neither of those reads a plan. Otherwise the two stored plans are read, and a pair compiled for different
+    /// parameter values over unchanged statistics is out, while the same values, or different values after a statistics
+    /// update, are kept. Anything that cannot be checked (a plan or the statement text is missing, unreadable or withheld, or
+    /// the read failed) keeps the candidate, as before, and counts as unverified. Only the outcome leaves
+    /// <see cref="PlanInputComparison"/>: no value is logged or stored.
     /// </summary>
     private async Task<PlanInputJudgement> JudgePlanRegressionInputsAsync(
         NpgsqlConnection connection, AnalysisContext context, PlanRegressionCandidate candidate, PlanReadFailures planReads)
     {
         var text = candidate.StatementText;
-        if (PlanInputComparison.HasRecompileHint(text))
-            return new PlanInputJudgement(Exclude: true, Unverified: false);
-
         var textUnknown = string.IsNullOrWhiteSpace(text) || WithheldStatementMarker.IsMarker(text);
+
+        /* The statement and the rows per call decide the first two drops, so no plan is read for them. */
+        var early = PlanInputComparison.JudgeBeforePlans(text, candidate.Factor, candidate.LatestRows, candidate.BestRows);
+        if (PlanInputComparison.IsDrop(early))
+            return new PlanInputJudgement(early, Unverified: false);
+
         if (candidate.LatestPlanId is not long latestId || candidate.BestPlanId is not long bestId)
-            return new PlanInputJudgement(Exclude: false, Unverified: true);
+            return new PlanInputJudgement(PlanInputOutcome.KeepUnverified, Unverified: true);
 
         string? latestXml = null;
         string? bestXml = null;
@@ -1060,16 +1110,16 @@ AND   m.plan_id = ANY($3)";
             /* The check could not run, so the candidate stays, as it did before the check existed. The caller records the
                failure once for the pass (#2826), so a broken connection is one event, not one per candidate. */
             planReads.Add(ex);
-            return new PlanInputJudgement(Exclude: false, Unverified: true);
+            return new PlanInputJudgement(PlanInputOutcome.KeepUnverified, Unverified: true);
         }
 
-        var verdict = PlanInputComparison.Compare(latestXml, bestXml);
-        return verdict switch
-        {
-            PlanInputVerdict.Different => new PlanInputJudgement(Exclude: true, Unverified: false),
-            PlanInputVerdict.Same => new PlanInputJudgement(Exclude: false, Unverified: textUnknown),
-            _ => new PlanInputJudgement(Exclude: false, Unverified: true),
-        };
+        var outcome = PlanInputComparison.JudgePlans(latestXml, bestXml);
+        if (PlanInputComparison.IsDrop(outcome))
+            return new PlanInputJudgement(outcome, Unverified: false);
+
+        /* A kept pair is unverified when the plans could not be compared, or when the statement text was missing or withheld
+           (the OPTION (RECOMPILE) check could not run). */
+        return new PlanInputJudgement(outcome, Unverified: outcome == PlanInputOutcome.KeepUnverified || textUnknown);
     }
 
     public const string ProcedureStatsSql = @"

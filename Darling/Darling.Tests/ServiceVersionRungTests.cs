@@ -83,7 +83,9 @@ public sealed class ServiceVersionRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        /* V175's sentinel (#5631) sits above this one; the probe's last ordinal is the newest rung's. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
@@ -138,12 +140,7 @@ public sealed class ServiceVersionRungTests
             /* An upgraded store: one rung behind (no table, no version row), then migrated, gets the table. */
             await ExecAsync(connection, "DROP TABLE config.service_version", ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + ServiceVersionTable.RungVersion, ct);
-            if (StorageVersion.SchemaVersion == ServiceVersionTable.RungVersion)
-            {
-                /* Only while this is the newest rung: a newer rung's own sentinel would map the store past it. */
-                Assert.Equal(ServiceVersionTable.RungVersion - 1, await ProbedVersionAsync(connection, ct));
-            }
-
+            /* V175's sentinel (#5631) is still on disk, so the probe maps the store past this rung; the rung is checked by its own table below. */
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM config.service_version", ct));
             Assert.Equal(StorageVersion.SchemaVersion, await ProbedVersionAsync(connection, ct));

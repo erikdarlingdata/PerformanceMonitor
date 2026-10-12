@@ -943,6 +943,36 @@ END $$;";
     private static readonly string V174Sql = ServiceVersionTable.CreateSql;
 
     /// <summary>
+    /// V175 (#5631) — <c>collect.plan_regression_daily.rowcount_sum</c>: the day's sum of <c>avg_rowcount * execution_count</c> for
+    /// the plan, so PLAN_REGRESSION can tell a plan whose cost followed a much bigger output from a real regression on the daily
+    /// path, as it can on the raw and interval-table paths. NULL when any interval of the day had no <c>avg_rowcount</c>, so a
+    /// missing count never reads as a small one. The same step bumps <c>late_seq</c> on every built day: each day then reads as
+    /// stale, so reads take it from the interval table (the same answer as the raw read) until the hourly builder rebuilds it with
+    /// the column filled. Both happen only when the column is added, so a second run of the text changes nothing. Catalog-only: a
+    /// nullable column without a default does not rewrite the table, and the built table is one row per server and day. The lock
+    /// timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's, because the new column needs an ACCESS EXCLUSIVE
+    /// lock on the table. No GRANT: the <c>collect</c> schema's blanket SELECT covers a column. <b>No Lite twin:</b> Lite has no
+    /// PostgreSQL store.
+    /// </summary>
+    private static readonly string V175Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+BEGIN
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'collect'
+        AND   table_name = 'plan_regression_daily'
+        AND   column_name = 'rowcount_sum'
+    )
+    THEN
+        ALTER TABLE collect.plan_regression_daily ADD COLUMN rowcount_sum numeric;
+        UPDATE collect.plan_regression_daily_built SET late_seq = late_seq + 1;
+    END IF;
+END
+$$;";
+
+    /// <summary>
     /// The text of V171 and V172 (#5571). Plain literal DDL after token substitution, not dynamic SQL, so the data-moving
     /// census can read the shipped text. Every statement is catalog-only; see <see cref="V171Sql"/>.
     /// </summary>
@@ -1228,6 +1258,7 @@ $rung$;";
         new Migration(172, "query-store-interval-latest-partitioned", V172Sql),
         new Migration(173, "query-store-compose-stamp", V173Sql),
         new Migration(174, "service-version", V174Sql),
+        new Migration(175, "plan-regression-daily-rowcount", V175Sql),
     };
 
     /// <summary>

@@ -54,14 +54,27 @@ public sealed class PlanRegressionInputsLiveTests
     private const long RealRegression = 5;
     private const long NoPlansStored = 6;
     private const long Withheld = 7;
+    private const long OutputGrew = 8;
+    private const long StatsFlip = 9;
+    private const long RowsUnknown = 10;
+
+    private const string StatsEarly = "2026-01-05T10:00:00";
+    private const string StatsLate = "2026-01-09T10:00:00";
 
     private static DateTime TruncateToSeconds(DateTime t) =>
         DateTime.SpecifyKind(new DateTime(t.Ticks - (t.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
-    private static string PlanFor(string statement, string? location) =>
+    /// <summary>A synthetic plan. <paramref name="statsDate"/> adds an OptimizerStatsUsage with three statistics last updated then; null adds none.</summary>
+    private static string PlanFor(string statement, string? location, string? statsDate = null) =>
         "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.564\"><BatchSequence><Batch><Statements>"
         + "<StmtSimple StatementText=\"" + System.Security.SecurityElement.Escape(statement) + "\" StatementId=\"1\" StatementType=\"SELECT\">"
         + "<QueryPlan CachedPlanSize=\"16\">"
+        + (statsDate is null ? string.Empty
+            : "<OptimizerStatsUsage>"
+              + string.Concat(new[] { "stat_a", "stat_b", "stat_c" }.Select(n =>
+                  "<StatisticsInfo Database=\"[inputsdb]\" Schema=\"[dbo]\" Table=\"[widgets]\" Statistics=\"[" + n
+                  + "]\" ModificationCount=\"0\" SamplingPercent=\"100\" LastUpdate=\"" + statsDate + "\"/>"))
+              + "</OptimizerStatsUsage>")
         + (location is null ? string.Empty
             : "<ParameterList><ColumnReference Column=\"@location_id\" ParameterDataType=\"int\" ParameterCompiledValue=\""
               + location + "\" ParameterRuntimeValue=\"" + location + "\"/></ParameterList>")
@@ -77,9 +90,10 @@ public sealed class PlanRegressionInputsLiveTests
     };
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task APlanRegressionAcrossDifferentInputsIsNotReported_AgainstDevPostgres(bool intervalTable)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task APlanRegressionThatIsOnlyAChangeOfInputIsNotReported_AgainstDevPostgres(bool intervalTable, bool daily)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -107,6 +121,31 @@ public sealed class PlanRegressionInputsLiveTests
             await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
             {
                 await SeedAsync(connection, periodStart, periodEnd, intervalTable, ct);
+                if (daily)
+                {
+                    /* Build the closed days, so the read takes them from the per-day totals (the live half of the read holds the rest). */
+                    var windowDay = periodStart.Date;
+                    for (var d = -PgFactCollector.PlanRegressionWindowDays; d <= -3; d++)
+                    {
+                        await PlanRegressionDaily.BuildDayAsync(connection, ServerId, DateOnly.FromDateTime(windowDay.AddDays(d)), periodEnd, ct);
+                    }
+
+                    /* A built day carries rowcount_sum: the sum of rows times calls for a plan whose intervals all counted rows, and
+                       NULL for the plan with an interval that did not (query 10's older plan). */
+                    await using var sums = new NpgsqlCommand(
+                        "SELECT plan_id, rowcount_sum FROM collect.plan_regression_daily WHERE server_id = $1 AND plan_id IN (81, 101, 51) ORDER BY plan_id", connection);
+                    sums.Parameters.AddWithValue(ServerId);
+                    await using var sumReader = await sums.ExecuteReaderAsync(ct);
+                    var seen = new Dictionary<long, decimal?>();
+                    while (await sumReader.ReadAsync(ct))
+                    {
+                        seen[sumReader.GetInt64(0)] = sumReader.IsDBNull(1) ? null : sumReader.GetDecimal(1);
+                    }
+
+                    Assert.Equal(2_500m, seen[81]);
+                    Assert.Equal(49_800m, seen[51]);
+                    Assert.Null(seen[101]);
+                }
             }
 
             await using var postgres = NpgsqlDataSource.Create(connectionString!);
@@ -116,19 +155,23 @@ public sealed class PlanRegressionInputsLiveTests
 
             /* The path the read took is the one the case names. */
             Assert.Equal(intervalTable, pass.PlanRegressionReadsIntervalTable);
+            Assert.Equal(daily, pass.PlanRegressionWindowStart is not null);
 
-            /* The real regression stays, and so do the two whose inputs cannot be checked (no stored plans; a statement the
-               filter withheld). The recompiling lookup and both parameter-sensitive lists are out, and the control never
-               regressed. */
-            var expected = new[] { Withheld, NoPlansStored, RealRegression };
+            /* Kept: the two whose inputs cannot be checked (no stored plans; a statement the filter withheld), the statistics flip,
+               the real regression with the same compiled values, and the one whose older row count is unknown. Out: the recompiling
+               lookup, both lists that differ only by value, and the plan whose cost followed a 26,000-row output. The control
+               never regressed. */
+            var expected = new[] { Withheld, NoPlansStored, StatsFlip, RealRegression, RowsUnknown };
             Assert.NotNull(pass.PlanRegressionOffenders);
             Assert.Equal(
                 expected.Select(q => new PlanRegressionOffender(Db, q)),
                 pass.PlanRegressionOffenders!);
-            Assert.Equal(3, fact.Metadata["offender_count"]);
+            Assert.Equal(5, fact.Metadata["offender_count"]);
             Assert.Equal(Withheld, fact.Metadata["worst_query_id"]);
-            Assert.Equal(3, fact.Metadata["cross_input_excluded_count"]);
-            Assert.Equal(2, fact.Metadata["inputs_unverified_count"]);
+            Assert.Equal(4, fact.Metadata["cross_input_excluded_count"]);
+            Assert.Equal(3, fact.Metadata["inputs_unverified_count"]);
+            /* The worst kept offender is the withheld statement, which was not checked. */
+            Assert.Equal(0, fact.Metadata["worst_input_basis"]);
 
             /* Every other reader of the list agrees: the drill-down and the force-plan targets built from it. */
             var finding = new AnalysisFinding
@@ -147,6 +190,52 @@ public sealed class PlanRegressionInputsLiveTests
 
             var targets = FactRemediation.ExtractPlanRegressionTargets(finding);
             Assert.All(targets, t => Assert.Contains(t.QueryId, expected));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteTestRowsAsync);
+        }
+    }
+
+    [Theory]
+    [InlineData(StatsFlip, 2)]
+    [InlineData(RealRegression, 1)]
+    public async Task TheWorstInputBasisIsTheWorstKeptOffenders_AgainstDevPostgres(long query, int basis)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #5631 input basis test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+        {
+            await DeleteTestRowsAsync(connection, ct);
+        }
+
+        try
+        {
+            var periodEnd = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
+            var periodStart = periodEnd.AddHours(-4);
+
+            /* The plan whose cost followed its output ranks first by factor and is dropped, so the worst KEPT offender is the
+               query under test. */
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await SeedAsync(connection, periodStart, periodEnd, false, ct, only: [OutputGrew, query]);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var pass = NewContext(ServerId, periodStart, periodEnd);
+            var fact = (await new PgFactCollector(postgres).CollectFactsAsync(pass))
+                .Single(f => f.Key == "PLAN_REGRESSION");
+
+            Assert.Equal(query, fact.Metadata["worst_query_id"]);
+            Assert.Equal(1, fact.Metadata["cross_input_excluded_count"]);
+            Assert.Equal(0, fact.Metadata["inputs_unverified_count"]);
+            Assert.Equal(basis, fact.Metadata["worst_input_basis"]);
 
             bodySucceeded = true;
         }
@@ -261,11 +350,11 @@ public sealed class PlanRegressionInputsLiveTests
                 }
 
                 /* Query 399 on two replicas. The primary's plans were compiled for the same value and rank first; the
-                   secondary's were compiled for different values and rank last, below the cut of the others. */
+                   secondary's were compiled for different values over unchanged statistics and rank last, below the cut of the others. */
                 await InsertPlanAsync(connection, 5011, PlanFor(Text, "(7)"), gz: true, periodEnd, ct, ReplicaServerId);
                 await InsertPlanAsync(connection, 5012, PlanFor(Text, "(7)"), gz: true, periodEnd, ct, ReplicaServerId);
-                await InsertPlanAsync(connection, 5013, PlanFor(Text, "(7)"), gz: true, periodEnd, ct, ReplicaServerId);
-                await InsertPlanAsync(connection, 5014, PlanFor(Text, "(1)"), gz: true, periodEnd, ct, ReplicaServerId);
+                await InsertPlanAsync(connection, 5013, PlanFor(Text, "(7)", StatsEarly), gz: true, periodEnd, ct, ReplicaServerId);
+                await InsertPlanAsync(connection, 5014, PlanFor(Text, "(1)", StatsEarly), gz: true, periodEnd, ct, ReplicaServerId);
                 await InsertStatsAsync(connection, ReplicaServerId, Split, 5011, "0xP1", 200_000, periodStart.AddDays(-5), periodStart, periodEnd, false, ct, "PRIMARY");
                 await InsertStatsAsync(connection, ReplicaServerId, Split, 5012, "0xP2", 5_000_000, periodEnd, periodStart, periodEnd, false, ct, "PRIMARY");
                 await InsertStatsAsync(connection, ReplicaServerId, Split, 5013, "0xS1", 200_000, periodStart.AddDays(-5), periodStart, periodEnd, false, ct, "SECONDARY");
@@ -357,8 +446,10 @@ public sealed class PlanRegressionInputsLiveTests
     /* ── The seed ──────────────────────────────────────────────────────────────────────────────────────
        Each query has a cheap plan that last ran five days back and a costlier plan running at the window's end. */
     private static async Task SeedAsync(
-        NpgsqlConnection connection, DateTime periodStart, DateTime periodEnd, bool intervalTable, CancellationToken ct)
+        NpgsqlConnection connection, DateTime periodStart, DateTime periodEnd, bool intervalTable, CancellationToken ct,
+        long[]? only = null)
     {
+        bool On(long queryId) => only is null || only.Contains(queryId);
         var best = periodStart.AddDays(-5);
         const string ManifestText = "SELECT TOP (50) m.manifest_id FROM dbo.manifest AS m WHERE m.location_id = @location_id ORDER BY m.amount DESC";
         const string LookupText = "SELECT i.item_id FROM dbo.item AS i WHERE i.package_id = @package_id OPTION (RECOMPILE)";
@@ -373,50 +464,104 @@ public sealed class PlanRegressionInputsLiveTests
 
             /* 1: a recompiling lookup, three plan hashes, the slow one 400x the cheap one. Its plans carry the SAME compiled
                values: it is the hint that excludes it. */
-            await InsertStatsAsync(connection, ServerId, RecompileLookup, 11, "0xA1", 1_000, best, periodStart, periodEnd, intervalTable, ct);
-            await InsertStatsAsync(connection, ServerId, RecompileLookup, 12, "0xA2", 5_000, best.AddHours(1), periodStart, periodEnd, intervalTable, ct);
-            await InsertStatsAsync(connection, ServerId, RecompileLookup, 13, "0xA3", 400_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
-            await InsertTextAsync(connection, ServerId, RecompileLookup, LookupText, periodEnd, ct);
-            foreach (var planId in new long[] { 11, 12, 13 })
+            if (On(RecompileLookup))
             {
-                await InsertPlanAsync(connection, planId, PlanFor(LookupText, null), gz: true, periodEnd, ct);
+                await InsertStatsAsync(connection, ServerId, RecompileLookup, 11, "0xA1", 1_000, best, periodStart, periodEnd, intervalTable, ct);
+                await InsertStatsAsync(connection, ServerId, RecompileLookup, 12, "0xA2", 5_000, best.AddHours(1), periodStart, periodEnd, intervalTable, ct);
+                await InsertStatsAsync(connection, ServerId, RecompileLookup, 13, "0xA3", 400_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
+                await InsertTextAsync(connection, ServerId, RecompileLookup, LookupText, periodEnd, ct);
+                foreach (var planId in new long[] { 11, 12, 13 })
+                {
+                    await InsertPlanAsync(connection, planId, PlanFor(LookupText, null), gz: true, periodEnd, ct);
+                }
             }
 
-            /* 2 and 3: parameter-sensitive lists, two hashes, compiled for different locations. */
-            foreach (var (queryId, bestPlan, latestPlan, latestCpu) in new[] { (ManifestsB, 21L, 22L, 100_000L), (ManifestsA, 31L, 32L, 50_000L) })
+            /* 2 and 3: parameter-sensitive lists, two hashes, compiled for different locations over the same statistics: only the
+               values differ, so a real change of input and not a plan regression. */
+            if (On(ManifestsB) || On(ManifestsA))
             {
-                await InsertStatsAsync(connection, ServerId, queryId, bestPlan, "0xB" + bestPlan, 1_000, best, periodStart, periodEnd, intervalTable, ct);
-                await InsertStatsAsync(connection, ServerId, queryId, latestPlan, "0xB" + latestPlan, latestCpu * 10, periodEnd, periodStart, periodEnd, intervalTable, ct);
-                await InsertTextAsync(connection, ServerId, queryId, ManifestText, periodEnd, ct);
-                await InsertPlanAsync(connection, bestPlan, PlanFor(ManifestText, "(201)"), gz: true, periodEnd, ct);
-                await InsertPlanAsync(connection, latestPlan, PlanFor(ManifestText, "(1)"), gz: queryId == ManifestsB, periodEnd, ct);
+                foreach (var (queryId, bestPlan, latestPlan, latestCpu) in new[] { (ManifestsB, 21L, 22L, 100_000L), (ManifestsA, 31L, 32L, 50_000L) })
+                {
+                    await InsertStatsAsync(connection, ServerId, queryId, bestPlan, "0xB" + bestPlan, 1_000, best, periodStart, periodEnd, intervalTable, ct);
+                    await InsertStatsAsync(connection, ServerId, queryId, latestPlan, "0xB" + latestPlan, latestCpu * 10, periodEnd, periodStart, periodEnd, intervalTable, ct);
+                    await InsertTextAsync(connection, ServerId, queryId, ManifestText, periodEnd, ct);
+                    await InsertPlanAsync(connection, bestPlan, PlanFor(ManifestText, "(201)", StatsEarly), gz: true, periodEnd, ct);
+                    await InsertPlanAsync(connection, latestPlan, PlanFor(ManifestText, "(1)", StatsEarly), gz: queryId == ManifestsB, periodEnd, ct);
+                }
             }
 
             /* 4: the control: one hash for every call, so there is nothing to compare. */
-            await InsertStatsAsync(connection, ServerId, ManifestsControl, 41, "0xC1", 200_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
-            await InsertTextAsync(connection, ServerId, ManifestsControl, ManifestText, periodEnd, ct);
-            await InsertPlanAsync(connection, 41, PlanFor(ManifestText, "(1)"), gz: true, periodEnd, ct);
+            if (On(ManifestsControl))
+            {
+                await InsertStatsAsync(connection, ServerId, ManifestsControl, 41, "0xC1", 200_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
+                await InsertTextAsync(connection, ServerId, ManifestsControl, ManifestText, periodEnd, ct);
+                await InsertPlanAsync(connection, 41, PlanFor(ManifestText, "(1)"), gz: true, periodEnd, ct);
+            }
 
             /* 5: a real regression: two hashes, the SAME compiled values, the latest 3x the best. */
-            await InsertStatsAsync(connection, ServerId, RealRegression, 51, "0xD1", 200_000, best, periodStart, periodEnd, intervalTable, ct);
-            await InsertStatsAsync(connection, ServerId, RealRegression, 52, "0xD2", 600_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
-            await InsertTextAsync(connection, ServerId, RealRegression, RealText, periodEnd, ct);
-            await InsertPlanAsync(connection, 51, PlanFor(RealText, "(7)"), gz: true, periodEnd, ct);
-            await InsertPlanAsync(connection, 52, PlanFor(RealText, "(7)"), gz: true, periodEnd, ct);
+            if (On(RealRegression))
+            {
+                await InsertStatsAsync(connection, ServerId, RealRegression, 51, "0xD1", 200_000, best, periodStart, periodEnd, intervalTable, ct, avgRowcount: 996);
+                await InsertStatsAsync(connection, ServerId, RealRegression, 52, "0xD2", 600_000, periodEnd, periodStart, periodEnd, intervalTable, ct, avgRowcount: 996);
+                await InsertTextAsync(connection, ServerId, RealRegression, RealText, periodEnd, ct);
+                await InsertPlanAsync(connection, 51, PlanFor(RealText, "(7)"), gz: true, periodEnd, ct);
+                await InsertPlanAsync(connection, 52, PlanFor(RealText, "(7)"), gz: true, periodEnd, ct);
+            }
 
             /* 6: no plans stored: the check cannot run, so the query stays and is counted. */
-            await InsertStatsAsync(connection, ServerId, NoPlansStored, 61, "0xE1", 200_000, best, periodStart, periodEnd, intervalTable, ct);
-            await InsertStatsAsync(connection, ServerId, NoPlansStored, 62, "0xE2", 800_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
-            await InsertTextAsync(connection, ServerId, NoPlansStored, RealText, periodEnd, ct);
+            if (On(NoPlansStored))
+            {
+                await InsertStatsAsync(connection, ServerId, NoPlansStored, 61, "0xE1", 200_000, best, periodStart, periodEnd, intervalTable, ct);
+                await InsertStatsAsync(connection, ServerId, NoPlansStored, 62, "0xE2", 800_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
+                await InsertTextAsync(connection, ServerId, NoPlansStored, RealText, periodEnd, ct);
+            }
 
             /* 7: a statement the filter withheld: its text and its compiled values are the placeholder, so two placeholders
                must never compare Same. The plans go through the real filter, as the collector stores them. */
-            var secret = "CREATE LOGIN [w5630] WITH PASSWORD = N'S3cret-5630'";
-            await InsertStatsAsync(connection, ServerId, Withheld, 71, "0xF1", 200_000, best, periodStart, periodEnd, intervalTable, ct);
-            await InsertStatsAsync(connection, ServerId, Withheld, 72, "0xF2", 1_000_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
-            await InsertTextAsync(connection, ServerId, Withheld, SensitiveStatements.PlaceholderText, periodEnd, ct);
-            await InsertPlanAsync(connection, 71, SensitiveStatements.Xml(PlanFor(secret, "(5)"))!, gz: true, periodEnd, ct);
-            await InsertPlanAsync(connection, 72, SensitiveStatements.Xml(PlanFor(secret, "(5)"))!, gz: true, periodEnd, ct);
+            if (On(Withheld))
+            {
+                var secret = "CREATE LOGIN [w5630] WITH PASSWORD = N'S3cret-5630'";
+                await InsertStatsAsync(connection, ServerId, Withheld, 71, "0xF1", 200_000, best, periodStart, periodEnd, intervalTable, ct);
+                await InsertStatsAsync(connection, ServerId, Withheld, 72, "0xF2", 1_000_000, periodEnd, periodStart, periodEnd, intervalTable, ct);
+                await InsertTextAsync(connection, ServerId, Withheld, SensitiveStatements.PlaceholderText, periodEnd, ct);
+                await InsertPlanAsync(connection, 71, SensitiveStatements.Xml(PlanFor(secret, "(5)"))!, gz: true, periodEnd, ct);
+                await InsertPlanAsync(connection, 72, SensitiveStatements.Xml(PlanFor(secret, "(5)"))!, gz: true, periodEnd, ct);
+            }
+
+        {
+            const string WidgetText = "SELECT w.widget_id FROM dbo.widgets AS w WHERE w.owner_id = @owner_id";
+
+            /* 8: a plan whose cost followed a bigger output. The newer plan returns 26,000 rows per call against 50, and the cost per
+               row is no worse (factor 187, 520x the rows). No plan is stored: the rows alone decide, so a read of plans would
+               leave it kept as unverified instead. */
+            if (On(OutputGrew))
+            {
+                await InsertStatsAsync(connection, ServerId, OutputGrew, 81, "0xG1", 2_000, best, periodStart, periodEnd, intervalTable, ct, avgRowcount: 50);
+                await InsertStatsAsync(connection, ServerId, OutputGrew, 82, "0xG2", 374_000, periodEnd, periodStart, periodEnd, intervalTable, ct, avgRowcount: 26_000);
+                await InsertTextAsync(connection, ServerId, OutputGrew, WidgetText, periodEnd, ct);
+            }
+
+            /* 9: a statistics flip. Three compiled values differ (here one), the statistics were all updated between the compiles,
+               and the output is flat (0 rows): kept, with basis 2. */
+            if (On(StatsFlip))
+            {
+                await InsertStatsAsync(connection, ServerId, StatsFlip, 91, "0xH1", 200_000, best, periodStart, periodEnd, intervalTable, ct, avgRowcount: 0);
+                await InsertStatsAsync(connection, ServerId, StatsFlip, 92, "0xH2", 700_000, periodEnd, periodStart, periodEnd, intervalTable, ct, avgRowcount: 0);
+                await InsertTextAsync(connection, ServerId, StatsFlip, WidgetText, periodEnd, ct);
+                await InsertPlanAsync(connection, 91, PlanFor(WidgetText, "(3)", StatsEarly), gz: true, periodEnd, ct);
+                await InsertPlanAsync(connection, 92, PlanFor(WidgetText, "(9)", StatsLate), gz: true, periodEnd, ct);
+            }
+
+            /* 10: the older plan has an interval with no row count (avg_rowcount NULL), so its rows per call are unknown on every
+               read path, the daily path included (its rowcount_sum is NULL for the day). The newer plan returns 26,000 rows, which
+               would drop it were the older count known; unknown, no output is assumed, so it stays, unverified. */
+            if (On(RowsUnknown))
+            {
+                await InsertStatsAsync(connection, ServerId, RowsUnknown, 101, "0xI1", 200_000, best, periodStart, periodEnd, intervalTable, ct);
+                await InsertStatsAsync(connection, ServerId, RowsUnknown, 102, "0xI2", 500_000, periodEnd, periodStart, periodEnd, intervalTable, ct, avgRowcount: 26_000);
+                await InsertTextAsync(connection, ServerId, RowsUnknown, WidgetText, periodEnd, ct);
+            }
+        }
         }
 
         if (intervalTable)
@@ -432,7 +577,7 @@ public sealed class PlanRegressionInputsLiveTests
 
     private static async Task InsertStatsAsync(
         NpgsqlConnection connection, int serverId, long queryId, long planId, string planHash, long cpuUs, DateTime lastExec,
-        DateTime periodStart, DateTime periodEnd, bool intervalTable, CancellationToken ct, string? replicaRole = null)
+        DateTime periodStart, DateTime periodEnd, bool intervalTable, CancellationToken ct, string? replicaRole = null, long? avgRowcount = null)
     {
         var firstExec = lastExec.AddHours(-1);
         if (intervalTable)
@@ -442,9 +587,9 @@ INSERT INTO collect.query_store_interval_latest
 (
     server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
     collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
-    last_execution_time, is_forced_plan, force_failure_count
+    last_execution_time, is_forced_plan, force_failure_count, avg_rowcount
 )
-VALUES ($1, $2, $3, $4, NULL, $4, $5, $6, $7, $8, 50, $9, $10, $11, false, 0)", connection)
+VALUES ($1, $2, $3, $4, NULL, $4, $5, $6, $7, $8, 50, $9, $10, $11, false, 0, $12)", connection)
             { CommandTimeout = LiveTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
             cmd.Parameters.AddWithValue(Db);
@@ -457,6 +602,7 @@ VALUES ($1, $2, $3, $4, NULL, $4, $5, $6, $7, $8, 50, $9, $10, $11, false, 0)", 
             cmd.Parameters.AddWithValue(cpuUs);
             cmd.Parameters.AddWithValue(cpuUs + 20_000);
             cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, lastExec);
+            cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)avgRowcount ?? DBNull.Value });
             await cmd.ExecuteNonQueryAsync(ct);
             return;
         }
@@ -467,8 +613,8 @@ INSERT INTO query_store_stats
      query_id, plan_id, execution_type_desc, replica_role,
      runtime_stats_interval_id, interval_start_time_utc, first_execution_time, last_execution_time,
      query_hash, query_plan_hash, execution_count,
-     avg_cpu_time_us, avg_duration_us, is_forced_plan, force_failure_count)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $16, $8, $9, $10, $11, $12, $13, 50, $14, $15, false, 0)", connection)
+     avg_cpu_time_us, avg_duration_us, is_forced_plan, force_failure_count, avg_rowcount)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $16, $8, $9, $10, $11, $12, $13, 50, $14, $15, false, 0, $17)", connection)
         { CommandTimeout = LiveTimeoutSeconds };
         raw.Parameters.AddWithValue(CollectionIdGenerator.Next());
         raw.Parameters.AddWithValue(periodEnd.AddMinutes(-5));
@@ -486,6 +632,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $16, $8, $9, $10, $11, $12, $13, 
         raw.Parameters.AddWithValue(cpuUs);
         raw.Parameters.AddWithValue(cpuUs + 20_000);
         raw.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)replicaRole ?? DBNull.Value });
+        raw.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)avgRowcount ?? DBNull.Value });
         await raw.ExecuteNonQueryAsync(ct);
     }
 

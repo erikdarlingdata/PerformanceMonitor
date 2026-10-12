@@ -226,6 +226,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "monitored-server registry, one row per configured server (about a hundred rows on the largest known "
             + "store, and every aws_* value NULL at this rung), so each is instant and neither touches data an earlier "
             + "rung created beyond that table. It does not move the lock-wait floor."),
+        new(
+            175,
+            SetsTheFloor: false,
+            "an UPDATE of late_seq on every row of collect.plan_regression_daily_built (created V168), in the same "
+            + "guarded block as the ADD COLUMN rowcount_sum on collect.plan_regression_daily (#5631). The built table "
+            + "holds one row per server per closed day and the hourly cleanup keeps about 17 days of them, so a fleet of "
+            + "a hundred servers is a few thousand rows and the UPDATE is milliseconds. The ADD COLUMN is nullable "
+            + "with no DEFAULT, so it is catalog-only and rewrites no row. It does not move the lock-wait floor."),
     ];
 
     /// <summary>

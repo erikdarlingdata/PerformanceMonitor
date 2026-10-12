@@ -295,7 +295,8 @@ public sealed class PlanRegressionDailyRungTests
 
         var insert = Regex.Match(sql, @"INSERT INTO collect\.plan_regression_daily \((?<cols>[^)]*)\)");
         Assert.True(insert.Success);
-        Assert.Equal(DailyColumns, insert.Groups["cols"].Value.Split(',').Select(c => c.Trim()).ToArray());
+        /* V175 (#5631) appended rowcount_sum to the table; the build writes it last. */
+        Assert.Equal(DailyColumns.Append("rowcount_sum").ToArray(), insert.Groups["cols"].Value.Split(',').Select(c => c.Trim()).ToArray());
 
         Assert.Contains("FROM collect.query_store_interval_latest AS l", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE l.server_id = $1::integer AND l.first_execution_time >= $4::timestamp AND l.first_execution_time < $3::timestamp AND l.last_execution_time >= $2::date AND l.last_execution_time < $3::timestamp AND l.collection_time >= $4::timestamp", sql, StringComparison.Ordinal);
@@ -308,6 +309,9 @@ public sealed class PlanRegressionDailyRungTests
         Assert.Contains("MAX(l.last_execution_time)", sql, StringComparison.Ordinal);
         Assert.Contains("bool_or(l.is_forced_plan)", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(l.force_failure_count)", sql, StringComparison.Ordinal);
+
+        /* #5631: rows per call, summed like the others, and NULL when any interval of the day had no avg_rowcount. */
+        Assert.Contains("CASE WHEN COUNT(*) = COUNT(l.avg_rowcount) THEN SUM(l.avg_rowcount::numeric * l.execution_count) END", sql, StringComparison.Ordinal);
 
         /* Four parameters, each cast where it is used, so each has one type. */
         Assert.Equal(new[] { "$1", "$2", "$3", "$4" }, Regex.Matches(sql, @"\$\d").Select(m => m.Value).Distinct().OrderBy(v => v).ToArray());
@@ -331,15 +335,16 @@ public sealed class PlanRegressionDailyRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 4})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 5})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 6})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 7})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 8})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
 
-        /* A newer rung's sentinel (V174's, #5655) is the last argument. */
-        Assert.Equal(ProbeOrdinal + 6, parameters.Length - 1);
+        /* A newer rung's sentinel (V175's, #5631) is the last argument. */
+        Assert.Equal(ProbeOrdinal + 7, parameters.Length - 1);
         Assert.Equal("hasPlanRegressionDaily", parameters[ProbeOrdinal].Name);
 
         /* Every sentinel true is a fully-migrated store, which maps to exactly this build's version. */
