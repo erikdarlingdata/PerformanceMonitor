@@ -230,6 +230,14 @@ public sealed class McpConfigTools
         }
     }
 
+    /// <summary>#5633 item 19: the empty answer of get_trace_flags. A successful trace_flags run that stored nothing says no flag is enabled as of
+    /// that run; with no such run it keeps the old hedge, which is then the true statement.</summary>
+    internal static string EmptyTraceFlagsStatus(CollectorRunFacts runFacts) =>
+        McpHelpers.Status(
+            "empty",
+            runFacts.NoTraceFlagsEnabled()
+                ?? "No trace flags found (none enabled, or the config collector has not run yet).");
+
     [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these flags are as of; a flag turned on or off since is not reflected until the next connect.")]
     public static async Task<string> GetTraceFlags(
         LocalDataService dataService,
@@ -244,7 +252,7 @@ public sealed class McpConfigTools
             var rows = await dataService.GetLatestTraceFlagsAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "trace_flags")
-                    ?? McpHelpers.Status("empty", "No trace flags found (none enabled, or the config collector has not run yet).");
+                    ?? EmptyTraceFlagsStatus(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags"));
 
             return JsonSerializer.Serialize(new
             {

@@ -326,7 +326,8 @@ ORDER BY c.database_name";
 WITH categorized AS (
     SELECT
         CASE
-            WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
+            WHEN wait_type = 'SOS_SCHEDULER_YIELD' THEN 'CPU'
+            WHEN wait_type IN ('CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER', 'HTDELETE', 'HTBUILD', 'HTREPARTITION') THEN 'Parallelism'
             WHEN wait_type ILIKE 'PAGEIOLATCH%'
             OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
@@ -344,7 +345,8 @@ WITH categorized AS (
     AND   delta_wait_time_ms > 0
     GROUP BY
         CASE
-            WHEN wait_type IN ('SOS_SCHEDULER_YIELD', 'CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER') THEN 'CPU'
+            WHEN wait_type = 'SOS_SCHEDULER_YIELD' THEN 'CPU'
+            WHEN wait_type IN ('CXPACKET', 'CXCONSUMER', 'CXSYNC_PORT', 'CXSYNC_CONSUMER', 'HTDELETE', 'HTBUILD', 'HTREPARTITION') THEN 'Parallelism'
             WHEN wait_type ILIKE 'PAGEIOLATCH%'
             OR   wait_type IN ('WRITELOG', 'IO_COMPLETION', 'ASYNC_IO_COMPLETION') THEN 'Storage'
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'

@@ -36,7 +36,7 @@ internal static class DarlingCurrentConfigReader
     public sealed record ServerConfigReadRow(
         string ConfigurationName, long ValueConfigured, long ValueInUse, bool IsDynamic, bool IsAdvanced)
     {
-        public bool ValuesMatch => ValueConfigured == ValueInUse;
+        public bool ValuesMatch => PerformanceMonitor.Common.ConfigValuesMatch.Matches(ConfigurationName, ValueConfigured, ValueInUse);
     }
 
     /// <summary>Latest sys.configurations snapshot for one server — the viewer's <c>ServerConfigSql</c> plus
