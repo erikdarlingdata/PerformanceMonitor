@@ -39,11 +39,17 @@ public class BlockingDeadlockContextBuilderTests
 
     /* ---------------- blocking builder ---------------- */
 
+    /* #5644 W1: reports of one blocked session, blocker and wait start are ONE wait, so a row that stands for a
+       separate wait of its own gets a blocked session of its own by default. */
+    private static int s_nextBlockedSpid = 100;
+
     private static BlockedProcessAlertRow Blocked(
         string db = "StackOverflow", string obj = "", string blockedSql = "", string blockingSql = "",
         long waitMs = 5000, string lockMode = "", string xml = "", DateTime? eventTime = null) => new()
     {
         EventTime = eventTime ?? new DateTime(2026, 6, 19, 12, 0, 0),
+        BlockedSpid = System.Threading.Interlocked.Increment(ref s_nextBlockedSpid),
+        BlockingSpid = 50,
         DatabaseName = db,
         ContentiousObject = obj,
         BlockedSqlText = blockedSql,
