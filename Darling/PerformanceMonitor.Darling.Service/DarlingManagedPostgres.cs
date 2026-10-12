@@ -5312,6 +5312,13 @@ public sealed class DarlingManagedPostgres
         Func<string, bool, string, string?>? tightenItem = null)
     {
         tightenItem ??= TightenStoreItem;
+
+        /* The store folder is a real folder: the permissions below are written by path, and a link at it would
+           send them, and every judgement of what is inside, to wherever it points. */
+        if (IsLink(storeFolder))
+        {
+            return $"{storeFolder} is a junction or symbolic link";
+        }
         var items = new List<(string Path, bool IsDirectory)>
         {
             (dataDirectory, true),
@@ -5344,8 +5351,12 @@ public sealed class DarlingManagedPostgres
             foreach (var entry in Directory.EnumerateFileSystemEntries(dataDirectory))
             {
                 /* A data directory's own entries are the ones PostgreSQL reads on start. A link among them is the
-                   operator's own relocation (pg_wal), so only the owner is judged here. */
-                if (!DarlingFileSecurity.IsTrustedStoreOwner(entry))
+                   operator's own relocation (pg_wal, say), so it is allowed when its own owner is trusted; it is never
+                   followed, and nothing here changes its permissions or owner. Every other name must not be a link. */
+                var entryTrusted = IsLink(entry)
+                    ? DarlingFileSecurity.IsTrustedStoreLinkOwner(entry)
+                    : DarlingFileSecurity.IsTrustedStoreOwner(entry);
+                if (!entryTrusted)
                 {
                     return $"{entry} is not owned by SYSTEM, Administrators, TrustedInstaller, the service account or the service's own account{DarlingFileSecurity.DescribeOwnerAndExposure(entry)}";
                 }

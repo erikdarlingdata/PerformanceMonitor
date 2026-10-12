@@ -2539,6 +2539,21 @@ public sealed class DarlingNativeStoreFolder : IDisposable
         return descriptor;
     }
 
+    // OWNER | GROUP | DACL of the object at the path itself, a link not followed (READ_CONTROL only; FILE_FLAG_OPEN_REPARSE_POINT |
+    // FILE_FLAG_BACKUP_SEMANTICS), or null.
+    public static byte[] ReadSecurityAt(string path)
+    {
+        using (SafeFileHandle opened = CreateFileW(ExtendedPath(path), 0x00020000u, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (opened.IsInvalid) { return null; }
+            uint needed;
+            GetKernelObjectSecurity(opened, 7u, null, 0, out needed);
+            if (needed == 0) { return null; }
+            byte[] descriptor = new byte[needed];
+            return GetKernelObjectSecurity(opened, 7u, descriptor, needed, out needed) ? descriptor : null;
+        }
+    }
+
     // DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION. SE_FILE_OBJECT is 1.
     public int WriteDacl(byte[] dacl)
     {
@@ -2565,13 +2580,25 @@ function Get-DarlingItemOwnerSid([string]$path) {
     catch { return $null }
 }
 
+# The owner of a junction or link ITSELF, read without following it, so the folder it points to is never asked; $null when it
+# cannot be read.
+function Get-DarlingLinkOwnerSid([string]$path) {
+    try {
+        Initialize-DarlingNativeStoreFolder
+        $bytes = [DarlingNativeStoreFolder]::ReadSecurityAt($path)
+        if ($null -eq $bytes) { return $null }
+        return (New-Object System.Security.AccessControl.RawSecurityDescriptor($bytes, 0)).Owner
+    }
+    catch { return $null }
+}
+
 # Why the store folder's contents cannot be accepted, or $null when they can. Nothing here is ever treated as empty because it
 # could not be listed: a folder this script cannot list, or an item whose owner it cannot read, is a reason to stop, not a folder
 # with nothing in it. Checked, directly under $folder: the PostgreSQL data directory ($dataDirectory), pg.log, server.key,
 # server.crt and logs. Each one that exists must not be a link and must be owned by one of $trusted (SYSTEM, Administrators,
 # TrustedInstaller or the service account: what the service leaves behind). The data directory's own entries must be
-# listable and owned the same way, and a link among them is refused unless it is pg_wal, the one relocation PostgreSQL
-# supports and the service accepts. Those names are the ones the service writes into, and initdb, pg_ctl and the key and certificate
+# listable and owned the same way, and a link among them (a relocated pg_wal, say) is accepted when the link's own owner is
+# trusted and is never followed, as the service accepts it. Those names are the ones the service writes into, and initdb, pg_ctl and the key and certificate
 # writers each open them without asking who made them, so something another user put there would be used as it is.
 function Get-DarlingStoreContentsProblem([string]$folder, [string]$dataDirectory, $trusted) {
     $named = @('pg.log', 'server.key', 'server.crt', 'logs')
@@ -2596,9 +2623,13 @@ function Get-DarlingStoreContentsProblem([string]$folder, [string]$dataDirectory
             try { $children = @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop) }
             catch { return "$($item.FullName) cannot be listed by this script ($($_.Exception.Message)), so what is in it is not known. It is not treated as empty." }
             foreach ($child in $children) {
-                # A link at pg_wal is the operator's own relocation of the write-ahead log, which the service accepts
-                # (only its owner is judged). A link at any other name is refused.
-                if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and $child.Name -ine 'pg_wal') { return "$($child.FullName) is a junction or link." }
+                # A link among the entries is the operator's own relocation (pg_wal, say), which the service accepts: it is
+                # allowed when its own owner is trusted, and it is never followed.
+                if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    $linkOwner = Get-DarlingLinkOwnerSid $child.FullName
+                    if ($null -eq $linkOwner -or -not ($trusted -contains $linkOwner)) { return "$($child.FullName) is a junction or link whose owner is not SYSTEM, Administrators or the service account (or cannot be read), so another user may have made it." }
+                    continue
+                }
                 $childProblem = Get-DarlingItemOwnerProblem $child.FullName $trusted
                 if ($childProblem) { return $childProblem }
             }

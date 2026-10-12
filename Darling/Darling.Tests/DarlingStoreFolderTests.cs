@@ -35,7 +35,7 @@ public sealed class DarlingStoreFolderScriptTests
 
     private static readonly string[] s_functions =
     {
-        "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid",
+        "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid",
         "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
         "Get-DarlingNativeText", "Get-DarlingProductType", "Test-DarlingDomainController", "Initialize-DarlingOperatorGroup",
     };
@@ -363,10 +363,11 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("none=0", answers);
     }
 
-    /// <summary>A link at <c>pg_wal</c> among the data directory's entries is the operator's own relocation of the
-    /// write-ahead log, which the service accepts; a link at any other name is refused.</summary>
+    /// <summary>A link among the data directory's entries, at any name, is accepted when its own owner is trusted and
+    /// refused when it is not; a link at the data directory or at a named item is refused. The owner of a link is read by
+    /// a function the probe redefines, so the untrusted case needs no second account.</summary>
     [Fact]
-    public void ARelocatedPgWal_IsAccepted_AndEveryOtherLinkInTheDataDirectoryIsRefused()
+    public void ALinkAmongTheDataDirectorysEntries_IsAcceptedForATrustedOwner_AndRefusedForAnotherOne()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs and junctions are Windows-only.");
 
@@ -378,24 +379,44 @@ public sealed class DarlingStoreFolderScriptTests
                 $store = Join-Path $base $name
                 New-Item -ItemType Directory (Join-Path $store 'pg') | Out-Null
                 Set-Content -LiteralPath (Join-Path $store 'pg\postgresql.auto.conf') 'x'
-                if ($link) { cmd /c mklink /J (Join-Path $store ('pg\' + $link)) "$target" | Out-Null }
+                if ($link) { cmd /c mklink /J (Join-Path $store $link) "$target" | Out-Null }
                 return $store
             }
-            $store = New-Store 'wal' 'pg_wal'
-            'walProblem=' + [bool](Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
-            $store = New-Store 'walupper' 'PG_WAL'
-            'walUpperProblem=' + [bool](Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
-            $store = New-Store 'other' 'pg_other'
-            'other=' + (Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
+            foreach ($case in @(@('wal', 'pg\pg_wal'), @('walupper', 'pg\PG_WAL'), @('other', 'pg\pg_other'))) {
+                $store = New-Store $case[0] $case[1]
+                ($case[0] + 'Problem=') + [bool](Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
+            }
+            $store = Join-Path $base 'other'
+            $real = Get-DarlingLinkOwnerSid (Join-Path $store 'pg\pg_other')
+            'ownLinkOwnerRead=' + ($real -eq $owner)
+            function Get-DarlingLinkOwnerSid([string]$path) { New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545') }
+            'otherOwner=' + (Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
             $store = New-Store 'plain' ''
             'plainProblem=' + [bool](Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
-            foreach ($junction in @('wal\pg\pg_wal', 'walupper\pg\PG_WAL', 'other\pg\pg_other')) { cmd /c rmdir (Join-Path $base $junction) | Out-Null }
+            foreach ($name in @('pg.log', 'server.key', 'server.crt', 'logs')) {
+                $store = New-Store ('link' + $name) ''
+                cmd /c mklink /J (Join-Path $store $name) "$target" | Out-Null
+                ('link' + $name + '=') + (Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
+            }
+            $store = New-Store 'linkdata' ''
+            Remove-Item -Recurse -Force (Join-Path $store 'pg')
+            cmd /c mklink /J (Join-Path $store 'pg') "$target" | Out-Null
+            'linkdata=' + (Get-DarlingStoreContentsProblem $store (Join-Path $store 'pg') @($owner))
+            foreach ($junction in @('wal\pg\pg_wal', 'walupper\pg\PG_WAL', 'other\pg\pg_other', 'linkpg.log\pg.log', 'linkserver.key\server.key', 'linkserver.crt\server.crt', 'linklogs\logs', 'linkdata\pg')) { cmd /c rmdir (Join-Path $base $junction) | Out-Null }
             """));
 
         Assert.Contains("walProblem=False", answers);
-        Assert.Contains("walUpperProblem=False", answers);
-        Assert.Contains(answers, a => a.StartsWith("other=", StringComparison.Ordinal) && a.Contains("pg_other is a junction or link", StringComparison.Ordinal));
+        Assert.Contains("walupperProblem=False", answers);
+        Assert.Contains("otherProblem=False", answers);
+        Assert.Contains("ownLinkOwnerRead=True", answers);
+        Assert.Contains(answers, a => a.StartsWith("otherOwner=", StringComparison.Ordinal) && a.Contains("pg_other is a junction or link whose owner", StringComparison.Ordinal));
         Assert.Contains("plainProblem=False", answers);
+        foreach (var name in new[] { "pg.log", "server.key", "server.crt", "logs" })
+        {
+            Assert.Contains(answers, a => a.StartsWith("link" + name + "=", StringComparison.Ordinal) && a.Contains("is a junction or link.", StringComparison.Ordinal));
+        }
+
+        Assert.Contains(answers, a => a.StartsWith("linkdata=", StringComparison.Ordinal) && a.Contains("is a junction or link.", StringComparison.Ordinal));
     }
 
     /// <summary>On a domain controller (product type 2) the local operator group is neither looked up nor created, because
@@ -467,7 +488,7 @@ public sealed class DarlingStoreFolderScriptTests
         var upgrade = UpgradeScript;
         foreach (var name in new[]
         {
-            "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid",
+            "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid",
             "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
             "Get-DarlingProductType", "Test-DarlingDomainController", "Initialize-DarlingOperatorGroup",
         })
@@ -1017,6 +1038,90 @@ public sealed class DarlingStoreContentsGateTests
 
             Remove(store);
             Remove(target);
+        }
+    }
+
+    private static void Junction(string link, string target)
+    {
+        using var process = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+        });
+        process!.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+    }
+
+    /// <summary>A link among the data directory's own entries, at any name, is the operator's relocation: it is accepted
+    /// when its own owner is trusted and is refused when it is not. It is never followed, so the folder it points to
+    /// keeps its ACL.</summary>
+    [Fact]
+    public void ALinkAmongTheDataDirectorysEntries_IsAcceptedForATrustedOwner_AndRefusedForAnotherOne()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+        var store = NewStore();
+        var target = Path.Combine(Path.GetTempPath(), "darling-contents-target-" + Guid.NewGuid().ToString("N"));
+        var link = Path.Combine(store, "pg", "pg_other");
+        try
+        {
+            Directory.CreateDirectory(target);
+            Junction(link, target);
+            Assert.True(DarlingManagedPostgres.IsLink(link));
+
+            Assert.Null(Problem(store));
+            Assert.False(new DirectoryInfo(target).GetAccessControl().AreAccessRulesProtected, "the folder behind the link keeps its ACL");
+
+            try
+            {
+                DarlingFileSecurity.UseStoreTrustForTests(null, null, linkOwner: path => path == link ? s_users : null);
+                var problem = Problem(store);
+                Assert.NotNull(problem);
+                Assert.Contains(link, problem, StringComparison.Ordinal);
+                Assert.Contains("is not owned by", problem, StringComparison.Ordinal);
+            }
+            finally
+            {
+                DarlingFileSecurity.UseStoreTrustForTests(null, null);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(link); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* The junction is already gone. */
+            }
+
+            Remove(store);
+            Remove(target);
+        }
+    }
+
+    /// <summary>The store folder is not a link either.</summary>
+    [Fact]
+    public void AStoreFolderThatIsALink_IsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+        var store = NewStore();
+        var link = store + "-link";
+        try
+        {
+            Junction(link, store);
+            var problem = DarlingManagedPostgres.StoreContentsProblem(
+                link, Path.Combine(link, "pg"), Path.Combine(link, "pg.log"), Path.Combine(link, "logs"));
+            Assert.NotNull(problem);
+            Assert.Contains("junction or symbolic link", problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(link); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* The junction is already gone. */
+            }
+
+            Remove(store);
         }
     }
 

@@ -658,11 +658,61 @@ public static class DarlingFileSecurity
 
     /// <summary>Substitutes the running account and the service-name account in the store checks; null for both
     /// restores the real ones. A test cannot make a file owned by the real service-name account.</summary>
-    internal static void UseStoreTrustForTests(SecurityIdentifier? runningAccount, SecurityIdentifier? ownServiceSid)
+    internal static void UseStoreTrustForTests(
+        SecurityIdentifier? runningAccount, SecurityIdentifier? ownServiceSid, Func<string, SecurityIdentifier?>? linkOwner = null)
     {
         _serviceAccountOverride = runningAccount;
         _ownServiceSidOverride = ownServiceSid;
+        _linkOwnerOverride = linkOwner;
     }
+
+    private static Func<string, SecurityIdentifier?>? _linkOwnerOverride;
+
+    /// <summary>
+    /// <see cref="IsTrustedStoreOwner"/> for a junction or symbolic link, judged by the link's own owner: it is opened
+    /// without following it, so the folder it points to is never asked. A link that cannot be opened or read is not
+    /// trusted.
+    /// </summary>
+    public static bool IsTrustedStoreLinkOwner(string path)
+    {
+        if (_linkOwnerOverride?.Invoke(path) is { } stoodIn)
+        {
+            return IsTrustedStoreSid(stoodIn);
+        }
+
+        try
+        {
+            using var handle = OpenForSecurity(path, followLink: false, access: ReadControl);
+            var result = GetSecurityInfo(handle, FileObject, OwnerSecurityInformation, out var owner, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out var descriptor);
+            if (result != 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                return owner != IntPtr.Zero && IsTrustedStoreSid(new SecurityIdentifier(owner));
+            }
+            finally
+            {
+                LocalFree(descriptor);
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private const uint OwnerSecurityInformation = 0x00000001;
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint GetSecurityInfo(
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle, int objectType, uint securityInfo,
+        out IntPtr ownerSid, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr securityDescriptor);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 
     /// <summary>
     /// The SID Windows derives from a service name (what <c>sc.exe showsid</c> prints): the SHA-1 of the upper-cased
