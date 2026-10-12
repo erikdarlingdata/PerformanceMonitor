@@ -126,7 +126,7 @@ public static class CurrentDatabaseScope
     /// </summary>
     public static async Task<List<T>> OmitDroppedAsync<T>(
         NpgsqlDataSource postgres, List<T> rows, Func<T, int> serverOf, Func<T, string?> databaseOf, DatabaseFilter filter,
-        CancellationToken cancellationToken = default, Func<T, DateTime?>? timeOf = null)
+        Func<T, DateTime?>? timeOf = null, CancellationToken cancellationToken = default)
     {
         if (!filter.IsAll || rows.Count == 0)
         {
