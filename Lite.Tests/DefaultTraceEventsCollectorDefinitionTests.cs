@@ -202,7 +202,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
 
         /* The keep is the FIRST arm of the OR that follows the StartTime bound, and every database predicate
            sits AFTER it — inside the other arm — so none of them can reach the 15457 row. */
-        var startTime = text.IndexOf("AND   ft.StartTime >= ", StringComparison.Ordinal);
+        var startTime = text.IndexOf("ft.StartTime >= CONVERT(datetime, ", StringComparison.Ordinal);
         var keepAt = text.IndexOf(keep, StringComparison.Ordinal);
         var systemDbs = text.IndexOf("ISNULL(ft.DatabaseID, 0) NOT IN (1, 3, 4)", StringComparison.Ordinal);
         var agDbs = text.IndexOf("ISNULL(ft.DatabaseID, 0) < 32761", StringComparison.Ordinal);
@@ -277,7 +277,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     {
         var noExclusion = DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext());
         Assert.DoesNotContain("@excl_db_0", noExclusion.Text, StringComparison.Ordinal);
-        Assert.Equal(3, noExclusion.Parameters.Count); /* @cutoff_time + @last_trace_path + @include_object_ddl */
+        Assert.Equal(5, noExclusion.Parameters.Count); /* @cutoff_time + @last_trace_path + @last_trace_start + @last_event_sequence + @include_object_ddl */
 
         var withExclusion = DefaultTraceEventsCollector.Instance.BuildQuery(
             MakeContext(excludedDatabases: new[] { "ReportingDB", "ScratchDB" }));
@@ -289,7 +289,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
             "AND (ft.DatabaseName IS NULL OR ft.DatabaseName NOT IN (@excl_db_0, @excl_db_1))",
             withExclusion.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("AND ft.DatabaseName NOT IN", withExclusion.Text, StringComparison.Ordinal); /* never the bare form */
-        Assert.Equal(5, withExclusion.Parameters.Count); /* @cutoff_time + @last_trace_path + @include_object_ddl + two excluded names */
+        Assert.Equal(7, withExclusion.Parameters.Count); /* the five above + two excluded names */
         Assert.Contains(withExclusion.Parameters, p => p.Name == "@excl_db_0" && (string?)p.Value == "ReportingDB");
         Assert.Contains(withExclusion.Parameters, p => p.Name == "@excl_db_1" && (string?)p.Value == "ScratchDB");
     }
@@ -399,11 +399,12 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     [Fact]
-    public void StateKeys_DeclaresTheLastSeenTracePathAndTheWatermarkTickSequences_AndTheDeclaringSetIsPinned()
+    public void StateKeys_DeclaresTheTracePathTheTickSequencesAndTheTraceSequence_AndTheDeclaringSetIsPinned()
     {
         Assert.Equal(
-            new[] { "last_trace_file_path", "watermark_tick_event_sequences" },
+            new[] { "last_trace_file_path", "watermark_tick_event_sequences", "trace_event_sequence" },
             DefaultTraceEventsCollector.Instance.StateKeys.ToArray());
+        Assert.Equal("trace_event_sequence", DefaultTraceEventsCollector.TraceSequenceStateKey);
         Assert.Equal("watermark_tick_event_sequences", DefaultTraceEventsCollector.WatermarkTickSequencesStateKey);
         Assert.Equal("last_trace_file_path", DefaultTraceEventsCollector.LastTraceFilePathStateKey);
 
@@ -462,8 +463,8 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         Assert.Contains("@current_trace_path = t.path", text, StringComparison.Ordinal);
 
         /* Steady-state arm: the captured path itself, and ONE file. */
-        Assert.Contains("WHEN @current_trace_path = @last_trace_path\n        THEN @current_trace_path", text, StringComparison.Ordinal);
-        Assert.Contains("WHEN @current_trace_path = @last_trace_path\n        THEN 1", text, StringComparison.Ordinal);
+        Assert.Contains("WHEN @current_trace_path = @last_trace_path\n        AND  @trace_continues = 1\n        THEN @current_trace_path", text, StringComparison.Ordinal);
+        Assert.Contains("WHEN @current_trace_path = @last_trace_path\n        AND  @trace_continues = 1\n        THEN 1", text, StringComparison.Ordinal);
 
         /* Fallback arm still reads the whole set, via the unchanged base-path normalization. */
         Assert.Contains("ELSE t.max_files", text, StringComparison.Ordinal);
@@ -513,7 +514,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            cycles that most need the path recorded are the ones that collect ZERO rows (a server whose
            trace churns through 20 MB files without producing curated events), and a row-derived path
            would never notice those rollovers — leaving the collector in the expensive fallback forever. */
-        Assert.Contains("OPTION(RECOMPILE);\n\nSELECT /* PerformanceMonitorLite */\n    current_trace_path = @current_trace_path;", text, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE);\n\nSELECT /* PerformanceMonitorLite */\n    current_trace_path = @current_trace_path,\n    current_trace_start = @current_trace_start;", text, StringComparison.Ordinal);
         Assert.DoesNotContain("current_trace_path = ft.", text, StringComparison.Ordinal);
         Assert.DoesNotContain("trace_path", string.Join(",", DefaultTraceEventsCollector.Instance.PayloadColumns.Select(c => c.Name)), StringComparison.Ordinal);
     }
