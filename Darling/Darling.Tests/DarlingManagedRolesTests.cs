@@ -762,15 +762,20 @@ public sealed class DarlingManagedRolesTests
 
         var utilityOff = byo.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
         Assert.True(utilityOff >= 0, "provision-roles.sql no longer turns utility tracking off for its own session");
-        Assert.True(utilityOff < byo.IndexOf("CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal),
+        Assert.True(utilityOff < byo.IndexOf("ALTER ROLE admin  LOGIN PASSWORD", StringComparison.Ordinal),
             "provision-roles.sql sends a password before it turns utility tracking off");
-        Assert.True(utilityOff < byo.IndexOf("ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal),
-            "provision-roles.sql sends a password before it turns utility tracking off");
+
+        /* The role-collision guard creates the roles without a password, so no CREATE ROLE statement carries one: a
+           password rides only on the ALTER ROLE lines, which come after the guard's own utility-tracking check. */
+        Assert.DoesNotContain("CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD", byo, StringComparison.Ordinal);
+        var trackingCheck = byo.IndexOf("current_setting('pg_stat_statements.track_utility', true) = 'on'", StringComparison.Ordinal);
+        Assert.True(trackingCheck > utilityOff && trackingCheck < byo.IndexOf("CREATE ROLE admin LOGIN NOSUPERUSER;", StringComparison.Ordinal),
+            "the guard must test utility tracking before it creates a role");
 
         /* #3914: the script creates mcp too, so its password statements and its slow-statement lines are held to
            the same order and the same settings. */
-        var mcpCreate = byo.IndexOf("CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal);
-        var mcpAlter = byo.IndexOf("ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal);
+        var mcpCreate = byo.IndexOf("CREATE ROLE mcp LOGIN NOSUPERUSER;", StringComparison.Ordinal);
+        var mcpAlter = byo.IndexOf("ALTER ROLE mcp    LOGIN PASSWORD", StringComparison.Ordinal);
         Assert.True(mcpCreate > utilityOff && mcpAlter > utilityOff,
             "provision-roles.sql sends the mcp password before it turns utility tracking off");
         Assert.Contains("ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';", byo, StringComparison.Ordinal);
