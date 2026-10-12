@@ -17,6 +17,7 @@
 import { renderPanel, VIZ } from "../../panels.js";
 import { READ_FIELDS } from "../../read-fields.js";
 import { el, mount, loadingStrip, readErrorStrip, errorStrip, readTool, fmtInt } from "../../util.js";
+import { plainText } from "../../plain-text.js";
 import { gatedEmptyStrip, PG_NOT_COLLECTED } from "./gate.js";
 const CPU_HOURS = 24;
 const TOP_HOURS = 24;
@@ -147,7 +148,7 @@ function loadUtilization(body, server, ctx) {
       mount(body, [
         el("h3", {}, [SUMMARY_TITLE, el("span", { class: "panel-sub", text: " " + SUMMARY_SUBTITLE })]),
         VIZ.stat(view, { stats }),
-        data.health_score_note ? el("p", { class: "finops-note", title: data.health_score_note, text: data.health_score_note }) : null,
+        data.health_score_note ? el("p", { class: "finops-note", title: plainText(data.health_score_note), text: plainText(data.health_score_note) }) : null,
         el("p", { class: "finops-reason", text: data.verdict_reason }),
         el("details", {}, [
           el("summary", { text: "7-Day Provisioning Trend" }),

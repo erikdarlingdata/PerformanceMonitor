@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -3306,7 +3306,8 @@ const LATCH_COLUMNS = [
   { key: "total_delta_wait_time_ms", label: "Wait", format: "ms" },
   { key: "total_delta_waiting_requests", label: "Requests", format: "int" },
   { key: "avg_wait_ms_per_request", label: "Avg/req", format: "num2" },
-  { key: "wait_ms_per_second", label: "ms/s", format: "num2" },
+  /* #5644 W10: the panel reads "last 24 hours" and the totals are, but this rate is the latest interval's only. */
+  { key: "wait_ms_per_second", label: "ms/s, latest interval", format: "num2" },
   { key: "description", label: "What it means", wrap: true },
 ];
 
@@ -3316,7 +3317,7 @@ const SPINLOCK_COLUMNS = [
   { key: "total_delta_spins", label: "Spins", format: "int" },
   { key: "total_delta_backoffs", label: "Backoffs", format: "int" },
   { key: "spins_per_collision", label: "Spins/coll", format: "num1" },
-  { key: "collisions_per_second", label: "Coll/s", format: "num2" },
+  { key: "collisions_per_second", label: "Coll/s, latest interval", format: "num2" },
   { key: "description", label: "What it means", wrap: true },
 ];
 
@@ -4053,7 +4054,7 @@ export function serverTrendPanel(server, ctx, kind) {
         unit: spec.unit,
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|" + spec.metric, chartZoomScope(ctx.hours)),
-      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? el("div", { class: "mp-metric-note", text: res.data.aggregate_note }) : null,
+      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
     ]);
   })();
   return panel;
@@ -4157,7 +4158,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
       unit: "MB",
       ...windowFromHours(trend.keptHours || ctx.hours),
     }, "clerk-trend|" + server, chartZoomScope(ctx.hours)),
-    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? el("div", { class: "mp-metric-note", text: trend.data.aggregate_note }) : null,
+    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? metricNote(trend.data.aggregate_note) : null,
   ]);
 }
 
@@ -4176,6 +4177,7 @@ const NAMED_TRENDS = {
     seriesKey: "latch_class",
     unit: "ms/s",
     noun: "latch class",
+    plural: "latch classes",
     label: "Latch classes",
     note: "Wait ms/s, one line per checked latch class.",
     noOptions: "No latch classes accumulated waits in this window.",
@@ -4188,6 +4190,7 @@ const NAMED_TRENDS = {
     seriesKey: "spinlock_name",
     unit: "collisions/s",
     noun: "spinlock",
+    plural: "spinlocks",
     label: "Spinlocks",
     note: "Collisions/s, one line per checked spinlock.",
     noOptions: "No spinlocks recorded collisions in this window.",
@@ -4198,7 +4201,7 @@ const DEFAULT_NAMES_CHECKED = 5;
 
 export function namedTrendPanel(server, ctx, kind) {
   const spec = NAMED_TRENDS[kind];
-  const { panel, body } = panelShell(spec.title, ctx.label + ", with a trend for the " + spec.noun + "s you check", 2, spec.optionsTool);
+  const { panel, body } = panelShell(spec.title, ctx.label + ", with a trend for the " + spec.plural + " you check", 2, spec.optionsTool);
   (async () => {
     const res = await readToolWithinKeptHistory(spec.optionsTool, { server, hours: ctx.hours, top: MAX_NAMES_CHARTED }, ctx && ctx.signal);
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -4213,7 +4216,7 @@ export function namedTrendPanel(server, ctx, kind) {
       options,
       max: MAX_NAMES_CHARTED,
       noun: spec.noun,
-      defaultsLabel: "Top " + spec.noun + "s",
+      defaultsLabel: "Top " + spec.plural,
       defaults: (o) => o.slice(0, DEFAULT_NAMES_CHECKED),
       onChange: (checked) => drawNamedTrends(chartSlot, server, ctx, kind, checked),
     });
@@ -4280,7 +4283,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
       ...windowFromHours(trend.keptHours || ctx.hours),
     }, kind + "-trend|" + server, chartZoomScope(ctx.hours)),
     el("div", { class: "mp-metric-note", text: spec.note }),
-    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? el("div", { class: "mp-metric-note", text: trend.data.aggregate_note }) : null,
+    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? metricNote(trend.data.aggregate_note) : null,
   ]);
 }
 
@@ -4323,7 +4326,7 @@ export function sessionStatsTrendPanel(server, ctx) {
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),
       top.length ? el("div", { class: "mp-metric-note", text: "Top in the newest bucket: " + top.join("; ") + "." }) : null,
-      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? el("div", { class: "mp-metric-note", text: res.data.aggregate_note }) : null,
+      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
     ]);
   })();
   return panel;

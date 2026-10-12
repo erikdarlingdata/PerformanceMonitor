@@ -200,10 +200,11 @@ public sealed class CollectionOutputBesideCostTests
            #3754: the faulted-run count (a RUN-CLASS count, like the note count beside it) and the
            event-collector bool, computed by the caller from the name on IsEventCollector's own name-list
            pattern, precisely so that this method still takes no string. */
-        Assert.Equal(6, parameters.Length);
+        /* #5644: the zero-is-normal bool joined the event bool, computed from a name list the same way. */
+        Assert.Equal(7, parameters.Length);
 
         Assert.Equal(
-            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector" },
+            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector", "isZeroNormal" },
             parameters.Select(p => p.Name!).ToArray());
 
         Assert.DoesNotContain(parameters, p => p.ParameterType == typeof(string));
