@@ -492,6 +492,11 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private readonly DatabaseWatermarkCache _databaseWatermarkCache = new();
 
+    /// <summary>The Query Store seed read's side-table reader (#5684); it owns the fallback counter and log throttle.</summary>
+    private readonly QueryStoreWatermarkReader _queryStoreWatermarkReader;
+
+    internal QueryStoreWatermarkReader QueryStoreWatermarkSeedReader => _queryStoreWatermarkReader;
+
     /// <summary>
     /// When a server's live query_store collection last failed a per-database item — the backfill
     /// worker's yield-to-live signal (#2111), read through <see cref="LastQueryStoreItemFailureUtc"/>
@@ -831,6 +836,7 @@ public sealed class DarlingCollectorRunner
         _queryStoreWriteFence = queryStoreWriteFence;
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
+        _queryStoreWatermarkReader = new QueryStoreWatermarkReader(logger);
         _capturePlans = capturePlans ?? (() => true);
         /* Null provider = keep the collector's own compile-time budget (what Lite and every test does). */
         _textBudgetMb = textBudgetMb ?? (() => 0);
@@ -6893,6 +6899,12 @@ RETURNING s.state_key";
         return (null, !failed);
     }
 
+    /// <summary>True when the seed read is the Query Store one the per-batch side table (#5684) answers.</summary>
+    private static bool IsQueryStoreWatermarkShape(string tableName, string columnName, string databaseColumnName) =>
+        string.Equals(tableName, "query_store_stats", StringComparison.Ordinal)
+        && string.Equals(columnName, "last_execution_time", StringComparison.Ordinal)
+        && string.Equals(databaseColumnName, "database_name", StringComparison.Ordinal);
+
     /// <summary>
     /// The seed read for the per-database Query Store watermark cache (#4749): the bounded read behind
     /// <see cref="ReadLastCollectedTimeForDatabaseAsync"/> (same bound, same failure handling), plus the
@@ -6908,8 +6920,16 @@ RETURNING s.state_key";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName), connection);
+            var rawSql = BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName);
+            if (IsQueryStoreWatermarkShape(tableName, columnName, databaseColumnName))
+            {
+                /* #5684: the stitched read (side table + coverage + verification), never above the raw read. */
+                var (stitchedValue, stitchedWitness) = await _queryStoreWatermarkReader.ReadAsync(
+                    connection, serverId, databaseName, collectedSince, rawSql, CommandTimeoutSeconds, cancellationToken);
+                return (stitchedValue, stitchedWitness, true);
+            }
+
+            using var command = new NpgsqlCommand(rawSql, connection);
             command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName);
