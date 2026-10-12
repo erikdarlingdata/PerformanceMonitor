@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -48,8 +49,10 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>STATEFUL dedup (must-handle):</b> mirrors the deadlock / blocked-process-report /
 /// system_health collectors — an <c>event_time</c> watermark (the newest already-collected StartTime from
-/// the host store) filters <c>ft.StartTime &gt; @cutoff_time</c>, so a rollover file re-read across cycles
-/// never re-ingests an event. Unlike those XE ring-buffer collectors (whose 10-minute first-run fallback
+/// the host store) bounds the read at <c>ft.StartTime &gt;= @cutoff_time</c> (at-or-after, #5644 W6: an event in the
+/// watermark's own 3.33 ms tick that the trace flushes after a poll must not be lost), and the rows already
+/// stored for that one tick are dropped by <c>EventSequence</c> (see <see cref="WatermarkTickSequencesStateKey"/>),
+/// so a rollover file re-read across cycles never re-ingests an event. Unlike those XE ring-buffer collectors (whose 10-minute first-run fallback
 /// fits their tiny recent-only buffers), the FIRST run here collects EVERYTHING still in the trace files
 /// (a far-past cutoff), because the default trace persists hours-to-days of history on disk that would
 /// otherwise be lost — the same first-run-collects-all choice the Dashboard collector makes.</para>
@@ -144,6 +147,20 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
     /// path, never record a rollover and so never leave the expensive fallback.
     /// </summary>
     public const string LastTraceFilePathStateKey = "last_trace_file_path";
+
+    /// <summary>
+    /// The <see cref="CollectorContext.State"/> key holding the EventSequence of every event this collector
+    /// read at the newest StartTime tick it has seen, as <c>"&lt;DateTime ticks&gt;:&lt;seq&gt;,&lt;seq&gt;..."</c>
+    /// (#5644 W6). The read is at-or-after the watermark (<c>ft.StartTime &gt;= cutoff</c>), so it returns the
+    /// rows already stored for the watermark's own tick as well as any event the trace flushed into that tick
+    /// after the last poll; <see cref="ReadAsync"/> drops the first and keeps the second. A strict
+    /// <c>&gt;</c> bound could not tell them apart and lost the second. State, not a read of the store, so
+    /// the identity is host-neutral: Lite and Darling both persist it after the cycle (the same path as
+    /// <see cref="LastTraceFilePathStateKey"/>). Absent, stale (its tick is not the watermark) or malformed
+    /// state drops nothing: a possible repeat of one tick's rows, which the readers' DISTINCT collapses, is
+    /// cheaper than a lost event.
+    /// </summary>
+    public const string WatermarkTickSequencesStateKey = "watermark_tick_event_sequences";
 
     public sealed class Row
     {
@@ -269,7 +286,7 @@ JOIN sys.trace_events AS te
   ON ft.EventClass = te.trace_event_id
 WHERE t.is_default = 1
 AND   t.status = 1
-AND   ft.StartTime > CONVERT(datetime, {1})
+AND   ft.StartTime >= CONVERT(datetime, {1})
 AND
 (
     /*The sp_configure line (msg 15457, an ErrorLog write): kept regardless of the session's database
@@ -334,7 +351,8 @@ SELECT /* PerformanceMonitorLite */
     public override string PrefixIdColumnName => "default_trace_event_id";
 
     /// <summary>
-    /// Only events newer than the newest already-collected StartTime are fetched, so re-reading the
+    /// Events at or after the newest already-collected StartTime are fetched and the ones already stored for
+    /// that tick are dropped by EventSequence (<see cref="WatermarkTickSequencesStateKey"/>), so re-reading the
     /// rolling trace files across cycles never re-ingests an event (mirrors the deadlock / system_health
     /// collectors' event_time watermark). First run has no watermark → collect all on-disk history.
     /// </summary>
@@ -348,7 +366,7 @@ SELECT /* PerformanceMonitorLite */
     /// before the query is built and persists whatever this cycle observed once the cycle completes.
     /// The only collector that declares state — every other one's dedup is derivable from its rows.
     /// </summary>
-    public override IReadOnlyList<string> StateKeys { get; } = new[] { LastTraceFilePathStateKey };
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { LastTraceFilePathStateKey, WatermarkTickSequencesStateKey };
 
     /// <summary>
     /// Collects on SQL Server, Azure SQL Managed Instance, and AWS RDS — everywhere the built-in default
@@ -501,7 +519,98 @@ SELECT /* PerformanceMonitorLite */
             context.PendingState[LastTraceFilePathStateKey] = reader.GetString(0);
         }
 
-        return rows;
+        return DropStoredWatermarkTickRows(rows, context);
+    }
+
+    /// <summary>
+    /// #5644 W6: the query reads at-or-after the watermark tick, so rows already stored for that tick come
+    /// back with any new event of the same tick. Drops exactly the stored ones (same tick, EventSequence in
+    /// the state the previous cycle recorded) and records this cycle's newest-tick sequences for the next.
+    /// A row with no EventSequence cannot be matched and is kept: a repeat beats a lost event.
+    /// </summary>
+    private static List<Row> DropStoredWatermarkTickRows(List<Row> rows, CollectorContext context)
+    {
+        context.State.TryGetValue(WatermarkTickSequencesStateKey, out var stored);
+        var storedSequences = TryParseTickSequences(stored, out var storedTicks, out var parsed)
+            ? parsed
+            : new HashSet<long>();
+        long? watermarkTicks = context.Watermark?.Ticks;
+        bool storedIsForWatermark = watermarkTicks.HasValue && storedTicks == watermarkTicks.Value;
+
+        var kept = new List<Row>(rows.Count);
+        long newestTicks = long.MinValue;
+        foreach (var row in rows)
+        {
+            if (row.EventTime is not { } time)
+            {
+                kept.Add(row);
+                continue;
+            }
+
+            newestTicks = Math.Max(newestTicks, time.Ticks);
+            bool alreadyStored = storedIsForWatermark
+                && time.Ticks == watermarkTicks!.Value
+                && row.EventSequence is { } sequence
+                && storedSequences.Contains(sequence);
+            if (!alreadyStored)
+            {
+                kept.Add(row);
+            }
+        }
+
+        if (newestTicks != long.MinValue)
+        {
+            /* Every sequence this cycle read at the newest tick, dropped ones included, plus the earlier ones
+               when that tick is still the stored one (a rolled-over trace may no longer return them). */
+            var newest = new SortedSet<long>();
+            foreach (var row in rows)
+            {
+                if (row.EventTime is { } t && t.Ticks == newestTicks && row.EventSequence is { } q)
+                {
+                    newest.Add(q);
+                }
+            }
+
+            if (storedIsForWatermark && newestTicks == watermarkTicks!.Value)
+            {
+                newest.UnionWith(storedSequences);
+            }
+
+            context.PendingState[WatermarkTickSequencesStateKey] =
+                newestTicks.ToString(CultureInfo.InvariantCulture) + ":"
+                + string.Join(",", newest.Select(static v => v.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        return kept;
+    }
+
+    private static bool TryParseTickSequences(string? value, out long ticks, out HashSet<long> sequences)
+    {
+        ticks = 0;
+        sequences = new HashSet<long>();
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+
+        int colon = value.IndexOf(':', StringComparison.Ordinal);
+        if (colon <= 0 || !long.TryParse(value.AsSpan(0, colon), NumberStyles.None, CultureInfo.InvariantCulture, out ticks))
+        {
+            return false;
+        }
+
+        foreach (var part in value.Substring(colon + 1).Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!long.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sequence))
+            {
+                sequences.Clear();
+                return false;
+            }
+
+            sequences.Add(sequence);
+        }
+
+        return true;
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
