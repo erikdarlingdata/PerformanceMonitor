@@ -456,23 +456,12 @@ public sealed class DarlingManagedRolesTests
         Assert.DoesNotContain("TO admin, viewer, mcp", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;", sql, StringComparison.Ordinal);
 
-        /* The narrow ANALYSIS writes (Round 4 #1: INSERT-only on the two findings/mute targets; #5633 adds the caveat table below). The mcp role's ONE other write —
+        /* Exactly the two narrow ANALYSIS writes (Round 4 #1: INSERT-only). The mcp role's ONE other write —
            INSERT/UPDATE/DELETE on config.custom_views (#1599, the custom-view tools) — is a single-table grant
            pinned separately by BuildProvisioningSql_McpRole_GrantsCustomViewsWrite_LikeViewer; it does not widen
            either schema-wide claim below. */
         Assert.Contains("GRANT INSERT ON collect.analysis_findings TO mcp;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT ON config.analysis_muted TO mcp;", sql, StringComparison.Ordinal);
-
-        /* #5633 item 13: analyze_server's collection-caveat bookkeeping (CollectionCaveatStore.ApplyPassAsync: an
-           upsert that sets reason + last_seen_utc, then a DELETE) writes ONE more table as mcp. Exactly those
-           privileges and nothing wider: INSERT + DELETE, and UPDATE on just the two columns the upsert sets (so
-           first_seen_utc, server_id and family stay immutable to mcp). No table-level UPDATE, no TRUNCATE, and the
-           SELECT its WHERE clauses read is the schema-wide collect SELECT above. Without these grants every
-           MCP analyze_server call failed the write with 42501. */
-        Assert.Contains("GRANT INSERT, DELETE ON collect.analysis_collection_caveats TO mcp;", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT UPDATE (reason, last_seen_utc) ON collect.analysis_collection_caveats TO mcp;", sql, StringComparison.Ordinal);
-        Assert.DoesNotMatch(@"GRANT [A-Z, ]*UPDATE[A-Z, ]* ON collect\.analysis_collection_caveats TO mcp", sql);
-        Assert.DoesNotMatch(@"TRUNCATE[A-Z, ]* ON collect\.analysis_collection_caveats", sql);
 
         /* No DELETE on analysis_muted (no MCP unmute tool) and no schema-wide write for mcp. */
         Assert.DoesNotContain("DELETE ON config.analysis_muted TO mcp", sql, StringComparison.Ordinal);
@@ -494,6 +483,39 @@ public sealed class DarlingManagedRolesTests
             Assert.DoesNotContain("mcp", adpLine, StringComparison.Ordinal);
         }
     }
+
+    /// <summary>
+    /// #5633 item 13, as ruled: <c>collect.analysis_collection_caveats</c> is the SCHEDULED pass's state, written
+    /// only by the worker as the service role. The mcp role holds no write on it: no statement in the managed
+    /// batch or in the BYO <c>provision-roles.sql</c> names the table at all, and no <c>GRANT ALL</c> reaches mcp
+    /// (which would carry INSERT/UPDATE/DELETE/TRIGGER/REFERENCES onto it, and onto every other table the grant
+    /// names). The live census (McpCollectionCaveatGrantLiveTests) proves the same on a real role; this one runs
+    /// without a database.
+    /// </summary>
+    [Fact]
+    public void McpRole_HoldsNoWriteOnTheCaveatTable_InTheManagedBatchOrTheByoScript()
+    {
+        var managed = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+        var byo = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
+
+        foreach (var (name, script) in new[] { ("managed", managed), ("byo", byo) })
+        {
+            var code = Regex.Replace(script, @"(?m)--.*$", "");
+            Assert.True(!code.Contains("analysis_collection_caveats", StringComparison.Ordinal), name + ": a statement names the caveat table");
+            Assert.True(!Regex.IsMatch(code, GrantAllToMcp), name + ": GRANT ALL reaches mcp");
+            Assert.True(!Regex.IsMatch(code, McpWriteOnWholeCollectSchema), name + ": a collect-wide non-SELECT grant reaches mcp");
+        }
+
+        /* The patterns catch the shapes the earlier single-keyword regex missed. */
+        Assert.Matches(GrantAllToMcp, "GRANT ALL ON collect.analysis_collection_caveats TO mcp;");
+        Assert.Matches(GrantAllToMcp, "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA collect TO admin, mcp;");
+        Assert.Matches(GrantAllToMcp, "ALTER DEFAULT PRIVILEGES IN SCHEMA collect GRANT ALL ON TABLES TO mcp;");
+        Assert.Matches(McpWriteOnWholeCollectSchema, "GRANT TRIGGER ON ALL TABLES IN SCHEMA collect TO mcp;");
+        Assert.DoesNotMatch(McpWriteOnWholeCollectSchema, "GRANT SELECT ON ALL TABLES IN SCHEMA collect TO mcp;");
+    }
+
+    private const string GrantAllToMcp = @"(?is)\bGRANT\s+ALL\b[^;]*\bTO\b[^;]*\bmcp\b";
+    private const string McpWriteOnWholeCollectSchema = @"(?is)\bGRANT\s+(?!SELECT\s+ON\b)[^;]*\bON\s+ALL\s+TABLES\s+IN\s+SCHEMA\s+collect\b[^;]*\bTO\b[^;]*\bmcp\b";
 
     [Fact]
     public void BuildProvisioningSql_McpRole_GrantsCustomViewsWrite_LikeViewer()

@@ -11244,8 +11244,10 @@ AND   j.hypertable_name = '{relation}'", connection))
             /* Both tokens, and they mean different things: the first is what the reads observe, the
                second is the only one that still means "the host is stopping". Handing the armed token
                to the classifier alone would log every ordinary overrun as "abandoned at shutdown". */
+            /* #5633 item 13: the scheduled pass is the ONE caller that writes collect.analysis_collection_caveats
+               (on-demand passes -- MCP analyze_server -- compute their caveats and never save them). */
             var analyzeTask = analysisService.AnalyzeAsync(
-                serverId, storageName, hoursBack: 4, cts.Token, stoppingToken);
+                serverId, storageName, hoursBack: 4, cts.Token, stoppingToken, persistCollectionCaveats: true);
 
             /* Clear the in-flight marker only when the task truly finishes — not
                when the timeout below moves us on — so a hung server is not relaunched. */

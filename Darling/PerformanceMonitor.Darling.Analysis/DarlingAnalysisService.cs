@@ -208,15 +208,6 @@ public sealed class DarlingAnalysisService
     public int LastCollectionFamilyCount { get; private set; }
 
     /// <summary>
-    /// True when the last pass tried to save its collection caveats to
-    /// <c>collect.analysis_collection_caveats</c> and that write failed (#5633 item 13) -- a role without the
-    /// table grant (42501) is the case that surfaced it. The failure never fails the pass and is logged, so
-    /// without this the MCP <c>analyze_server</c> response could not tell its caller the caveats were not saved.
-    /// False on a pass whose write landed and on one that never reached collection.
-    /// </summary>
-    public bool LastCollectionCaveatWriteFailed { get; private set; }
-
-    /// <summary>
     /// How many facts the last pass handed to the scorer — the collector's plus the anomaly detector's
     /// (#3691) — and how many of those came out with a non-zero severity. Both null when the pass never
     /// reached scoring (the data-span gate, the unobserved window, a fault). They exist so an <c>empty</c>
@@ -363,6 +354,11 @@ public sealed class DarlingAnalysisService
     /// day-of-week baseline, which is keyed off the window rather than off the clock; that is what makes
     /// the answer for a past window the same KIND of answer, and not merely a differently-filtered one.
     /// An anchored pass does not persist — see <see cref="AnalysisContext.PersistFindings"/>.</para>
+    /// <para><b><c>persistCollectionCaveats</c> (#5633 item 13).</b> True only for the SCHEDULED pass (the worker, as
+    /// the service role): <c>collect.analysis_collection_caveats</c> is that pass's state, so it is the only caller
+    /// that writes it. Every on-demand pass (the MCP <c>analyze_server</c> tool, anchored or not) leaves it false:
+    /// it still computes its caveats for its own response and the in-process ledger, and the <c>mcp</c> role holds
+    /// no write on the table. Defaults to false so a new on-demand caller cannot write it by forgetting a flag.</para>
     /// </summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
         Justification = "The two tokens are at positions 4 and 5 and the Darling worker passes them POSITIONALLY. " +
@@ -371,7 +367,7 @@ public sealed class DarlingAnalysisService
                         "only edit that cannot do that, and Lite's twin keeps the same order so the two stay transplantable.")]
     public async Task<List<AnalysisFinding>> AnalyzeAsync(
         int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default,
-        CancellationToken shutdownToken = default, DateTime? asOfUtc = null)
+        CancellationToken shutdownToken = default, DateTime? asOfUtc = null, bool persistCollectionCaveats = false)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -396,13 +392,13 @@ public sealed class DarlingAnalysisService
             ShutdownToken = shutdownToken
         };
 
-        return await AnalyzeAsync(context);
+        return await AnalyzeAsync(context, persistCollectionCaveats);
     }
 
     /// <summary>
     /// Runs the full analysis pipeline with a specific context.
     /// </summary>
-    public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)
+    public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context, bool persistCollectionCaveats = false)
     {
         if (IsAnalyzing)
             return [];
@@ -413,7 +409,6 @@ public sealed class DarlingAnalysisService
         LastWindowCoverage = null;
         LastCollectionFailures = [];
         LastCollectionFamilyCount = 0;
-        LastCollectionCaveatWriteFailed = false;
         LastFactCount = null;
         LastFactsScored = null;
         EndedEarlyAs = null;
@@ -493,8 +488,14 @@ public sealed class DarlingAnalysisService
                 .Select(g => new CollectionCaveatStore.UnreadFamily(g.Key, CollectionFailure.Label(g.Last().Outcome)))
                 .ToArray();
 
-            LastCollectionCaveatWriteFailed = !await CollectionCaveatStore.ApplyPassAsync(
-                _postgres, context.ServerId, unreadFamilies, DateTime.UtcNow, _logger, context.CancellationToken);
+            /* #5633 item 13: the table is the SCHEDULED pass's state. An on-demand pass (MCP analyze_server, with
+               or without as_of) computed unreadFamilies for its own response above and must not replace the
+               standing rows: it ran over a window the caller chose, as a role that holds no write on the table. */
+            if (persistCollectionCaveats)
+            {
+                await CollectionCaveatStore.ApplyPassAsync(
+                    _postgres, context.ServerId, unreadFamilies, DateTime.UtcNow, _logger, context.CancellationToken);
+            }
 
             if (context.CollectionFailures.Count > 0)
             {
