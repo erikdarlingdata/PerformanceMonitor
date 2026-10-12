@@ -58,6 +58,9 @@ public sealed class McpToolGuideHeadsLongQueryTests
         var tail = McpToolGuideTests.Served(Tool).Tail!;
         Assert.Contains("Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort", tail, StringComparison.Ordinal);
         Assert.Contains("Both SKUs keep the same population.", tail, StringComparison.Ordinal);
+        /* #5711: the guide names the field to group by; batch-level events carry no query_hash. */
+        Assert.Contains("query_identity is the key to group rows by", tail, StringComparison.Ordinal);
+        Assert.Contains("batch-level events carry none, so query_hash is null there", tail, StringComparison.Ordinal);
         Assert.Contains(
             "The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule.",
             tail, StringComparison.Ordinal);
