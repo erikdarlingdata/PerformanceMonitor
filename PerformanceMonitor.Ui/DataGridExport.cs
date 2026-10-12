@@ -37,7 +37,10 @@ public static class DataGridExport
 {
     /* ---- side-effecting wrappers (wired to the context-menu MenuItem handlers) ---- */
 
-    /// <summary>Copies the current cell's value to the clipboard.</summary>
+    /// <summary>
+    /// Copies the current cell's value to the clipboard exactly as it is (see <see cref="GetRawCellValue"/>): a
+    /// single cell is often query text on its way into SSMS, where a leading apostrophe would break it.
+    /// </summary>
     public static void CopyCell(object sender)
     {
         var grid = FindDataGrid(sender);
@@ -46,7 +49,7 @@ public static class DataGridExport
         var cell = grid.CurrentCell;
         if (cell.Column == null || cell.Item == null) return;
 
-        var value = GetCellValue(cell.Column, cell.Item);
+        var value = GetRawCellValue(cell.Column, cell.Item);
         if (value.Length > 0) ClipboardText.TrySetText(value);
     }
 
@@ -151,14 +154,25 @@ public static class DataGridExport
     /// template columns are instantiated and inspected for a TextBlock binding. Unhandled column
     /// types yield an empty string so the value count always matches the column count.
     /// </summary>
-    public static string GetCellValue(DataGridColumn column, object item)
+    public static string GetCellValue(DataGridColumn column, object item) =>
+        ReadCell(column, item, FormatForExport);
+
+    /// <summary>
+    /// One cell's text exactly as it is, with no apostrophe added: what Copy Cell puts on the clipboard. Copy Row,
+    /// Copy All Rows, the keyboard copy on selected rows and the CSV export still read through
+    /// <see cref="GetCellValue"/>, because those land in a spreadsheet.
+    /// </summary>
+    public static string GetRawCellValue(DataGridColumn column, object item) =>
+        ReadCell(column, item, FormatRaw);
+
+    private static string ReadCell(DataGridColumn column, object item, Func<object?, string> format)
     {
         if (column is DataGridBoundColumn boundColumn
             && boundColumn.Binding is Binding binding
             && binding.Path != null)
         {
             var property = item.GetType().GetProperty(binding.Path.Path);
-            return FormatForExport(property?.GetValue(item));
+            return format(property?.GetValue(item));
         }
 
         if (column is DataGridTemplateColumn templateColumn && templateColumn.CellTemplate != null)
@@ -170,7 +184,7 @@ public static class DataGridExport
                 if (textBinding != null && textBinding.Path != null)
                 {
                     var property = item.GetType().GetProperty(textBinding.Path.Path);
-                    return FormatForExport(property?.GetValue(item));
+                    return format(property?.GetValue(item));
                 }
             }
         }
@@ -178,8 +192,19 @@ public static class DataGridExport
         return string.Empty;
     }
 
-    /// <summary>Formats a value for export: invariant culture for IFormattable, else ToString.</summary>
-    public static string FormatForExport(object? value)
+    /// <summary>
+    /// Formats a value for export: invariant culture for IFormattable (numbers and dates, which stay as they
+    /// are), else ToString. Text goes through <see cref="SpreadsheetText.Neutralize"/>, so a cell that starts
+    /// with a formula character is written as text. Every grid copy that lands in a spreadsheet and every CSV
+    /// path reads its cells here; only the single-cell Copy Cell reads them raw (<see cref="FormatRaw"/>).
+    /// </summary>
+    public static string FormatForExport(object? value) =>
+        value == null || value is IFormattable
+            ? FormatRaw(value)
+            : SpreadsheetText.Neutralize(FormatRaw(value));
+
+    /// <summary>The value as text with no neutralizing: invariant culture for IFormattable, else ToString.</summary>
+    public static string FormatRaw(object? value)
     {
         if (value == null) return string.Empty;
         if (value is IFormattable formattable) return formattable.ToString(null, CultureInfo.InvariantCulture);

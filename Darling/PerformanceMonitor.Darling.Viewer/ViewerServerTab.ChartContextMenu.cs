@@ -102,7 +102,7 @@ public partial class ViewerServerTab
         string.Join(separator, new[]
         {
             dateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
-            CsvEscape(series, separator),
+            CsvEscape(SpreadsheetText.Neutralize(series), separator),
             value.ToString(CultureInfo.InvariantCulture),
         });
 

@@ -323,7 +323,7 @@ public static partial class PlanAnalyzer
             if (stmt.NonParallelPlanReason == "MaxDOPSetToOne")
             {
                 var text = MaskCommentsAndLiterals(stmt.StatementText); // #4524
-                var hasMaxdop1InText = Regex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase);
+                var hasMaxdop1InText = PlanRegex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase);
                 var isTruncated = stmt.IsTextTruncated;
 
                 if (hasMaxdop1InText)
@@ -506,7 +506,7 @@ public static partial class PlanAnalyzer
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
         if (!cfg.IsRuleDisabled(27) && !string.IsNullOrEmpty(stmt.StatementText) &&
-            OptimizeForUnknownRegExp().IsMatch(MaskCommentsAndLiterals(stmt.StatementText))) // #4524
+            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText))) // #4524
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
@@ -653,14 +653,14 @@ public static partial class PlanAnalyzer
             // qualifier must be looked for between CURSOR and the FOR that introduces
             // the SELECT. Capturing tokens *before* CURSOR never sees LOCAL and would
             // fire on every cursor, including ones already declared LOCAL.
-            var cursorDeclMatch = Regex.Match(
+            var cursorDeclMatch = PlanRegex.Match(
                 maskedText,
                 @"\bDECLARE\s+\w+\s+(?:INSENSITIVE\s+|SCROLL\s+)*CURSOR\b(.*?)\bFOR\b",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             if (cursorDeclMatch.Success)
             {
                 var qualifiers = cursorDeclMatch.Groups[1].Value;
-                if (!Regex.IsMatch(qualifiers, @"\bLOCAL\b", RegexOptions.IgnoreCase))
+                if (!PlanRegex.IsMatch(qualifiers, @"\bLOCAL\b", RegexOptions.IgnoreCase))
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
@@ -682,7 +682,7 @@ public static partial class PlanAnalyzer
             // Suppress when the user explicitly set MAXDOP 2 as a query hint — the DOP
             // cap is intentional, not the Standard Edition batch-mode limitation.
             var hasMaxdop2Hint = !string.IsNullOrEmpty(stmt.StatementText)
-                && Regex.IsMatch(MaskCommentsAndLiterals(stmt.StatementText), @"MAXDOP\s+2\b", RegexOptions.IgnoreCase); // #4524
+                && PlanRegex.IsMatch(MaskCommentsAndLiterals(stmt.StatementText), @"MAXDOP\s+2\b", RegexOptions.IgnoreCase); // #4524
 
             if (!hasMaxdop2Hint)
             {
@@ -1632,7 +1632,7 @@ public static partial class PlanAnalyzer
     {
         // Check statement text for NOT IN
         if (string.IsNullOrEmpty(stmt.StatementText) ||
-            !NotInRegExp().IsMatch(MaskCommentsAndLiterals(stmt.StatementText))) // #4524
+            !PlanRegex.IsMatch(NotInRegExp(), MaskCommentsAndLiterals(stmt.StatementText))) // #4524
             return false;
 
         // Walk up the tree checking ancestors and their children
@@ -1683,11 +1683,11 @@ public static partial class PlanAnalyzer
     private static bool IsProbeOnly(string predicate)
     {
         // Strip all PROBE(...) expressions — PROBE args can contain nested parens
-        var stripped = Regex.Replace(predicate, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
+        var stripped = PlanRegex.Replace(predicate, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
             RegexOptions.IgnoreCase).Trim();
 
         // Remove leftover AND/OR connectors and whitespace
-        stripped = Regex.Replace(stripped, @"\b(AND|OR)\b", "", RegexOptions.IgnoreCase).Trim();
+        stripped = PlanRegex.Replace(stripped, @"\b(AND|OR)\b", "", RegexOptions.IgnoreCase).Trim();
 
         // If nothing meaningful remains, it was PROBE-only
         return stripped.Length == 0;
@@ -1699,11 +1699,11 @@ public static partial class PlanAnalyzer
     /// </summary>
     private static string StripProbeExpressions(string predicate)
     {
-        var stripped = Regex.Replace(predicate, @"\s*AND\s+PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
+        var stripped = PlanRegex.Replace(predicate, @"\s*AND\s+PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
             RegexOptions.IgnoreCase);
-        stripped = Regex.Replace(stripped, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*AND\s+", "",
+        stripped = PlanRegex.Replace(stripped, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*AND\s+", "",
             RegexOptions.IgnoreCase);
-        stripped = Regex.Replace(stripped, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
+        stripped = PlanRegex.Replace(stripped, @"PROBE\s*\([^()]*(?:\([^()]*\)[^()]*)*\)", "",
             RegexOptions.IgnoreCase);
         return stripped.Trim();
     }
@@ -1848,7 +1848,7 @@ public static partial class PlanAnalyzer
     {
         // CASE expression in predicate — check first because CASE bodies
         // often contain CONVERT_IMPLICIT that isn't the root cause
-        if (CaseInPredicateRegex.IsMatch(predicate))
+        if (PlanRegex.IsMatch(CaseInPredicateRegex, predicate))
             return "CASE expression in predicate";
 
         // CONVERT_IMPLICIT — most common non-SARGable pattern, but only when it converts the
@@ -1860,7 +1860,7 @@ public static partial class PlanAnalyzer
         // parameter side is a runtime constant and seeks fine; flagging it contradicted this
         // warning's own "wrapping a column" message. col = ISNULL(@p, col) is still caught,
         // because the column sits inside the function, on its side of the comparison.
-        foreach (Match isnullMatch in IsNullCoalesceRegex.Matches(predicate))
+        foreach (Match isnullMatch in PlanRegex.Matches(IsNullCoalesceRegex, predicate))
         {
             if (IsFunctionOnColumnSide(predicate, isnullMatch, identity))
                 return "ISNULL/COALESCE wrapping column";
@@ -1872,7 +1872,7 @@ public static partial class PlanAnalyzer
         // Every match, not just the first: a parameter-side CONVERT_IMPLICIT now falls through to
         // here, and it is skipped below. Taking only the first match would let a benign conversion
         // sitting to the left of a real function-on-column hide it.
-        foreach (Match funcMatch in FunctionInPredicateRegex.Matches(predicate))
+        foreach (Match funcMatch in PlanRegex.Matches(FunctionInPredicateRegex, predicate))
         {
             var funcName = funcMatch.Groups[1].Value.ToUpperInvariant();
             if (funcName != "CONVERT_IMPLICIT" && IsFunctionOnColumnSide(predicate, funcMatch, identity))
@@ -1880,7 +1880,7 @@ public static partial class PlanAnalyzer
         }
 
         // Leading wildcard LIKE
-        if (LeadingWildcardLikeRegex.IsMatch(predicate))
+        if (PlanRegex.IsMatch(LeadingWildcardLikeRegex, predicate))
             return "Leading wildcard LIKE pattern";
 
         return null;
@@ -1918,7 +1918,7 @@ public static partial class PlanAnalyzer
     /// </summary>
     internal static bool ReadsAnotherInput(string scalarString)
     {
-        foreach (Match match in BracketedNameRegex.Matches(scalarString))
+        foreach (Match match in PlanRegex.Matches(BracketedNameRegex, scalarString))
         {
             if (!match.Groups["name"].Success || match.Groups["call"].Success)
                 continue; // a string literal, or the name of a function
@@ -2683,14 +2683,14 @@ public static partial class PlanAnalyzer
         var text = MaskCommentsAndLiterals(stmtText).ToUpperInvariant();
         var causes = new List<string>(4);
 
-        if (Regex.IsMatch(text, @"\bTOP\b"))
+        if (PlanRegex.IsMatch(text, @"\bTOP\b"))
             causes.Add("TOP");
-        if (Regex.IsMatch(text, @"\bEXISTS\b"))
+        if (PlanRegex.IsMatch(text, @"\bEXISTS\b"))
             causes.Add("EXISTS");
         // IN with subquery — bare "IN (" followed by SELECT, not just "IN (1,2,3)"
-        if (Regex.IsMatch(text, @"\bIN\s*\(\s*SELECT\b"))
+        if (PlanRegex.IsMatch(text, @"\bIN\s*\(\s*SELECT\b"))
             causes.Add("IN (subquery)");
-        if (Regex.IsMatch(text, @"\bFAST\b"))
+        if (PlanRegex.IsMatch(text, @"\bFAST\b"))
             causes.Add("FAST hint");
 
         return causes.Count > 0
@@ -2778,7 +2778,7 @@ public static partial class PlanAnalyzer
     {
         var comparison = ComparisonContaining(predicate, funcMatch.Index, out var offset);
 
-        var compMatch = ComparisonOperatorRegex.Match(comparison);
+        var compMatch = PlanRegex.Match(ComparisonOperatorRegex, comparison);
         if (!compMatch.Success)
             return true; // No comparison found — can't determine side, assume worst case
 
@@ -2811,7 +2811,7 @@ public static partial class PlanAnalyzer
         var start = 0;
         var end = predicate.Length;
 
-        foreach (Match match in LogicalOperatorRegex.Matches(predicate))
+        foreach (Match match in PlanRegex.Matches(LogicalOperatorRegex, predicate))
         {
             if (!match.Groups[1].Success)
                 continue; // a string literal or bracketed name, skipped whole
@@ -2858,7 +2858,7 @@ public static partial class PlanAnalyzer
     /// </summary>
     internal static bool ConvertImplicitWrapsColumn(string predicate, ScanIdentity? identity = null)
     {
-        foreach (Match match in ConvertImplicitRegex.Matches(predicate))
+        foreach (Match match in PlanRegex.Matches(ConvertImplicitRegex, predicate))
         {
             // The regex ends at the opening paren, so its last character is where the args start.
             var arguments = ExtractBalancedArguments(predicate, match.Index + match.Length - 1);
@@ -2914,11 +2914,11 @@ public static partial class PlanAnalyzer
     private static bool IsColumnReference(string text, ScanIdentity? identity)
     {
         if (identity == null)
-            return ColumnReferenceRegex.IsMatch(text);
+            return PlanRegex.IsMatch(ColumnReferenceRegex, text);
 
         var scan = identity.Value;
 
-        foreach (Match match in BracketedNameRegex.Matches(text))
+        foreach (Match match in PlanRegex.Matches(BracketedNameRegex, text))
         {
             if (!match.Groups["name"].Success || match.Groups["call"].Success)
                 continue; // a string literal, or the name of a function
@@ -2931,7 +2931,7 @@ public static partial class PlanAnalyzer
             if (FollowedByAsBracket(text, match.Index + match.Length))
                 continue;
 
-            var parts = NamePartRegex.Matches(name);
+            var parts = PlanRegex.Matches(NamePartRegex, name);
             if (parts.Count >= 2)
             {
                 var owner = StripBrackets(parts[^2].Value);
@@ -2962,7 +2962,7 @@ public static partial class PlanAnalyzer
             if (name.StartsWith("[@", StringComparison.Ordinal))
                 continue; // a parameter or a variable: [@p1]
 
-            if (ExpressionColumnRegex.IsMatch(name))
+            if (PlanRegex.IsMatch(ExpressionColumnRegex, name))
                 continue; // an optimizer-generated expression, not an actual column: [Expr1003]
 
             if (scan.IsTableVariable && string.IsNullOrEmpty(scan.Alias) &&
@@ -3093,40 +3093,40 @@ public static partial class PlanAnalyzer
         };
     }
 
-    [GeneratedRegex(@"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\b(CONVERT_IMPLICIT|CONVERT|CAST|isnull|coalesce|datepart|datediff|dateadd|year|month|day|upper|lower|ltrim|rtrim|trim|substring|left|right|charindex|replace|len|datalength|abs|floor|ceiling|round|reverse|stuff|format)\s*\(", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex FunctionInPredicateRegExp();
-    [GeneratedRegex(@"\blike\b[^'""]*?N?'%", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\blike\b[^'""]*?N?'%", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex LeadingWildcardLikeRegExp();
-    [GeneratedRegex(@"\bCASE\s+(WHEN\b|$)", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\bCASE\s+(WHEN\b|$)", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex CaseInPredicateRegExp();
-    [GeneratedRegex(@"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex IsNullCoalesceRegExp();
-    [GeneratedRegex(@"\bCONVERT_IMPLICIT\s*\(", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\bCONVERT_IMPLICIT\s*\(", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex ConvertImplicitRegExp();
     // A column reference in a ScalarString is multi-part bracket-qualified ([schema].[table]).
     // A variable is a single bracket pair with an @ prefix ([@0]), so excluding @ from the first
     // part is what separates the two.
-    [GeneratedRegex(@"\[[^\]@]+\]\.\[")]
+    [GeneratedRegex(@"\[[^\]@]+\]\.\[", RegexOptions.None, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex ColumnReferenceRegExp();
-    [GeneratedRegex(@"^\[Expr\d+\]$")]
+    [GeneratedRegex(@"^\[Expr\d+\]$", RegexOptions.None, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex ExpressionColumnRegExp();
-    [GeneratedRegex(@"\[(?:[^\]]|\]\])*\]")]
+    [GeneratedRegex(@"\[(?:[^\]]|\]\])*\]", RegexOptions.None, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex NamePartRegExp();
-    [GeneratedRegex(@"'(?:[^']|'')*'|(?<name>\[(?:[^\]]|\]\])*\](?:\.\[(?:[^\]]|\]\])*\])*)(?<call>\s*\()?")]
+    [GeneratedRegex(@"'(?:[^']|'')*'|(?<name>\[(?:[^\]]|\]\])*\](?:\.\[(?:[^\]]|\]\])*\])*)(?<call>\s*\()?", RegexOptions.None, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex BracketedNameRegExp();
     // The operator a comparison turns on in a ScalarString: >=, <=, <>, !=, >, <, = or like.
     // Without like, [col] like upper([@p]) had no operator at all, fell to the assume-the-worst
     // default, and a function on the pattern was reported as a function on the column.
-    [GeneratedRegex(@"(?<![<>])([<>=!]{1,2})(?![<>=])|\s(like)\s", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"(?<![<>])([<>=!]{1,2})(?![<>=])|\s(like)\s", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex ComparisonOperatorRegExp();
     // What joins one comparison to the next in a compound predicate. String literals and
     // bracketed identifiers are matched first, so an AND inside one of them (N'Tom AND Jerry',
     // [Terms and Conditions]) is consumed whole and never reaches the capture group. Only a
     // Groups[1] match is a real operator.
-    [GeneratedRegex(@"'(?:[^']|'')*'|\[(?:[^\]]|\]\])*\]|\s(AND|OR)\s", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"'(?:[^']|'')*'|\[(?:[^\]]|\]\])*\]|\s(AND|OR)\s", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex LogicalOperatorRegExp();
-    [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex OptimizeForUnknownRegExp();
-    [GeneratedRegex(@"\bNOT\s+IN\b", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\bNOT\s+IN\b", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex NotInRegExp();
 }

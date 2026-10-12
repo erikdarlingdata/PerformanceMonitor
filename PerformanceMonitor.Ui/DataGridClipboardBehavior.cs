@@ -52,15 +52,30 @@ public static class DataGridClipboardBehavior
     }
 
     /// <summary>
-    /// Event handler that can be wired directly to DataGrid.CopyingRowClipboardContent.
+    /// Event handler that can be wired directly to DataGrid.CopyingRowClipboardContent. It fixes the header
+    /// row (see the class summary) and, on every data row, passes text cells through
+    /// <see cref="SpreadsheetText.Neutralize"/> so a cell that starts with a formula character is pasted into a
+    /// spreadsheet as text. Cells that are not strings (numbers, dates) are left as they are.
     /// </summary>
     public static void FixHeaderCopy(object? sender, DataGridRowClipboardEventArgs e)
     {
-        if (!e.IsColumnHeadersRow) return;
-
         for (int i = 0; i < e.ClipboardRowContent.Count; i++)
         {
             var cell = e.ClipboardRowContent[i];
+            if (!e.IsColumnHeadersRow)
+            {
+                if (cell.Content is string text)
+                {
+                    var safe = SpreadsheetText.Neutralize(text);
+                    if (!ReferenceEquals(safe, text))
+                    {
+                        e.ClipboardRowContent[i] = new DataGridClipboardCellContent(cell.Item, cell.Column, safe);
+                    }
+                }
+
+                continue;
+            }
+
             if (cell.Column?.Header is StackPanel sp)
             {
                 var tb = sp.Children.OfType<TextBlock>().FirstOrDefault();

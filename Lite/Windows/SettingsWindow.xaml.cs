@@ -271,6 +271,14 @@ public partial class SettingsWindow : Window
     /// </summary>
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
+        /* An SMTP login that would go to the mail server unencrypted is confirmed before anything is applied:
+           No cancels the whole save and leaves the window open to fix it. Not blocked - an internal relay on
+           port 25 is a real setup. */
+        if (!ConfirmCleartextSmtp("Save"))
+        {
+            return;
+        }
+
         JsonNode root;
         bool mcpChanged, mcpValid, alertsValid, webhooksValid, memoryLimitValid;
 
@@ -1183,7 +1191,8 @@ public partial class SettingsWindow : Window
 
         if (errors.Count == 0)
         {
-            SmtpStatusText.Text = "Settings look good. Use 'Send Test Email' to verify delivery.";
+            SmtpStatusText.Text = CleartextSmtpWarning()
+                ?? "Settings look good. Use 'Send Test Email' to verify delivery.";
         }
         else
         {
@@ -1194,8 +1203,50 @@ public partial class SettingsWindow : Window
         }
     }
 
+    /// <summary>
+    /// Whether a password will be sent with the login: the one typed here, or the one already in the
+    /// credential store (Save never clears the stored password when the box is empty).
+    /// </summary>
+    private bool SmtpPasswordIsSet() =>
+        !string.IsNullOrEmpty(SmtpPasswordBox.Password) || !string.IsNullOrEmpty(App.GetSmtpPassword());
+
+    /// <summary>The unencrypted-login warning for the SMTP settings as they stand in the boxes, or null.</summary>
+    private string? CleartextSmtpWarning() =>
+        EmailSendCore.CleartextCredentialsWarning(
+            SmtpSslCheckBox.IsChecked == true, SmtpUsernameBox.Text?.Trim(), SmtpPasswordIsSet());
+
+    /// <summary>
+    /// Non-blocking confirm shown at Save and Send Test when SSL is off and a login is set, so the username
+    /// and password would go to the mail server unencrypted. Yes proceeds; No cancels the action.
+    /// <paramref name="action"/> is the verb ("Save" / "Send"). Not blocked outright: an internal relay on
+    /// port 25 is a real setup.
+    /// </summary>
+    private bool ConfirmCleartextSmtp(string action)
+    {
+        if (SmtpEnabledCheckBox.IsChecked != true)
+        {
+            return true;
+        }
+
+        var warning = CleartextSmtpWarning();
+        if (warning == null)
+        {
+            return true;
+        }
+
+        var result = MessageBox.Show(
+            $"{warning}\n\n{action} anyway?",
+            "Unencrypted SMTP Login", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        return result == MessageBoxResult.Yes;
+    }
+
     private async void TestEmailButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!ConfirmCleartextSmtp("Send"))
+        {
+            return;
+        }
+
         /* Save current App values so we can restore after the test */
         var origServer = App.SmtpServer;
         var origPort = App.SmtpPort;

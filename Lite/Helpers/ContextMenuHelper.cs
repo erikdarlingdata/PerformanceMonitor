@@ -56,12 +56,14 @@ public static class ContextMenuHelper
         return "";
     }
 
+    /* One cell is copied exactly as it is: it is often query text on its way into SSMS, where a leading
+       apostrophe would break it. Copy Row, Copy All Rows and the CSV export still neutralize. */
     public static void CopyCell(object sender)
     {
         var grid = FindParentDataGrid(sender);
         if (grid?.CurrentCell.Column == null || grid.CurrentItem == null) return;
 
-        var value = GetCellValue(grid.CurrentCell.Column, grid.CurrentItem);
+        var value = DataGridExport.GetRawCellValue(grid.CurrentCell.Column, grid.CurrentItem);
         if (value.Length > 0) ClipboardText.TrySetDataObject(value);
     }
 
@@ -150,22 +152,12 @@ public static class ContextMenuHelper
         }
     }
 
-    private static string FormatForExport(object? value)
-    {
-        if (value == null) return "";
-        if (value is IFormattable formattable)
-            return formattable.ToString(null, CultureInfo.InvariantCulture);
-        return value.ToString() ?? "";
-    }
+    /* One formatter and one quoting rule for every grid copy and CSV export. The shared DataGridExport
+       versions neutralize text that starts with a formula character (SpreadsheetText), so a cell of collected
+       text is not evaluated when the copy or the CSV is opened in a spreadsheet. */
+    private static string FormatForExport(object? value) => DataGridExport.FormatForExport(value);
 
-    private static string CsvEscape(string value, string separator)
-    {
-        if (value.Contains(separator, StringComparison.Ordinal) || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
-        {
-            return "\"" + value.Replace("\"", "\"\"") + "\"";
-        }
-        return value;
-    }
+    private static string CsvEscape(string value, string separator) => DataGridExport.CsvEscape(value, separator);
 
     /// <summary>The time text of a chart CSV export line, the format the export has always used.</summary>
     private const string ChartCsvTimeFormat = "yyyy-MM-dd HH:mm:ss";
@@ -202,7 +194,7 @@ public static class ContextMenuHelper
         return string.Join(separator, new[]
         {
             shown.ToString(ChartCsvTimeFormat, CultureInfo.InvariantCulture),
-            CsvEscape(seriesName, separator),
+            CsvEscape(SpreadsheetText.Neutralize(seriesName), separator),
             y.ToString(CultureInfo.InvariantCulture),
             DisplayZone.UtcOffsetText(plotted, displayZone)
         });

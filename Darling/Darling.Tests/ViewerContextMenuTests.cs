@@ -188,6 +188,15 @@ public sealed class ViewerChartContextMenuTests
         Assert.Equal("2026-07-06 00:00:00,\"reads, writes\",3", line);
     }
 
+    [Fact]
+    public void FormatChartCsvLine_WritesAFormulaLookingSeriesAsText_AndANegativeValueAsANumber()
+    {
+        /* A series name is collected text. One that starts with a formula character is written with a leading
+           apostrophe so a spreadsheet shows it instead of evaluating it; the value stays a number. */
+        var line = ViewerServerTab.FormatChartCsvLine(new DateTime(2026, 7, 6, 0, 0, 0), "=1+1", -5, ",");
+        Assert.Equal("2026-07-06 00:00:00,'=1+1,-5", line);
+    }
+
     [Theory]
     [InlineData("plain", ",", "plain")]
     [InlineData("a,b", ",", "\"a,b\"")]
