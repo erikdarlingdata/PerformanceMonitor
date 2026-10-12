@@ -160,9 +160,38 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
         Assert.False(new DirectoryInfo(target).GetAccessControl().AreAccessRulesProtected, "the folder behind the link keeps its ACL");
     }
 
-    /// <summary>The folder above the log folder is the link: the lock by path would follow it just the same.</summary>
+    /// <summary>The folder above the log folder is a link the store folder check accepts (its owner is trusted, the folder
+    /// it sits in is closed to ordinary users, it points straight at a folder with a trusted owner): file logging stays
+    /// on, the folder is locked and written to where the link leads, and the log file path is the real one.</summary>
     [Fact]
-    public void ALogDirectoryBelowAJunction_TurnsFileLoggingOff()
+    public void ALogDirectoryBelowAnAcceptedStoreFolderLink_StaysOn_AndWritesUnderTheRealFolder()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+
+        Directory.CreateDirectory(_tempRoot);
+        var real = Path.Combine(_tempRoot, "store");
+        Directory.CreateDirectory(real);
+        var link = Path.Combine(_tempRoot, "link");
+        MakeJunction(link, real);
+
+        var reports = new ConcurrentQueue<string>();
+        using var provider = new DarlingFileLoggerProvider(Path.Combine(link, "logs"), reports.Enqueue);
+        provider.CreateLogger("Test").LogInformation("a line through the link");
+        provider.Flush();
+
+        Assert.Null(provider.StartupFailure);
+        Assert.Empty(reports);
+        Assert.StartsWith(Path.Combine(real, "logs") + Path.DirectorySeparatorChar, provider.CurrentLogFile(), StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(provider.CurrentLogFile()), "the log file is in the real folder");
+        Assert.Single(Directory.GetFiles(Path.Combine(real, "logs")));
+        Assert.True(new DirectoryInfo(Path.Combine(real, "logs")).GetAccessControl().AreAccessRulesProtected, "the real log folder is locked");
+        Assert.Equal(Path.Combine(real, "logs"), DarlingFileLoggerProvider.ResolveLogDirectory(Path.Combine(link, "logs")), ignoreCase: true);
+    }
+
+    /// <summary>A link the store folder check refuses stays refused for the log folder, with the reason: the owner of the
+    /// link is not trusted.</summary>
+    [Fact]
+    public void ALogDirectoryBelowALinkWhoseOwnerIsNotTrusted_TurnsFileLoggingOff()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
 
@@ -173,11 +202,49 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
         MakeJunction(parent, target);
 
         var reports = new ConcurrentQueue<string>();
+        try
+        {
+            var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+            DarlingFileSecurity.UseStoreTrustForTests(null, null, linkOwner: path => path == parent ? users : null);
+            using var provider = new DarlingFileLoggerProvider(Path.Combine(parent, "logs"), reports.Enqueue);
+
+            Assert.NotNull(provider.StartupFailure);
+            Assert.Contains("junction or symbolic link", provider.StartupFailure, StringComparison.Ordinal);
+            Assert.Contains("is not owned by", provider.StartupFailure, StringComparison.Ordinal);
+            Assert.Single(reports);
+            Assert.Empty(Directory.GetFileSystemEntries(target));
+        }
+        finally
+        {
+            DarlingFileSecurity.UseStoreTrustForTests(null, null);
+        }
+    }
+
+    /// <summary>A link in a folder ordinary users can change is refused for the log folder too.</summary>
+    [Fact]
+    public void ALogDirectoryBelowALinkInAFolderUsersCanChange_TurnsFileLoggingOff()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "junctions are Windows-only.");
+
+        var container = Directory.CreateDirectory(_tempRoot);
+        var security = container.GetAccessControl();
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.Modify,
+            InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
+        container.SetAccessControl(security);
+        var target = Path.Combine(_tempRoot, "elsewhere");
+        Directory.CreateDirectory(target);
+        var parent = Path.Combine(_tempRoot, "parent");
+        MakeJunction(parent, target);
+
+        var reports = new ConcurrentQueue<string>();
         using var provider = new DarlingFileLoggerProvider(Path.Combine(parent, "logs"), reports.Enqueue);
 
         Assert.NotNull(provider.StartupFailure);
         Assert.Contains("junction or symbolic link", provider.StartupFailure, StringComparison.Ordinal);
+        Assert.Contains("could be replaced by", provider.StartupFailure, StringComparison.Ordinal);
         Assert.Single(reports);
+        Assert.Empty(Directory.GetFileSystemEntries(target));
     }
 
     /// <summary>A log folder some other user made, and so owns, is not locked and written to: its owner could give
