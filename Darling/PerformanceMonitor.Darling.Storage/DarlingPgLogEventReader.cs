@@ -349,11 +349,14 @@ public static class DarlingPgLogEventReader
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* Read ahead of the row: the stored SQLSTATE keys which of the row's fields carry row values in
+               PostgreSQL's own formats, so a row stored under the earlier rules is brought to these on the way out. */
+            var sqlState = reader.IsDBNull(3) ? null : reader.GetString(3);
             rows.Add(new PgLogEventRow(
                 OccurredAtUtc: DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
                 Family: reader.IsDBNull(1) ? PerformanceMonitor.Collectors.PgLogFamilies.Other : reader.GetString(1),
                 Severity: reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                SqlState: reader.IsDBNull(3) ? null : reader.GetString(3),
+                SqlState: sqlState,
                 DatabaseName: reader.IsDBNull(4) ? null : reader.GetString(4),
                 UserName: reader.IsDBNull(5) ? null : reader.GetString(5),
                 ApplicationName: reader.IsDBNull(6) ? null : reader.GetString(6),
@@ -365,8 +368,8 @@ public static class DarlingPgLogEventReader
                    written, so a newer row comes back unchanged, and the 30-day retention ages the older ones out. A
                    stored DETAIL carries no proof it is whole, so a deadlock report is read the fail-closed way (#3996's
                    review); a row this build wrote reads the same, because its withheld queries read to their end. */
-                Message: PerformanceMonitor.Collectors.PgLogTextRedactor.RedactMessage(reader.IsDBNull(8) ? string.Empty : reader.GetString(8)) ?? string.Empty,
-                Detail: reader.IsDBNull(9) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactDetail(reader.GetString(9)),
+                Message: PerformanceMonitor.Collectors.PgLogTextRedactor.RedactMessage(reader.IsDBNull(8) ? string.Empty : reader.GetString(8), sqlState: sqlState) ?? string.Empty,
+                Detail: reader.IsDBNull(9) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactDetail(reader.GetString(9), sqlState: sqlState),
                 Context: reader.IsDBNull(10) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactContext(reader.GetString(10)),
                 TimesSeen: reader.GetInt32(11),
                 Metrics: new PgLogEventMetricsRow(

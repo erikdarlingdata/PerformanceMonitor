@@ -1198,7 +1198,7 @@ public static class DarlingCliCommands
             "web",
             "web dashboard access",
             "--print-web-token",
-            "A remote browser presents it once via ?token=... and gets a session cookie back.",
+            "A remote browser pastes it into the sign-in form once and gets a session cookie back.",
             IsElevated(),
             network is not null && network.IsConfigured,
             () => network!.ResolveToken(out _),
@@ -2516,7 +2516,7 @@ public static class DarlingCliCommands
         {
             error.WriteLine();
             error.WriteLine("SAVE THIS NOW — your new web dashboard access token is shown ONCE (darling.json stores only its DPAPI blob).");
-            error.WriteLine("A remote browser presents it once via ?token=... and gets a session cookie back.");
+            error.WriteLine("A remote browser pastes it into the sign-in form once and gets a session cookie back.");
             output.WriteLine(web.Value.GeneratedPlain);
         }
 
@@ -3101,7 +3101,7 @@ public static class DarlingCliCommands
             output.WriteLine("   --configure-firewall ELEVATED instead and it resolves the effective port and moves the rule.)");
 
             /* The one login step a human does differently for Web: a remote browser presents the access token
-               once via ?token= and is 302'd back with a session cookie. BuildWebLoginHint decides the scheme
+               into the sign-in form and is 302'd back with a session cookie. BuildWebLoginHint decides the scheme
                and the host, so a test can pin them. */
             foreach (var line in BuildWebLoginHint(webListen, webPort, webTls))
             {
@@ -3166,8 +3166,8 @@ public static class DarlingCliCommands
         return
         [
             "  Remote browser login (after the service restarts):",
-            $"    {scheme}://{WebLoginHost(listen)}:{port}/?token=<your-access-token>",
-            "  (the token is exchanged for a session cookie and stripped from the URL; loopback presents the token too)",
+            $"    {scheme}://{WebLoginHost(listen)}:{port}/",
+            "  (open the address and paste the access token into the sign-in form; loopback presents the token too)",
         ];
     }
 

@@ -76,7 +76,7 @@ internal static class DiagnosticsBundle
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
         "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
-        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "WebConfig.Enabled", "WebConfig.Network",
+        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "WebConfig.Enabled", "WebConfig.Network",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -158,6 +158,9 @@ internal static class DiagnosticsBundle
             ["servers_by_engine"] = byEngine,
             ["mcp_enabled"] = config.Mcp?.Enabled ?? false,
             ["mcp_network_exposed"] = config.Mcp?.Network is not null,
+            ["mcp_allow_writes"] = config.Mcp?.AllowWrites ?? false,
+            ["mcp_allow_server_admin"] = config.Mcp?.AllowServerAdmin ?? false,
+            ["mcp_allow_windows_auth_over_unverified_tls"] = config.Mcp?.AllowWindowsAuthOverUnverifiedTls ?? false,
             ["web_enabled"] = config.Web?.Enabled ?? false,
             ["web_network_exposed"] = config.Web?.Network is not null,
             ["analyzer_present"] = config.Analyzer is not null,

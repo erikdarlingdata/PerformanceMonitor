@@ -135,5 +135,6 @@
          TimescaleSupport.HypertableCount via the same formula BuildWorkerSizingConfAppend writes for the
          managed Windows store, and compose's command: line cannot call into the product. -->
     <None Include="..\compose\docker-compose.yml" Link="Fixtures\docker-compose.yml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\compose\darling.sample.json" Link="Fixtures\compose.darling.sample.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

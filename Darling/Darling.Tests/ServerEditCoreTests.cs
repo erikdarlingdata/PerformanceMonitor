@@ -102,6 +102,72 @@ public sealed class ServerEditCoreTests : IDisposable
     private static Task<string> Run(FakeStore store, string changes, Edit.ServerProbe? probe = null, IPasswordKeyRing? ring = null, ILogger? logger = null) =>
         Edit.EditServerCoreAsync(store, 41, changes, probe ?? ThrowingProbe, ring ?? TestKeyRings.Healthy, logger, CancellationToken.None);
 
+    private static Task<string> RunAsMcp(FakeStore store, string changes, DarlingMcpAddServersPolicy policy, Edit.ServerProbe? probe = null) =>
+        Edit.EditServerCoreAsync(store, 41, changes, probe ?? ThrowingProbe, TestKeyRings.Healthy, null, CancellationToken.None, policy: policy);
+
+    [Theory]
+    [InlineData("{\"host\":\"other.example.test\",\"trust_server_certificate\":true}")]
+    [InlineData("{\"host\":\"other.example.test\",\"encrypt_mode\":\"Optional\"}")]
+    [InlineData("{\"trust_server_certificate\":true}")]
+    public async Task McpEdit_OfAWindowsServer_ToAnUnverifiedConnection_IsRefusedBeforeTheProbe_AndNothingIsWritten(string changes)
+    {
+        var store = new FakeStore { Row = SqlRow(auth: "integrated") };
+
+        /* The probe throws if it runs: the screen has to answer first. */
+        var answer = await RunAsMcp(store, changes, DarlingMcpAddServersPolicy.Default);
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Contains(DarlingMcpAddServersPolicy.UnverifiedWindowsAuthSetting, answer, StringComparison.Ordinal);
+        Assert.Contains("Not saved", answer, StringComparison.Ordinal);
+        Assert.DoesNotContain("Not added", answer, StringComparison.Ordinal);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public async Task McpEdit_SwitchingToWindowsAuth_WithAnUnverifiedConnection_IsRefused()
+    {
+        var store = new FakeStore { Row = SqlRow() };
+
+        var answer = await RunAsMcp(store, "{\"auth\":\"Windows\",\"trust_server_certificate\":true}", DarlingMcpAddServersPolicy.Default);
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public async Task McpEdit_OfAWindowsServer_ToAVerifiedConnection_IsProbedAndSaved()
+    {
+        var store = new FakeStore { Row = SqlRow(auth: "integrated") };
+
+        var answer = await RunAsMcp(store, "{\"host\":\"other.example.test\"}", DarlingMcpAddServersPolicy.Default, Reachable);
+
+        Assert.Equal("updated", Status(answer));
+        Assert.Equal(1, store.Writes);
+    }
+
+    [Fact]
+    public async Task McpEdit_WithTheOperatorSettingOn_ProbesAnUnverifiedWindowsServer()
+    {
+        var store = new FakeStore { Row = SqlRow(auth: "integrated") };
+
+        var answer = await RunAsMcp(
+            store, "{\"host\":\"other.example.test\",\"trust_server_certificate\":true}",
+            new DarlingMcpAddServersPolicy(allowWindowsAuthOverUnverifiedTls: true), Reachable);
+
+        Assert.Equal("updated", Status(answer));
+    }
+
+    [Fact]
+    public async Task TheWebRoute_PassesNoMcpPolicy_SoTheScreenDoesNotApplyToIt()
+    {
+        var store = new FakeStore { Row = SqlRow(auth: "integrated") };
+
+        var answer = await Edit.EditServerCoreAsync(
+            store, 41, "{\"host\":\"other.example.test\",\"trust_server_certificate\":true}", Reachable, TestKeyRings.Healthy, null, CancellationToken.None);
+
+        Assert.Equal("updated", Status(answer));
+    }
+
     private static string Status(string answer) => JsonNode.Parse(answer)!["status"]!.GetValue<string>();
 
     /* ---------------- parse ---------------- */

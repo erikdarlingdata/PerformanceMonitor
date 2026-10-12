@@ -111,7 +111,8 @@ public sealed class PgDeadlockRemaskTests
         Assert.Contains("AND   xmin = $4::xid", PgDeadlockRemask.FindingUpdateSql, StringComparison.Ordinal);
         Assert.DoesNotContain("$5", PgDeadlockRemask.AlertUpdateSql, StringComparison.Ordinal);
         Assert.DoesNotContain("$5", PgDeadlockRemask.FindingUpdateSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$9", PgDeadlockRemask.ReportUpdateSql, StringComparison.Ordinal);
+        /* $8 and $9 are the anchor's position and count, two integers, never text. */
+        Assert.DoesNotContain("$10", PgDeadlockRemask.ReportUpdateSql, StringComparison.Ordinal);
         Assert.DoesNotContain("$4", PgDeadlockRemask.FindingAlertUpdateSql, StringComparison.Ordinal);
         foreach (var sql in new[] { PgDeadlockRemask.AlertUpdateSql, PgDeadlockRemask.FindingUpdateSql, PgDeadlockRemask.FindingAlertUpdateSql, PgDeadlockRemask.ReportUpdateSql, PgDeadlockRemask.ReportUpdateOwnBatchSql })
         {
@@ -134,7 +135,7 @@ public sealed class PgDeadlockRemaskTests
     {
         var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
 
-        var (victim, graph, hash) = PgDeadlockRemask.RemaskReport(at, LegacyVictimStatement, LegacyGraph);
+        var (victim, graph, hash) = PgDeadlockRemask.RemaskReport(at, 3101, LegacyGraph);
 
         Assert.Equal(PgDeadlockLogParser.NormalizeStatement(LegacyVictimStatement), victim);
         Assert.Equal(PgDeadlockLogParser.NormalizeGraph(LegacyGraph), graph);
@@ -147,7 +148,7 @@ public sealed class PgDeadlockRemaskTests
         Assert.Equal(captured.VictimStatement, victim);
         Assert.NotEqual(PgDeadlockLogParser.HashOf(graph), hash);
 
-        Assert.Equal((victim, graph, hash), PgDeadlockRemask.RemaskReport(at, victim, graph));
+        Assert.Equal((victim, graph, hash), PgDeadlockRemask.RemaskReport(at, 3101, graph));
     }
 
     /// <summary>
@@ -165,10 +166,10 @@ public sealed class PgDeadlockRemaskTests
             Incidents = [new AlertIncident(rawHash, [AlertContextBuilders.TruncateText(LegacyVictimStatement)])],
             SeverityOverride = AlertSeverityLevel.Warning,
         };
-        var rewritten = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, LegacyVictimStatement, LegacyGraph);
+        var rewritten = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, LegacyGraph);
         var live = new AlertContext { Incidents = [rewritten], SeverityOverride = AlertSeverityLevel.Warning };
 
-        Assert.Equal(PgDeadlockRemask.RemaskReport(at, LegacyVictimStatement, LegacyGraph).DeadlockHash, rewritten.DedupKey);
+        Assert.Equal(PgDeadlockRemask.RemaskReport(at, 3101, LegacyGraph).DeadlockHash, rewritten.DedupKey);
         Assert.Equal("UPDATE accounts SET pin = '?' WHERE card = ?", Assert.Single(rewritten.InvolvedObjects));
 
         PgDeadlockRemask.ResolvedReport Resolve(string key) =>
@@ -200,6 +201,77 @@ public sealed class PgDeadlockRemaskTests
     }
 
     /// <summary>
+    /// An overflow row carries several incidents in one detail text. With one incident's raw statement a prefix of
+    /// a later one's, the text rewritten for the shorter statement first rewrote the head of the longer line and
+    /// left its tail, a card number, as it was. The text is what the live alert renders for the rewritten
+    /// incidents, and no literal of either survives.
+    /// </summary>
+    [Fact]
+    public void AnOverflowRow_WithOneStatementAPrefixOfAnother_KeepsNoTail()
+    {
+        var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
+        const string shortStatement = "UPDATE accounts SET pin = '4721'";
+        const string longStatement = "UPDATE accounts SET pin = '4721' WHERE card = 5500005555555559";
+        var shortGraph = GraphWithVictim(3101, 3102, shortStatement);
+        var longGraph = GraphWithVictim(3201, 3202, longStatement);
+        var shortHash = PgDeadlockLogParser.HashOf(shortGraph);
+        var longHash = PgDeadlockLogParser.HashOf(longGraph);
+
+        var legacy = new AlertContext { SeverityOverride = AlertSeverityLevel.Warning };
+        AlertIncidentRenderer.Apply(legacy, [new AlertIncident(shortHash, [shortStatement]), new AlertIncident(longHash, [longStatement])]);
+        var rewrittenShort = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, shortGraph);
+        var rewrittenLong = PgDeadlockRemask.RemaskedIncident(at.AddSeconds(1), 3201, 2, longGraph);
+        var live = new AlertContext { SeverityOverride = AlertSeverityLevel.Warning };
+        AlertIncidentRenderer.Apply(live, [rewrittenShort, rewrittenLong]);
+
+        PgDeadlockRemask.ResolvedReport Resolve(string key) =>
+            key == shortHash ? new(PgDeadlockRemask.ReportState.Raw, rewrittenShort)
+            : key == longHash ? new(PgDeadlockRemask.ReportState.Raw, rewrittenLong)
+            : new(PgDeadlockRemask.ReportState.Current, null);
+
+        var legacyText = AlertContextBuilders.ContextToDetailText(legacy)!;
+        Assert.Contains("5500005555555559", legacyText, StringComparison.Ordinal);
+
+        var remasked = PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(legacy), legacyText, Resolve, s_key);
+        Assert.NotNull(remasked);
+        Assert.Equal(AlertContextBuilders.ContextToDetailText(live), remasked.Value.DetailText);
+        Assert.Equal(Marked(AlertContextSerializer.Serialize(live), 0, 1), remasked.Value.ContextJson);
+        AssertNoSecret(remasked.Value.DetailText);
+        AssertNoSecret(remasked.Value.ContextJson);
+    }
+
+    /// <summary>
+    /// The victim statement is the re-masked graph's own, as the collector takes it from a report it reads live.
+    /// Normalized on its own, the stored statement of a report cut before the victim's real head, where the cut
+    /// query's literal holds a line shaped like that head, kept words of the literal that the graph withholds.
+    /// A whole report reads the same either way.
+    /// </summary>
+    [Fact]
+    public void TheVictimStatement_IsWhatTheRemaskedGraphCarries_OrWithheldWithIt()
+    {
+        var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
+        const string cut = "Process 3102 waits for ShareLock on transaction 5501; blocked by process 3101.\n"
+            + "Process 3101 waits for ShareLock on transaction 5500; blocked by process 3102.\n"
+            + "Process 3102: UPDATE notes SET body = 'see log:\n"
+            + "Process 3101: Jane Doe card', owner = 'Kept4012 Alice Example";
+        var stored = PgDeadlockLogParser.ParseStatements(cut)[3101];
+        Assert.Contains("Kept4012", PgDeadlockLogParser.NormalizeStatement(stored)!, StringComparison.Ordinal);
+
+        var (victim, graph, _) = PgDeadlockRemask.RemaskReport(at, 3101, cut);
+        Assert.DoesNotContain("Kept4012", graph, StringComparison.Ordinal);
+        Assert.Equal(PgDeadlockLogParser.ParseStatements(graph).GetValueOrDefault(3101), victim);
+        Assert.True(victim is null || !victim.Contains("Kept4012", StringComparison.Ordinal));
+
+        var incident = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, cut);
+        Assert.DoesNotContain("Kept4012", string.Join(", ", incident.InvolvedObjects), StringComparison.Ordinal);
+        Assert.Null(PgDeadlockRemask.RemaskReport(at, null, cut).VictimStatement);
+
+        var whole = Assert.Single(PgDeadlockLogParser.Extract(Report(at, 3101, 3102)));
+        Assert.Equal(whole.VictimStatement, PgDeadlockRemask.RemaskReport(at, 3101, LegacyGraph).VictimStatement);
+        Assert.Equal("UPDATE accounts SET pin = '?' WHERE card = ?", whole.VictimStatement);
+    }
+
+    /// <summary>
     /// An alert whose report cannot be found (retention dropped it, or the report stage already rewrote it) has its
     /// statement normalized as it stands, and its key, which may be a raw graph's hash, keyed under the store's secret
     /// (#4012's review): the same key in, the same key out, so two alerts that shared one still do, and not a report
@@ -226,7 +298,7 @@ public sealed class PgDeadlockRemaskTests
         Assert.True(AlertContextSerializer.TryDeserialize(gone.Value.ContextJson, out var context));
         Assert.Equal(s_key.DeadlockAlertKey(goneHash), context.Incidents![0].DedupKey);
         Assert.Equal(s_key.DeadlockAlertKey(goneHash[..31] + "0"), context.Incidents[1].DedupKey);
-        Assert.Equal("UPDATE creds SET pw = '?' WHERE id = ?", Assert.Single(context.Incidents[0].InvolvedObjects));
+        Assert.Equal(PgLogTextRedactor.WithheldStatement, Assert.Single(context.Incidents[0].InvolvedObjects));
         Assert.Equal("victim pid 3101, 2 participant(s)", Assert.Single(context.Incidents[1].InvolvedObjects));
         AssertNoSecret(gone.Value.ContextJson);
         Assert.DoesNotContain(goneHash, gone.Value.ContextJson, StringComparison.Ordinal);
@@ -343,8 +415,11 @@ public sealed class PgDeadlockRemaskTests
         var atD = now.AddDays(-2);
         var atC = now.AddDays(-1);
 
-        /* A: raw, seen twice, a day apart. B: raw, no victim statement. D: raw, then seen again by this build. C: this build's. */
-        var graphB = LegacyGraph.Replace("3101", "4101", StringComparison.Ordinal).Replace("3102", "4102", StringComparison.Ordinal);
+        /* A: raw, seen twice, a day apart. B: raw, cut before its victim's statement, so it has none. D: raw, then seen
+           again by this build. C: this build's. */
+        var graphB = LegacyGraph.Replace("3101", "4101", StringComparison.Ordinal).Replace("3102", "4102", StringComparison.Ordinal)
+            .Replace("Process 4101: UPDATE accounts SET pin = '47Q1' WHERE card = 4111111111111111\n", "", StringComparison.Ordinal);
+        Assert.DoesNotContain("Process 4101:", graphB, StringComparison.Ordinal);
         var graphD = LegacyGraph.Replace("3101", "5101", StringComparison.Ordinal).Replace("3102", "5102", StringComparison.Ordinal);
         await PlantAsync(connection, atA.AddMinutes(1), atA, 3101, "A", PgDeadlockLogParser.HashOf(LegacyGraph), LegacyVictimStatement, LegacyGraph, ct);
         await PlantAsync(connection, atA.AddDays(1), atA, 3101, "A", PgDeadlockLogParser.HashOf(LegacyGraph), LegacyVictimStatement, LegacyGraph, ct);
@@ -461,15 +536,18 @@ public sealed class PgDeadlockRemaskTests
         /* The alerts carry the rewritten reports' incidents; the one fired since and the SQL Server one are as
            planted. */
         var alertsAfter = await ReadAlertsAsync(connection, ct);
-        var expectedA = PgDeadlockRemask.RemaskedIncident(atA, 3101, 2, LegacyVictimStatement, LegacyGraph);
-        var expectedB = PgDeadlockRemask.RemaskedIncident(atB, 4101, 2, null, graphB);
+        var expectedA = PgDeadlockRemask.RemaskedIncident(atA, 3101, 2, LegacyGraph);
+        var expectedB = PgDeadlockRemask.RemaskedIncident(atB, 4101, 2, graphB);
         var liveContext = new AlertContext { Incidents = [expectedA, expectedB], SeverityOverride = AlertSeverityLevel.Warning };
         var livePerEvent = PerEventNotification.Split(liveContext, 10)[0].Context;
         Assert.Contains((Marked(AlertContextSerializer.Serialize(liveContext), 0, 1), (string?)null), alertsAfter);
         Assert.Contains((Marked(AlertContextSerializer.Serialize(livePerEvent), 0), AlertContextBuilders.ContextToDetailText(livePerEvent)), alertsAfter);
         Assert.Contains((AlertContextSerializer.Serialize(sinceC), (string?)null), alertsAfter);
         Assert.Contains((sqlServerJson, (string?)null), alertsAfter);
-        Assert.Contains(alertsAfter, a => a.Context.Contains(s_key.DeadlockAlertKey(goneHash), StringComparison.Ordinal) && a.Context.Contains("WHERE id = ?", StringComparison.Ordinal));
+        /* The alert whose report is gone keeps its (keyed) incident, and its statement text is withheld whole. */
+        Assert.Contains(alertsAfter, a => a.Context.Contains(s_key.DeadlockAlertKey(goneHash), StringComparison.Ordinal)
+            && AlertContextSerializer.TryDeserialize(a.Context, out var gone)
+            && gone.Incidents!.Any(i => i.InvolvedObjects.SequenceEqual(new[] { PgLogTextRedactor.WithheldStatement })));
         Assert.DoesNotContain(goneHash, alertDump, StringComparison.Ordinal);
 
         /* The finding reads as every read showed it before; the one with no deadlock section is as planted. */
@@ -524,7 +602,7 @@ public sealed class PgDeadlockRemaskTests
 
         /* Neither: the rewrite is the live collector's report, identity included. */
         var whole = Assert.Single(PgDeadlockLogParser.Extract(Report(at, 3101, 3102)));
-        Assert.Equal(whole.DeadlockHash, PgDeadlockRemask.RemaskReport(at, LegacyVictimStatement, LegacyGraph).DeadlockHash);
+        Assert.Equal(whole.DeadlockHash, PgDeadlockRemask.RemaskReport(at, 3101, LegacyGraph).DeadlockHash);
     }
 
     /// <summary>
@@ -578,7 +656,7 @@ public sealed class PgDeadlockRemaskTests
         Assert.Equal((long)reportRows, await ScalarAsync(connection, "SELECT count(*) FROM pg_deadlocks", ct));
 
         /* Alerts first: the named alert took the report's new identity, not a keyed key. */
-        var expected = PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Victim, first.Graph);
+        var expected = PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Graph);
         var alertDump = await DumpAsync(connection, "SELECT concat_ws('|', detail_text, context_json) FROM config_alert_log", ct);
         var namedAfter = await ReadAlertsAsync(connection, ct);
         var namedIncident = Assert.Single(
@@ -800,7 +878,7 @@ public sealed class PgDeadlockRemaskTests
 
         var reportHash = await ScalarTextAsync(connection, $"SELECT deadlock_hash FROM pg_deadlocks WHERE victim_pid = {first.VictimPid}", ct);
         var alertKey = SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context);
-        Assert.Equal(PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Victim, first.Graph).DedupKey, reportHash);
+        Assert.Equal(PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Graph).DedupKey, reportHash);
         Assert.Equal(reportHash, alertKey);
     }
 
@@ -825,7 +903,7 @@ public sealed class PgDeadlockRemaskTests
         var first = await ReadFirstRawReportAsync(connection, ct);
         await PlantAlertAsync(connection, now.AddDays(-2), null, AlertContextSerializer.Serialize(
             new AlertContext { Incidents = [new AlertIncident(first.Hash, [first.Victim!])] }), ct);
-        var newIdentity = PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Victim, first.Graph).DedupKey;
+        var newIdentity = PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Graph).DedupKey;
 
         /* The alerts are rebuilt (the alert names its report's new identity), then the report stage gives up with
            its reports still raw, as four failures in a row leave it. */
@@ -869,7 +947,7 @@ public sealed class PgDeadlockRemaskTests
         var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
         var rawHash = PgDeadlockLogParser.HashOf(LegacyGraph);
         var goneHash = PgDeadlockLogParser.HashOf("a report retention dropped");
-        var built = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, LegacyVictimStatement, LegacyGraph);
+        var built = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, LegacyGraph);
         var legacy = new AlertContext
         {
             Incidents =
@@ -890,7 +968,7 @@ public sealed class PgDeadlockRemaskTests
         Assert.Equal(s_key.DeadlockAlertKey(goneHash), dto.Incidents[1].DedupKey);
         Assert.Equal(Marked(AlertContextSerializer.Serialize(new AlertContext
         {
-            Incidents = [built, new AlertIncident(s_key.DeadlockAlertKey(goneHash), ["UPDATE creds SET pw = '?' WHERE id = ?"])],
+            Incidents = [built, new AlertIncident(s_key.DeadlockAlertKey(goneHash), [PgLogTextRedactor.WithheldStatement])],
         }), 0), first.Value.ContextJson);
         Assert.DoesNotContain(rawHash, first.Value.ContextJson, StringComparison.Ordinal);
         Assert.DoesNotContain(goneHash, first.Value.ContextJson, StringComparison.Ordinal);
@@ -917,11 +995,16 @@ public sealed class PgDeadlockRemaskTests
     public void AnUnmarkedRebuiltRow_WaitsForTheAlertKeys()
     {
         var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
-        var built = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, LegacyVictimStatement, LegacyGraph);
+        var built = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, LegacyGraph);
         var rebuiltBy4022 = AlertContextSerializer.Serialize(new AlertContext { Incidents = [built] });
         static PgDeadlockRemask.ResolvedReport Missing(string key) => new(PgDeadlockRemask.ReportState.Missing, null);
 
-        Assert.Null(PgDeadlockRemask.RemaskAlert(rebuiltBy4022, null, Missing, s_key, reportsMayBeRaw: true));
+        /* While a report may be raw, the key is left as it is; the statement, which nothing can be re-derived from, is
+           withheld whatever rule wrote it (the repair pass rebuilds it from the report's graph once it is found). */
+        var early = PgDeadlockRemask.RemaskAlert(rebuiltBy4022, null, Missing, s_key, reportsMayBeRaw: true);
+        Assert.NotNull(early);
+        Assert.Contains(built.DedupKey, early.Value.ContextJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(s_key.DeadlockAlertKey(built.DedupKey), early.Value.ContextJson, StringComparison.Ordinal);
 
         var keyed = PgDeadlockRemask.RemaskAlert(rebuiltBy4022, null, Missing, s_key);
         Assert.NotNull(keyed);
@@ -1062,7 +1145,9 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
         Assert.Equal(2, progress.Alerts.Walks);
         var dump = await DumpAsync(connection, "SELECT context_json FROM config_alert_log WHERE server_id = 1", ct);
         AssertNoSecret(dump);
-        Assert.Contains("WHERE id = ?", dump, StringComparison.Ordinal);
+        /* The report is gone, so the statement text is withheld whole: nothing can be re-derived from it. */
+        Assert.True(AlertContextSerializer.TryDeserialize(dump, out var context));
+        Assert.Equal(PgLogTextRedactor.WithheldStatement, Assert.Single(Assert.Single(context.Incidents!).InvolvedObjects));
     }
 
     /* The expected context of a rewritten alert: its incidents at the given positions carry the rebuilt marker,
@@ -1157,8 +1242,15 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
         {
             Assert.DoesNotMatch(@"deadlock_hash\s*=\s*\$", sql[sql.IndexOf("WHERE", StringComparison.Ordinal)..]);
             Assert.Contains("d.deadlock_hash = (", sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("$8", sql, StringComparison.Ordinal);
+            /* The anchor takes a position among the place's raw hashes and the write checks their count, both
+               integers; nothing after them. */
+            Assert.Contains("OFFSET $8 LIMIT 1)", sql, StringComparison.Ordinal);
+            Assert.Contains(") = $9", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("$10", sql, StringComparison.Ordinal);
         }
+
+        Assert.DoesNotContain("$5", PgDeadlockRemask.ReportRawGraphsSql, StringComparison.Ordinal);
+        Assert.Contains(PgDeadlockLogParser.RawGraphHashSql("a.deadlock_hash", "a.graph_text"), PgDeadlockRemask.ReportRawGraphsSql, StringComparison.Ordinal);
 
         Assert.DoesNotContain("unnest(", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
         /* #5625: the slice is one server's ($1), after a time ($2), for a page size ($3); no fourth parameter carries a key. */
@@ -1263,7 +1355,7 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
         var from = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2);
 
         /* Five raw reports; the fourth's batch also holds a raw twin (the same time and victim, another graph), which
-           the rewrite cannot tell from it and so leaves, both; then three reports already current. */
+           the rewrite tells from it by its position among the place's raw hashes; then three reports already current. */
         await PlantRawReportsAsync(connection, 5, from, ct);
         await ExecuteAsync(connection, @"
 INSERT INTO pg_deadlocks
@@ -1294,19 +1386,17 @@ WHERE victim_pid = 10004", ct);
 
             using var other = new NpgsqlConnection(scratch.ConnectionString);
             other.Open();
-            using var read = new NpgsqlCommand("SELECT occurred_at, victim_statement, graph_text FROM pg_deadlocks WHERE victim_pid = 10005", other);
+            using var read = new NpgsqlCommand("SELECT occurred_at, graph_text FROM pg_deadlocks WHERE victim_pid = 10005", other);
             DateTime occurredAt;
-            string? victimStatement;
             string graphText;
             using (var reader = read.ExecuteReader())
             {
                 Assert.True(reader.Read());
                 occurredAt = reader.GetDateTime(0);
-                victimStatement = reader.IsDBNull(1) ? null : reader.GetString(1);
-                graphText = reader.GetString(2);
+                graphText = reader.GetString(1);
             }
 
-            var (victim, graph, hash) = PgDeadlockRemask.RemaskReport(occurredAt, victimStatement, graphText);
+            var (victim, graph, hash) = PgDeadlockRemask.RemaskReport(occurredAt, 10005, graphText);
             using var write = new NpgsqlCommand("UPDATE pg_deadlocks SET victim_statement = $1, graph_text = $2, deadlock_hash = $3 WHERE victim_pid = 10005", other);
             write.Parameters.Add(new NpgsqlParameter { Value = (object?)victim ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
             write.Parameters.AddWithValue(graph);
@@ -1318,10 +1408,11 @@ WHERE victim_pid = 10004", ct);
         await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), budget.Token);
         Assert.False(progress.Reports.Done);
         Assert.Equal(5, counted);
-        Assert.Equal(2L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+        /* The fourth and its twin were both rewritten before the cancel; the fifth by the callback. */
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+        Assert.Equal(2L, await ScalarAsync(connection, "SELECT count(*) FROM pg_deadlocks WHERE victim_pid = 10004 AND graph_text NOT LIKE '%''4721''%'", ct));
 
-        /* The twin goes, so the report left can be rewritten; the next tick completes the walk over current rows. */
-        await ExecuteAsync(connection, "DELETE FROM pg_deadlocks WHERE graph_text LIKE '% twin'", ct);
+        /* The next tick completes the walk over current rows. */
         progress.RowCounted = null;
         await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), ct);
 
@@ -1329,6 +1420,118 @@ WHERE victim_pid = 10004", ct);
         Assert.True(progress.Reports.Done);
         Assert.False(progress.Reports.GaveUp);
         Assert.True(progress.Reports.Walks >= 2);
+    }
+
+    /// <summary>
+    /// A report walk the slice's budget cuts after a finished batch resumes at its cursor on the next tick and is
+    /// not an unclean one: the stage finishes (a second walk, clean, ends it) and does not give up. A second walk
+    /// that rewrites nothing and is cut at a batch boundary the same way is done after the slices that follow.
+    /// </summary>
+    [Fact]
+    public async Task AReportWalkCutAtABatchBoundary_ResumesFinishesAndIsDone()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        await PlantRawReportsAsync(connection, PgDeadlockRemask.MaxReportRowsPerPass + 150, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
+
+        /* The budget ends the first tick part-way through the report stage's first page; each report is a batch of its own. */
+        using var cut = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        var counted = 0;
+        progress.RowCounted = (stage, outcome) =>
+        {
+            if (ReferenceEquals(stage, progress.Reports) && outcome == PgDeadlockRemask.RowOutcome.Rewritten && ++counted == 40)
+            {
+                cut.Cancel();
+            }
+        };
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), cut.Token);
+
+        Assert.True(progress.Alerts.Done);
+        Assert.False(progress.Reports.WalkInterrupted);
+        Assert.False(progress.Reports.Done);
+        Assert.NotNull(progress.ReportCursor);
+
+        progress.RowCounted = null;
+        for (var tick = 0; tick < 6 && !progress.Reports.Done; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        }
+
+        Assert.True(progress.Reports.Done);
+        Assert.False(progress.Reports.GaveUp);
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        /* Nothing is left to rewrite: a walk cut at a batch boundary and finished over later slices is clean. */
+        using var secondCut = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var second = new PgDeadlockRemask.RemaskProgress();
+        var seen = 0;
+        second.RowCounted = (stage, _) =>
+        {
+            if (ReferenceEquals(stage, second.Reports) && ++seen == 40)
+            {
+                secondCut.Cancel();
+            }
+        };
+        await PgDeadlockRemask.RunAsync(connection, second, s_key, NullLoggerFor(), secondCut.Token);
+        Assert.False(second.Reports.WalkInterrupted);
+        Assert.False(second.Reports.Done);
+
+        second.RowCounted = null;
+        for (var tick = 0; tick < 6 && !second.Reports.Done; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, second, s_key, NullLoggerFor(), ct);
+        }
+
+        Assert.True(second.Reports.Done);
+        Assert.False(second.Reports.GaveUp);
+        Assert.Equal(1, second.Reports.Walks);
+    }
+
+    /// <summary>
+    /// One backend the victim of two deadlocks within a second, in a store written before the upgrade, is two raw
+    /// reports at one place (server, collection time, occurred time, victim pid). The anchor names each by its
+    /// position among the place's raw hashes, so both are rewritten in one walk, each with its own graph's values,
+    /// and the walk fails nothing.
+    /// </summary>
+    [Fact]
+    public async Task TwoRawReportsAtOnePlace_AreBothRewritten_EachWithItsOwnGraph()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var at = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2);
+        var other = LegacyGraph.Replace("UPDATE accounts SET pin = '47Q1'", "UPDATE ledgers SET pin = '47Q1'", StringComparison.Ordinal);
+        Assert.NotEqual(LegacyGraph, other);
+        var graphs = new[] { ("T1", LegacyGraph), ("T2", other) };
+        foreach (var (shape, graph) in graphs)
+        {
+            await PlantAsync(connection, at.AddMinutes(1), at, 3101, shape, PgDeadlockLogParser.HashOf(graph), null, graph, ct);
+        }
+
+        var (next, examined, rewritten, failed) = await PgDeadlockRemask.RemaskStoredReportsAsync(connection, null, null, ct);
+        Assert.Null(next);
+        Assert.Equal(2, examined);
+        Assert.Equal(2, rewritten);
+        Assert.Equal(0, failed);
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        /* Each row carries its own graph's values, told apart by the resources column the rewrite never touches. */
+        var expected = string.Join("\n", graphs
+            .Select(g => (g.Item1, Report: PgDeadlockRemask.RemaskReport(at, 3101, g.Item2)))
+            .Select(g => $"transaction 5500, transaction 5501, report {g.Item1}|{g.Report.DeadlockHash}|{g.Report.GraphText}|{g.Report.VictimStatement}")
+            .Order(StringComparer.Ordinal));
+        Assert.Equal(expected, await DumpAsync(connection, "SELECT resources, deadlock_hash, graph_text, victim_statement FROM pg_deadlocks", ct));
+        AssertNoSecret(await DumpAsync(connection, "SELECT victim_statement, graph_text FROM pg_deadlocks", ct));
     }
 
     /// <summary>
@@ -1828,6 +2031,13 @@ VALUES ($1, $2, $3, $4, $9, 1, 'deadlocks', $7, $8, $5, split_part($7, ' → ', 
             + $"\tProcess {other}: UPDATE accounts SET pin = '90X4' WHERE card = 5500005555555559\n"
             + prefix + "HINT:  See server log for query details.\n";
     }
+
+    /* A raw graph in LegacyGraph's shape with the victim's own statement. */
+    private static string GraphWithVictim(int victim, int other, string victimStatement) =>
+        $"Process {victim} waits for ShareLock on transaction 5501; blocked by process {other}.\n"
+        + $"Process {other} waits for ShareLock on transaction 5500; blocked by process {victim}.\n"
+        + $"Process {victim}: {victimStatement}\n"
+        + $"Process {other}: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559";
 
     private static void AssertNoSecret(string? text)
     {

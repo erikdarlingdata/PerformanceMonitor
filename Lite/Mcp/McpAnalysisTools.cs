@@ -1102,6 +1102,47 @@ public sealed class McpAnalysisTools
         }
     }
 
+    [McpServerTool(Name = "unmute_analysis_finding"), Description("Write: removes the mute that mute_analysis_finding registered for story_path_hash, in the scope of server_name (all servers when omitted), so the pattern appears in later analysis runs again. Served only when the operator sets mcp_allow_writes to true in settings.json, with mute_analysis_finding. status: unmuted (removed is at least 1), not_muted (that scope held no mute; nothing changed), error (the write failed; nothing changed). <<GUIDE>> Undoes a mute. A mute registered for all servers is not removed by naming one server, and a per-server mute is not removed by omitting server_name: pass the same server_name (or none) the mute used. removed is the number of registry rows deleted. Findings the pattern would have produced while it was muted were never stored, so nothing comes back until the next analysis pass finds the pattern again.")]
+    public static async Task<string> UnmuteAnalysisFinding(
+        AnalysisService analysisService,
+        ServerManager serverManager,
+        [Description("The story_path_hash of the muted pattern.")] string story_path_hash,
+        [Description("Server name. If omitted, removes the all-servers mute.")] string? server_name = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(story_path_hash))
+            {
+                return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
+            }
+
+            int? serverId = null;
+            if (server_name != null)
+            {
+                var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+                if (error != null) return error;
+                serverId = resolved.ServerId;
+            }
+
+            var removed = await analysisService.UnmuteFindingAsync(serverId, story_path_hash);
+
+            return JsonSerializer.Serialize(new
+            {
+                status = removed > 0 ? "unmuted" : "not_muted",
+                story_path_hash,
+                server = server_name ?? "(all servers)",
+                removed,
+                note = removed > 0
+                    ? $"Removed {removed} mute row(s) for this scope. The pattern is no longer skipped and is reported again when a later analysis pass finds it."
+                    : "This scope holds no mute for this story_path_hash, so nothing changed. A mute registered for all servers is removed by omitting server_name; a per-server mute by naming that server.",
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("unmute_analysis_finding", ex);
+        }
+    }
+
     /// <summary>
     /// Where a <c>mute_analysis_finding</c> call writes: either the fleet-wide scope (<see cref="All"/>), a single
     /// enabled server (<see cref="ServerId"/>, the storage name to echo as <see cref="Label"/> and which kind of
