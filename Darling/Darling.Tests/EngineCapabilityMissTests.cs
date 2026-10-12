@@ -210,20 +210,6 @@ public sealed class CollectorEngineCapabilityTests
     }
 
     /// <summary>
-    /// The prose table cannot outlive the gates it describes: every key must be a real collector, and every
-    /// key must be a collector its OWN <c>AppliesTo</c> gate shuts out somewhere — an entry for a collector
-    /// nothing gates is prose no message can ever reach, which is how a stale explanation survives unnoticed.
-    ///
-    /// <para><b>"Its own gate", not "any gap at all" (#2532).</b> Since the kind axis landed, EVERY collector
-    /// is a permanent gap on some engine the store can record — a SQL Server one on both PostgreSQL tokens,
-    /// a PostgreSQL one on <c>sqlserver</c> — purely because of its DIALECT. So a check phrased as "is this a
-    /// gap somewhere" would now pass for every name anyone typed, which is the guard-that-stopped-guarding
-    /// shape. The dialect half is excluded deliberately, leaving exactly the original claim: the entry
-    /// describes a collector whose own precondition excludes it on some target it could otherwise be sent
-    /// at. That covers the twelve Azure SQL Database entries unchanged and the two Aurora-only PostgreSQL
-    /// ones on the same terms.</para>
-    /// </summary>
-    /// <summary>
     /// Collectors whose entry ships ahead of the read that asks about them. <c>attention</c> (#5640) gets its
     /// <c>get_client_timeouts</c> read in a later part of the same change; until then no gate and no read reaches
     /// the prose. The exemption cannot outlive that: <see cref="AReadsPendingWiringEntry_IsDroppedOnceTheReadIsWired"/>
@@ -265,6 +251,20 @@ public sealed class CollectorEngineCapabilityTests
         }
     }
 
+    /// <summary>
+    /// The prose table cannot outlive the gates it describes: every key must be a real collector, and every
+    /// key must be a collector its OWN <c>AppliesTo</c> gate shuts out somewhere — an entry for a collector
+    /// nothing gates is prose no message can ever reach, which is how a stale explanation survives unnoticed.
+    ///
+    /// <para><b>"Its own gate", not "any gap at all" (#2532).</b> Since the kind axis landed, EVERY collector
+    /// is a permanent gap on some engine the store can record — a SQL Server one on both PostgreSQL tokens,
+    /// a PostgreSQL one on <c>sqlserver</c> — purely because of its DIALECT. So a check phrased as "is this a
+    /// gap somewhere" would now pass for every name anyone typed, which is the guard-that-stopped-guarding
+    /// shape. The dialect half is excluded deliberately, leaving exactly the original claim: the entry
+    /// describes a collector whose own precondition excludes it on some target it could otherwise be sent
+    /// at. That covers the twelve Azure SQL Database entries unchanged and the two Aurora-only PostgreSQL
+    /// ones on the same terms.</para>
+    /// </summary>
     [Fact]
     public void EveryCapturePathEntry_NamesARealCollectorThatIsActuallyGatedSomewhere()
     {

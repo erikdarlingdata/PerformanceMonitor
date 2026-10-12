@@ -27,6 +27,8 @@ namespace Darling.Tests;
 /// viewer's SQL carry the column, the MCP create/update verbs take and report it, and a rule narrowed ONLY by
 /// it is not mistaken for a whole-server silence.
 /// </summary>
+[Trait("Reads", "Lite")]
+[Collection("live-postgres")]
 public sealed class MuteRuleClientAppTests
 {
     private static readonly DateTime Now = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
