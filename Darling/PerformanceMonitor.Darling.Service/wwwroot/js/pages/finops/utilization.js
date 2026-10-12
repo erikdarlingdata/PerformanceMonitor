@@ -100,7 +100,7 @@ const TOP_TOTAL_COLUMNS = [
 
 const TOP_AVG_COLUMNS = [
   { key: "database_name", label: "Database" },
-  { key: "avg_cpu_ms", label: "Avg CPU (ms)", format: "int" },
+  { key: "avg_cpu_ms", label: "Avg CPU (ms)", format: "num2" },
   { key: "avg_io_mb", label: "Avg IO (MB)", format: "num2" },
   { key: "execution_count", label: "Execs", format: "int" },
 ];

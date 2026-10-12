@@ -456,7 +456,7 @@
                                         <DataGrid x:Name="FinOpsTopAvgGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MinHeight="40" MaxHeight="200">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
-                                                <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat=N2}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
+                                                <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat=N2}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
                                                 <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat=N2}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                                 <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
                                             </DataGrid.Columns>

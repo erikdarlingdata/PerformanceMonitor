@@ -51,7 +51,7 @@ public sealed class FinOpsDatabaseResourcesViewTests
         Assert.Contains("top_by_total can include databases with 0 CPU that only had file I/O", tail, StringComparison.Ordinal);
         Assert.Contains("top_by_avg is empty when no database has executions in the window", tail, StringComparison.Ordinal);
         Assert.Contains("Above 72 hours, rows reads the per-database rollup and the top lists read the query-grain rollup", tail, StringComparison.Ordinal);
-        Assert.Contains("avg_cpu_ms is rounded to a whole millisecond, avg_io_mb has 4 decimals, io_total_mb has 2, and total_cpu_ms is the total behind the average", tail, StringComparison.Ordinal);
+        Assert.Contains("avg_cpu_ms has 2 decimals and top_by_avg is ranked on it before any rounding, avg_io_mb has 4 decimals, io_total_mb has 2, and total_cpu_ms is the total behind the average", tail, StringComparison.Ordinal);
         Assert.Contains("the desktop's top-consumer grids always cover 24 hours, so send hours_back=24 to match them", tail, StringComparison.Ordinal);
         Assert.Contains("database_count", tail, StringComparison.Ordinal);
         Assert.Contains("truncated", tail, StringComparison.Ordinal);
