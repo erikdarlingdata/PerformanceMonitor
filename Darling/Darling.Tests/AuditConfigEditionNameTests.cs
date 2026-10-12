@@ -64,7 +64,7 @@ public sealed class AuditConfigEditionNameTests
         Assert.True(gate < body.LastIndexOf("\"no_config_data\"", StringComparison.Ordinal));
 
         /* The private edition switch is gone: the tool names an edition through the shared table only. */
-        Assert.Contains("AuditEditionName(edition)", body, StringComparison.Ordinal);
+        Assert.Contains("AuditEditionLabel(propertiesRow?.Edition, edition)", body, StringComparison.Ordinal);
         Assert.DoesNotContain("(HADR)", body, StringComparison.Ordinal);
         Assert.DoesNotContain("Azure Synapse serverless\"", body, StringComparison.Ordinal);
     }
