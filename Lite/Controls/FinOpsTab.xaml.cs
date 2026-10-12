@@ -1121,7 +1121,32 @@ public partial class FinOpsTab : UserControl
             manager.ClearFilters();
         }
 
+        /* #5639: empty the per-server grids BEFORE the reload starts. Until the reload paints, the grids would keep
+           server A's rows under server B's selection, and a "Get Actual Plan" click in that window would pair the
+           selected server B with A's row. */
+        ClearPerServerGrids();
+
         await LoadPerServerDataAsync();
+    }
+
+    /// <summary>
+    /// Empties every grid that <see cref="LoadPerServerDataAsync"/> refills for the selected server. The fleet-wide
+    /// server inventory and the on-demand index analysis grids are not part of that reload and are left alone.
+    /// </summary>
+    private void ClearPerServerGrids()
+    {
+        _dbResourcesFilterMgr?.UpdateData(new List<DatabaseResourceUsageRow>());
+        _appConnectionsFilterMgr?.UpdateData(new List<ApplicationConnectionRow>());
+        _dbSizesFilterMgr?.UpdateData(new List<DatabaseSizeRow>());
+        _pvsStatsFilterMgr?.UpdateData(new List<PvsStatsRow>());
+        _storageGrowthFilterMgr?.UpdateData(new List<StorageGrowthRow>());
+        _indexLockingFilterMgr?.UpdateData(new List<IndexLockingRow>());
+        _idleDbsFilterMgr?.UpdateData(new List<IdleDatabaseRow>());
+        _tempdbFilterMgr?.UpdateData(new List<TempdbSummaryRow>());
+        _waitCategoryFilterMgr?.UpdateData(new List<WaitCategorySummaryRow>());
+        _expensiveQueriesFilterMgr?.UpdateData(new List<ExpensiveQueryRow>());
+        _memoryGrantFilterMgr?.UpdateData(new List<MemoryGrantEfficiencyRow>());
+        _highImpactFilterMgr?.UpdateData(new List<HighImpactQueryRow>());
     }
 
     private async void RefreshRecommendations_Click(object sender, RoutedEventArgs e)

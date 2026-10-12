@@ -141,6 +141,35 @@ public sealed class FinOpsShowReloadPolicyTests
         var stamp = load.IndexOf("_lastPerServerLoadUtc = DateTime.UtcNow;", StringComparison.Ordinal);
         Assert.True(guard >= 0 && stamp > guard);
     }
+
+    /// <summary>
+    /// #5639: switching servers empties the per-server grids before the reload starts. Until the reload paints, the grids
+    /// would show the previous server's rows under the new selection, and a Get Actual Plan click in that window would pair
+    /// the new server with the old server's row.
+    /// </summary>
+    [Fact]
+    public void SwitchingServers_EmptiesThePerServerGrids_BeforeTheReloadStarts()
+    {
+        var src = ReadFinOpsTab();
+        var handler = BodyOf(src, "ServerSelector_SelectionChanged");
+        var clear = handler.IndexOf("ClearPerServerGrids();", StringComparison.Ordinal);
+        var reload = handler.IndexOf("await LoadPerServerDataAsync();", StringComparison.Ordinal);
+        Assert.True(clear >= 0 && reload > clear, "the grids are emptied before the reload starts");
+
+        // Every grid the whole per-server load refills is emptied; the fleet-wide inventory and the on-demand index analysis
+        // grids are not part of that load.
+        var clearBody = BodyOf(src, "ClearPerServerGrids");
+        var notReloaded = new[] { "_serverInventoryFilterMgr", "_indexSummaryFilterMgr", "_indexDetailFilterMgr" };
+        var managers = Regex.Matches(src, @"private DataGridFilterManager<\w+>\? (_\w+FilterMgr);")
+            .Select(m => m.Groups[1].Value)
+            .Where(name => !notReloaded.Contains(name))
+            .ToList();
+        Assert.True(managers.Count >= 12, "the per-server grid managers were found");
+        foreach (var manager in managers)
+        {
+            Assert.Contains(manager + "?.UpdateData(new List<", clearBody, StringComparison.Ordinal);
+        }
+    }
 }
 
 /// <summary>
