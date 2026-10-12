@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -900,7 +901,9 @@ public static class FactAdvice
                     var sigma = fact.Metadata.TryGetValue(ConfigChangeAttribution.DeltaSigmaKey(key), out var ds) ? ds : (double?)null;
                     var rel = fact.Metadata.TryGetValue(ConfigChangeAttribution.RelativeMoveKey(key), out var rm) ? rm : (double?)null;
                     var magnitude = sigma is not null
-                        ? $"{(sigma.Value >= 0 ? "+" : string.Empty)}{sigma.Value:0.#}σ"
+                        ? (Math.Abs(sigma.Value) >= AnomalyThresholds.SigmaDisplayCap - 1e-9
+                            ? $"{(sigma.Value >= 0 ? "at least +" : "at least −")}{AnomalyThresholds.SigmaDisplayCap:0.#}σ"
+                            : $"{(sigma.Value >= 0 ? "+" : string.Empty)}{sigma.Value:0.#}σ")
                         : rel is not null && rel.Value < 1.0
                             ? $"{(worse ? "+" : "−")}{rel.Value * 100:0}%"
                             : worse ? "appeared" : "resolved";
@@ -1607,8 +1610,10 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// QUERY_SPILLS composed: states total spills, how many distinct queries spilled, then the
-    /// statistics/grant remediation and the current max-server-memory sentence.
+    /// QUERY_SPILLS composed: states the pages spilled, how many distinct queries spilled, then the
+    /// statistics/grant remediation and the current max-server-memory sentence. The value is the sum of
+    /// <c>sys.dm_exec_query_stats.total_spills</c> deltas, and that column counts 8 KB PAGES written to
+    /// tempdb, not spill events, so it is named as pages and megabytes (#5633 item 2), never as "spills".
     /// </summary>
     private static AdviceBlock ComposeQuerySpills(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -1619,7 +1624,8 @@ public static class FactAdvice
             return mem.Length == 0 ? fallback : fallback with { Remediation = fallback.Remediation + " " + mem };
 
         var distinct = FactMeta(facts, "QUERY_SPILLS", "spilling_query_count");
-        var inv = new StringBuilder($"{Plural(total.Value, "spill")} to tempdb this window");
+        var spilled = SpilledPagesText(total.Value);
+        var inv = new StringBuilder($"{spilled} spilled to tempdb this window");
         if (distinct is > 0)
             inv.Append($", across {Plural(distinct.Value, "distinct query")}");
         inv.Append(". A spill means a query's memory grant was too small for its sort or hash operation, so the overflow went to tempdb — disk-speed work in place of memory-speed.");
@@ -1634,10 +1640,19 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{Plural(total.Value, "query spill")} to tempdb — memory grants too small for their sorts/hashes",
+            Headline = $"{spilled} spilled to tempdb — memory grants too small for their sorts/hashes",
             Investigation = inv.ToString(),
             Remediation = rem
         };
+    }
+
+    /// <summary>"1,234 pages (9.6 MB)" for a <c>total_spills</c> value: the DMV column counts 8 KB pages, so the
+    /// megabyte figure is pages x 8 / 1024 (#5633 item 2). Internal so the tests can pin the wording.</summary>
+    internal static string SpilledPagesText(double pages)
+    {
+        var mb = pages * 8.0 / 1024.0;
+        var mbText = mb < 10 ? mb.ToString("0.0#") : mb.ToString("N0");
+        return $"{Plural(pages, "page")} ({mbText} MB)";
     }
 
     /// <summary>
@@ -1898,13 +1913,20 @@ public static class FactAdvice
                     "pick it up on a later window with its own detail, and treat it then with the matching wait or resource advice."
             };
         }
-        var inv = new StringBuilder($"{noun} reached {fmt(observed.Value)} this window, {sigma.Value:0.#}σ above its {fmt(mean.Value)} baseline for this hour-of-week");
+        /* #5633 item 8: name the centre the sigma was MEASURED from. When AnomalyGate.Decide ran in the robust
+           frame (a bucket with a median/MAD), both sigmas are distances from baseline.Median in MAD-derived
+           robust sigmas, so printing them beside baseline_mean (a different centre, 3x apart on a skewed metric)
+           misstates the arithmetic. A sigma at SigmaDisplayCap is a clamp, not a measurement. */
+        var robust = AnomalyUsedRobustFrame(facts, key, out var median);
+        var centre = robust ? median : mean.Value;
+        var centreWord = robust ? "baseline median" : "baseline";
+        var inv = new StringBuilder($"{noun} reached {fmt(observed.Value)} this window, {SigmaText(sigma.Value, robust)} above its {fmt(centre)} {centreWord} for this hour-of-week");
         if (samples is > 0)
             inv.Append($" (over {samples.Value:N0} baseline samples)");
         var windowMean = windowMeanKey is null ? null : FactMeta(facts, key, windowMeanKey);
         var meanSigma = FactMeta(facts, key, "mean_deviation_sigma");
         if (windowMean is not null && meanSigma is not null)
-            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {meanSigma.Value:0.#}σ above it (the detector fires only when the mean clears its bar as well, so this is the window running high, not one hot sample)");
+            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {SigmaText(meanSigma.Value, robust)} above it (the detector fires only when the mean clears its bar as well, so this is the window running high, not one hot sample)");
         inv.Append($". {meaning} This is a deviation from normal for this time of day and week, not necessarily a sustained problem — check whether it lines up with a workload change, a deploy, or a one-off job before treating it as chronic.");
 
         var rem =
@@ -1914,10 +1936,32 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{noun} spiked to {fmt(observed.Value)} — {sigma.Value:0.#}σ above its baseline for this time of week",
+            Headline = $"{noun} spiked to {fmt(observed.Value)} — {SigmaText(sigma.Value, robust)} above its {centreWord} for this time of week",
             Investigation = inv.ToString(),
             Remediation = rem
         };
+    }
+
+    /// <summary>Whether the anomaly fact was judged in the ROBUST frame (#5633 item 8): the bucket carried a median
+    /// or a MAD, which is exactly when <c>BaselineBucket.EffectiveRobustSigma</c> is positive and
+    /// <c>AnomalyGate.Decide</c> measured both sigmas from <c>baseline.Median</c>. The detectors stamp
+    /// <c>baseline_median</c> and <c>baseline_mad</c> as zeros for a classical-frame metric. <paramref name="median"/>
+    /// is the stamped median, the centre to name.</summary>
+    internal static bool AnomalyUsedRobustFrame(IReadOnlyDictionary<string, Fact> facts, string key, out double median)
+    {
+        median = FactMeta(facts, key, "baseline_median") ?? 0;
+        var mad = FactMeta(facts, key, "baseline_mad") ?? 0;
+        return median > 0 || mad > 0;
+    }
+
+    /// <summary>A stored deviation as words (#5633 item 8). <c>AnomalyGate</c> clamps the stored sigma at
+    /// <see cref="AnomalyThresholds.SigmaDisplayCap"/>, so a value AT the cap is a floor ("at least 25 sigma"), not a
+    /// measurement. <paramref name="robust"/> names the MAD-derived frame.</summary>
+    internal static string SigmaText(double sigma, bool robust)
+    {
+        if (sigma >= AnomalyThresholds.SigmaDisplayCap - 1e-9)
+            return $"at least {AnomalyThresholds.SigmaDisplayCap:0.#}{(robust ? " robust σ" : "σ")}";
+        return robust ? $"{sigma:0.#} robust σ" : $"{sigma:0.#}σ";
     }
 
     /// <summary>
@@ -2086,7 +2130,7 @@ public static class FactAdvice
             var meanClause = windowMean is null
                 ? ""
                 : meanModifiedZ > 0
-                    ? $"; the window's mean of {windowMean.Value:0.#} ms/sec sat {meanModifiedZ:0.#} robust σ above the baseline median " +
+                    ? $"; the window's mean of {windowMean.Value:0.#} ms/sec sat {SigmaText(meanModifiedZ, true)} above the baseline median " +
                       "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
                     : mean > 0
                         ? $"; the window's mean of {windowMean.Value:0.#} ms/sec was roughly {windowMean.Value / mean:0.#}× that baseline " +
@@ -2245,7 +2289,7 @@ public static class FactAdvice
         var inv = new StringBuilder($"{Plural(warns.Value, "plan warning")} in the top queries' execution plans this window");
         if (crit is > 0)
             inv.Append($", {crit.Value:N0} of them critical");
-        inv.Append(". Plan warnings are things the optimizer flags in the plan itself — implicit conversions defeating an index seek, missing join predicates (accidental cross joops), oversized memory grants, and spills.");
+        inv.Append(". Plan warnings are things the optimizer flags in the plan itself — implicit conversions defeating an index seek, missing join predicates (accidental cross joins), oversized memory grants, and spills.");
 
         var rem =
             "Pull the flagged plans and fix by warning type: an implicit conversion usually means a parameter or " +
@@ -3010,7 +3054,7 @@ public static class FactAdvice
             Headline:
                 "Query spills — operators are running out of granted memory and spilling intermediate results to tempdb",
             Investigation:
-                "A hash join, sort, or hash aggregate gets a grant smaller than it needs and falls back to writing to tempdb — usually 10-100x slower than the in-memory operator. Root cause is almost always a bad cardinality estimate: the optimizer guessed 1,000 rows and the operator actually saw 1,000,000. The top spilling queries for the window are attached, ranked by spill count, with the database, the query, and how often it ran. Open Queries → Top Queries by Duration in-app and sort by spill columns; the query's plan will show the operator-level estimate-vs-actual divergence.",
+                "A hash join, sort, or hash aggregate gets a grant smaller than it needs and falls back to writing to tempdb — usually 10-100x slower than the in-memory operator. Root cause is almost always a bad cardinality estimate: the optimizer guessed 1,000 rows and the operator actually saw 1,000,000. The top spilling queries for the window are attached, ranked by pages spilled (8 KB each), with the database, the query, and how often it ran. Open Queries → Top Queries by Duration in-app and sort by spill columns; the query's plan will show the operator-level estimate-vs-actual divergence.",
             Remediation:
                 "Update statistics with FULLSCAN on the tables that drive the bad estimate — stale statistics are the single most common cause. Add filtered indexes if a subset of the data is the hot spot, or rewrite the operator (a hash join over a sorted input that should have been a merge join is a classic). Per-query stopgaps: `OPTION (RECOMPILE)` re-estimates at each execution against current statistics; `OPTION (MIN_GRANT_PERCENT = X)` forces a larger grant. If many queries spill consistently and grant pressure is high, the workspace pool may simply need more memory available, so check whether `max server memory` is capped too low for the workload.");
 
