@@ -1070,8 +1070,10 @@ ORDER BY local_bucket, story_path_hash";
         };
 
         /* #4005: a deadlock exemplar stored before its SQL was normalized comes back normalized, and names its
-           report by timestamp and pid rather than by a hash that may be over the raw graph. */
-        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding);
+           report by timestamp and pid rather than by a hash that may be over the raw graph. Restamped: a section an
+           earlier build stamped holds a victim statement that build normalized alone, so it is derived from its graph
+           here until the repair rewrites it; a section written under these rules says so and is left as it is. */
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding, restamped: true);
         return finding;
     }
 

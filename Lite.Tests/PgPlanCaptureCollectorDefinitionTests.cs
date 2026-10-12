@@ -99,6 +99,35 @@ public class PgPlanCaptureCollectorDefinitionTests
     }
 
     /// <summary>
+    /// A quoted identifier is one token of the stored text, never the opening of a literal. PostgreSQL deparses
+    /// a name that needs quoting with its quotes, and one holding an apostrophe read by the literal pattern
+    /// alone opened a literal that closed at the next real quote, so the literal after it stayed in the stored
+    /// plan. The fingerprint pattern is untouched: every stored fingerprint was hashed with it.
+    /// </summary>
+    [Fact]
+    public void AQuotedIdentifierHoldingAnApostrophe_LeavesNoLaterLiteralStanding()
+    {
+        var root = Redact("""
+            {
+              "Plan": { "Node Type": "Nested Loop",
+                        "Join Filter": "((\"c'\".email)::text = 'SECRET_K'::text)",
+                        "Output": ["(\"a'b'c\")::text", "'O''Brien SECRET_M'::text"],
+                        "Plans": [ { "Node Type": "Seq Scan", "Relation Name": "t", "Alias": "t",
+                                     "Filter": "((\"o'k\")::text = 'SECRET_J'::text)" } ] }
+            }
+            """);
+
+        var plan = (JsonObject)root["Plan"]!;
+        var child = (JsonObject)((JsonArray)plan["Plans"]!)[0]!;
+
+        Assert.DoesNotContain("SECRET", root.ToJsonString(), StringComparison.Ordinal);
+        Assert.Equal("((\"c'\".email)::text = '?'::text)", plan["Join Filter"]!.GetValue<string>());
+        Assert.Equal("((\"o'k\")::text = '?'::text)", child["Filter"]!.GetValue<string>());
+        Assert.Equal("(\"a'b'c\")::text", ((JsonArray)plan["Output"]!)[0]!.GetValue<string>());
+        Assert.Equal("'?'::text", ((JsonArray)plan["Output"]!)[1]!.GetValue<string>());
+    }
+
+    /// <summary>
     /// Redaction must not mangle IDENTITY. A blanket numeric strip would rewrite a relation genuinely named
     /// <c>transactionitems1</c> into <c>transactionitems?</c>, destroying the name to hide a value that was
     /// never there — so bare numbers are stripped only inside condition fields.

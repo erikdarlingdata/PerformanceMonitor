@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using TimeBoundPattern = PerformanceMonitor.Collectors.PgSettingRedactor.TimeBoundPattern;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -25,6 +26,19 @@ namespace PerformanceMonitor.Collectors;
 /// masking every bare number would have destroyed the evidence prose carries (pids, transaction ids, durations). So
 /// the prose masking went, and what stays is the half that CAN be made complete: SQL, read by its own lexical
 /// rules.</para>
+///
+/// <para><b>The one exception: row values in PostgreSQL's own fixed formats.</b> A narrow exception to that decision,
+/// not a reversal of it. Some of the server's formats put row data in a fixed slot: a unique or foreign-key
+/// violation's <c>Key (col)=(value) ...</c>, a NOT NULL or CHECK failure's <c>Failing row contains (...)</c>, a COPY
+/// or JSON input error's CONTEXT quoting the input, and <c>invalid input syntax for type ...: "value"</c>. Unlike
+/// open-ended prose these are a closed list of formats, each catalogue's msgstr verbatim (the tables below, guarded
+/// like <see cref="LexerErrorFormats"/> by <c>PgLogCatalogueShapeTests</c>), so only the value slot is replaced
+/// by <c>?</c> and every column, constraint and table name stays, the way the bind-parameter and PL/pgSQL
+/// parameter-list masking already works. Where the log carries a SQLSTATE (csvlog, jsonlog, a <c>%e</c> prefix) it
+/// names the class whose fields carry values (<see cref="ValueDetailStates"/>, <see cref="ValueMessageStates"/>),
+/// and a field in that class matching no form is withheld (<see cref="WithheldValues"/>) rather than stored as
+/// written; without one, a field that opens like a form and matches none whole is withheld the same way.
+/// Application-authored text (a RAISE message, a value an application quotes itself) stays as written.</para>
 ///
 /// <list type="bullet">
 /// <item><description><see cref="RedactStatement"/> — a monitored target's <c>STATEMENT:</c> companion, which is
@@ -41,11 +55,17 @@ namespace PerformanceMonitor.Collectors;
 /// <item><description><see cref="RedactMessage"/> — a message as written, except auto_explain's plan report, whose
 /// plan carries the statement's text in a form the lexer cannot read (<see cref="WithholdPlan"/>, withheld below
 /// its duration line), and the SQL a syntax error quotes after <c>at or near</c>, in any catalogue's words
-/// (<see cref="ScannerErrorFormats"/>, #4006), put through the lexer.</description></item>
+/// (<see cref="LexerErrorFormats"/>, #4006), put through the lexer.</description></item>
 /// </list>
 /// </summary>
 public static class PgLogTextRedactor
 {
+    /// <summary>The bound every pattern here runs under. The value forms and the frame heads are linear in the
+    /// field's length (the longest field they read is <see cref="MaxSqlFieldLength"/>), so this is a backstop, not
+    /// a budget: a pattern that outruns it throws, and the field it was reading is withheld
+    /// (<see cref="WithheldValues"/>), never kept as written and never left half masked.</summary>
+    private static readonly TimeSpan s_matchTimeout = TimeSpan.FromSeconds(1);
+
     /* The DETAIL shapes that carry SQL (#3920). A deadlock report opens with its wait-for lines, "Process N
        waits for <lock> on <object>; blocked by process M.", then writes each process's query as "Process N:
        <query>" (errdetail_log, each cut at track_activity_query_size). A crashed backend's report is one query,
@@ -55,38 +75,44 @@ public static class PgLogTextRedactor
        STRICT row count raised, and "Parameters: $1 = 'value', ..." under a logged statement (errdetail_params).
        Prose masking had covered their quoted values. A tab leads each continuation line in a stderr log, nothing
        in csvlog. Any other DETAIL is prose, kept as written. */
-    private static readonly Regex s_deadlockWaitFor = new(
+    private static readonly TimeBoundPattern s_deadlockWaitFor = new(
         @"^\t?Process (?<pid>[0-9]+) waits for .*; blocked by process (?<blocker>[0-9]+)\.$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
-    private static readonly Regex s_deadlockQueryHead = new(
+    private static readonly TimeBoundPattern s_deadlockQueryHead = new(
         @"^\t?Process (?<pid>[0-9]+): ",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
-    private static readonly Regex s_singleQueryHead = new(
+    private static readonly TimeBoundPattern s_singleQueryHead = new(
         @"^(?:Failed process was running: |prepare: |(?<parameters>[Pp]arameters: ))",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* What a list of values reads as once lexed (#3996's review): `name = '?'` or `name = NULL` pairs, comma
        separated, each name a plain identifier or a `$n`. PL/pgSQL writes a variable's name UNQUOTED
        (format_expr_params), so a name that needed quoting in the function (`"o'k"`, `"a""b"`) opens a literal or an
        identifier the lexer then reads out of step, and a value comes back as a word. Such a list is not this shape,
        and is withheld. */
-    private static readonly Regex s_valueList = new(
+    private static readonly TimeBoundPattern s_valueList = new(
         @"^(?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*|\$[0-9]+) = (?:'\?'|NULL)(?:, (?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*|\$[0-9]+) = (?:'\?'|NULL))*$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* A portal's one bound value (`portal "p" parameter $1 = '...'`), or only its number when the value was not
        logged. */
-    private static readonly Regex s_oneValue = new(
+    private static readonly TimeBoundPattern s_oneValue = new(
         @"^\$[0-9]+(?: = (?:'\?'|NULL))?$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* A CONTEXT frame that quotes the statement it was running, unescaped (#3920's review): SPI's
        `SQL statement "..."` and PL/pgSQL's expression and assignment frames. */
-    private static readonly Regex s_contextSqlFrame = new(
+    private static readonly TimeBoundPattern s_contextSqlFrame = new(
         @"^\t?(?:SQL statement|SQL expression|PL/pgSQL expression|PL/pgSQL assignment) """,
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* A CONTEXT frame that writes SQL WITHOUT quoting it, to the frame's end (#3944's review): postgres_fdw's
        `remote SQL command: <sql>`, whose pushed-down constants are literals, the values a statement was bound
@@ -96,14 +122,39 @@ public static class PgLogTextRedactor
        unescaped, so it is matched lazily to the first `" with parameters: ` or `" parameter $` (#3996's review): a
        name holding a double quote had failed the match, and the frame's values were kept as prose. What a portal
        frame's values lex to is checked against their shape as well, so a name holding that text only withholds. */
-    private static readonly Regex s_contextSqlLine = new(
+    private static readonly TimeBoundPattern s_contextSqlLine = new(
         @"^\t?(?:remote SQL command: |query: |(?:unnamed portal|portal "".*?"") (?:(?<list>with parameters: )|(?<one>parameter )(?=\$)))",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* What can follow an SQL frame: the line after its closing quote starts one of these, or the field ends. */
-    private static readonly Regex s_contextFrameStart = new(
+    private static readonly TimeBoundPattern s_contextFrameStart = new(
         @"^\t?(?:PL/pgSQL function |SQL function |SQL statement ""|SQL expression ""|PL/pgSQL expression ""|PL/pgSQL assignment ""|parallel worker|while |COPY |JSON data, |remote SQL command: |query: |unnamed portal |portal "")",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
+
+    /* The CONTEXT frames that quote no input and no statement, each in the whole of its grammar as PostgreSQL writes it
+       (English; another catalogue's wording is not trusted here and is withheld where trust is required). A line is
+       trusted as one of these only when all of it fits: the frame word alone does not (`while home: ...` begins like
+       a lock wait's frame and is not one). The free parts are names, which PostgreSQL writes unescaped: a relation
+       or function name, and a function's argument types; a relation or SQL function name holding a double quote is not trusted, so a line with one is withheld. Locks and vacuum: heapam's XactLockTableWaitErrorCb and
+       vacuumlazy's vacuum_error_callback. PL/pgSQL: plpgsql_exec_error_callback, whose statement types are
+       plpgsql_stmt_typename's, and whose other tails are its err_text phrases. SQL functions: sql_exec_error_callback
+       and the inliner's. */
+    private static readonly TimeBoundPattern s_contextPlainFrame = new(
+        @"^\t?(?:"
+        + @"parallel worker"
+        + @"|while (?:(?:updating tuple|deleting tuple|locking tuple|inserting index tuple|checking uniqueness of tuple|rechecking updated tuple|checking exclusion constraint on tuple) \([0-9]+,[0-9]+\)|locking updated version \([0-9]+,[0-9]+\) of tuple) in relation ""[^""]+"""
+        + @"|while (?:scanning block [0-9]+(?: offset [0-9]+)? of relation ""[^""]+""|scanning relation ""[^""]+""|vacuuming block [0-9]+ of relation ""[^""]+""|vacuuming relation ""[^""]+"""
+        + @"|vacuuming index ""[^""]+"" of relation ""[^""]+""|cleaning up index ""[^""]+"" of relation ""[^""]+""|truncating relation ""[^""]+"" to [0-9]+ blocks)"
+        + @"|SQL function ""[^""]+"" (?:statement [0-9]+|during (?:startup|inlining))"
+        + @"|PL/pgSQL function (?:inline_code_block|(?>""(?:[^""]|"""")+""|[A-Za-z0-9_$.\u0080-\uFFFF])+\([A-Za-z0-9_$.,\[\] \u0080-\uFFFF""]*\))"
+        + @"(?: line [0-9]+ (?:at (?:statement block|assignment|FOR with integer loop variable|FOR over SELECT rows|FOR over cursor|FOR over EXECUTE statement|FOREACH over array|EXIT|CONTINUE|RETURN|RETURN NEXT|RETURN QUERY|RAISE|ASSERT|EXECUTE|IF|CASE|LOOP|WHILE|SQL statement|GET DIAGNOSTICS|OPEN|FETCH|CLOSE|PERFORM|CALL|COMMIT|ROLLBACK|unknown)"
+        + @"|during (?:statement block local variable initialization|function entry|function exit|statement block entry|statement block exit|exception cleanup)"
+        + @"|while (?:storing call arguments into local variables|casting return value to function's return type)))?"
+        + @")\r?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /// <summary>What a statement becomes when it cannot be read to its end (cut inside a literal, a quoted
     /// identifier or a block comment, or written two ways at once): no mask can be trusted to have covered what
@@ -159,11 +210,37 @@ public static class PgLogTextRedactor
     /// <param name="detail">The DETAIL field's text.</param>
     /// <param name="complete">True only when a companion field followed the DETAIL in the same entry. False, the
     /// default, fails closed.</param>
-    public static string? RedactDetail(string? detail, bool complete = false)
+    public static string? RedactDetail(string? detail, bool complete = false, string? sqlState = null)
+    {
+        try
+        {
+            return RedactDetailCore(detail, complete, sqlState);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldValues;
+        }
+    }
+
+    private static string? RedactDetailCore(string? detail, bool complete, string? sqlState)
     {
         if (string.IsNullOrEmpty(detail))
         {
             return detail;
+        }
+
+        /* The row values PostgreSQL writes into an integrity violation's DETAIL, masked in their slot (the one
+           exception to #3944: a closed list of the server's own fixed formats, in every catalogue). A DETAIL whose
+           SQLSTATE puts it in that class, or that opens like one of the forms, and matches none whole is withheld:
+           an application's DETAIL under a RAISE with that errcode, or a shape this build does not read. */
+        if (detail.Length <= MaxSqlFieldLength && MaskValues(detail, s_detailForms) is { } maskedValues)
+        {
+            return maskedValues;
+        }
+
+        if (InValueClass(sqlState, ValueDetailStates) || OpensValueForm(detail, s_detailForms, message: false))
+        {
+            return WithheldValues;
         }
 
         var single = s_singleQueryHead.Match(detail);
@@ -293,6 +370,18 @@ public static class PgLogTextRedactor
     /// </summary>
     public static string? RedactContext(string? context)
     {
+        try
+        {
+            return RedactContextCore(context);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldValues;
+        }
+    }
+
+    private static string? RedactContextCore(string? context)
+    {
         if (string.IsNullOrEmpty(context))
         {
             return context;
@@ -303,6 +392,38 @@ public static class PgLogTextRedactor
         var i = 0;
         while (i < lines.Length)
         {
+            /* A COPY frame's input line or column, and the JSON parser's input, masked in their slot (the one
+               exception to #3944). A line that opens like one of those frames and matches none whole (a CSV value
+               holding a newline runs onto the next line) is withheld with everything after it, which may be the rest
+               of that value. */
+            var tab = lines[i].StartsWith('\t') ? "\t" : string.Empty;
+            var body = tab.Length == 0 ? lines[i] : lines[i][1..];
+            if (context.Length <= MaxSqlFieldLength && MaskValues(body, s_contextForms, out var carriesValue) is { } maskedLine)
+            {
+                output.Add(tab + maskedLine);
+                i++;
+
+                /* A COPY value in CSV mode, or a JSON input, can hold a newline: its first physical line then ends
+                   in a quote or is cut where the value goes on, and the form above reads that line whole. What
+                   follows a value-bearing frame is another frame, or nothing. A line is another frame only when ALL
+                   of it reads as one (ReadsAsFrame): beginning with a frame word is not enough, since a value's next
+                   line can begin with any of them. Any other line is the rest of the value, and is withheld with
+                   everything after it. */
+                if (carriesValue && i < lines.Length && !ReadsAsFrame(lines[i]))
+                {
+                    output.Add((lines[i].StartsWith('\t') ? "\t" : string.Empty) + WithheldValues);
+                    return string.Join('\n', output);
+                }
+
+                continue;
+            }
+
+            if (OpensValueForm(body, s_contextForms, message: false))
+            {
+                output.Add(tab + WithheldValues);
+                return string.Join('\n', output);
+            }
+
             var sqlFrame = s_contextSqlFrame.Match(lines[i]);
             var quoted = sqlFrame.Success;
             if (!quoted)
@@ -338,6 +459,21 @@ public static class PgLogTextRedactor
         }
 
         return string.Join('\n', output);
+    }
+
+    /// <summary>Whether a CONTEXT line, the one after a frame that quoted a value, reads whole as a frame
+    /// PostgreSQL writes: a COPY or JSON value form (<see cref="MaskValues(string, ValueForm[])"/>), an SQL frame that
+    /// <see cref="CloseSqlFrame"/> then reads to its close or withholds, or a frame with no input in it that fits its
+    /// grammar to the end of the line (<see cref="s_contextPlainFrame"/>). A line that only begins with a frame word
+    /// (<c>while </c>, <c>parallel worker</c>, <c>PL/pgSQL function </c>, <c>SQL function </c>, <c>unnamed portal </c>,
+    /// <c>portal "</c>) is not one.</summary>
+    private static bool ReadsAsFrame(string line)
+    {
+        var body = line.StartsWith('\t') ? line[1..] : line;
+        return s_contextSqlFrame.IsMatch(line)
+            || s_contextSqlLine.IsMatch(line)
+            || s_contextPlainFrame.IsMatch(line)
+            || MaskValues(body, s_contextForms) is not null;
     }
 
     /// <summary>Where the SQL frame opening on <paramref name="start"/> ends: its statement masked and the line of
@@ -394,14 +530,25 @@ public static class PgLogTextRedactor
     }
 
     /* auto_explain's report (auto_explain.c): "duration: N ms  plan:", and the plan on the lines under it. */
-    private static readonly Regex s_planHead = new(
+    private static readonly TimeBoundPattern s_planHead = new(
         @"^duration: [0-9]+(?:\.[0-9]+)? ms  plan:$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /// <summary>Whether a message is auto_explain's plan head, <c>duration: N ms  plan:</c>, whose plan is on the lines
     /// under it (#5097). The one spelling of the head, shared with <see cref="WithholdPlan"/>.</summary>
-    public static bool IsPlanHead(string? firstLineMessage) =>
-        firstLineMessage is not null && s_planHead.IsMatch(firstLineMessage);
+    public static bool IsPlanHead(string? firstLineMessage)
+    {
+        try
+        {
+            return firstLineMessage is not null && s_planHead.IsMatch(firstLineMessage);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Not read to its end: withheld the way a plan is.
+            return true;
+        }
+    }
 
     /// <summary>What an auto_explain plan becomes in a stored message: its statement's text rides in it.</summary>
     public const string WithheldPlan = "<plan withheld: auto_explain writes the statement's text into it>";
@@ -415,14 +562,1027 @@ public static class PgLogTextRedactor
     public static string? WithholdPlan(string? message)
     {
         var newline = message?.IndexOf('\n') ?? -1;
-        if (newline < 0 || !s_planHead.IsMatch(message![..newline]))
+        if (newline < 0)
         {
             return message;
+        }
+
+        try
+        {
+            if (!s_planHead.IsMatch(message![..newline]))
+            {
+                return message;
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldPlan;
         }
 
         var indent = newline + 1 < message.Length && message[newline + 1] == '\t' ? "\t" : string.Empty;
         return message[..(newline + 1)] + indent + WithheldPlan;
     }
+
+    /// <summary>Every catalogue's <c>Key %s already exists.</c> and <c>Key %s is duplicated.</c>: a unique violation's DETAIL, its one slot the index's <c>(columns)=(values)</c>.</summary>
+    public static readonly IReadOnlyList<string> KeyExistsDetailFormats =
+    [
+        "Key %s already exists.",
+        "Schlüssel »%s« existiert bereits.", // de
+        "Ya existe la llave %s.", // es
+        "La clé « %s » existe déjà.", // fr
+        "Kunci « %s » sudah ada.", // id
+        "La chiave %s esiste già.", // it
+        "キー %s はすでに存在します。", // ja
+        "გასაღები უკვე არსებობს: %s.", // ka
+        "%s 키가 이미 있습니다.", // ko
+        "Klucz %s już istnieje.", // pl
+        "Chave %s já existe.", // pt_BR
+        "Ключ \"%s\" уже существует.", // ru
+        "Nyckeln %s existerar redan.", // sv
+        "\"%s\" anahtarı zaten mevcut", // tr
+        "Ключ %s вже існує.", // uk
+        "键值\"%s\" 已经存在", // zh_CN
+        "Key %s is duplicated.",
+        "Schlüssel %s ist doppelt vorhanden.", // de
+        "La llave %s está duplicada.", // es
+        "La clé %s est dupliquée.", // fr
+        "Key %s terduplikasi.", // id
+        "La chiave %s è duplicata.", // it
+        "キー%sは重複しています。", // ja
+        "გასაღები %s დუბლირებულია.", // ka
+        "%s 키가 중복됨", // ko
+        "Klucz %s jest zdublowany.", // pl
+        "Chave %s está duplicada.", // pt_BR
+        "Ключ %s дублируется.", // ru
+        "Nyckeln %s är duplicerad.", // sv
+        "%s anahtarı (key) çoğaltılmış (duplicated).", // tr
+        "Ключ %s дублюється.", // uk
+        "键值%s重复了", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's <c>Key %s conflicts with existing key %s.</c> and <c>Key %s conflicts with key %s.</c>: an exclusion violation's DETAIL, both slots <c>(columns)=(values)</c> of the same index.</summary>
+    public static readonly IReadOnlyList<string> KeyConflictDetailFormats =
+    [
+        "Key %s conflicts with existing key %s.",
+        "Schlüssel %s kollidiert mit vorhandenem Schlüssel %s.", // de
+        "La llave %s está en conflicto con la llave existente %s.", // es
+        "La clé %s est en conflit avec la clé existante %s.", // fr
+        "Kunci %s bermasalah dengan kunci yang sudah ada %s.", // id
+        "La chiave %s è in conflitto con la chiave esistente %s.", // it
+        "キー %s が既存のキー %s と競合しています", // ja
+        "გასაღები %s კონფლიქტობს არსებულ გასაღებ %s-სთან.", // ka
+        "%s 키가 이미 있는 %s 키와 충돌합니다.", // ko
+        "Klucz %s jest sprzeczny z istniejącym kluczem %s.", // pl
+        "A chave %s está em conflito com a chave existente %s.", // pt_BR
+        "Ключ %s конфликтует с существующим ключом %s.", // ru
+        "Nyckel %s står i konflilkt med existerande nyckel %s.", // sv
+        "%s anahtarı, mevcut %s anahtarıyla uyuşmuyor.", // tr
+        "Ключ %s конфліктує з існуючим ключем %s.", // uk
+        "键%s与已存在的键%s冲突", // zh_CN
+        "Key %s conflicts with key %s.",
+        "Schlüssel %s kollidiert mit Schlüssel %s.", // de
+        "La llave %s está en conflicto con la llave %s.", // es
+        "La clé %s est en conflit avec la clé %s.", // fr
+        "Kunci %s bermasalah dengan kunci %s.", // id
+        "La chiave %s è in conflitto con la chiave %s.", // it
+        "キー %s がキー %s と競合しています", // ja
+        "გასაღები %s კონფლიქტობს გასაღებ %s-სთან.", // ka
+        "%s 키와 %s 가 충돌함", // ko
+        "Klucz %s jest sprzeczny z kluczem %s.", // pl
+        "A chave %s está em conflito com a chave %s.", // pt_BR
+        "Ключ %s конфликтует с ключом %s.", // ru
+        "Nyckel %s står i konflikt med nyckel %s.", // sv
+        "%s anahtarı,  %s anahtarı ile uyuşmuyor.", // tr
+        "Ключ %s конфліктує з ключем %s.", // uk
+        "键%s与另外一个键%s冲突", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's <c>Key (%s)=(%s) is not present in table "%s".</c> and <c>Key (%s)=(%s) is still referenced from table "%s".</c>: a foreign-key violation's DETAIL, the second slot the key's values.</summary>
+    public static readonly IReadOnlyList<string> KeyReferenceDetailFormats =
+    [
+        "Key (%s)=(%s) is not present in table \"%s\".",
+        "Schlüssel (%s)=(%s) ist nicht in Tabelle »%s« vorhanden.", // de
+        "La llave (%s)=(%s) no está presente en la tabla «%s».", // es
+        "La clé (%s)=(%s) n'est pas présente dans la table « %s ».", // fr
+        "Key (%s)=(%s) tidak ada dalam table « %s ».", // id
+        "La chiave (%s)=(%s) non è presente nella tabella \"%s\".", // it
+        "テーブル\"%3$s\"にキー(%1$s)=(%2$s)がありません", // ja
+        "გასაღები (%s)=(%s) არაა წარმოდგენილი ცხრილში \"%s\".", // ka
+        "(%s)=(%s) 키가 \"%s\" 테이블에 없습니다.", // ko
+        "Klucz (%s)=(%s) nie występuje w tabeli \"%s\".", // pl
+        "Chave (%s)=(%s) não está presente na tabela \"%s\".", // pt_BR
+        "Ключ (%s)=(%s) отсутствует в таблице \"%s\".", // ru
+        "Nyckel (%s)=(%s) finns inte i tabellen \"%s\".", // sv
+        "\"%3$s\" tablosunda (%1$s)=(%2$s) anahtarı mevcut değildir.", // tr
+        "Ключ (%s)=(%s) не присутній в таблиці \"%s\".", // uk
+        "键值对(%s)=(%s)没有在表\"%s\"中出现.", // zh_CN
+        "Key (%s)=(%s) is still referenced from table \"%s\".",
+        "Auf Schlüssel (%s)=(%s) wird noch aus Tabelle »%s« verwiesen.", // de
+        "La llave (%s)=(%s) todavía es referida desde la tabla «%s».", // es
+        "La clé (%s)=(%s) est toujours référencée à partir de la table « %s ».", // fr
+        "Key (%s)=(%s) masih direferensikan dari table « %s ».", // id
+        "La chiave (%s)=(%s) è ancora referenziata dalla tabella \"%s\".", // it
+        "キー(%s)=(%s)はまだテーブル\"%s\"から参照されています", // ja
+        "(%s)=(%s) 키가 \"%s\" 테이블에서 여전히 참조됩니다.", // ko
+        "Klucz (%s)=(%s) ma wciąż odwołanie w tabeli \"%s\".", // pl
+        "Chave (%s)=(%s) ainda é referenciada pela tabela \"%s\".", // pt_BR
+        "На ключ (%s)=(%s) всё ещё есть ссылки в таблице \"%s\".", // ru
+        "Nyckeln (%s)=(%s) refereras fortfarande till från tabell \"%s\".", // sv
+        "(%s)=(%s) anahtarı \"%s\" tablosundan hala referans edilmektedir.", // tr
+        "На ключ (%s)=(%s) все ще є посилання в таблиці \"%s\".", // uk
+        "键值对(%s)=(%s)仍然是从表\"%s\"引用的.", // zh_CN
+        "Key (%s)=(%s) is referenced from table \"%s\".",
+        "Auf Schlüssel (%s)=(%s) wird aus Tabelle »%s« verwiesen.", // de
+        "キー(%s)=(%s)はテーブル\"%s\"から参照されています。", // ja
+        "გასაღებს (%s)=(%s) მიმართავენ ცხრილიდან \"%s\".", // ka
+        "На ключ (%s)=(%s) есть ссылки в таблице \"%s\".", // ru
+        "Nyckeln (%s)=(%s) refereras från tabell \"%s\".", // sv
+        "Ключ (%s)=(%s) посилається з таблиці \"%s\".", // uk
+    ];
+
+    /// <summary>Every catalogue's <c>Key is not present in table "%s".</c> and <c>Key is still referenced from table "%s".</c>: the foreign-key DETAIL written when the role may not read the key's columns, which carries no value.</summary>
+    public static readonly IReadOnlyList<string> KeyReferenceUnreadableDetailFormats =
+    [
+        "Key is not present in table \"%s\".",
+        "Der Schlüssel ist nicht in Tabelle »%s« vorhanden.", // de
+        "La llave no está presente en la tabla «%s».", // es
+        "La clé n'est pas présente dans la table « %s ».", // fr
+        "La chiave non è presente nella tabella \"%s\".", // it
+        "テーブル\"%s\"にキーがありません。", // ja
+        "ცხრილში \"%s\" გასაღები არ არსებობს.", // ka
+        "\"%s\" 테이블에 키가 없습니다.", // ko
+        "Klucz nie występuje w tabeli \"%s\".", // pl
+        "A chave não está presente na tabela \"%s\".", // pt_BR
+        "Ключ отсутствует в таблице \"%s\".", // ru
+        "Nyckeln finns inte i tabellen \"%s\".", // sv
+        "Ключ не присутній в таблиці \"%s\".", // uk
+        "表\"%s\"中没有出现键。", // zh_CN
+        "Key is still referenced from table \"%s\".",
+        "Auf den Schlüssel wird noch aus Tabelle »%s« verwiesen.", // de
+        "La llave todavía es referida desde la tabla «%s».", // es
+        "La clé est toujours référencée à partir de la table « %s ».", // fr
+        "La chiave è ancora referenziata dalla tabella \"%s\".", // it
+        "テーブル\"%s\"からキーがまだ参照されています。", // ja
+        "\"%s\" 테이블에서 키가 여전히 참조됩니다.", // ko
+        "Klucz ma wciąż odwołania w tabeli \"%s\".", // pl
+        "A chave ainda é referenciada pela tabela \"%s\".", // pt_BR
+        "На ключ всё ещё есть ссылки в таблице \"%s\".", // ru
+        "Nyckel refereras fortfarande till från tabell \"%s\".", // sv
+        "На ключ все ще є посилання в таблиці \"%s\".", // uk
+        "表\"%s\"中仍然有对键的引用。", // zh_CN
+        "Key is referenced from table \"%s\".",
+        "Auf den Schlüssel wird aus Tabelle »%s« verwiesen.", // de
+        "キーがテーブル\"%s\"から参照されています。", // ja
+        "გასაღებს მიმართავენ ცხრილიდან \"%s\".", // ka
+        "На ключ есть ссылки в таблице \"%s\".", // ru
+        "Nyckel refereras från tabell \"%s\".", // sv
+        "Ключ посилається з таблиці \"%s\".", // uk
+    ];
+
+    /// <summary>Every catalogue's <c>Failing row contains %s.</c>: a NOT NULL or CHECK failure's DETAIL, its slot the whole row's <c>(values)</c>.</summary>
+    public static readonly IReadOnlyList<string> FailingRowDetailFormats =
+    [
+        "Failing row contains %s.",
+        "Fehlgeschlagene Zeile enthält %s.", // de
+        "La fila que falla contiene %s.", // es
+        "La ligne en échec contient %s.", // fr
+        "Baris gagal berisi %s", // id
+        "La riga in errore contiene %s.", // it
+        "失敗した行は%sを含みます", // ja
+        "შეცდომიანი მწკრივი \"%s\"-ს შეიცავს.", // ka
+        "실패한 자료: %s", // ko
+        "Niepoprawne ograniczenia wiersza %s.", // pl
+        "Registro que falhou contém %s.", // pt_BR
+        "Ошибочная строка содержит %s.", // ru
+        "Misslyckande rad innehåller %s.", // sv
+        "Hata veren satır %s içeriyor.", // tr
+        "Помилковий рядок містить %s.", // uk
+        "失败, 行包含%s.", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's <c>Partition key of the failing row contains %s.</c>: a row no partition takes, its slot <c>(columns) = (values)</c>.</summary>
+    public static readonly IReadOnlyList<string> PartitionKeyDetailFormats =
+    [
+        "Partition key of the failing row contains %s.",
+        "Partitionierungsschlüssel der fehlgeschlagenen Zeile enthält %s.", // de
+        "La llave de particionamiento de la fila que falla contiene %s.", // es
+        "La clé de partitionnement de la ligne en échec contient %s.", // fr
+        "La chiave di partizione della riga sbagliata contiene %s.", // it
+        "失敗した行のパーティションキーは%sを含みます。", // ja
+        "შეცდომიანი მწკრივის დანაყოფის გასაღები \"%s\"-ს შეიცავს.", // ka
+        "실패한 로우의 파티션 키 값: %s", // ko
+        "A chave de partição da linha com falha contém %s.", // pt_BR
+        "Ключ секционирования для неподходящей строки содержит %s.", // ru
+        "Partitioneringsnyckel för den trasiga raden innehåller %s.", // sv
+        "Başarısız olan satırda bölümleme anahtarı %s içeriyor.", // tr
+        "Ключ секціонування для невідповідного рядка містить %s.", // uk
+        "失败行的分区键包含%s.", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's <c>COPY %s, line %llu: "%s"</c>: a COPY frame quoting the input line.</summary>
+    public static readonly IReadOnlyList<string> CopyLineContextFormats =
+    [
+        "COPY %s, line %llu: \"%s\"",
+        "COPY %s, ligne %llu : « %s »", // fr
+        "COPY %s, riga %llu: \"%s\"", // it
+        "COPY %s, linha %llu: \"%s\"", // pt_BR
+        "%sのCOPY、行 %llu: \"%s\"", // ja
+        "%s 복사, %llu번째 줄: \"%s\"", // ko
+    ];
+
+    /// <summary>Every catalogue's <c>COPY %s, line %llu, column %s: "%s"</c>: a COPY frame quoting one column's input.</summary>
+    public static readonly IReadOnlyList<string> CopyColumnContextFormats =
+    [
+        "COPY %s, line %llu, column %s: \"%s\"",
+        "COPY %s, ligne %llu, colonne %s : « %s »", // fr
+        "COPY %s, riga %llu, colonna %s: \"%s\"", // it
+        "COPY %s, linha %llu, coluna %s: \"%s\"", // pt_BR
+        "%sのCOPY、行 %llu、列 %s: \"%s\"", // ja
+        "%s 복사, %llu번째 줄, %s 열: \"%s\"", // ko
+    ];
+
+    /// <summary>Every catalogue's COPY frames that quote no input: the relation alone, the line, the column, and a null input.</summary>
+    public static readonly IReadOnlyList<string> CopyBareContextFormats =
+    [
+        "COPY %s",
+        "%sのCOPY", // ja
+        "COPY %s, line %llu",
+        "COPY %s, ligne %llu", // fr
+        "COPY %s, riga %llu", // it
+        "COPY %s, linha %llu", // pt_BR
+        "COPY %s, line %llu, column %s",
+        "COPY %s, ligne %llu, colonne %s", // fr
+        "COPY %s, riga %llu, colonna %s", // it
+        "COPY %s, linha %llu, coluna %s", // pt_BR
+        "COPY %s, line %llu, column %s: null input",
+        "COPY %s, ligne %llu, colonne %s : NULL en entrée", // fr
+        "COPY %s, riga %llu, colonna %s: input nullo", // it
+        "COPY %s, linha %llu, coluna %s: entrada nula", // pt_BR
+        "%sのCOPY、行 %llu、列 %s", // ja
+        "%sのCOPY、行 %llu", // ja
+        "%sのCOPY、行 %llu、列 %s: null が入力されました", // ja
+        "%s 복사, %llu번째 줄, %s 열", // ko
+        "%s 복사, %llu번째 줄", // ko
+    ];
+
+    /// <summary>Every catalogue's <c>JSON data, line %d: %s%s%s</c>: the JSON parser's frame, everything after the line number the input around the error.</summary>
+    public static readonly IReadOnlyList<string> JsonContextFormats =
+    [
+        "JSON data, line %d: %s%s%s",
+        "JSON-Daten, Zeile %d: %s%s%s", // de
+        "Datos JSON, línea %d: %s%s%s", // es
+        "données JSON, ligne %d : %s%s%s", // fr
+        "data JSON, baris %d : %s%s%s", // id
+        "dati JSON, riga %d: %s%s%s", // it
+        "JSONデータ、%d行目: %s%s%s", // ja
+        "JSON მონაცემი, ხაზი %d: %s%s%s", // ka
+        "JSON 자료, %d 번째 줄: %s%s%s", // ko
+        "Dane JSON, linia %d: %s%s%s", // pl
+        "dado JSON, linha %d: %s%s%s", // pt_BR
+        "данные JSON, строка %d: %s%s%s", // ru
+        "JSON-data, rad %d: %s%s%s", // sv
+        "Дані JSON, рядок %d: %s%s%s", // uk
+        "JSON数据, 行 %d: %s%s%s", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's <c>invalid input syntax for type %s: "%s"</c>: an input function's message, its second slot the rejected value.</summary>
+    public static readonly IReadOnlyList<string> InputSyntaxMessageFormats =
+    [
+        "invalid input syntax for type %s: \"%s\"",
+        "ungültige Eingabesyntax für Typ %s: »%s«", // de
+        "la sintaxis de entrada no es válida para tipo %s: «%s»", // es
+        "syntaxe en entrée invalide pour le type %s : « %s »", // fr
+        "sintaks masukan tidak valid untuk tipe %s : « %s »", // id
+        "sintassi di input non valida per il tipo %s: \"%s\"", // it
+        "\"%s\"型の入力構文が不正です: \"%s\"", // ja
+        "არასწორი შეყვანის სინტაქსი ტიპისთვის %s: \"%s\"", // ka
+        "%s 자료형 대한 잘못된 입력: \"%s\"", // ko
+        "nieprawidłowa składnia wejścia dla typu %s: \"%s\"", // pl
+        "sintaxe de entrada é inválida para tipo %s: \"%s\"", // pt_BR
+        "неверный синтаксис для типа %s: \"%s\"", // ru
+        "ogiltig indatasyntax för type %s: \"%s\"", // sv
+        "%s tipi için geçersiz giriş sözdizimi: \"%s\"", // tr
+        "неприпустимий синтаксис для типу %s: \"%s\"", // uk
+        "无效的类型 %s 输入语法: \"%s\"", // zh_CN
+        "%s型の入力構文が不正です: \"%s\"", // ja
+    ];
+
+    /// <summary>Every catalogue's <c>invalid input syntax for type %s</c>: the JSON parser's message, which carries no value (its DETAIL and CONTEXT do).</summary>
+    public static readonly IReadOnlyList<string> InputSyntaxBareMessageFormats =
+    [
+        "invalid input syntax for type %s",
+        "ungültige Eingabesyntax für Typ %s", // de
+        "sintaxis de entrada no válida para tipo %s", // es
+        "syntaxe en entrée invalide pour le type %s", // fr
+        "sintassi di input non valida per il tipo %s", // it
+        "%s型に対する不正な入力構文", // ja
+        "არასწორი შეყვანის სინტაქსი ტიპისთვის %s", // ka
+        "%s 자료형에 대한 잘못된 입력 구문", // ko
+        "nieprawidłowa składnia wejścia dla typu %s", // pl
+        "sintaxe de entrada inválida para o tipo de dados %s", // pt_BR
+        "неверный синтаксис для типа %s", // ru
+        "ogiltig indatassyntax för typen %s", // sv
+        "%s tipi için geçersiz girdi sözdizimi", // tr
+        "неприпустимий вхідний синтаксис для типу %s", // uk
+        "类型%s的输入语法无效", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's message that quotes the value an input function or a range check rejected, the first
+    /// slot the value: <c>malformed array literal: "%s"</c> (and the record, range and multirange forms),
+    /// <c>value "%s" is out of range for type %s</c>, <c>"%s" is out of range for type double precision</c> (and
+    /// <c>real</c>), and the date and time range checks (<c>date/time field value out of range: "%s"</c>,
+    /// <c>interval field value out of range: "%s"</c>, <c>time zone displacement out of range: "%s"</c>,
+    /// <c>date out of range: "%s"</c>, <c>timestamp out of range: "%s"</c>). Each major version's wording is listed.</summary>
+    public static readonly IReadOnlyList<string> QuotedValueMessageFormats =
+    [
+        "malformed array literal: \"%s\"",
+        "malformed record literal: \"%s\"",
+        "malformed range literal: \"%s\"",
+        "malformed multirange literal: \"%s\"",
+        "value \"%s\" is out of range for type %s",
+        "\"%s\" is out of range for type double precision",
+        "\"%s\" is out of range for type real",
+        "date/time field value out of range: \"%s\"",
+        "interval field value out of range: \"%s\"",
+        "time zone displacement out of range: \"%s\"",
+        "date out of range: \"%s\"",
+        "timestamp out of range: \"%s\"",
+        "fehlerhafte Arraykonstante: »%s«", // de
+        "Wert »%s« ist außerhalb des gültigen Bereichs für Typ %s", // de
+        "date ist außerhalb des gültigen Bereichs: »%s«", // de
+        "Datum/Zeit-Feldwert ist außerhalb des gültigen Bereichs: »%s«", // de
+        "»interval«-Feldwert ist außerhalb des gültigen Bereichs: »%s«", // de
+        "Zeitzonenunterschied ist außerhalb des gültigen Bereichs: »%s«", // de
+        "»%s« ist außerhalb des gültigen Bereichs für Typ real", // de
+        "»%s« ist außerhalb des gültigen Bereichs für Typ double precision", // de
+        "fehlerhafte Multirange-Konstante: »%s«", // de
+        "fehlerhafte Bereichskonstante: »%s«", // de
+        "fehlerhafte Record-Konstante: »%s«", // de
+        "timestamp ist außerhalb des gültigen Bereichs: »%s«", // de
+        "literal de array mal formado: «%s»", // es
+        "el valor «%s» está fuera de rango para el tipo %s", // es
+        "fecha fuera de rango: «%s»", // es
+        "valor de hora/fecha fuera de rango: «%s»", // es
+        "valor de interval fuera de rango: «%s»", // es
+        "desplazamiento de huso horario fuera de rango: «%s»", // es
+        "«%s» está fuera de rango para el tipo real", // es
+        "«%s» está fuera de rango para el tipo double precision", // es
+        "literal de multirango mal formado: «%s»", // es
+        "literal de rango mal formado: «%s»", // es
+        "literal de record mal formado: «%s»", // es
+        "timestamp fuera de rango: «%s»", // es
+        "timestamp en dehors de limites : « %s »", // fr
+        "tableau litéral mal formé : « %s »", // fr
+        "la valeur « %s » est en dehors des limites pour le type %s", // fr
+        "date en dehors des limites : « %s »", // fr
+        "valeur du champ date/time en dehors des limites : « %s »", // fr
+        "valeur du champ interval en dehors des limites : « %s »", // fr
+        "déplacement du fuseau horaire en dehors des limites : « %s »", // fr
+        "« %s » est en dehors des limites du type real", // fr
+        "« %s » est en dehors des limites du type double precision", // fr
+        "litéral multirange mal formé : « %s »", // fr
+        "intervalle litéral mal formé : « %s »", // fr
+        "enregistrement litéral invalide : « %s »", // fr
+        "tableau littéral mal formé : « %s »", // fr
+        "littéral multirange mal formé : « %s »", // fr
+        "intervalle littéral mal formé : « %s »", // fr
+        "enregistrement littéral invalide : « %s »", // fr
+        "literal array salah bentuk: « %s »", // id
+        "tanggal diluar jangkauan: « %s »", // id
+        "nilai field date/time melebihi jangkauan : « %s »", // id
+        "nilai field interval melebihi jangkauan : « %s »", // id
+        "pemindahan zona waktu melebihi jangkauan : « %s »", // id
+        "« %s » diluar jangkauan untuk tipe real", // id
+        "« %s » diluar jangkauan untuk tipe presisi ganda", // id
+        "literal rentang tidak benar: « %s »", // id
+        "literal record cacad: « %s »", // id
+        "timestamp di luar jangkauan: « %s »", // id
+        "il letterale array non è definito in modo corretto: \"%s\"", // it
+        "valore \"%s\" fuori dall'intervallo consentito per il tipo %s", // it
+        "data fuori dall'intervallo consentito: \"%s\"", // it
+        "valore del campo date/time fuori dall'intervallo consentito: \"%s\"", // it
+        "valore del campo interval fuori dall'intervallo consentito: \"%s\"", // it
+        "la differenza di fuso orario è fuori dall'intervallo consentito: \"%s\"", // it
+        "\"%s\" è fuori dall'intervallo consentito per il tipo real", // it
+        "\"%s\" è fuori dall'intervallo consentito per il tipo double precision", // it
+        "letterale multirange non corretto: \"%s\"", // it
+        "letterale di intervallo non definito correttamente: \"%s\"", // it
+        "letterale record non corretto: \"%s\"", // it
+        "timestamp fuori dall'intervallo consentito: \"%s\"", // it
+        "配列リテラルの書式が誤っています: \"%s\"", // ja
+        "値\"%s\"は型%sの範囲外です", // ja
+        "日付が範囲外です: \"%s\"", // ja
+        "日付時刻のフィールドが範囲外です: \"%s\"", // ja
+        "intervalフィールドの値が範囲外です: \"%s\"", // ja
+        "タイムゾーンの置換が範囲外です: \"%s\"", // ja
+        "型realでは\"%s\"は範囲外です", // ja
+        "型double precisionでは\"%s\"は範囲外です", // ja
+        "不正な複範囲リテラル: \"%s\"", // ja
+        "不正な範囲リテラル: \"%s\"", // ja
+        "おかしなレコードリテラルです: \"%s\"", // ja
+        "timestampが範囲外です: \"%s\"", // ja
+        "値\"%s\"は%s型の範囲外です", // ja
+        "\"%s\"はreal型の範囲外です", // ja
+        "\"%s\"はdouble precision型の範囲外です", // ja
+        "不正な複範囲型リテラル: \"%s\"", // ja
+        "不正な形式のレコードリテラル: \"%s\"", // ja
+        "თარიღი დიაპაზონს გარეთაა: \"%s\"", // ka
+        "დროის/თარიღის ველის მნიშვნელობა დიაპაზონს გარეთაა: \"%s\"", // ka
+        "ინტერვალის ველის მნიშვნელობა დიაპაზონს გარეთაა: \"%s\"", // ka
+        "%s დიაპაზონს გარეთაა ტიპისთვის: real", // ka
+        "%s დიაპაზონს გარეთაა ტიპისთვის: double precision", // ka
+        "დიაპაზონის არასწორი სტრიქონი: %s", // ka
+        "ჩანაწერის არასწორი სტრიქონი: %s", // ka
+        "დროის შტამპი დიაპაზონს გარეთაა: \"%s\"", // ka
+        "비정상적인 배열 문자: \"%s\"", // ko
+        "입력한 \"%s\" 값은 %s 자료형 범위를 초과했습니다", // ko
+        "날짜 범위가 벗어났음: \"%s\"", // ko
+        "날짜/시간 필드의 값이 범위를 벗어남: \"%s\"", // ko
+        "interval 필드의 값이 범위를 벗어남: \"%s\"", // ko
+        "표준시간대 범위를 벗어남: \"%s\"", // ko
+        "\"%s\"는 real 자료형의 범위를 벗어납니다.", // ko
+        "\"%s\"는 double precision 자료형의 범위를 벗어납니다.", // ko
+        "비정상적인 multirange 문자열: \"%s\"", // ko
+        "비정상적인 range 문자: \"%s\"", // ko
+        "비정상적인 레코드 문자: \"%s\"", // ko
+        "타임스탬프 값이 범위를 벗어났음: \"%s\"", // ko
+        "nieprawidłowy literał tablicy: \"%s\"", // pl
+        "wartość \"%s\" jest poza zakresem dla typu %s", // pl
+        "data poza zakresem: \"%s\"", // pl
+        "wartość pola daty/czasu poza zakresem: \"%s\"", // pl
+        "wartość pola interwału poza zakresem: \"%s\"", // pl
+        "przesunięcie strefy czasowej poza zakresem: \"%s\"", // pl
+        "\"%s\" jest poza zakresem dla typu liczb rzeczywistych", // pl
+        "\"%s\" jest poza zakresem dla typu liczb podwójnej precyzji", // pl
+        "nieprawidłowy literał przedziału: \"%s\"", // pl
+        "nieprawidłowy literał rekordu: \"%s\"", // pl
+        "znacznik czasu poza zakresem: \"%s\"", // pl
+        "timestamp fora do intervalo: \"%s\"", // pt_BR
+        "matriz mal formada: \"%s\"", // pt_BR
+        "o valor \"%s\" está fora do intervalo para o tipo de dados %s", // pt_BR
+        "date fora do intervalo: \"%s\"", // pt_BR
+        "valor do campo date/time está fora do intervalo: \"%s\"", // pt_BR
+        "valor do campo interval fora do intervalo: \"%s\"", // pt_BR
+        "deslocamento de zona horária fora do intervalo: \"%s\"", // pt_BR
+        "\"%s\" está fora do intervalo para tipo real", // pt_BR
+        "\"%s\" está fora do intervalo para tipo double precision", // pt_BR
+        "literal multi-intervalo malformado: \"%s\"", // pt_BR
+        "range mal formado: \"%s\"", // pt_BR
+        "ошибочный литерал массива: \"%s\"", // ru
+        "значение \"%s\" вне диапазона для типа %s", // ru
+        "дата вне диапазона: \"%s\"", // ru
+        "значение поля типа date/time вне диапазона: \"%s\"", // ru
+        "значение поля interval вне диапазона: \"%s\"", // ru
+        "смещение часового пояса вне диапазона: \"%s\"", // ru
+        "\"%s\" вне диапазона для типа real", // ru
+        "\"%s\" вне диапазона для типа double precision", // ru
+        "ошибочный литерал мультидиапазона: \"%s\"", // ru
+        "ошибочный литерал диапазона: \"%s\"", // ru
+        "ошибка в литерале записи: \"%s\"", // ru
+        "timestamp вне диапазона: \"%s\"", // ru
+        "felaktig array-literal: \"%s\"", // sv
+        "värdet \"%s\" är utanför giltigt intervall för typen %s", // sv
+        "datum utanför giltigt intervall \"%s\"", // sv
+        "datum/tid-värde utanför giltigt område: \"%s\"", // sv
+        "intervall-värde utanför giltigt område: \"%s\"", // sv
+        "tidszonförskjutning itanför sitt intervall: \"%s\"", // sv
+        "\"%s\" är utanför giltigt intervall för typen real", // sv
+        "\"%s\" är utanför giltigt intervall för typen double precision", // sv
+        "trasig multirange-litteral: \"%s\"", // sv
+        "trasig range-litteral: \"%s\"", // sv
+        "felaktig postliteral: \"%s\"", // sv
+        "timestamp utanför giltigt intervall: \"%s\"", // sv
+        "array literal bozuk: \"%s\"", // tr
+        "date kapsam dışıdır: \"%s\"", // tr
+        "date/time alan değieri kapsam dışıdır: \"%s\"", // tr
+        "interval alan değeri kapsam dışında: \"%s\"", // tr
+        "yer değiştirme değeri kapsam dışında: \"%s\"", // tr
+        "real tipi için kapsam dışı bir değer \"%s\"", // tr
+        "double precision tipi için kapsam dışı bir değer \"%s\"", // tr
+        "aralık (range) literali bozuk: \"%s\"", // tr
+        "hatalı değer: \"%s\"", // tr
+        "timestamp kapsam dışıdır: \"%s\"", // tr
+        "неправильний літерал масиву: \"%s\"", // uk
+        "значення \"%s\" поза діапазоном для типу %s", // uk
+        "дата поза діапазоном: \"%s\"", // uk
+        "значення поля типу дата/час поза діапазоном: \"%s\"", // uk
+        "значення поля типу інтервал, поза діапазоном: \"%s\"", // uk
+        "зміщення часового поясу, поза діапазоном: \"%s\"", // uk
+        "\"%s\" поза діапазоном для дійсного типу", // uk
+        "\"%s\" поза діапазоном для типу double precision", // uk
+        "неправильний багатодіапазонний літерал: \"%s\"", // uk
+        "неправильний літерал діапазону: \"%s\"", // uk
+        "невірно сформований літерал запису: \"%s\"", // uk
+        "позначка часу поза діапазоном: \"%s\"", // uk
+        "有缺陷的数组常量:\"%s\"", // zh_CN
+        "值 \"%s\" 超出类型 %s 的范围", // zh_CN
+        "时间戳超出范围: \"%s\"", // zh_CN
+        "日期/时间值超出范围: \"%s\"", // zh_CN
+        "间隔字段超出范围: \"%s\"", // zh_CN
+        "时间区域置换超出范围: \"%s\"", // zh_CN
+        "\"%s\" 超出实数类型的范围", // zh_CN
+        "\"%s\" 超出双精度类型的范围", // zh_CN
+        "有缺陷的范围字串:\"%s\"", // zh_CN
+        "有缺陷的记录常量: \"%s\"", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's <c>invalid input value for enum %s: "%s"</c>: the enum's name, then the rejected value.</summary>
+    public static readonly IReadOnlyList<string> EnumInputMessageFormats =
+    [
+        "invalid input value for enum %s: \"%s\"",
+        "ungültiger Eingabewert für Enum %s: »%s«", // de
+        "la sintaxis de entrada no es válida para el enum %s: «%s»", // es
+        "valeur en entrée invalide pour le enum %s : « %s »", // fr
+        "nilai masukan tidak valid untuk enum %s : « %s »", // id
+        "la sintassi per l'enumerazione %s non è valida: \"%s\"", // it
+        "列挙型%sの不正な入力構文: \"%s\"", // ja
+        "არასწორი შეყვანილი მნიშვნელობა ჩამონათვალისთვის %s: \"%s\"", // ka
+        "%s 열거형의 입력 값이 잘못됨: \"%s\"", // ko
+        "nieprawidłowa wartość wejścia dla enumeracji %s: \"%s\"", // pl
+        "valor de entrada é inválido para enum %s: \"%s\"", // pt_BR
+        "неверное значение для перечисления %s: \"%s\"", // ru
+        "ogiltigt indata-värde för enum %s: \"%s\"", // sv
+        "%s enum tipi için geçersiz değer: \"%s\"", // tr
+        "неприпустиме вхідне значення для переліку %s: \"%s\"", // uk
+        "对于枚举%s的输入值无效: \"%s\"", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's DETAIL for a JSON parser error that quotes the token it stopped at (<c>Token "%s" is
+    /// invalid.</c>, <c>Expected JSON value, but found "%s".</c> and its siblings, <c>Escape sequence "\%s" is
+    /// invalid.</c>), the one slot the token. Each major version's wording is listed (the token's placeholder is
+    /// <c>%s</c> in 13 through 16 and <c>%.*s</c> in 17 and 18; both write the same text).</summary>
+    public static readonly IReadOnlyList<string> JsonTokenDetailFormats =
+    [
+        "Token \"%s\" is invalid.",
+        "Expected end of input, but found \"%s\".",
+        "Expected array element or \"]\", but found \"%s\".",
+        "Expected \",\" or \"]\", but found \"%s\".",
+        "Expected \":\", but found \"%s\".",
+        "Expected JSON value, but found \"%s\".",
+        "Expected string, but found \"%s\".",
+        "Expected string or \"}\", but found \"%s\".",
+        "Expected \",\" or \"}\", but found \"%s\".",
+        "Escape sequence \"\\%s\" is invalid.",
+        "Escape-Sequenz »\\%s« ist nicht gültig.", // de
+        "Ende der Eingabe erwartet, aber »%s« gefunden.", // de
+        "Array-Element oder »]« erwartet, aber »%s« gefunden.", // de
+        "»,« oder »]« erwartet, aber »%s« gefunden.", // de
+        "»:« erwartet, aber »%s« gefunden.", // de
+        "JSON-Wert erwartet, aber »%s« gefunden.", // de
+        "Zeichenkette oder »}« erwartet, aber »%s« gefunden.", // de
+        "»,« oder »}« erwartet, aber »%s« gefunden.", // de
+        "Zeichenkette erwartet, aber »%s« gefunden.", // de
+        "Token »%s« ist ungültig.", // de
+        "La secuencia de escape «\\%s» no es válida.", // es
+        "Se esperaba el fin de la entrada, se encontró «%s».", // es
+        "Se esperaba un elemento de array o «]», se encontró «%s».", // es
+        "Se esperaba «,» o «]», se encontró «%s».", // es
+        "Se esperaba «:», se encontró «%s».", // es
+        "Se esperaba un valor JSON, se encontró «%s».", // es
+        "Se esperaba una cadena o «}», se encontró «%s».", // es
+        "Se esperaba «,» o «}», se encontró «%s».", // es
+        "Se esperaba una cadena, se encontró «%s».", // es
+        "La secuencia de escape «%s» no es válida.", // es
+        "El elemento «%s» no es válido.", // es
+        "La séquence d'échappement « \\%s » est invalide.", // fr
+        "Attendait une fin de l'entrée, mais a trouvé « %s ».", // fr
+        "Élément de tableau ou « ] » attendu, mais « %s » trouvé.", // fr
+        "« , » ou « ] » attendu, mais « %s » trouvé.", // fr
+        "« : » attendu, mais « %s » trouvé.", // fr
+        "Valeur JSON attendue, mais « %s » trouvé.", // fr
+        "Chaîne ou « } » attendu, mais « %s » trouvé.", // fr
+        "« , » ou « } » attendu, mais « %s » trouvé.", // fr
+        "Chaîne attendue, mais « %s » trouvé.", // fr
+        "Le jeton « %s » n'est pas valide.", // fr
+        "Chaîne ou « } » attendu, mais « %s » trouvé", // fr
+        "urutan escape « \\%s » tidak valid.", // id
+        "Diharapkan akhir masukan, tapi mendapatkan « %s ».", // id
+        "Diharapkan nilai JSON, tapi mendapatkan « %s ».", // id
+        "Diharapkan string, tapi didapatkan « %s ».", // id
+        "Diharapkan elemen array atau « ] », namun menemukan « %s »", // id
+        "« , » ou « ] » diharapkan, namun menemukan « %s »", // id
+        "String « } » diharapkan, namun menemukan « %s »", // id
+        "« : » diharapkan, namun menemukan « %s »", // id
+        "« , » atau « } » diharapkan, namun menemukan « %s » trouvé", // id
+        "Token « %s » tidak valid", // id
+        "La sequenza di escape \"\\%s\" non è valida.", // it
+        "Era prevista la fine dell'input, trovato \"%s\" invece.", // it
+        "Era previsto un elemento di array oppure \"]\", trovato \"%s\" invece.", // it
+        "Era previsto \",\" oppure \"]\", trovato \"%s\" invece.", // it
+        "Era previsto \":\", trovato \"%s\" invece.", // it
+        "Era previsto un valore JSON, trovato \"%s\" invece.", // it
+        "Era prevista una stringa oppure \"}\", trovato \"%s\" invece.", // it
+        "Era previsto \",\" oppure \"}\", trovato \"%s\" invece.", // it
+        "Era prevista una stringa, trovato \"%s\" invece.", // it
+        "Il token \"%s\" non è valido.", // it
+        "エスケープシーケンス\"\\%s\"は不正です。", // ja
+        "入力の終端を想定していましたが、\"%s\"でした。", // ja
+        "配列要素または\"]\"を想定していましたが、\"%s\"でした。", // ja
+        "\",\"または\"]\"を想定していましたが、\"%s\"でした。", // ja
+        "\":\"を想定していましたが、\"%s\"でした。", // ja
+        "JSON値を想定していましたが、\"%s\"でした。", // ja
+        "文字列または\"}\"を想定していましたが、\"%s\"でした。", // ja
+        "\",\"または\"}\"を想定していましたが、\"%s\"でした。", // ja
+        "文字列を想定していましたが、\"%s\"でした。", // ja
+        "トークン\"%s\"は不正です。", // ja
+        "სპეციალური მიმდევრობა \"\\%s\" არასწორია.", // ka
+        "მოველოდი შეყვანის დასასრულს, მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი მასივის ელემენტს ან \"]\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი \",\" ან \"]\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი \":\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი JSON მნიშვნელობას. მივიღე \"%s\".", // ka
+        "მოველოდი სტრიქონს ან \"}\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი \",\", ან \"}\", მაგრამ მივიღე \"%s\".", // ka
+        "მოველოდი სტრიქონს, მაგრამ მივიღე \"%s\".", // ka
+        "კოდი არასწორია: %s.", // ka
+        "잘못된 이스케이프 조합: \"\\%s\"", // ko
+        "입력 자료의 끝을 기대했는데, \"%s\" 값이 더 있음.", // ko
+        "배열 요소나 \"]\" 가 필요한데 \"%s\"이(가) 있음", // ko
+        "\",\" 또는 \"]\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "\":\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "JSON 값을 기대했는데, \"%s\" 값임", // ko
+        "문자열이나 \"}\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "\",\" 또는 \"}\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "문자열 값을 기대했는데, \"%s\" 값임", // ko
+        "\"]\" 가 필요한데 \"%s\"이(가) 있음", // ko
+        "\"}\"가 필요한데 \"%s\"이(가) 있음", // ko
+        "잘못된 토큰: \"%s\"", // ko
+        "Sekwencja ucieczki \"\\%s\" nie jest poprawna.", // pl
+        "Oczekiwano zakończenia na wejściu, znaleziono \"%s\".", // pl
+        "Oczekiwano wartości JSON, znaleziono \"%s\".", // pl
+        "Oczekiwano ciągu znaków, znaleziono \"%s\".", // pl
+        "Oczekiwano elementu tablicy lub \"]\", znaleziono \"%s\".", // pl
+        "Oczekiwano \",\" lub \"]\", znaleziono \"%s\".", // pl
+        "Oczekiwano ciągu znaków lub \"}\", znaleziono \"%s\".", // pl
+        "Oczekiwano \":\", znaleziono \"%s\".", // pl
+        "Oczekiwano \",\" lub \"}\", znaleziono \"%s\".", // pl
+        "Token \"%s\" jest niepoprawny.", // pl
+        "A sequência de escape \"\\%s\" não é válida.", // pt_BR
+        "Esperado o fim da entrada, mas encontrado \"%s\".", // pt_BR
+        "Esperado elemento da matriz ou \"]\", mas encontrado \"%s\".", // pt_BR
+        "Esperado \",\" ou \"]\", mas encontrado \"%s\".", // pt_BR
+        "Esperado \":\", mas encontrado \"%s\".", // pt_BR
+        "Esperado valor JSON, mas encontrado \"%s\".", // pt_BR
+        "Esperada uma cadeia de caracteres ou \"}\", mas encontrado \"%s\".", // pt_BR
+        "Esperado \",\" ou \"}\", mas encontrado \"%s\".", // pt_BR
+        "Esperada uma cadeia de caracteres, mas encontrado \"%s\".", // pt_BR
+        "O elemento \"%s\" não é válido.", // pt_BR
+        "Неверная спецпоследовательность: \"\\%s\".", // ru
+        "Ожидался конец текста, но обнаружено продолжение \"%s\".", // ru
+        "Ожидался элемент массива или \"]\", но обнаружено \"%s\".", // ru
+        "Ожидалась \",\" или \"]\", но обнаружено \"%s\".", // ru
+        "Ожидалось \":\", но обнаружено \"%s\".", // ru
+        "Ожидалось значение JSON, но обнаружено \"%s\".", // ru
+        "Ожидалась строка или \"}\", но обнаружено \"%s\".", // ru
+        "Ожидалась \",\" или \"}\", но обнаружено \"%s\".", // ru
+        "Ожидалась строка, но обнаружено \"%s\".", // ru
+        "Ошибочный элемент \"%s\".", // ru
+        "Escape-sekvens \"\\%s\" är ogiltig.", // sv
+        "Förväntade slut på indata, men hittade \"%s\".", // sv
+        "Färväntade array-element eller \"]\", men hittade \"%s\".", // sv
+        "Förväntade \",\" eller \"]\", men hittade \"%s\".", // sv
+        "Förväntade sig \":\" men hittade \"%s\".", // sv
+        "Förväntade JSON-värde, men hittade \"%s\".", // sv
+        "Färväntade sträng eller \"}\", men hittade \"%s\".", // sv
+        "Förväntade sig \",\" eller \"}\" men hittade \"%s\".", // sv
+        "Förväntade sträng, men hittade \"%s\".", // sv
+        "Token \"%s\" är ogiltig.", // sv
+        "Неприпустима спеціальна послідовність \"\\%s\".", // uk
+        "Очікувався кінець введення, але знайдено \"%s\".", // uk
+        "Очікувався елемент масиву або \"]\", але знайдено \"%s\".", // uk
+        "Очікувалось \",\" або \"]\", але знайдено \"%s\".", // uk
+        "Очікувалось \":\", але знайдено \"%s\".", // uk
+        "Очікувалось значення JSON, але знайдено \"%s\".", // uk
+        "Очікувався рядок або \"}\", але знайдено \"%s\".", // uk
+        "Очікувалось \",\" або \"}\", але знайдено \"%s\".", // uk
+        "Очікувався рядок, але знайдено \"%s\".", // uk
+        "Неприпустимий маркер \"%s\".", // uk
+        "转义序列 \"\\%s\" 无效.", // zh_CN
+        "期望输入结束，结果发现是\"%s\".", // zh_CN
+        "期望 是JSON值, 但结果发现是\"%s\".", // zh_CN
+        "期望是字符串, 但发现结果是\"%s\".", // zh_CN
+        "期望为数组元素或者\"]\"，但发现结果是\"%s\".", // zh_CN
+        "期望是\",\" 或 \"]\"，但发现结果是\"%s\".", // zh_CN
+        "期望是字符串或\"}\"，但发现结果是\"%s\".", // zh_CN
+        "期望得到 \":\"，但发现结果是\"%s\".", // zh_CN
+        "期望是 \",\" 或 \"}\"，但发现结果是\"%s\".", // zh_CN
+        "令牌 \"%s\" 无效.", // zh_CN
+    ];
+
+    /* ── Row values in PostgreSQL's own fixed formats: the one exception to #3944 (see the type's summary). ── */
+
+    /// <summary>What a field becomes when PostgreSQL writes row values into fields of its kind and this build reads no
+    /// form for it: its SQLSTATE names the class (<see cref="ValueDetailStates"/>, <see cref="ValueMessageStates"/>),
+    /// or the text opens like one of the forms without matching it whole. Nothing of it is kept, the way a line under
+    /// a field label a translated <c>lc_messages</c> writes is withheld rather than read as prose.</summary>
+    public const string WithheldValues = "<withheld: this text carries row values in a shape this build does not read>";
+
+    /// <summary>The SQLSTATEs whose DETAIL PostgreSQL writes row values into (errcodes.txt): not_null_violation,
+    /// foreign_key_violation, unique_violation, check_violation and exclusion_violation, whose DETAIL is one of the
+    /// <c>Key ...</c> / <c>Failing row ...</c> forms below; and invalid_text_representation, whose JSON parser writes
+    /// the offending token into its DETAIL. A DETAIL under one of these that matches no form is withheld.</summary>
+    public static readonly IReadOnlyList<string> ValueDetailStates = ["23502", "23503", "23505", "23514", "23P01", "22P02"];
+
+    /// <summary>The SQLSTATE whose message PostgreSQL writes the rejected value into: invalid_text_representation
+    /// (<c>invalid input syntax for type %s: "%s"</c>, the <c>malformed ... literal: "%s"</c> family, and
+    /// <c>invalid input value for enum</c>). A message under it that matches no form is withheld. The messages that
+    /// carry a value under other SQLSTATEs (<see cref="QuotedValueMessageFormats"/>) are read by their text alone,
+    /// so a log prefix with no <c>%e</c> keeps no more of them than one with it: a message opening like one of those
+    /// forms and matching none whole is withheld too.</summary>
+    public static readonly IReadOnlyList<string> ValueMessageStates = ["22P02"];
+
+    /* A placeholder in one of the value forms: %s, %d or %llu in order, or %n$s where a catalogue reorders them. */
+    private static readonly Regex s_valuePlaceholder = new(
+        @"%(?:(?<position>[0-9])\$)?(?<spec>llu|d|s)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
+
+    /// <summary>Which of a form's slots carry values, and in what inner shape.</summary>
+    private enum ValueSlot
+    {
+        /// <summary>Every slot is an index key, <c>(columns)=(values)</c>; the values are masked and the columns kept,
+        /// and two keys must name the same columns (they are of one index).</summary>
+        Key,
+
+        /// <summary>The second slot is the key's values, the first its columns and the third the table.</summary>
+        KeyPair,
+
+        /// <summary>The one slot is the whole row, <c>(values)</c>.</summary>
+        Row,
+
+        /// <summary>The one slot is the partition key, <c>(columns) = (values)</c>.</summary>
+        PartitionKey,
+
+        /// <summary>The third slot is the input line (after the relation and the line number).</summary>
+        CopyLine,
+
+        /// <summary>The fourth slot is one column's input (after the relation, the line number and the column).</summary>
+        CopyColumn,
+
+        /// <summary>Every slot after the line number is the input around the error.</summary>
+        Json,
+
+        /// <summary>The second slot is the rejected value, the first the type's name.</summary>
+        Input,
+
+        /// <summary>The first slot is the value; a later slot, when there is one, is a name (a type's).</summary>
+        Literal,
+
+        /// <summary>No slot carries a value: the form is recognized so that it is kept, not withheld.</summary>
+        None,
+    }
+
+    /// <summary>One value form, compiled: the pattern of a whole field in it, and the literal it opens with.
+    ///
+    /// <para><b>No slot backtracks into another.</b> Each slot before the last ends at the FIRST place the text that
+    /// follows it begins (a tempered, atomic run: <c>(?&gt;(?:(?!separator).)*)</c>), and the last slot, which
+    /// <c>$</c> pins to the field's end, takes the rest. A slot can therefore be read in one pass whatever the
+    /// text holds, where lazy slots tried every split of every separator the text repeated. The two value slots that
+    /// run to the LAST place their separator appears (<see cref="ValueSlot.KeyPair"/>, <see cref="ValueSlot.Literal"/>)
+    /// are one atomic scan back from the field's end, linear for the same reason. Text that repeats a
+    /// separator and so does not read as the form whole matches nothing, and is withheld (<see cref="OpensValueForm"/>,
+    /// <see cref="InValueClass"/>) rather than read some other way.</para></summary>
+    private sealed class ValueForm
+    {
+        public required TimeBoundPattern Whole { get; init; }
+
+        /// <summary>The literal before the form's first slot, when it has a letter in it; empty otherwise (a
+        /// catalogue that writes a slot first, or opens with a bare quote), so it marks nothing.</summary>
+        public required string Head { get; init; }
+
+        /// <summary>Whether the form is a message's, which a verbose log's SQLSTATE may precede.</summary>
+        public required bool Message { get; init; }
+
+        /// <summary>Two keys of one index must name the same columns; different ones mean the text is not what
+        /// PostgreSQL wrote, and it is withheld.</summary>
+        public required bool SameNames { get; init; }
+
+        /// <summary>A slot that ends where <paramref name="separator"/> (a pattern) first appears.</summary>
+        private static string Until(string group, string separator, string atom = ".") =>
+            $"(?<{group}>(?>(?:(?!{separator}){atom})*))";
+
+        /// <summary>The form's last slot: whatever is left of the field, up to the text that ends the form.</summary>
+        private static string Rest(string group, string atom = ".") => $"(?<{group}>{atom}*)";
+
+        /// <summary>A slot that ends where <paramref name="separator"/> (a pattern) LAST appears: one atomic run
+        /// that takes everything to the end of the field and gives back only as far as the last place the separator
+        /// begins (<c>(?&gt;.*(?=separator))</c>). The scan back is a single pass, O(field length x separator length),
+        /// whatever the text repeats, and being atomic it never offers an earlier separator to the slots after it:
+        /// a field that does not read as the form with its last separator does not read as it at all, and is withheld.
+        /// The separator itself is matched by the literal that follows the slot.</summary>
+        private static string Greedy(string group, string separator) =>
+            $"(?<{group}>(?>.*(?={separator})))";
+
+        /// <summary>The form's longest literal that has a letter in it, kept only for a form with no <see cref="Head"/>
+        /// (the catalogues that write a slot first): text holding it is a field of this form in a wording this build
+        /// does not list (another major version's, or a minor release's). Empty when the form has a head.
+        ///
+        /// <para><b>A fallback that can only add withholding.</b> It is tried after the forms have all failed to match
+        /// whole, and what it adds is a form's text withheld, never a form's text kept: it cannot make a field that
+        /// was withheld read as kept. Its coverage is the one literal, verbatim, wherever it appears. A wording of another
+        /// major version that changes any character inside that literal, or a value-first message cut inside its value,
+        /// does not contain it and is kept when no SQLSTATE puts the field in the class. A literal short in letters
+        /// (the ko COPY form's five characters) is found in unrelated text too, and a CONTEXT line holding it is
+        /// withheld with everything after it: the fallback may withhold more than the form's text, and does not
+        /// cover every wording.</para></summary>
+        public required string Tail { get; init; }
+
+        /// <summary>Whether a slot of the form carries a value (false for the forms recognized only to be kept).</summary>
+        public required bool Carries { get; init; }
+
+        public static ValueForm Compile(string format, ValueSlot slot, bool message)
+        {
+            var placeholders = s_valuePlaceholder.Matches(format);
+            var literals = new List<string>(placeholders.Count + 1);
+            var from = 0;
+            foreach (Match placeholder in placeholders)
+            {
+                literals.Add(format[from..placeholder.Index]);
+                from = placeholder.Index + placeholder.Length;
+            }
+
+            literals.Add(format[from..]);
+
+            var pattern = new StringBuilder(message ? StatePattern : "^");
+            var argument = 0;
+            string? head = null;
+            var keys = 0;
+            var valueOpened = false;
+            var tail = string.Empty;
+            for (var at = 0; at < placeholders.Count; at++)
+            {
+                var placeholder = placeholders[at];
+                var literal = literals[at];
+                head ??= literal;
+                tail = LongerLetteredLiteral(tail, literal);
+                pattern.Append(Regex.Escape(literal));
+
+                /* What the slot ends at, in the text: the literal that follows the placeholder; the form's end when
+                   no slot follows. */
+                var last = at == placeholders.Count - 1;
+                var next = Regex.Escape(literals[at + 1]);
+                var position = placeholder.Groups["position"];
+                argument = position.Success ? position.Value[0] - '0' : argument + 1;
+                if (placeholder.Groups["spec"].Value != "s")
+                {
+                    pattern.Append("(?<name>[0-9]+)");
+                }
+                else
+                {
+                    switch (slot)
+                    {
+                        case ValueSlot.Key:
+                            pattern.Append(@"\(").Append(Until("name", @"\)=\(")).Append(@"\)=\(")
+                                .Append(last ? Rest("value") : Until("value", @"\)" + next)).Append(@"\)");
+                            keys++;
+                            break;
+                        case ValueSlot.CopyLine when argument == 3:
+                        case ValueSlot.CopyColumn when argument == 4:
+                        case ValueSlot.Input when argument == 2:
+                            pattern.Append(last ? Rest("value") : Until("value", next));
+                            break;
+                        case ValueSlot.KeyPair when argument == 2:
+                            /* A value with a name slot after it (the table's) runs to the LAST place that text appears:
+                               a value holding it would otherwise leave its tail in the name. */
+                            pattern.Append(last ? Rest("value") : Greedy("value", next));
+                            break;
+                        case ValueSlot.Literal when argument == 1:
+                            pattern.Append(last ? Rest("value") : Greedy("value", next));
+                            break;
+                        case ValueSlot.Row:
+                            pattern.Append(@"\(").Append(last ? Rest("value") : Until("value", @"\)" + next)).Append(@"\)");
+                            break;
+                        case ValueSlot.PartitionKey:
+                            pattern.Append(@"\(").Append(Until("name", @"\) = \(")).Append(@"\) = \(")
+                                .Append(last ? Rest("value") : Until("value", @"\)" + next)).Append(@"\)");
+                            break;
+                        case ValueSlot.Json when argument >= 2:
+                            /* The three slots are adjacent: one value spans them. */
+                            if (!valueOpened)
+                            {
+                                pattern.Append(Rest("value"));
+                                valueOpened = true;
+                            }
+
+                            break;
+                        default:
+                            /* A form with no value slot must not read a whole value-bearing line as its one name
+                               (`COPY %s` over `COPY t, line 1: "..."`), so its names take no colon, quote or line
+                               break; a relation named with one falls to the head rule and is withheld. */
+                            var atom = slot == ValueSlot.None ? @"[^\n:""]" : ".";
+                            pattern.Append(last ? Rest("name", atom) : Until("name", next, atom));
+                            break;
+                    }
+                }
+            }
+
+            pattern.Append(Regex.Escape(literals[^1])).Append(message ? s_positionPattern : "$");
+            head ??= format;
+            tail = LongerLetteredLiteral(tail, literals[^1]);
+            var headed = head.Any(char.IsLetter);
+            return new ValueForm
+            {
+                Whole = new TimeBoundPattern(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline, s_matchTimeout),
+                Head = headed ? head : string.Empty,
+                Message = message,
+                SameNames = keys > 1,
+                Tail = headed ? string.Empty : tail,
+                Carries = slot != ValueSlot.None,
+            };
+        }
+
+        private static string LongerLetteredLiteral(string longest, string literal) =>
+            literal.Length > longest.Length && literal.Any(char.IsLetter) ? literal : longest;
+
+        /// <summary>The text with every value slot replaced by <c>?</c>; <see cref="WithheldValues"/> when its keys
+        /// name different columns; null when it is not in this form.</summary>
+        public string? Apply(string text)
+        {
+            /* A form that opens with words is only tried on text that opens with them (after a verbose log's
+               SQLSTATE, for a message): the pattern could not match otherwise, and skipping it skips the read. */
+            if (Head.Length > 0 && !text.AsSpan(Message ? StatePrefixLength(text) : 0).StartsWith(Head, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var match = Whole.Match(text);
+            if (!match.Success)
+            {
+                return null;
+            }
+
+            if (SameNames)
+            {
+                var names = match.Groups["name"].Captures;
+                for (var k = 1; k < names.Count; k++)
+                {
+                    if (!string.Equals(names[k].Value, names[0].Value, StringComparison.Ordinal))
+                    {
+                        return WithheldValues;
+                    }
+                }
+            }
+
+            var values = match.Groups["value"].Captures;
+            if (values.Count == 0)
+            {
+                return text;
+            }
+
+            var result = new StringBuilder(text.Length);
+            var at = 0;
+            foreach (Capture value in values)
+            {
+                result.Append(text, at, value.Index - at).Append('?');
+                at = value.Index + value.Length;
+            }
+
+            return result.Append(text, at, text.Length - at).ToString();
+        }
+    }
+
+    /// <summary>The text in the first form that matches it whole, its values masked (or withheld); null when none
+    /// does.</summary>
+    private static string? MaskValues(string text, ValueForm[] forms) => MaskValues(text, forms, out _);
+
+    /// <param name="carriesValue">Whether the form that matched has a slot that carries a value.</param>
+    private static string? MaskValues(string text, ValueForm[] forms, out bool carriesValue)
+    {
+        foreach (var form in forms)
+        {
+            if (form.Apply(text) is { } masked)
+            {
+                carriesValue = form.Carries;
+                return masked;
+            }
+        }
+
+        carriesValue = false;
+        return null;
+    }
+
+    /// <summary>Whether the text opens with one of the forms' heads (after a verbose log's SQLSTATE, for a message)
+    /// without matching any of them whole: a form this build reads, in a shape it does not. A form with no head (its
+    /// catalogue writes a slot first) is recognized by its longest lettered literal anywhere in the text instead, so
+    /// another major version's wording of it is withheld, not kept.</summary>
+    private static bool OpensValueForm(string text, ValueForm[] forms, bool message)
+    {
+        var span = text.AsSpan(message ? StatePrefixLength(text) : 0);
+        foreach (var form in forms)
+        {
+            if (form.Head.Length > 0
+                ? span.StartsWith(form.Head, StringComparison.Ordinal)
+                : form.Tail.Length > 0 && span.Contains(form.Tail, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool InValueClass(string? sqlState, IReadOnlyList<string> states) =>
+        sqlState is not null && states.Contains(sqlState);
 
     /* A scanner's error, in every language PostgreSQL 18 ships it in (#4006). The scanner writes "<what> at or near
        "<text>"" (scanner_yyerror, plpgsql_yyerror), jsonpath's grammar "... of jsonpath input", and past the last
@@ -437,7 +1597,7 @@ public static class PgLogTextRedactor
 
     /// <summary>Every catalogue's <c>%s at or near "%s"</c> (#4006): what the token of a syntax error is written
     /// inside, in the postgres and plpgsql domains.</summary>
-    public static readonly IReadOnlyList<string> ScannerErrorFormats =
+    public static readonly IReadOnlyList<string> LexerErrorFormats =
     [
         "%s at or near \"%s\"",
         "%s bei »%s«", // de
@@ -655,7 +1815,8 @@ public static class PgLogTextRedactor
     /* A placeholder in a catalogue format: %s in order, or %1$s / %2$s where a catalogue reorders them. */
     private static readonly Regex s_formatArgument = new(
         @"%(?:(?<position>[12])\$)?s",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant,
+        s_matchTimeout);
 
     /* The head is one of the scanner's fixed messages, so it holds no newline and no quote a token is written
        inside. Holding one is what makes a head "not clean" (#3996's round-2 review): `improper use of "*"` puts a
@@ -676,18 +1837,46 @@ public static class PgLogTextRedactor
     private static readonly MessageShape[] s_tokenShapes =
     [
         .. JsonpathErrorFormats.Select(f => MessageShape.Compile(f, jsonpath: true)),
-        .. ScannerErrorFormats.Select(f => MessageShape.Compile(f, jsonpath: false)),
+        .. LexerErrorFormats.Select(f => MessageShape.Compile(f, jsonpath: false)),
     ];
 
     private static readonly MessageShape[] s_endShapes =
         [.. EndOfInputFormats.Select(f => MessageShape.Compile(f, jsonpath: false))];
+
+    /* Compiled after s_positionPattern, which the message forms end in: static fields initialize in order. */
+    private static readonly ValueForm[] s_detailForms =
+    [
+        .. JsonTokenDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.Literal, message: false)),
+        .. KeyExistsDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.Key, message: false)),
+        .. KeyConflictDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.Key, message: false)),
+        .. KeyReferenceDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.KeyPair, message: false)),
+        .. KeyReferenceUnreadableDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.None, message: false)),
+        .. FailingRowDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.Row, message: false)),
+        .. PartitionKeyDetailFormats.Select(f => ValueForm.Compile(f, ValueSlot.PartitionKey, message: false)),
+    ];
+
+    private static readonly ValueForm[] s_contextForms =
+    [
+        .. CopyLineContextFormats.Select(f => ValueForm.Compile(f, ValueSlot.CopyLine, message: false)),
+        .. CopyColumnContextFormats.Select(f => ValueForm.Compile(f, ValueSlot.CopyColumn, message: false)),
+        .. CopyBareContextFormats.Select(f => ValueForm.Compile(f, ValueSlot.None, message: false)),
+        .. JsonContextFormats.Select(f => ValueForm.Compile(f, ValueSlot.Json, message: false)),
+    ];
+
+    private static readonly ValueForm[] s_messageForms =
+    [
+        .. QuotedValueMessageFormats.Select(f => ValueForm.Compile(f, ValueSlot.Literal, message: true)),
+        .. EnumInputMessageFormats.Select(f => ValueForm.Compile(f, ValueSlot.Input, message: true)),
+        .. InputSyntaxMessageFormats.Select(f => ValueForm.Compile(f, ValueSlot.Input, message: true)),
+        .. InputSyntaxBareMessageFormats.Select(f => ValueForm.Compile(f, ValueSlot.None, message: true)),
+    ];
 
     /// <summary>One catalogue form, compiled (#4006): the pattern of a whole message in it, and the literal text on
     /// either side of its token, which is all a message cut short, or ending in a way no form knows, is recognized
     /// by.</summary>
     private sealed class MessageShape
     {
-        public required Regex Whole { get; init; }
+        public required TimeBoundPattern Whole { get; init; }
 
         /// <summary>The form's longest literal: a message without it cannot be in this form.</summary>
         public required string Anchor { get; init; }
@@ -743,7 +1932,7 @@ public static class PgLogTextRedactor
             var closing = tokenAfter < 0 ? string.Empty : literals[tokenAfter + 1];
             return new MessageShape
             {
-                Whole = new Regex(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline),
+                Whole = new TimeBoundPattern(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline, s_matchTimeout),
                 Anchor = literals.MaxBy(l => l.Length)!,
                 Opening = opening,
                 Closing = closing,
@@ -758,7 +1947,7 @@ public static class PgLogTextRedactor
 
     /// <summary>
     /// A message as it is kept (#3944, #3996's reviews, #4006): as PostgreSQL wrote it (<see cref="WithholdPlan"/>),
-    /// except the token a syntax error quotes, in any catalogue's words (<see cref="ScannerErrorFormats"/>), which is
+    /// except the token a syntax error quotes, in any catalogue's words (<see cref="LexerErrorFormats"/>), which is
     /// SQL: the scanner writes the statement from the error token on, one token for most errors (a string literal
     /// among them, value and all), and everything to the end of the input for an unterminated one
     /// (<c>unterminated dollar-quoted string</c> carries a whole function body). It is read by
@@ -779,12 +1968,44 @@ public static class PgLogTextRedactor
     /// <param name="message">The message, and its continuation lines.</param>
     /// <param name="cut">True when the caller knows the message's end may be missing (a stored sample the length cap
     /// cut on its first line).</param>
-    public static string? RedactMessage(string? message, bool cut = false)
+    public static string? RedactMessage(string? message, bool cut = false, string? sqlState = null)
+    {
+        try
+        {
+            return RedactMessageCore(message, cut, sqlState);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldValues;
+        }
+    }
+
+    private static string? RedactMessageCore(string? message, bool cut, string? sqlState)
     {
         var kept = WithholdPlan(message);
         if (string.IsNullOrEmpty(kept))
         {
             return kept;
+        }
+
+        /* A verbose log (log_error_verbosity) writes the SQLSTATE ahead of the message, which tells the class when the
+           log's prefix gave none. */
+        if (sqlState is null && StatePrefixLength(kept) > 0)
+        {
+            sqlState = kept[..5];
+        }
+
+        /* The rejected value an input function or a range check writes into its message, masked in its slot (the one
+           exception to #3944). A message whose SQLSTATE is invalid_text_representation, or that opens like one of the
+           forms, and matches none whole is withheld. */
+        if (kept.Length <= MaxSqlFieldLength && MaskValues(kept, s_messageForms) is { } maskedValues)
+        {
+            return maskedValues;
+        }
+
+        if (InValueClass(sqlState, ValueMessageStates) || OpensValueForm(kept, s_messageForms, message: true))
+        {
+            return WithheldValues;
         }
 
         /* A form matched whole: the token lexed, or withheld. The earliest token wins, so no token is left standing
@@ -907,8 +2128,17 @@ public static class PgLogTextRedactor
             return statement;
         }
 
-        var scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(statement, "'?'");
-        return PgPlanLogParser.s_bareNumber.Replace(scrubbed, "?");
+        /* A statement the patterns cannot finish reading in time is withheld whole: it is never kept as written, and
+           the timeout never reaches the collector. */
+        try
+        {
+            var scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(statement, "'?'");
+            return PgPlanLogParser.s_bareNumber.Replace(scrubbed, "?");
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldValues;
+        }
     }
 
     /// <summary>

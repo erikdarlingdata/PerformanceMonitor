@@ -274,4 +274,34 @@ public sealed class PgPlanShapeHashTests
     {
         Assert.Matches(new Regex("^[0-9A-F]{32}$"), Parse(AggregateOverIndexScan()).PlanHash);
     }
+
+    /// <summary>The stored text's own literal pattern runs before the hash, so the hash is taken over the REDACTED
+    /// root: the hash of a plan whose text held a quoted name with an apostrophe in it differs from the one the
+    /// fingerprint pattern alone would have produced, once. It is never taken over a raw value, and the same input
+    /// gives the same hash on every run.</summary>
+    [Fact]
+    public void ThePlanHash_IsTakenOverTheRedactedRoot_AndIsStableAcrossRuns()
+    {
+        static JsonObject WithFilter(string literal)
+        {
+            var block = AggregateOverIndexScan();
+            ChildOf(block)["Filter"] = "((\"owner's count\" > 5) AND (name = '" + literal + "'::text) AND (city = 'Oslo'::text))";
+            return block;
+        }
+
+        var first = Parse(WithFilter("Kept-5698-a"));
+        var again = Parse(WithFilter("Kept-5698-a"));
+        var other = Parse(WithFilter("Kept-5698-b"));
+
+        // The same input, the same hash; a different raw value inside a literal, the same hash as well.
+        Assert.Equal(first.PlanHash, again.PlanHash);
+        Assert.Equal(first.PlanHash, other.PlanHash);
+        Assert.DoesNotContain("Kept-5698", first.PlanJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("Oslo", first.PlanJson, StringComparison.Ordinal);
+
+        // The hash is the shape hash of the root as it is stored, not of the root as it arrived.
+        var stored = JsonNode.Parse(first.PlanJson)!.AsObject();
+        Assert.Equal(first.PlanHash, PgPlanLogParser.ShapeHash(stored));
+        Assert.NotEqual(first.PlanHash, PgPlanLogParser.ShapeHash(WithFilter("Kept-5698-a")));
+    }
 }

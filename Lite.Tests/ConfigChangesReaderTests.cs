@@ -270,6 +270,48 @@ public sealed class ConfigChangesReaderTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(on, change.ChangeTime);
     }
 
+    /* #5633 item 19 review (Medium-1, Low-3): the baseline arm ("the newest empty run before the window") stops at the window start
+       minus Lite's retention. An empty run older than the oldest trace_flags rows Lite still holds pairs with a later capture as a
+       flag turned on that has really been on since, the rows that said so having aged out. */
+
+    [Fact]
+    public async Task TraceFlagChanges_AnEmptyRunOlderThanTheRetention_IsNotABaseline_ForALaterCapture()
+    {
+        var service = new LocalDataService(_duckDb);
+        var tooOld = Truncate(DateTime.UtcNow.AddMonths(-RetentionService.ArchiveRetentionMonths).AddDays(-20));
+        var on = Truncate(DateTime.UtcNow.AddHours(-3));
+
+        await SeedTraceFlagRunAsync(tooOld, "SUCCESS", 0);
+        await SeedTraceFlagAsync(on, 3226, status: true, isGlobal: true, isSession: false);
+        await SeedTraceFlagRunAsync(on, "SUCCESS", 1);
+
+        Assert.Empty(await service.GetTraceFlagChangesAsync(ServerId));
+    }
+
+    [Fact]
+    public async Task TraceFlagChanges_AnEmptyRunInsideTheRetention_StillIsTheBaseline()
+    {
+        var service = new LocalDataService(_duckDb);
+        var withinRetention = Truncate(DateTime.UtcNow.AddMonths(-RetentionService.ArchiveRetentionMonths).AddDays(20));
+        var on = Truncate(DateTime.UtcNow.AddHours(-3));
+
+        await SeedTraceFlagRunAsync(withinRetention, "SUCCESS", 0);
+        await SeedTraceFlagAsync(on, 3226, status: true, isGlobal: true, isSession: false);
+        await SeedTraceFlagRunAsync(on, "SUCCESS", 1);
+
+        var change = Assert.Single(await service.GetTraceFlagChangesAsync(ServerId));
+        Assert.Equal("Trace flag 3226 ENABLED", change.ChangeDescription);
+    }
+
+    [Fact]
+    public void TheEmptyRunFloor_IsBoundInTheSql_NotFilteredAfterTheRead()
+    {
+        /* Low-3: the bound has to be in the statement so DuckDB prunes the collection log's archive instead of reading all of it. */
+        Assert.Contains("collection_time >= $4", LocalDataService.EmptyTraceFlagRunsSql);
+        var start = new DateTime(2026, 10, 12, 0, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(start.AddMonths(-RetentionService.ArchiveRetentionMonths), LocalDataService.EmptyTraceFlagRunsFloor(start));
+    }
+
     // ── Row VM projection (server-time render, shared with the other grids) ──
 
     [Fact]

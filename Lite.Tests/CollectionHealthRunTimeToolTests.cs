@@ -433,7 +433,7 @@ public sealed class CollectionHealthRunTimeToolTests : IClassFixture<SharedDuckD
         Assert.Equal(1, Regex.Count(host, @"new McpCollectorRunTimes\("));
 
         var app = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "MainWindow.xaml.cs"));
-        Assert.Matches(@"new McpHostService\([^;]*,\s*_scheduleManager\)", app);
+        Assert.Matches(@"new McpHostService\([^;]*\b_scheduleManager\s*[,)]", app);
     }
 
     /* The shared run-time paragraph names run_time_note for both apps: it is no longer scoped to Darling, and the row-shape

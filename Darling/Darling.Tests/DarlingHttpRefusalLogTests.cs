@@ -92,6 +92,24 @@ public class DarlingHttpRefusalLogTests
         Assert.True(log.Observe(DarlingRefusalGate.HostAllowlist, "10.0.0.5", T0.AddSeconds(2)).Log);
     }
 
+    /// <summary>The token form's same-site refusal has its own fold key: a burst of them from one address neither hides
+    /// nor is hidden by the OIDC flow's refusals or a wrong token from the same address, and its description is not the
+    /// OIDC flow's.</summary>
+    [Fact]
+    public void TheTokenSignInSiteGate_FoldsApartFromTheOidcFlowAndTheToken_AndIsNotDescribedAsOidc()
+    {
+        var log = new DarlingHttpRefusalLog(Window, 16);
+
+        Assert.True(log.Observe(DarlingRefusalGate.SignIn, "10.0.0.5", T0).Log);
+        Assert.True(log.Observe(DarlingRefusalGate.TokenSignInSite, "10.0.0.5", T0.AddSeconds(1)).Log);
+        Assert.True(log.Observe(DarlingRefusalGate.Token, "10.0.0.5", T0.AddSeconds(2)).Log);
+
+        var described = DarlingHttpRefusalLog.Describe(DarlingRefusalGate.TokenSignInSite);
+        Assert.Contains("web.publicBaseUrl", described, StringComparison.Ordinal);
+        Assert.DoesNotContain("OIDC", described, StringComparison.Ordinal);
+        Assert.NotEqual(DarlingHttpRefusalLog.Describe(DarlingRefusalGate.SignIn), described);
+    }
+
     /// <summary>
     /// Per SOURCE, not per gate alone. Keyed per gate only, one scanner's line wins the window and hides
     /// the tester's own refusal completely — the failure this exists to fix, reintroduced by the fix.
