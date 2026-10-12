@@ -159,8 +159,77 @@ public sealed class WaitingTasksRollup5633Tests
         }
     }
 
+    /// <summary>Review round 2 Low-2: equal waits and NULL waits. Lite's twin (<c>WaitingBlockedDatabaseFilterToolTests.WaitingTasks_TiedAndNullWaitThreads_...</c>)
+    /// seeds the same threads and asserts the same rows, so the two stores' rollups stay the same row.</summary>
+    [Fact]
+    public async Task TiedAndNullWaitThreads_PickTheSameRowAsLite()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the waiting-tasks rollup live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var serverName = "wt5633c_" + Guid.NewGuid().ToString("N");
+        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            var capture = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-5), DateTimeKind.Unspecified);
+            await using (var seed = new NpgsqlConnection(cs))
+            {
+                await seed.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(seed, ct);
+                await DarlingMcpTestData.RegisterServerAsync(seed, serverId, serverName, ct);
+
+                /* Session 80: the longest thread is self-blocked, two others tie at 300 ms (the higher blocker is stored first): the lowest blocker wins. */
+                await InsertAsync(seed, serverId, serverName, capture, 80, "CXPACKET", 800, 80, ct, "res-self");
+                await InsertAsync(seed, serverId, serverName, capture, 80, "CXPACKET", 300, 50, ct, "res-50");
+                await InsertAsync(seed, serverId, serverName, capture, 80, "CXPACKET", 300, 40, ct, "res-40");
+                /* Session 81: the longest thread is self-blocked and the only other-blocked thread has a NULL wait: it still supplies the blocker. */
+                await InsertAsync(seed, serverId, serverName, capture, 81, "CXPACKET", 800, 81, ct, "res-self");
+                await InsertAsync(seed, serverId, serverName, capture, 81, "CXPACKET", null, 70, ct, "res-null-wait");
+                /* Session 82: equal waits, one self-blocked: the lowest other blocker wins, and the resource follows the lowest raw blocker. */
+                await InsertAsync(seed, serverId, serverName, capture, 82, "LCK_M_S", 500, 33, ct, "res-33");
+                await InsertAsync(seed, serverId, serverName, capture, 82, "LCK_M_S", 500, 22, ct, "res-22");
+                await InsertAsync(seed, serverId, serverName, capture, 82, "LCK_M_S", 500, 82, ct, "res-self");
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, serverName, 1, 30, cancellationToken: ct));
+            var tasks = doc.RootElement.GetProperty("tasks").EnumerateArray().ToList();
+
+            var tied = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 80);
+            Assert.Equal(800, tied.GetProperty("wait_duration_ms").GetInt64());
+            Assert.Equal("res-self", tied.GetProperty("resource_description").GetString());
+            Assert.Equal(40, tied.GetProperty("blocking_session_id").GetInt32());
+            Assert.Equal(new[] { 40, 50 }, tied.GetProperty("blocking_session_ids").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+
+            var nullWait = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 81);
+            Assert.Equal(800, nullWait.GetProperty("wait_duration_ms").GetInt64());
+            Assert.Equal("res-self", nullWait.GetProperty("resource_description").GetString());
+            Assert.True(nullWait.GetProperty("intra_query_parallelism").GetBoolean());
+            Assert.Equal(70, nullWait.GetProperty("blocking_session_id").GetInt32());
+            Assert.Equal(JsonValueKind.Null, nullWait.GetProperty("blocking_session_ids").ValueKind);
+
+            var equal = tasks.Single(t => t.GetProperty("session_id").GetInt32() == 82);
+            Assert.Equal(500, equal.GetProperty("wait_duration_ms").GetInt64());
+            Assert.Equal("res-22", equal.GetProperty("resource_description").GetString());
+            Assert.Equal(22, equal.GetProperty("blocking_session_id").GetInt32());
+            Assert.Equal(new[] { 22, 33 }, equal.GetProperty("blocking_session_ids").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.waiting_tasks WHERE server_id = $1", serverId);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM collect.servers WHERE server_id = $1", serverId);
+            });
+        }
+    }
+
     private static Task InsertAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime capture, int session, string waitType,
-        long waitMs, int? blocker, CancellationToken ct, string? resource = null) =>
+        long? waitMs, int? blocker, CancellationToken ct, string? resource = null) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO waiting_tasks (collection_id, collection_time, server_id, server_name, session_id, wait_type, wait_duration_ms, blocking_session_id, resource_description, database_name)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
