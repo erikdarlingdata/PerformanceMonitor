@@ -98,7 +98,7 @@ public sealed class CollectionCaveatsParityTests
     {
         foreach (var (sku, source) in Services())
         {
-            var passStart = source.IndexOf("public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)", StringComparison.Ordinal);
+            var passStart = source.IndexOf("public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context", StringComparison.Ordinal);
             const string readEntry = "public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(";
             var readStart = source.IndexOf(readEntry, passStart, StringComparison.Ordinal);
             var readEnd = source.IndexOf("ComparePeriodsAsync(", readStart, StringComparison.Ordinal);

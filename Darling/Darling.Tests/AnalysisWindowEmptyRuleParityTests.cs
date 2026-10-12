@@ -33,7 +33,7 @@ namespace Darling.Tests;
 [Trait("Reads", "Lite")]
 public sealed class AnalysisWindowEmptyRuleParityTests
 {
-    private const string PassEntry = "public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)";
+    private const string PassEntry = "public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context";
     private const string UnobservedBranch = "if (context.ObservedDurationMs <= 0)";
     private const string ObservedZeroBranch = "if (facts.Count == 0)";
     private const string PartialCaveat = "if (context.Coverage is { IsPartial: true } partial)";
