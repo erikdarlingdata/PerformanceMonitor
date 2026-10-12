@@ -14,9 +14,10 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #5630: when PARAMETER_SENSITIVITY fired beside PLAN_REGRESSION, the advice must not tell the reader to force the
-/// "best" plan. That plan may only have served small inputs, and forcing it made the slow case slower in a scratch test.
-/// Rendered through the public <see cref="FactAdvice.Compose"/> entry point, as a reader sees it.
+/// #5630/#5631: the PLAN_REGRESSION advice reads <c>worst_input_basis</c> (0 not checked, 1 both plans compiled for the
+/// same values, 2 the statistics changed between the compiles) and claims only what that value shows. When
+/// PARAMETER_SENSITIVITY fired beside it, the advice must not tell the reader to force. Rendered through the public
+/// <see cref="FactAdvice.Compose"/> entry point, as a reader sees it.
 /// </summary>
 public sealed class PlanRegressionInputsAdviceTests
 {
@@ -36,6 +37,18 @@ public sealed class PlanRegressionInputsAdviceTests
         }
 
         return new Fact { Key = "PLAN_REGRESSION", Severity = 1, Metadata = meta };
+    }
+
+    private static Fact PlanRegressionWithBasis(int basis, Dictionary<string, double>? extra = null)
+    {
+        var meta = new Dictionary<string, double> { ["worst_input_basis"] = basis };
+        if (extra is not null)
+        {
+            foreach (var pair in extra)
+                meta[pair.Key] = pair.Value;
+        }
+
+        return PlanRegression(meta);
     }
 
     private static Fact ParameterSensitivity() => new()
@@ -67,81 +80,150 @@ public sealed class PlanRegressionInputsAdviceTests
         return map;
     }
 
-    [Fact]
-    public void ACpuSpikeWithBothFacts_LeadsWithTheDoNotForceGuidance_AndDoesNotAdviseAForce()
+    private static AdviceBlock Compose(string key, params Fact[] facts)
     {
-        var advice = FactAdvice.Compose("CPU_SPIKE", Facts(CpuSpike(), PlanRegression(), ParameterSensitivity()));
-
+        var advice = FactAdvice.Compose(key, Facts(facts));
         Assert.NotNull(advice);
-        Assert.StartsWith("Parameter sensitivity co-fired — do NOT force a plan", advice!.Remediation, StringComparison.Ordinal);
-        Assert.DoesNotContain("forcing it is the fast fix", advice.Remediation, StringComparison.Ordinal);
-        Assert.Contains("compare the two plans' compiled parameter values", advice.Remediation, StringComparison.Ordinal);
+        return advice!;
+    }
+
+    // ---- basis 0, 1 and 2 on PLAN_REGRESSION ----
+
+    [Fact]
+    public void Basis1_KeepsTheForceAsTheFastFix_AndSaysBothPlansUsedTheSameValues()
+    {
+        var advice = Compose("PLAN_REGRESSION", PlanRegressionWithBasis(1));
+
+        Assert.Contains("forcing it stops the bleeding immediately", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("both plans were compiled for the same parameter values", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("a plan choice that got worse", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("a plan choice got worse", advice.Headline, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ACpuSpikeWithOnlyAPlanRegression_StillAdvisesTheForce()
+    public void Basis2_PointsAtTheStatistics_AndAsksForOneSlowCallBeforeForcing()
     {
-        var advice = FactAdvice.Compose("CPU_SPIKE", Facts(CpuSpike(), PlanRegression()));
+        var advice = Compose("PLAN_REGRESSION", PlanRegressionWithBasis(2));
 
-        Assert.NotNull(advice);
-        Assert.Contains("forcing it is the fast fix", advice!.Remediation, StringComparison.Ordinal);
+        Assert.StartsWith("Look at the statistics first", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("confirm it on one slow call first", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("stops the bleeding", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("different parameter values", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("statistics they used changed between the compiles", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("a plan choice that got worse", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("got worse", advice.Headline, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void ACpuSpikeWithOnlyParameterSensitivity_IsUnchanged()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Basis0_SaysTheInputsCouldNotBeCompared_WhetherTheBasisIsZeroOrAbsent(bool present)
     {
-        var advice = FactAdvice.Compose("CPU_SPIKE", Facts(CpuSpike(), ParameterSensitivity()));
+        var advice = Compose("PLAN_REGRESSION", present ? PlanRegressionWithBasis(0) : PlanRegression());
 
-        Assert.NotNull(advice);
-        Assert.StartsWith("Parameter sensitivity co-fired — do NOT force a plan", advice!.Remediation, StringComparison.Ordinal);
-        Assert.DoesNotContain("compiled parameter values", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("could not be compared", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("check them in both plans first", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("forcing the cheaper plan can make the slow calls slower", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("stops the bleeding", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the cause is not established", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("got worse", advice.Headline, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void TheCoFiredCauseList_DoesNotSayToForceWhenParameterSensitivityFired()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void NoBasisTextEverSaysToForceOnlyWhenTheValuesMatch(int basis)
     {
-        var both = FactAdvice.Compose("CPU_SQL_PERCENT", Facts(CpuSqlPercent(), PlanRegression(), ParameterSensitivity()));
-        var only = FactAdvice.Compose("CPU_SQL_PERCENT", Facts(CpuSqlPercent(), PlanRegression()));
-
-        Assert.NotNull(both);
-        Assert.NotNull(only);
-        Assert.DoesNotContain("force the historically faster plan", both!.Remediation, StringComparison.Ordinal);
-        Assert.Contains("compare the two plans' compiled parameter values", both.Remediation, StringComparison.Ordinal);
-        Assert.Contains("force the historically faster plan", only!.Remediation, StringComparison.Ordinal);
+        foreach (var facts in new[]
+        {
+            Facts(PlanRegressionWithBasis(basis)),
+            Facts(PlanRegressionWithBasis(basis), ParameterSensitivity()),
+            Facts(PlanRegressionWithBasis(basis, new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 })),
+            Facts(PlanRegressionWithBasis(basis, new Dictionary<string, double> { ["cross_input_excluded_count"] = 2, ["inputs_unverified_count"] = 1 })),
+        })
+        {
+            var all = FactAdvice.Compose("PLAN_REGRESSION", facts);
+            Assert.NotNull(all);
+            var text = all!.Headline + " " + all.Investigation + " " + all.Remediation;
+            Assert.DoesNotContain("only when the values match", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("only when they match", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("until the compiled parameter values match", text, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
-    [Fact]
-    public void PlanRegressionWithParameterSensitivity_SaysToCompareCompiledValues_NotThatForcingStopsTheCost()
+    [Theory]
+    [InlineData("CPU_SQL_PERCENT")]
+    [InlineData("CPU_SPIKE")]
+    public void NoCpuTextEverSaysToForceOnlyWhenTheValuesMatch(string rootKey)
     {
-        var advice = FactAdvice.Compose("PLAN_REGRESSION", Facts(PlanRegression(), ParameterSensitivity()));
+        var root = rootKey == "CPU_SPIKE" ? CpuSpike() : CpuSqlPercent();
+        var staticRoot = new Fact { Key = rootKey, Severity = 1, Metadata = [] };
+        foreach (var facts in new[]
+        {
+            Facts(root, PlanRegressionWithBasis(1)),
+            Facts(root, PlanRegressionWithBasis(1), ParameterSensitivity()),
+            Facts(staticRoot, PlanRegressionWithBasis(1)),
+            Facts(staticRoot, PlanRegressionWithBasis(1), ParameterSensitivity()),
+        })
+        {
+            var advice = FactAdvice.Compose(rootKey, facts);
+            Assert.NotNull(advice);
+            var text = advice!.Headline + " " + advice.Investigation + " " + advice.Remediation;
+            Assert.DoesNotContain("only when the values match", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("only when they match", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("compare the two plans' compiled parameter values", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("compare the compiled parameter values", text, StringComparison.Ordinal);
+        }
+    }
 
-        Assert.NotNull(advice);
-        Assert.Contains("do NOT force the cheaper plan yet", advice!.Remediation, StringComparison.Ordinal);
-        Assert.Contains("compare the compiled parameter values of the two plans", advice.Remediation, StringComparison.Ordinal);
+    // ---- the excluded and unverified counts ----
+
+    [Fact]
+    public void TheExcludedCountNamesAllThreeReasons()
+    {
+        var advice = Compose("PLAN_REGRESSION", PlanRegressionWithBasis(1, new Dictionary<string, double>
+        {
+            ["cross_input_excluded_count"] = 3,
+            ["inputs_unverified_count"] = 1,
+        }));
+
+        Assert.Contains("3 other queries were left out", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("recompiles on every call", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("returns many times the rows", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("different parameter values over unchanged statistics", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("1 reported query could not be compared", advice.Remediation, StringComparison.Ordinal);
+
+        var one = Compose("PLAN_REGRESSION", PlanRegressionWithBasis(1, new Dictionary<string, double> { ["cross_input_excluded_count"] = 1 }));
+        Assert.Contains("1 other query was left out", one.Investigation, StringComparison.Ordinal);
+    }
+
+    // ---- PARAMETER_SENSITIVITY beside PLAN_REGRESSION ----
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void PlanRegressionWithParameterSensitivity_SaysNotToForce_WhateverTheBasis(int basis)
+    {
+        var advice = Compose("PLAN_REGRESSION", PlanRegressionWithBasis(basis), ParameterSensitivity());
+
+        Assert.Contains("do not force a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("OPTION (RECOMPILE)", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("stops the bleeding", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("so this is a plan choice that got worse", advice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("may have been compiled for different parameter values", advice.Investigation, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void PlanRegressionWithoutParameterSensitivity_KeepsItsForceAdvice()
-    {
-        var advice = FactAdvice.Compose("PLAN_REGRESSION", Facts(PlanRegression()));
-
-        Assert.NotNull(advice);
-        Assert.Contains("forcing it stops the bleeding immediately", advice!.Remediation, StringComparison.Ordinal);
-        Assert.Contains("so this is a plan choice that got worse", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("parameter sensitivity fired as well", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("got worse", advice.Headline, StringComparison.Ordinal);
     }
 
     [Fact]
     public void AFailingForceStillGetsItsGuidance_WhenParameterSensitivityFiredToo()
     {
-        var advice = FactAdvice.Compose("PLAN_REGRESSION", Facts(
-            PlanRegression(new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 }),
-            ParameterSensitivity()));
+        var advice = Compose("PLAN_REGRESSION",
+            PlanRegressionWithBasis(1, new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 }),
+            ParameterSensitivity());
 
-        Assert.NotNull(advice);
-        Assert.Contains("do NOT force the cheaper plan yet", advice!.Remediation, StringComparison.Ordinal);
+        Assert.Contains("do not force a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("clear the broken force", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("failing to apply", advice.Investigation, StringComparison.Ordinal);
     }
@@ -149,11 +231,50 @@ public sealed class PlanRegressionInputsAdviceTests
     [Fact]
     public void AFailingForceWithoutParameterSensitivity_KeepsItsOwnGuidance()
     {
-        var advice = FactAdvice.Compose("PLAN_REGRESSION", Facts(
-            PlanRegression(new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 })));
+        var advice = Compose("PLAN_REGRESSION",
+            PlanRegressionWithBasis(1, new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 }));
 
-        Assert.NotNull(advice);
-        Assert.StartsWith("Fix the failing force first", advice!.Remediation, StringComparison.Ordinal);
+        Assert.StartsWith("Fix the failing force first", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    // ---- the CPU texts ----
+
+    [Fact]
+    public void ACpuSpikeWithBothFacts_LeadsWithTheDoNotForceGuidance_AndDoesNotAdviseAForce()
+    {
+        var advice = Compose("CPU_SPIKE", CpuSpike(), PlanRegressionWithBasis(1), ParameterSensitivity());
+
+        Assert.StartsWith("Parameter sensitivity co-fired — do NOT force a plan", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("forcing it is the fast fix", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("do not force a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ACpuSpikeWithOnlyAPlanRegression_StillAdvisesTheForce()
+    {
+        var advice = Compose("CPU_SPIKE", CpuSpike(), PlanRegressionWithBasis(1));
+
+        Assert.Contains("forcing it is the fast fix", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ACpuSpikeWithOnlyParameterSensitivity_IsUnchanged()
+    {
+        var advice = Compose("CPU_SPIKE", CpuSpike(), ParameterSensitivity());
+
+        Assert.StartsWith("Parameter sensitivity co-fired — do NOT force a plan", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan regression", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheCoFiredCauseList_DoesNotSayToForceWhenParameterSensitivityFired()
+    {
+        var both = Compose("CPU_SQL_PERCENT", CpuSqlPercent(), PlanRegressionWithBasis(1), ParameterSensitivity());
+        var only = Compose("CPU_SQL_PERCENT", CpuSqlPercent(), PlanRegressionWithBasis(1));
+
+        Assert.DoesNotContain("force the historically faster plan", both.Remediation, StringComparison.Ordinal);
+        Assert.Contains("do not force a query that also shows the parameter-sensitivity signature", both.Remediation, StringComparison.Ordinal);
+        Assert.Contains("force the historically faster plan", only.Remediation, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -162,10 +283,7 @@ public sealed class PlanRegressionInputsAdviceTests
     public void TheCoFiredCauseList_NamesParameterSensitivityBeforeThePlanRegression(string rootKey)
     {
         var root = rootKey == "CPU_SPIKE" ? CpuSpike() : CpuSqlPercent();
-        var advice = FactAdvice.Compose(rootKey, Facts(root, PlanRegression(), ParameterSensitivity()));
-
-        Assert.NotNull(advice);
-        var text = advice!.Remediation;
+        var text = Compose(rootKey, root, PlanRegressionWithBasis(1), ParameterSensitivity()).Remediation;
         var sensitivity = text.IndexOf("parameter sensitivity —", StringComparison.Ordinal);
         var regression = text.IndexOf("a plan regression —", StringComparison.Ordinal);
         if (rootKey == "CPU_SQL_PERCENT")
@@ -183,33 +301,16 @@ public sealed class PlanRegressionInputsAdviceTests
     [Theory]
     [InlineData("CPU_SQL_PERCENT")]
     [InlineData("CPU_SPIKE")]
-    public void TheStaticCpuText_NeverSaysToForceBeforeComparingCompiledValues(string rootKey)
+    public void TheStaticCpuText_OnlyAdvisesAForceForAPlanRegressionWithoutParameterSensitivity(string rootKey)
     {
         /* No CPU metadata, so the composer falls back to the fixed text. */
-        var advice = FactAdvice.Compose(rootKey, Facts(new Fact { Key = rootKey, Severity = 1, Metadata = [] }, PlanRegression(), ParameterSensitivity()));
+        var text = Compose(rootKey, new Fact { Key = rootKey, Severity = 1, Metadata = [] }, PlanRegressionWithBasis(1), ParameterSensitivity()).Remediation;
 
-        Assert.NotNull(advice);
-        var text = advice!.Remediation;
         var force = text.IndexOf("force the historically faster plan", StringComparison.Ordinal);
         var doNot = text.IndexOf("do NOT force", StringComparison.OrdinalIgnoreCase);
-        var compare = text.IndexOf("compare the compiled parameter values", StringComparison.Ordinal);
+        var without = text.IndexOf("without it", StringComparison.Ordinal);
         Assert.True(doNot >= 0, "the text says not to force when parameter sensitivity fired");
-        Assert.True(compare >= 0, "the text says to compare the compiled values");
-        Assert.True(force > compare, "the force sentence comes only after the compare sentence");
-        Assert.True(force > doNot, "the force sentence comes only after the do-not-force sentence");
-    }
-
-    [Fact]
-    public void ThePlanRegressionAdviceCountsWhatTheInputCheckLeftOutAndWhatItCouldNotCheck()
-    {
-        var advice = FactAdvice.Compose("PLAN_REGRESSION", Facts(PlanRegression(new Dictionary<string, double>
-        {
-            ["cross_input_excluded_count"] = 3,
-            ["inputs_unverified_count"] = 1,
-        })));
-
-        Assert.NotNull(advice);
-        Assert.Contains("3 other queries compared plans compiled for different parameter values", advice!.Investigation, StringComparison.Ordinal);
-        Assert.Contains("1 reported query could not be checked", advice.Remediation, StringComparison.Ordinal);
+        Assert.True(force > doNot, "the force sentence comes after the do-not-force sentence");
+        Assert.True(without >= 0 && without < force, "the force sentence is for a plan regression without parameter sensitivity");
     }
 }

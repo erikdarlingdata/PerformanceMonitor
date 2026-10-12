@@ -981,7 +981,7 @@ public static class FactAdvice
         if (Fired(facts, "PLAN_REGRESSION"))
         {
             bits.Add(Fired(facts, "PARAMETER_SENSITIVITY")
-                ? "a plan regression — compare the two plans' compiled parameter values before forcing anything, because parameter sensitivity co-fired (see that finding)"
+                ? "a plan regression — do not force a query that also shows the parameter-sensitivity signature (see that finding)"
                 : "a plan regression — force the historically faster plan (see that finding)");
         }
         if (Fired(facts, "MISSING_INDEX"))
@@ -1309,7 +1309,7 @@ public static class FactAdvice
         {
             rem.Append("Parameter sensitivity co-fired — do NOT force a plan (it locks in the wrong shape for the other parameter values); use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter.");
             if (Fired(facts, "PLAN_REGRESSION"))
-                rem.Append(" A plan regression co-fired too, but compare the two plans' compiled parameter values before treating it as a plan choice that got worse.");
+                rem.Append(" A plan regression co-fired too, but do not force a query that also shows that signature.");
         }
         else if (Fired(facts, "PLAN_REGRESSION"))
             rem.Append("A plan regression co-fired — the engine attaches the historically faster plan and a ready-to-run force statement; forcing it is the fast fix while you address why the worse plan got chosen.");
@@ -1735,33 +1735,51 @@ public static class FactAdvice
             : bestAge.Value < 1
                 ? " (it last ran within the past day)"
                 : $" (it last ran {Plural(Math.Floor(bestAge.Value), "day")} ago)";
-        /* #5630: when parameter sensitivity fired too, the two plans may have been compiled for different inputs. */
+        /* #5630/#5631: what the input check found for the worst query decides what the text may claim.
+           worst_input_basis: 0 not checked, 1 both plans compiled for the same values, 2 the statistics changed between the compiles. */
         var paramSensitive = Fired(facts, "PARAMETER_SENSITIVITY");
+        var basis = FactMeta(facts, "PLAN_REGRESSION", "worst_input_basis") switch { 1 => 1, 2 => 2, _ => 0 };
         if (paramSensitive)
-            inv.Append($". Query Store has a cheaper plan on record{bestAgeText}, but parameter sensitivity fired as well, so the two plans may have been compiled for different parameter values and the cheaper one may only have served easy inputs — not a plan choice that got worse.");
+        {
+            inv.Append($". Query Store has a cheaper plan on record{bestAgeText}, but parameter sensitivity fired as well, so the cheaper plan may only have served easy parameter values — this may not be a plan choice that got worse.");
+            if (basis == 1)
+                inv.Append(" Both plans were compiled for the same parameter values.");
+            else if (basis == 2)
+                inv.Append(" The statistics changed between the two compiles.");
+        }
+        else if (basis == 1)
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}, and both plans were compiled for the same parameter values, so this is a plan choice that got worse — not a query that inherently costs more.");
+        else if (basis == 2)
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}. The two plans were compiled for different parameter values, and the statistics they used changed between the compiles (updated, or a different set), so the plan may have flipped after a statistics update.");
         else
-            inv.Append($". Query Store has the faster plan on record{bestAgeText}, so this is a plan choice that got worse — not a query that inherently costs more.");
+            inv.Append($". Query Store has the faster plan on record{bestAgeText}, but the compiled parameter values and statistics of the two plans could not be compared, so the cause is not established.");
         var crossInput = FactMeta(facts, "PLAN_REGRESSION", "cross_input_excluded_count");
         if (crossInput is > 0)
-            inv.Append($" {Plural(crossInput.Value, "other query")} compared plans compiled for different parameter values, or recompile on every call, and {(crossInput.Value == 1 ? "was" : "were")} left out.");
+            inv.Append($" {Plural(crossInput.Value, "other query")} {(crossInput.Value == 1 ? "was" : "were")} left out: the statement recompiles on every call, the newer plan returns many times the rows of the cheaper one at no higher cost per row, or the plans were compiled for different parameter values over unchanged statistics.");
         if (forceFailing && forceFails is not null)
             inv.Append($" A forced plan is in place but failing to apply ({Plural(forceFails.Value, "failure")}), so SQL Server is silently falling back to the regressed plan — the force is not actually protecting you.");
 
         var unverified = FactMeta(facts, "PLAN_REGRESSION", "inputs_unverified_count");
         var rem = paramSensitive
-            ? "Parameter sensitivity fired for this server too, so do NOT force the cheaper plan yet: compare the compiled parameter values of the two plans first (the ParameterCompiledValue of each parameter in the plan XML). If they differ, the cheaper plan only served those inputs, forcing it locks in the wrong shape for the others and can make the slow case slower, and the fix is the parameter sensitivity (OPTION (RECOMPILE) on the statement, or branch the procedure by parameter). Only when the values match is this a plan choice that got worse."
+            ? "Parameter sensitivity fired for this server too, so do not force a query that also shows that signature: forcing the cheaper plan can lock in the wrong shape for other parameter values and make the slow calls slower. The fix is the parameter sensitivity: OPTION (RECOMPILE) on the statement, or branch the procedure by parameter."
             : forceFailing
             ? "Fix the failing force first — the recorded plan force is not taking effect (the plan was likely evicted or invalidated); re-force the good plan or clear the broken force, then confirm it sticks. Then address WHY the plan regressed — usually stale statistics or a parameter-sensitivity swing."
+            : basis == 2
+            ? "Look at the statistics first: they changed between the compiles (compare the last-update dates in both plans), so the newer plan may simply reflect the new statistics. Forcing the historically faster plan is the usual fix for a plan that flipped after a statistics update; confirm it on one slow call first, because the compiled parameter values also differ."
+            : basis == 0
+            ? "The compiled parameter values and statistics dates of the two plans could not be compared, so check them in both plans first. If only the compiled values differ, forcing the cheaper plan can make the slow calls slower."
             : "The engine attaches a ready-to-run force statement for the historically faster plan — forcing it stops the bleeding immediately. Then address WHY the worse plan got chosen — usually stale statistics or a parameter-sensitivity swing — so you are not relying on a forced plan indefinitely.";
         /* The failing force is still the first thing to clear when parameter sensitivity fired too (#5630). */
         if (paramSensitive && forceFailing)
-            rem += " A forced plan is also failing to apply, so clear the broken force (or fix why it fails) — it is not taking effect, and the plan was likely evicted or invalidated — and do not re-force the cheaper plan until the compiled parameter values match.";
-        if (!paramSensitive && unverified is > 0)
-            rem += $" {Plural(unverified.Value, "reported query")} could not be checked for matching parameter values (a stored plan or the statement text was unavailable), so compare the two plans' compiled parameter values before forcing.";
+            rem += " A forced plan is also failing to apply, so clear the broken force (or fix why it fails) — it is not taking effect, and the plan was likely evicted or invalidated.";
+        if (unverified is > 0)
+            rem += $" {Plural(unverified.Value, "reported query")} could not be compared (a stored plan or the statement text was unavailable), so check each one's compiled parameter values and statistics dates before forcing.";
 
         return fallback with
         {
-            Headline = $"A query regressed to {factor.Value:0.#}× its best plan's cost — a plan choice got worse",
+            Headline = basis == 1 && !paramSensitive
+                ? $"A query regressed to {factor.Value:0.#}× its best plan's cost — a plan choice got worse"
+                : $"A query regressed to {factor.Value:0.#}× its best plan's cost",
             Investigation = inv.ToString(),
             Remediation = rem
         };
@@ -2706,7 +2724,7 @@ public static class FactAdvice
             Investigation:
                 "Open the CPU tab to see the SQL vs. other-process split over the analysis window — that confirms SQL is the consumer rather than antivirus, a runaway agent job, or another tenant on the VM. The top CPU-consuming queries for the window are attached, ranked by total CPU. SOS_SCHEDULER_YIELD co-elevation on the Wait Stats tab means schedulers are saturated; a CPU spike means the load is bursty rather than steady.",
             Remediation:
-                "Tune the attached top queries — almost always cheaper than buying cores. If parameter sensitivity or a plan regression fired alongside this, they point at the specific cause: a plan cached for one parameter value reused for a worse one, or a plan worse than the same query used to run. If parameter sensitivity fired, do NOT force a plan: it locks in the wrong shape for the other parameter values, so use OPTION (RECOMPILE) on the affected statement or branch the procedure by parameter. For a plan regression alone, compare the compiled parameter values of the two plans first (the ParameterCompiledValue of each parameter in each plan), and only when they match force the historically faster plan as a fast fix while you address why the worse one was chosen.");
+                "Tune the attached top queries — almost always cheaper than buying cores. If parameter sensitivity or a plan regression fired alongside this, they point at the specific cause: a plan cached for one parameter value reused for a worse one, or a plan worse than the same query used to run. If parameter sensitivity fired, do NOT force a plan: it locks in the wrong shape for the other parameter values, so use OPTION (RECOMPILE) on the affected statement or branch the procedure by parameter. For a plan regression without it, force the historically faster plan as a fast fix while you address why the worse one was chosen.");
 
         t["CPU_SPIKE"] = new AdviceBlock(
             Headline:
@@ -2714,7 +2732,7 @@ public static class FactAdvice
             Investigation:
                 "Spikes differ from steady saturation: the box has headroom most of the time but something briefly burns it all. The exact peak time and the sessions active around it are attached. Open the CPU tab and zoom to that timestamp, then cross-check the Wait Stats tab for what waits dominated. A co-fired plan regression, parameter sensitivity, or CXPACKET points at the cause.",
             Remediation:
-                "If parameter sensitivity co-fired, do NOT force a plan — that locks in the wrong plan for the other parameter values; use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter value. If a plan regression co-fired without it, compare the compiled parameter values of the two plans first (the ParameterCompiledValue of each parameter in each plan), and only when they match force the historically faster plan as the fast fix. For an ad-hoc reporting spike matching neither, Resource Governor or moving the report off-peak is the durable fix.");
+                "If parameter sensitivity co-fired, do NOT force a plan — that locks in the wrong plan for the other parameter values; use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter value. If a plan regression co-fired without it, force the historically faster plan as the fast fix. For an ad-hoc reporting spike matching neither, Resource Governor or moving the report off-peak is the durable fix.");
 
         t["RUNNABLE_TASKS"] = new AdviceBlock(
             Headline:
